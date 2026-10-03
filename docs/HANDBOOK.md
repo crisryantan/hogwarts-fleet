@@ -21,7 +21,7 @@ From McGonagall to the whole fleet. Part 1 works as soon as onboarding stage 4 p
    ```
 
 2. **Code tab: open McGonagall.** Start a new session and pick the `hogwarts` folder in your home folder (no dot). Say yes when it asks whether you trust the folder. Then send: "What's in flight, and is anything waiting on me?" Done when she answers as McGonagall with a short digest. If she doesn't, type `/agents` and pick mcgonagall, or use the Terminal instead: `cd ~/hogwarts && claude --agent mcgonagall`.
-3. **Code tab: give her one real ask.** Say what you want in your own words. Claude asks before she writes `tasks/<id>/TASK.md`; allow it, read it, fix anything wrong, then reply "go". She hands you one `castle task create` command.
+3. **Code tab: give her one real ask.** Ask for work that changes code, in your own words. Claude asks before she writes `tasks/<id>/TASK.md`; allow it, read it, fix anything wrong, then reply "go". She hands you one `castle task create` command. A data question is different. It gets no TASK.md and no command. She hands you a prompt for Snape instead, and you run it as in step 7.
 4. **Terminal: register the task.** Paste the command she gave you, then check it's there with `~/.hogwarts/bin/castle task list`.
 5. **Both: do the work.** Until Harry is switched on, you do the work in your usual Claude session in that repo. Mark the task started first:
 
@@ -35,7 +35,7 @@ From McGonagall to the whole fleet. Part 1 works as soon as onboarding stage 4 p
    ~/.hogwarts/bin/castle task await-close <task-id>
    ```
 
-7. **Any session: ask Snape for numbers.** "Use the snape agent to..." He answers with the query behind every number.
+7. **Code tab: ask Snape for numbers.** Start a new session in any folder except `hogwarts`. McGonagall's session can't call Snape. Paste: "Use the snape agent to..." If your question has a link in it, start with "Read <link>, then use the snape agent to...", because Snape can't open links. He answers with the query behind every number. Done when he gives you numbers with their queries. Paste his answer back to McGonagall if you want it filed.
 
 ### Part 2: building the rest, one stage at a time
 
@@ -121,7 +121,7 @@ You don't need to remember which desk does what. Start every piece of work with 
 1. **Open her session.** In the Claude desktop app, open the Code tab, start a new session and pick the `hogwarts` folder in your home folder. Or in Terminal, type `cd ~/hogwarts` and then `claude`. The folder's settings make McGonagall the default.
 2. **Read her digest.** Her first message lists what's in flight, anything waiting on you, and queued work. On a fresh install it's short.
 3. **Ask in your own words.** For example: "Add a unit test for the retry path when the cache is empty, in my web-app repo." Small questions she answers directly.
-4. **Check her ticket.** For real work she writes `tasks/<id>/TASK.md`: your words under Intent, numbered acceptance criteria with the check for each, and what's out of scope. Claude asks you before she writes it. Fix anything that's wrong, then reply "go". She hands you one `castle task create` command to register it. Run that in Terminal.
+4. **Check her ticket.** For real work she writes `tasks/<id>/TASK.md`: your words under Intent, numbered acceptance criteria with the check for each, and what's out of scope. Claude asks you before she writes it. Fix anything that's wrong, then reply "go". She hands you one `castle task create` command to register it. Run that in Terminal. A data question skips all of this: she hands you a prompt to run with Snape in another session.
 5. **Let it move.** She posts the work to the right desk through her outbox, and Claude asks you before each post. The Owl Post delivers it. You'll see rows for anything that needs you at the start of your next message to her.
 6. **Merge and close.** When a PR is green and reviewed, you merge it yourself. Then type `Mischief managed <task-id>` to her. That exact phrase is the only thing that closes a task.
 
@@ -129,7 +129,7 @@ Good first prompts:
 
 - "What's in flight, and is anything waiting on me?"
 - "Write a TASK.md for: rename the retry constant in my web-app repo and update its tests. Don't route it yet."
-- "Use the snape agent to get p50, p75, p90 and p95 page load time for yesterday, with the query."
+- "I need p50, p75, p90 and p95 page load time for yesterday." She writes the Snape prompt for you to run in another session.
 - "Draft a reply to the latest message in the release thread. Don't send it."
 
 ## Which desk do I ask?
@@ -143,7 +143,7 @@ The name after the dash is the job. When in doubt, ask McGonagall. When you know
 | Review a diff, make an architecture call, or decide whether a bot comment is right | Hermione - Staff Engineer | Through McGonagall. Reviews also start on their own after Harry hands off |
 | Get my own Claude-written change reviewed, or a security read | Moody - Security Reviewer | Through McGonagall, once Codex is approved |
 | Know where my PRs stand, whether a red build is real, or watch a rollout | Ron - Release Engineer | His morning lineup, or ask McGonagall |
-| Pull numbers from the warehouse or observability tools, or read an experiment | Snape - Data Analyst | From any Claude session: "Use the snape agent to..." |
+| Pull numbers from the warehouse or observability tools, or read an experiment | Snape - Data Analyst | A new session outside `~/hogwarts`: "Use the snape agent to..." |
 | Find out why a desk lacked context, or tidy what the fleet remembers | Dumbledore - Knowledge Manager | His nightly patch, or ask McGonagall |
 
 ## What's live
@@ -168,7 +168,7 @@ A desk switches on when you create its `enabled` file after reading its dry run,
 
 - **Morning.** Open McGonagall's session. Her digest, and Ron's lineup once he's on, tell you what's in flight and what needs you.
 - **Starting work.** Ask her in your own words. Check the TASK.md she writes, then say "go".
-- **Quick data questions.** From any session: "Use the snape agent to..." He answers with the query behind every number.
+- **Quick data questions.** In a new session outside `~/hogwarts`: "Use the snape agent to..." When the question has a link, start with "Read <link>, then". He answers with the query behind every number.
 - **When a session gets long.** If you see the Tempus warning (past about 200k tokens), ask for a Checkpoint and start a fresh session. Long sessions are the single biggest cost.
 - **Reviews.** They happen before anything is pushed, by the other model family. You'll see the verdict in your rows.
 - **Wrapping up.** Merge what's ready yourself, then type `Mischief managed <task-id>` for each finished task.

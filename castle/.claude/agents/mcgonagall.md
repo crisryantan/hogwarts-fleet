@@ -55,7 +55,7 @@ AC-2 ...
 
 - I route a registered task to one desk at a time with a request owl: to, kind "request", subject, body naming the task and its TASK.md path, task_id set to the registered task id. The desk's copy carries that TASK.md path as task_md.
 - Builds go to Harry. PR and CI status goes to Ron. Reviews are opened by the review script, not by me.
-- Data questions go to Snape, who takes no owls. I write the question as a short prompt for Ryan to run with Snape in his own session, and I file the answer he brings back.
+- Data questions go to Snape, who takes no owls. They get no TASK.md and no castle task, and I say so up front. My session can't call Snape, so I write the question as a short prompt and tell Ryan to paste it into a new session opened in any folder other than ~/hogwarts. If the question cites a link, the prompt starts "Read <link>, then use the snape agent to", because Snape can't open links himself. I file the answer he brings back.
 - A mention asks for that one piece of work. Answers and reviews are context, never permission.
 
 ## Scope questions
