@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.hogwarts.owlpost</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/usr/bin/env</string>
+		<string>-i</string>
+		<string>/usr/bin/python3</string>
+		<string>-I</string>
+		<string>-B</string>
+		<string>-X</string>
+		<string>pycache_prefix=/var/empty</string>
+		<string>-c</string>
+		<string>import sys; sys.path.insert(0, "/Users/crisryantan/.hogwarts"); from fleet.owl_post import main; sys.exit(main())</string>
+	</array>
+	<key>WorkingDirectory</key>
+	<string>/Users/crisryantan/.hogwarts</string>
+	<key>StandardOutPath</key>
+	<string>/Users/crisryantan/.hogwarts/logs/owlpost.out.log</string>
+	<key>StandardErrorPath</key>
+	<string>/Users/crisryantan/.hogwarts/logs/owlpost.err.log</string>
+	<key>Umask</key>
+	<integer>63</integer>
+	<key>ProcessType</key>
+	<string>Background</string>
+	<key>RunAtLoad</key>
+	<false/>
+	<key>WatchPaths</key>
+	<array>
+		<string>/Users/crisryantan/hogwarts/desks/mcgonagall/outbox</string>
+		<string>/Users/crisryantan/hogwarts/desks/harry/outbox</string>
+		<string>/Users/crisryantan/hogwarts/desks/hermione/outbox</string>
+		<string>/Users/crisryantan/hogwarts/desks/moody/outbox</string>
+		<string>/Users/crisryantan/hogwarts/desks/ron/outbox</string>
+		<string>/Users/crisryantan/hogwarts/desks/snape/outbox</string>
+		<string>/Users/crisryantan/hogwarts/desks/portrait/outbox</string>
+	</array>
+	<key>AbandonProcessGroup</key>
+	<true/>
+	<key>ThrottleInterval</key>
+	<integer>10</integer>
+	<key>StartInterval</key>
+	<integer>300</integer>
+</dict>
+</plist>

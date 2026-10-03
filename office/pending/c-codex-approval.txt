@@ -1,0 +1,28 @@
+Codex approval reminder
+
+Harry and Moody run on Codex, so their runs send code and diffs to OpenAI.
+Keep both desks disabled until your organization confirms Codex is approved for its source code.
+Never send warehouse rows, customer data or secrets to either reviewer, approved or not.
+
+Keep them disabled until Stage 2 also proves their read boundary. On 0.160.0 the
+fleet profile cannot stop a Codex desk reading the whole disk, including
+~/.hogwarts, ~/.ssh and ~/.codex/auth.json.
+
+run_desk passes --ignore-user-config and --ignore-rules, so neither your
+~/.codex/config.toml nor any user or project .rules file applies to a desk run.
+Your own allow rules for git push would otherwise run outside the sandbox.
+
+Every headless desk starts disabled. A desk is enabled only by a plain file named
+"enabled" in its office folder. The Owl Post never launches a desk without it.
+
+Before enabling any desk, read its exact command:
+/usr/bin/env -i /usr/bin/python3 -I -B -X pycache_prefix=/var/empty -c 'import sys; sys.path.insert(0, "/Users/crisryantan/.hogwarts"); from fleet.run_desk import main; sys.exit(main())' harry --dry-run
+
+Claude desks (hermione, ron, portrait) also need the Claude CLI signed in first:
+claude auth login
+
+Enable one desk, after the approval or sign-in it needs:
+touch /Users/crisryantan/.hogwarts/desks/hermione/enabled
+
+Disable it again:
+rm /Users/crisryantan/.hogwarts/desks/hermione/enabled

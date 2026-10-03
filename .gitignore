@@ -1,0 +1,8 @@
+state/
+logs/
+reviews/
+worktrees/*
+!castle/worktrees/.gitkeep
+__pycache__/
+*.pyc
+.DS_Store

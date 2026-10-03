@@ -1,0 +1,166 @@
+{
+  "agent": "mcgonagall",
+  "permissions": {
+    "allow": [
+      "Edit(~/hogwarts/PLAN.md)",
+      "Edit(~/hogwarts/desks/mcgonagall/scratchpad.md)",
+      "mcp__<chat-mcp>__list_messages",
+      "mcp__<chat-mcp>__search_conversations",
+      "mcp__<chat-mcp>__search_messages"
+    ],
+    "ask": [
+      "Edit(~/hogwarts/tasks/*/TASK.md)",
+      "Write(~/hogwarts/tasks/*/TASK.md)",
+      "Edit(~/hogwarts/desks/mcgonagall/outbox/**)",
+      "Write(~/hogwarts/desks/mcgonagall/outbox/**)"
+    ],
+    "deny": [
+      "Read(~/.hogwarts/**)",
+      "Edit(~/.hogwarts/**)",
+      "Write(~/.hogwarts/**)",
+      "Edit(~/hogwarts/.claude/**)",
+      "Write(~/hogwarts/.claude/**)",
+      "Edit(~/hogwarts/.git/**)",
+      "Write(~/hogwarts/.git/**)",
+      "Edit(~/hogwarts/CLAUDE.md)",
+      "Write(~/hogwarts/CLAUDE.md)",
+      "Edit(~/hogwarts/standing-orders.md)",
+      "Write(~/hogwarts/standing-orders.md)",
+      "Edit(~/hogwarts/worktrees/**)",
+      "Write(~/hogwarts/worktrees/**)",
+      "Edit(~/hogwarts/tasks/*/evidence.md)",
+      "Write(~/hogwarts/tasks/*/evidence.md)",
+      "Edit(~/hogwarts/desks/mcgonagall/inbox/**)",
+      "Write(~/hogwarts/desks/mcgonagall/inbox/**)",
+      "Edit(~/hogwarts/desks/harry/**)",
+      "Write(~/hogwarts/desks/harry/**)",
+      "Edit(~/hogwarts/desks/hermione/**)",
+      "Write(~/hogwarts/desks/hermione/**)",
+      "Edit(~/hogwarts/desks/moody/**)",
+      "Write(~/hogwarts/desks/moody/**)",
+      "Edit(~/hogwarts/desks/ron/**)",
+      "Write(~/hogwarts/desks/ron/**)",
+      "Edit(~/hogwarts/desks/snape/**)",
+      "Write(~/hogwarts/desks/snape/**)",
+      "Edit(~/hogwarts/desks/portrait/**)",
+      "Write(~/hogwarts/desks/portrait/**)",
+      "mcp__<chat-mcp>__send_message",
+      "mcp__<warehouse-mcp>",
+      "mcp__<observability-mcp>",
+      "mcp__claude_ai_Gmail__apply_sensitive_message_label",
+      "mcp__claude_ai_Gmail__apply_sensitive_thread_label",
+      "mcp__claude_ai_Gmail__create_draft",
+      "mcp__claude_ai_Gmail__create_label",
+      "mcp__claude_ai_Gmail__delete_draft",
+      "mcp__claude_ai_Gmail__delete_label",
+      "mcp__claude_ai_Gmail__forward",
+      "mcp__claude_ai_Gmail__label_message",
+      "mcp__claude_ai_Gmail__label_thread",
+      "mcp__claude_ai_Gmail__mark_message_spam",
+      "mcp__claude_ai_Gmail__mark_thread_spam",
+      "mcp__claude_ai_Gmail__reply",
+      "mcp__claude_ai_Gmail__send_message",
+      "mcp__claude_ai_Gmail__trash_message",
+      "mcp__claude_ai_Gmail__trash_thread",
+      "mcp__claude_ai_Gmail__unlabel_message",
+      "mcp__claude_ai_Gmail__unlabel_thread",
+      "mcp__claude_ai_Gmail__unmark_message_spam",
+      "mcp__claude_ai_Gmail__unmark_thread_spam",
+      "mcp__claude_ai_Gmail__untrash_message",
+      "mcp__claude_ai_Gmail__untrash_thread",
+      "mcp__claude_ai_Gmail__update_draft",
+      "mcp__claude_ai_Gmail__update_label",
+      "mcp__claude_ai_Gmail__update_message_labels",
+      "mcp__terminal",
+      "mcp__ccd_session_mgmt",
+      "mcp__ccd_session",
+      "mcp__ccd_pr",
+      "mcp__ccd_settings",
+      "mcp__ccd_connectors",
+      "mcp__ccd_host",
+      "mcp__ccd_directory",
+      "mcp__scheduled-tasks",
+      "mcp__claude-in-chrome",
+      "mcp__Claude_Browser",
+      "mcp__Claude_Code_iOS_Simulator",
+      "mcp__obsidian",
+      "mcp__hindsight",
+      "Bash",
+      "WebFetch",
+      "WebSearch",
+      "SendMessage",
+      "CronCreate",
+      "CronDelete",
+      "RemoteTrigger",
+      "Monitor",
+      "NotebookEdit",
+      "ShareOnboardingGuide"
+    ],
+    "disableBypassPermissionsMode": "disable"
+  },
+  "sandbox": {
+    "enabled": true,
+    "failIfUnavailable": true,
+    "autoAllowBashIfSandboxed": false,
+    "allowUnsandboxedCommands": false,
+    "filesystem": {
+      "denyRead": [
+        "/Users/crisryantan/.hogwarts"
+      ],
+      "denyWrite": [
+        "/Users/crisryantan/.hogwarts"
+      ]
+    },
+    "network": {
+      "allowUnixSockets": [],
+      "allowAllUnixSockets": false,
+      "allowLocalBinding": false
+    }
+  },
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/bin/env -i /usr/bin/python3 -I -B -X pycache_prefix=/var/empty -c 'import sys; sys.path.insert(0, \"/Users/crisryantan/.hogwarts\"); from fleet.hooks.session_start import main; sys.exit(main())'",
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/bin/env -i /usr/bin/python3 -I -B -X pycache_prefix=/var/empty -c 'import sys; sys.path.insert(0, \"/Users/crisryantan/.hogwarts\"); from fleet.hooks.user_prompt_submit import main; sys.exit(main())'",
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/bin/env -i /usr/bin/python3 -I -B -X pycache_prefix=/var/empty -c 'import sys; sys.path.insert(0, \"/Users/crisryantan/.hogwarts\"); from fleet.hooks.pre_compact import main; sys.exit(main())'",
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/bin/env -i /usr/bin/python3 -I -B -X pycache_prefix=/var/empty -c 'import sys; sys.path.insert(0, \"/Users/crisryantan/.hogwarts\"); from fleet.hooks.session_end import main; sys.exit(main())'",
+            "timeout": 30
+          }
+        ]
+      }
+    ]
+  }
+}

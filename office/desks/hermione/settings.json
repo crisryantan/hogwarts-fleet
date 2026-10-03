@@ -1,0 +1,98 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(~/hogwarts/CLAUDE.md)",
+      "Read(~/hogwarts/desks/hermione/**)",
+      "Edit(~/hogwarts/desks/hermione/scratchpad.md)",
+      "Edit(~/hogwarts/desks/hermione/outbox/**)",
+      "Read(~/hogwarts/tasks/**)",
+      "Read(~/hogwarts/worktrees/**)",
+      "Bash(git -C * diff --no-ext-diff --no-textconv origin/main...HEAD)",
+      "Bash(git -C * diff --no-ext-diff --no-textconv --stat origin/main...HEAD)",
+      "Bash(git -C * log --no-decorate --oneline origin/main..HEAD)",
+      "Bash(git -C * rev-parse HEAD)",
+      "Bash(RTK_DISABLED=1 git -C * diff --no-ext-diff --no-textconv origin/main...HEAD)",
+      "Bash(RTK_DISABLED=1 git -C * diff --no-ext-diff --no-textconv --stat origin/main...HEAD)",
+      "Bash(RTK_DISABLED=1 git -C * log --no-decorate --oneline origin/main..HEAD)",
+      "Bash(RTK_DISABLED=1 git -C * rev-parse HEAD)"
+    ],
+    "deny": [
+      "Read(~/.hogwarts/**)",
+      "Edit(~/.hogwarts/**)",
+      "Write(~/.hogwarts/**)",
+      "Edit(~/hogwarts/desks/hermione/inbox/**)",
+      "Write(~/hogwarts/desks/hermione/inbox/**)",
+      "mcp__<chat-mcp>__send_message",
+      "Bash(git * -c *)",
+      "Bash(git *--config-env*)",
+      "Bash(git *--output*)",
+      "Bash(git *--exec-path*)",
+      "Bash(git *--git-dir*)",
+      "Bash(git *--work-tree*)",
+      "Bash(git *--ext-diff*)",
+      "Bash(git *--textconv*)",
+      "Bash(RTK_DISABLED=1 git * -c *)",
+      "Bash(RTK_DISABLED=1 git *--config-env*)",
+      "Bash(RTK_DISABLED=1 git *--output*)",
+      "Bash(RTK_DISABLED=1 git *--exec-path*)",
+      "Bash(RTK_DISABLED=1 git *--git-dir*)",
+      "Bash(RTK_DISABLED=1 git *--work-tree*)",
+      "Bash(RTK_DISABLED=1 git *--ext-diff*)",
+      "Bash(RTK_DISABLED=1 git *--textconv*)"
+    ],
+    "disableBypassPermissionsMode": "disable"
+  },
+  "sandbox": {
+    "enabled": true,
+    "failIfUnavailable": true,
+    "autoAllowBashIfSandboxed": false,
+    "allowUnsandboxedCommands": false,
+    "filesystem": {
+      "allowWrite": [
+        "/Users/crisryantan/hogwarts/desks/hermione"
+      ],
+      "denyWrite": [
+        "/Users/crisryantan/.hogwarts",
+        "/Users/crisryantan/hogwarts/.git",
+        "/Users/crisryantan/hogwarts/.claude",
+        "/Users/crisryantan/hogwarts/tasks",
+        "/Users/crisryantan/hogwarts/worktrees",
+        "/Users/crisryantan/hogwarts/CLAUDE.md",
+        "/Users/crisryantan/hogwarts/PLAN.md",
+        "/Users/crisryantan/hogwarts/standing-orders.md",
+        "/Users/crisryantan/hogwarts/.gitignore",
+        "/Users/crisryantan/hogwarts/desks/mcgonagall",
+        "/Users/crisryantan/hogwarts/desks/harry",
+        "/Users/crisryantan/hogwarts/desks/moody",
+        "/Users/crisryantan/hogwarts/desks/ron",
+        "/Users/crisryantan/hogwarts/desks/snape",
+        "/Users/crisryantan/hogwarts/desks/portrait",
+        "/Users/crisryantan/hogwarts/desks/hermione/inbox"
+      ],
+      "denyRead": [
+        "/Users/crisryantan/.hogwarts",
+        "/Users/crisryantan/.ssh",
+        "/Users/crisryantan/.aws",
+        "/Users/crisryantan/.codex",
+        "/Users/crisryantan/.claude.json",
+        "/Users/crisryantan/.claude/.credentials.json",
+        "/Users/crisryantan/.claude/settings.json",
+        "/Users/crisryantan/.claude/settings.local.json",
+        "/Users/crisryantan/.claude/history.jsonl",
+        "/Users/crisryantan/.claude/projects",
+        "/Users/crisryantan/.netrc",
+        "/Users/crisryantan/.npmrc",
+        "/Users/crisryantan/.docker",
+        "/Users/crisryantan/.kube",
+        "/Users/crisryantan/.gnupg",
+        "/Users/crisryantan/.config/gh"
+      ]
+    },
+    "network": {
+      "allowUnixSockets": [],
+      "allowAllUnixSockets": false,
+      "allowLocalBinding": false,
+      "allowedDomains": []
+    }
+  }
+}

@@ -1,0 +1,303 @@
+from __future__ import annotations
+
+import multiprocessing
+import os
+import py_compile
+import shutil
+import sqlite3
+import stat
+import sys
+import unittest
+from unittest import mock
+
+from hogwarts import db, pensieve
+from hogwarts.errors import ConflictError, IntegrityError, NotFoundError, StoreError, ValidationError
+from tests.support import NOW, StoreCase, temp_dir
+
+PACKAGE = db.CODE_ROOT / "hogwarts"
+
+
+def mode(path) -> int:
+    return stat.S_IMODE(os.lstat(path).st_mode)
+
+
+def _open_worker(db_path: str, barrier, results) -> None:
+    barrier.wait(timeout=20)
+    try:
+        db.connect(db_path).close()
+        results.put("ok")
+    except ConflictError:
+        results.put("conflict")
+    except Exception as exc:
+        results.put(repr(exc))
+
+
+class _LockedThenWal:
+    def __init__(self, failures: int) -> None:
+        self.failures = failures
+        self.calls = 0
+
+    def execute(self, sql: str):
+        self.calls += 1
+        if self.calls <= self.failures:
+            raise sqlite3.OperationalError("database is locked")
+        return self
+
+    def fetchone(self):
+        return ("wal",)
+
+
+class ConnectTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = temp_dir(self)
+        self.db_path = self.tmp / "state" / "pensieve.db"
+
+    def open(self, **kwargs):
+        conn = db.connect(self.db_path, **kwargs)
+        self.addCleanup(conn.close)
+        return conn
+
+    def test_connect_creates_parent_with_0700(self):
+        self.open()
+        self.assertEqual(mode(self.db_path.parent), 0o700)
+
+    def test_connect_creates_db_file_with_0600(self):
+        self.open()
+        self.assertEqual(mode(self.db_path), 0o600)
+
+    def test_wal_and_shm_files_are_0600(self):
+        conn = self.open()
+        pensieve.add_desk(conn, "alpha", "claude", now=NOW)
+        for suffix in ("-wal", "-shm"):
+            sidecar = str(self.db_path) + suffix
+            self.assertTrue(os.path.exists(sidecar), suffix)
+            self.assertEqual(mode(sidecar), 0o600, suffix)
+
+    def test_loose_sidecar_is_tightened_on_connect(self):
+        pensieve.add_desk(self.open(), "alpha", "claude", now=NOW)
+        sidecar = str(self.db_path) + "-wal"
+        os.chmod(sidecar, 0o640)
+        self.open()
+        self.assertEqual(mode(sidecar), 0o600)
+
+    def test_pragmas_wal_foreign_keys_busy_timeout(self):
+        conn = self.open()
+        self.assertEqual(conn.execute("PRAGMA journal_mode").fetchone()[0], "wal")
+        self.assertEqual(conn.execute("PRAGMA foreign_keys").fetchone()[0], 1)
+        self.assertEqual(conn.execute("PRAGMA busy_timeout").fetchone()[0], 5000)
+        self.assertEqual(conn.execute("PRAGMA secure_delete").fetchone()[0], 1)
+        self.assertEqual(conn.execute("PRAGMA trusted_schema").fetchone()[0], 0)
+
+    def test_create_false_requires_existing_database(self):
+        with self.assertRaises(NotFoundError):
+            db.connect(self.db_path, create=False)
+        self.assertFalse(os.path.exists(self.db_path.parent))
+
+    def test_missing_grandparent_is_not_created(self):
+        with self.assertRaises(NotFoundError):
+            db.connect(self.tmp / "missing" / "state" / "pensieve.db")
+
+    def test_relative_path_is_refused(self):
+        with self.assertRaises(ValidationError):
+            db.connect("state/pensieve.db")
+
+
+class FirstOpenRaceTests(unittest.TestCase):
+    def test_wal_switch_retries_while_the_database_is_locked(self):
+        conn = _LockedThenWal(failures=3)
+        with mock.patch.object(db.time, "sleep") as sleep:
+            db._enable_wal(conn)
+        self.assertEqual((conn.calls, sleep.call_count), (4, 3))
+
+    def test_wal_switch_gives_up_with_conflict_error(self):
+        conn = _LockedThenWal(failures=db.WAL_ATTEMPTS)
+        with mock.patch.object(db.time, "sleep"):
+            with self.assertRaises(ConflictError):
+                db._enable_wal(conn)
+
+    def test_locked_errors_while_opening_or_migrating_become_conflict_errors(self):
+        tmp = temp_dir(self)
+        locked = sqlite3.OperationalError("database is locked")
+        for target in ("_enable_wal", "migrate"):
+            with self.subTest(target=target):
+                path = tmp / target / "pensieve.db"
+                with mock.patch.object(db, target, side_effect=locked):
+                    with self.assertRaises(ConflictError):
+                        db.connect(path)
+
+    def test_racing_first_opens_of_a_fresh_database_all_succeed(self):
+        tmp = temp_dir(self)
+        context = multiprocessing.get_context("spawn")
+        for round_number in range(2):
+            path = tmp / f"round-{round_number}" / "pensieve.db"
+            barrier, results = context.Barrier(6), context.Queue()
+            workers = [context.Process(target=_open_worker, args=(str(path), barrier, results)) for _ in range(6)]
+            for worker in workers:
+                worker.start()
+            outcomes = [results.get(timeout=60) for _ in workers]
+            for worker in workers:
+                worker.join(timeout=60)
+            self.assertEqual(outcomes, ["ok"] * 6)
+
+
+class MigrationTests(StoreCase):
+    def test_schema_version_is_recorded(self):
+        self.assertEqual(db.schema_version(self.conn), db.SCHEMA_VERSION)
+
+    def test_migrations_are_idempotent(self):
+        db.migrate(self.conn)
+        second = db.connect(self.db_path)
+        self.addCleanup(second.close)
+        db.migrate(second)
+        self.assertEqual(self.count("schema_version"), len(db.MIGRATIONS))
+
+    def test_rerunning_v1_statements_changes_nothing(self):
+        with db.transaction(self.conn):
+            for statement in db.V1:
+                self.conn.execute(statement)
+        self.assertEqual(db.schema_version(self.conn), db.SCHEMA_VERSION)
+
+    def test_newer_schema_is_refused(self):
+        self.conn.execute("INSERT INTO schema_version(version, applied_at) VALUES (99, 0)")
+        with self.assertRaises(IntegrityError):
+            db.connect(self.db_path)
+
+    def test_strict_tables_when_supported(self):
+        if sqlite3.sqlite_version_info < (3, 37, 0):
+            self.skipTest("SQLite is older than 3.37")
+        for table in ("desks", "tasks", "events", "owls", "requests", "facts", "close_tokens"):
+            sql = self.conn.execute("SELECT sql FROM sqlite_master WHERE name = ?", (table,)).fetchone()[0]
+            self.assertTrue(sql.rstrip().endswith("STRICT"), table)
+        with self.assertRaises(sqlite3.Error):
+            self.conn.execute("INSERT INTO metrics(ts, desk, run_id, model, input_tokens, output_tokens,"
+                              " cache_read_tokens, cost_usd, duration_ms) VALUES ('x', 'a', 'r', 'm', 1, 1, 1, 1, 1)")
+
+    def test_all_v1_tables_exist(self):
+        names = {row[0] for row in self.conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+        expected = {"schema_version", "desks", "tasks", "events", "sessions", "extracts", "extracts_fts",
+                    "keypoints", "keypoints_fts", "facts", "metrics", "owls", "requests",
+                    "request_phases", "review_passes", "close_tokens"}
+        self.assertTrue(expected <= names, expected - names)
+
+    def test_timestamps_are_integers(self):
+        with self.assertRaises(sqlite3.Error):
+            self.conn.execute("INSERT INTO desks(name, family, created_at) VALUES ('alpha', 'claude', 'now')")
+
+
+class TransactionTests(StoreCase):
+    def test_transaction_rolls_back_on_error(self):
+        with self.assertRaises(RuntimeError):
+            with db.transaction(self.conn):
+                self.conn.execute("INSERT INTO desks(name, family, created_at) VALUES ('alpha', 'claude', 1)")
+                raise RuntimeError("boom")
+        self.assertEqual(self.count("desks"), 0)
+        self.assertFalse(self.conn.in_transaction)
+
+    def test_transaction_takes_the_write_lock_up_front(self):
+        other = sqlite3.connect(str(self.db_path), timeout=0, isolation_level=None)
+        self.addCleanup(other.close)
+        with db.transaction(self.conn):
+            with self.assertRaises(sqlite3.OperationalError):
+                other.execute("BEGIN IMMEDIATE")
+
+    def test_busy_database_becomes_conflict_error(self):
+        other = sqlite3.connect(str(self.db_path), timeout=0, isolation_level=None)
+        self.addCleanup(other.close)
+        other.execute("BEGIN IMMEDIATE")
+        self.addCleanup(lambda: other.in_transaction and other.execute("ROLLBACK"))
+        self.conn.execute("PRAGMA busy_timeout=0")
+        with self.assertRaises(ConflictError):
+            with db.transaction(self.conn):
+                pass
+
+    def test_nested_transactions_join_the_outer_one(self):
+        with self.assertRaises(RuntimeError):
+            with db.transaction(self.conn):
+                pensieve.add_desk(self.conn, "alpha", "claude", now=NOW)
+                raise RuntimeError("boom")
+        self.assertEqual(self.count("desks"), 0)
+
+    def test_a_failed_nested_write_undoes_only_its_own_changes(self):
+        with db.transaction(self.conn):
+            pensieve.add_desk(self.conn, "alpha", "claude", now=NOW)
+            with self.assertRaises(RuntimeError):
+                with db.transaction(self.conn):
+                    self.conn.execute("INSERT INTO desks(name, family, created_at) VALUES ('beta', 'codex', 1)")
+                    raise RuntimeError("boom")
+            self.assertTrue(self.conn.in_transaction)
+            pensieve.add_desk(self.conn, "gamma", "codex", now=NOW)
+        self.assertEqual([desk["name"] for desk in pensieve.list_desks(self.conn)], ["alpha", "gamma"])
+        self.assertFalse(self.conn.in_transaction)
+
+    def test_writes_inside_a_snapshot_are_refused(self):
+        other = db.connect(self.db_path)
+        self.addCleanup(other.close)
+        with db.snapshot(self.conn):
+            self.conn.execute("SELECT COUNT(*) FROM desks").fetchone()
+            pensieve.add_desk(other, "beta", "codex", now=NOW)
+            with self.assertRaisesRegex(StoreError, "snapshot"):
+                pensieve.add_desk(self.conn, "alpha", "claude", now=NOW)
+        self.assertEqual([desk["name"] for desk in pensieve.list_desks(self.conn)], ["beta"])
+
+    def test_writes_inside_a_transaction_the_caller_opened_are_refused(self):
+        self.conn.execute("BEGIN")
+        self.addCleanup(lambda: self.conn.in_transaction and self.conn.execute("ROLLBACK"))
+        with self.assertRaisesRegex(StoreError, "caller opened"):
+            pensieve.add_desk(self.conn, "alpha", "claude", now=NOW)
+        self.conn.execute("ROLLBACK")
+        self.assertEqual(self.count("desks"), 0)
+
+    def test_sqlite_integrity_error_becomes_store_integrity_error(self):
+        with self.assertRaises(IntegrityError):
+            with db.transaction(self.conn):
+                self.conn.execute("INSERT INTO desks(name, family, created_at) VALUES ('alpha', 'elf', 1)")
+
+
+class DoctorTests(StoreCase):
+    def setUp(self):
+        super().setUp()
+        self.code = self.tmp / "code"
+        shutil.copytree(PACKAGE, self.code / "hogwarts", ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+        patcher = mock.patch.object(db, "CODE_ROOT", self.code)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_doctor_reports_a_healthy_database(self):
+        report = db.doctor(self.db_path)
+        self.assertTrue(report["ok"], report["problems"])
+        self.assertEqual(report["schema_version"], db.SCHEMA_VERSION)
+        self.assertEqual(report["integrity_check"], "ok")
+        self.assertTrue(report["fts5"])
+        self.assertEqual(report["checks"]["database"]["mode"], "0o600")
+
+    def test_doctor_reports_a_missing_database_without_creating_it(self):
+        missing = self.tmp / "other" / "pensieve.db"
+        report = db.doctor(missing)
+        self.assertFalse(report["ok"])
+        self.assertFalse(os.path.exists(missing.parent))
+
+    def test_doctor_flags_loose_permissions(self):
+        os.chmod(self.db_path.parent, 0o770)
+        self.addCleanup(os.chmod, self.db_path.parent, 0o700)
+        report = db.doctor(self.db_path)
+        self.assertFalse(report["ok"])
+        self.assertIn("database directory is group or world writable", report["problems"])
+
+    def test_doctor_fails_on_bytecode_that_could_shadow_the_source(self):
+        source = self.code / "hogwarts" / "__init__.py"
+        planted = self.code / "hogwarts" / "__pycache__" / f"__init__.{sys.implementation.cache_tag}.pyc"
+        py_compile.compile(str(source), cfile=str(planted), invalidation_mode=py_compile.PycInvalidationMode.UNCHECKED_HASH)
+        (self.code / "hogwarts" / "shadow.cpython-39-darwin.so").write_bytes(b"")
+        report = db.doctor(self.db_path)
+        self.assertFalse(report["ok"])
+        self.assertEqual(report["bytecode"], ["hogwarts/__pycache__", "hogwarts/shadow.cpython-39-darwin.so"])
+        self.assertTrue(any("hogwarts/__pycache__" in problem for problem in report["problems"]))
+
+    def test_doctor_scans_the_code_root_by_default(self):
+        with mock.patch.object(db, "stray_bytecode", return_value=[]) as scan:
+            db.doctor(self.db_path)
+        scan.assert_called_once_with(self.code)
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "deny": [
+      "Read(~/.hogwarts/**)",
+      "Edit(~/.hogwarts/**)",
+      "Write(~/.hogwarts/**)",
+      "Bash(/Users/crisryantan/.hogwarts/bin/castle *)",
+      "Bash(~/.hogwarts/bin/castle *)",
+      "Bash(castle *)",
+      "Bash(/usr/bin/env -i /usr/bin/python3 *)",
+      "Bash(/usr/bin/python3 -I -B *)"
+    ]
+  }
+}

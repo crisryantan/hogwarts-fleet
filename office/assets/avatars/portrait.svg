@@ -1,0 +1,61 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <radialGradient id="field" gradientUnits="userSpaceOnUse" cx="176" cy="156" r="360">
+      <stop offset="0" stop-color="#2F2D4E"/>
+      <stop offset="1" stop-color="#1D1B3F"/>
+    </radialGradient>
+    <clipPath id="inner">
+      <circle cx="256" cy="256" r="222" fill="#FFFFFF"/>
+    </clipPath>
+  </defs>
+
+  <!-- field -->
+  <circle cx="256" cy="256" r="240" fill="url(#field)"/>
+
+  <g clip-path="url(#inner)">
+    <!-- night sky: small four-point stars -->
+    <path d="M74,176 Q78,186 88,190 Q78,194 74,204 Q70,194 60,190 Q70,186 74,176 Z" fill="#F3E6C4" fill-opacity="0.4"/>
+    <path d="M66,300 Q69,308 77,311 Q69,314 66,322 Q63,314 55,311 Q63,308 66,300 Z" fill="#F3E6C4" fill-opacity="0.4"/>
+    <path d="M440,196 Q444,206 454,210 Q444,214 440,224 Q436,214 426,210 Q436,206 440,196 Z" fill="#F3E6C4" fill-opacity="0.4"/>
+    <path d="M444,320 Q447,328 455,331 Q447,334 444,342 Q441,334 433,331 Q441,328 444,320 Z" fill="#F3E6C4" fill-opacity="0.4"/>
+    <path d="M188,58 Q191,66 199,69 Q191,72 188,80 Q185,72 177,69 Q185,66 188,58 Z" fill="#F3E6C4" fill-opacity="0.4"/>
+    <path d="M326,436 Q329,444 337,447 Q329,450 326,458 Q323,450 315,447 Q323,444 326,436 Z" fill="#F3E6C4" fill-opacity="0.4"/>
+
+    <!-- gilded frame -->
+    <rect x="120" y="116" width="272" height="280" rx="6" fill="#D9A441"/>
+    <!-- top and bottom cartouches -->
+    <ellipse cx="256" cy="116" rx="34" ry="16" fill="#D9A441"/>
+    <ellipse cx="256" cy="396" rx="34" ry="16" fill="#D9A441"/>
+    <circle cx="256" cy="113" r="6" fill="#A97D2C"/>
+    <circle cx="256" cy="399" r="6" fill="#A97D2C"/>
+    <!-- corner flourishes -->
+    <circle cx="120" cy="116" r="11" fill="#D9A441"/>
+    <circle cx="392" cy="116" r="11" fill="#D9A441"/>
+    <circle cx="120" cy="396" r="11" fill="#D9A441"/>
+    <circle cx="392" cy="396" r="11" fill="#D9A441"/>
+    <circle cx="120" cy="116" r="4" fill="#A97D2C"/>
+    <circle cx="392" cy="116" r="4" fill="#A97D2C"/>
+    <circle cx="120" cy="396" r="4" fill="#A97D2C"/>
+    <circle cx="392" cy="396" r="4" fill="#A97D2C"/>
+    <!-- shadow bevel with concave corners -->
+    <path d="M164,140 L348,140 A20,20 0 0 0 368,160 L368,352 A20,20 0 0 0 348,372 L164,372 A20,20 0 0 0 144,352 L144,160 A20,20 0 0 0 164,140 Z" fill="#A97D2C"/>
+    <!-- dark inner panel -->
+    <path d="M172.6,149 L339.4,149 A29,29 0 0 0 359,168.6 L359,343.4 A29,29 0 0 0 339.4,363 L172.6,363 A29,29 0 0 0 153,343.4 L153,168.6 A29,29 0 0 0 172.6,149 Z" fill="#100F24"/>
+
+    <!-- crescent moon, upper right of the panel -->
+    <path transform="translate(56 -4)" d="M272,172 A28,28 0 1 0 272,224 A34,34 0 0 1 272,172 Z" fill="#F3E6C4"/>
+
+    <!-- half-moon spectacles: two lenses, 30px clear gap, low bridge, temple stubs -->
+    <g stroke="#F3E6C4" stroke-width="16" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M173,276 L233,276 A30,42 0 0 1 173,276 Z" fill="#F3E6C4" fill-opacity="0.12"/>
+      <path d="M279,276 L339,276 A30,42 0 0 1 279,276 Z" fill="#F3E6C4" fill-opacity="0.12"/>
+      <path d="M233,276 Q256,250 279,276" fill="none"/>
+      <line x1="173" y1="276" x2="163" y2="270" fill="none"/>
+      <line x1="339" y1="276" x2="349" y2="270" fill="none"/>
+    </g>
+  </g>
+
+  <!-- ring -->
+  <circle cx="256" cy="256" r="240" fill="none" stroke="#D9A441" stroke-width="16"/>
+  <circle cx="256" cy="256" r="222" fill="none" stroke="#D9A441" stroke-width="3" stroke-opacity="0.45"/>
+</svg>

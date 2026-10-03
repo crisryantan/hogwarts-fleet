@@ -1,0 +1,646 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hogwarts Fleet Handbook</title>
+<style>
+/* Layout: one readable column on castle stone, with a single parchment Marauder's Map as the bold moment. */
+:root {
+  --bg: #E8E7E1;
+  --surface: #F5F4EF;
+  --ink: #1B1E2B;
+  --muted: #565A69;
+  --rule: #CFCDC3;
+  --accent: #7E1F1F;
+  --gold: #7A560D;
+  --claude: #8E5A12;
+  --claude-bg: #F1E3C8;
+  --codex: #24467F;
+  --codex-bg: #DCE4F2;
+  --none: #4F5560;
+  --none-bg: #E0E0DB;
+  --map: #E4D6B3;
+  --map-ink: #4A3521;
+  --map-rule: #B49B6B;
+  --code-bg: #DFDED7;
+  --bar: #7E1F1F;
+  --bar-soft: #8C8676;
+  --font-display: "IM Fell English", "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
+  --font-caps: "IM Fell English SC", "IM Fell English", Georgia, serif;
+  --font-body: "Alegreya Sans", "Gill Sans", "Segoe UI", system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0D1120; --surface: #151A2C; --ink: #ECE7DA; --muted: #A4A8B8; --rule: #283049;
+    --accent: #E5786E; --gold: #E0B65C; --claude: #E6B866; --claude-bg: #3A2E18; --codex: #9DB9F0; --codex-bg: #1C2A47;
+    --none: #B7BCC6; --none-bg: #252A38; --map: #241F16; --map-ink: #E8D6AB; --map-rule: #6D5B3A;
+    --code-bg: #1A2034; --bar: #E5786E; --bar-soft: #626B90; color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0D1120; --surface: #151A2C; --ink: #ECE7DA; --muted: #A4A8B8; --rule: #283049;
+  --accent: #E5786E; --gold: #E0B65C; --claude: #E6B866; --claude-bg: #3A2E18; --codex: #9DB9F0; --codex-bg: #1C2A47;
+  --none: #B7BCC6; --none-bg: #252A38; --map: #241F16; --map-ink: #E8D6AB; --map-rule: #6D5B3A;
+  --code-bg: #1A2034; --bar: #E5786E; --bar-soft: #626B90; color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+@media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
+body {
+  background: var(--bg); color: var(--ink);
+  font-family: var(--font-body); font-size: 1.075rem; line-height: 1.6;
+  padding-inline: 16px; padding-block: 0 4rem;
+  -webkit-font-smoothing: antialiased;
+}
+.wrap { max-width: 68rem; margin-inline: auto; }
+.prose { max-width: 42rem; }
+h1, h2, h3 { font-family: var(--font-display); font-weight: 400; text-wrap: balance; line-height: 1.15; margin: 0; }
+h2 { font-size: clamp(1.9rem, 4vw, 2.5rem); }
+h3 { font-size: 1.35rem; }
+p { margin: 0; }
+a { color: var(--accent); text-underline-offset: 3px; }
+a:focus-visible, button:focus-visible, summary:focus-visible { outline: 2px solid var(--gold); outline-offset: 3px; border-radius: 3px; }
+code, pre, kbd { font-family: var(--font-mono); font-size: 0.86em; }
+:not(pre) > code { background: var(--code-bg); padding: 0.08em 0.35em; border-radius: 4px; overflow-wrap: anywhere; }
+.eyebrow { font-family: var(--font-caps); font-size: 0.95rem; letter-spacing: 0.08em; color: var(--accent); }
+.muted { color: var(--muted); }
+.small { font-size: 0.92rem; }
+
+/* nav */
+.nav {
+  position: sticky; top: env(safe-area-inset-top, 0px); z-index: 5;
+  background: var(--bg); border-bottom: 1px solid var(--rule);
+  margin-inline: -16px; padding: 0.55rem 16px;
+}
+.nav ul { list-style: none; margin: 0 auto; padding: 0; max-width: 68rem; display: flex; gap: 0.25rem 1.1rem; overflow-x: auto; scrollbar-width: none; white-space: nowrap; }
+.nav ul::-webkit-scrollbar { display: none; }
+.nav a { color: var(--muted); text-decoration: none; font-size: 0.93rem; }
+.nav a:hover { color: var(--ink); }
+
+/* hero */
+.hero { padding-block: 3.2rem 2.4rem; display: grid; gap: 1.1rem; }
+.hero h1 { font-size: clamp(2.8rem, 8vw, 5rem); letter-spacing: -0.01em; }
+.hero h1 em { font-style: italic; color: var(--accent); }
+.lede { font-size: 1.25rem; max-width: 40rem; color: var(--ink); }
+.figures { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 0; border-block: 1px solid var(--rule); margin-top: 1rem; }
+.fig { padding: 1rem 1rem 1rem 0; display: grid; gap: 0.2rem; align-content: start; }
+.fig + .fig { padding-left: 1rem; border-left: 1px solid var(--rule); }
+.fig b { font-family: var(--font-display); font-weight: 400; font-size: 2.3rem; line-height: 1; font-variant-numeric: tabular-nums; }
+.fig span { color: var(--muted); font-size: 0.92rem; line-height: 1.35; }
+@media (max-width: 760px) {
+  .figures { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .fig:nth-child(3) { padding-left: 0; border-left: 0; }
+  .fig:nth-child(n+3) { border-top: 1px solid var(--rule); }
+}
+
+/* sections */
+section { padding-block: 3.2rem 0.5rem; display: grid; gap: 1.2rem; scroll-margin-top: 3.5rem; }
+.sec-head { display: grid; gap: 0.5rem; }
+.sec-head p { max-width: 42rem; color: var(--muted); }
+
+/* short version */
+.short { list-style: none; padding: 0; margin: 0; display: grid; gap: 0.9rem; max-width: 46rem; counter-reset: s; }
+.short li { display: grid; grid-template-columns: 2.2rem 1fr; gap: 0.6rem; align-items: baseline; }
+.short li::before { counter-increment: s; content: counter(s); font-family: var(--font-display); font-size: 1.6rem; color: var(--accent); line-height: 1; }
+.short b { font-weight: 700; }
+
+/* roster */
+.roster { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1rem; }
+@media (max-width: 760px) { .roster { grid-template-columns: 1fr; } }
+.card {
+  background: var(--surface); border: 1px solid var(--rule); border-radius: 6px;
+  padding: 1.15rem 1.2rem 1.2rem; display: grid; gap: 0.7rem; align-content: start; min-width: 0;
+}
+.card.head { background: transparent; border-style: dashed; }
+.card-top { display: flex; justify-content: space-between; align-items: flex-start; gap: 0.75rem; flex-wrap: wrap; }
+.card h3 { font-size: 1.6rem; }
+.card .role { font-weight: 700; }
+.chip { display: inline-flex; align-items: center; gap: 0.35rem; font-size: 0.8rem; font-weight: 700; letter-spacing: 0.02em; padding: 0.2rem 0.55rem; border-radius: 999px; white-space: nowrap; }
+.chip::before { content: ""; width: 0.5rem; height: 0.5rem; border-radius: 50%; background: currentColor; }
+.chip.claude { color: var(--claude); background: var(--claude-bg); }
+.chip.codex { color: var(--codex); background: var(--codex-bg); }
+.chip.none { color: var(--none); background: var(--none-bg); }
+.why { color: var(--muted); font-size: 0.97rem; }
+.kv { display: grid; grid-template-columns: 5.9rem 1fr; gap: 0.35rem 0.7rem; font-size: 0.97rem; }
+.kv dt { font-family: var(--font-caps); color: var(--muted); letter-spacing: 0.04em; }
+.kv dd { margin: 0; min-width: 0; }
+.rule-q { font-family: var(--font-display); font-style: italic; font-size: 1.1rem; border-top: 1px solid var(--rule); padding-top: 0.6rem; }
+.scripts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1rem; }
+@media (max-width: 760px) { .scripts { grid-template-columns: 1fr; } }
+.script { display: grid; grid-template-columns: auto 1fr; gap: 0.2rem 0.8rem; align-items: baseline; padding: 0.8rem 0; border-top: 1px solid var(--rule); }
+.script .chip { justify-self: start; }
+.script b { font-family: var(--font-display); font-weight: 400; font-size: 1.2rem; }
+.script p { grid-column: 1 / -1; color: var(--muted); font-size: 0.97rem; }
+
+/* map */
+.map-wrap { background: var(--map); color: var(--map-ink); border: 1px solid var(--map-rule); border-radius: 8px; padding: 1rem; overflow-x: auto; }
+.map-wrap svg { display: block; width: 100%; min-width: 700px; height: auto; }
+.map-cap { font-family: var(--font-caps); letter-spacing: 0.06em; font-size: 0.95rem; display: flex; justify-content: space-between; gap: 1rem; flex-wrap: wrap; margin-bottom: 0.4rem; }
+.trail { stroke-dasharray: 2 9; stroke-linecap: round; animation: walk 14s linear infinite; }
+@keyframes walk { to { stroke-dashoffset: -220; } }
+@media (prefers-reduced-motion: reduce) { .trail { animation: none; } }
+.steps { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.4rem 2rem; counter-reset: st; }
+@media (max-width: 760px) { .steps { grid-template-columns: 1fr; } }
+.steps li { display: grid; grid-template-columns: 1.8rem 1fr; gap: 0.5rem; padding-block: 0.55rem; border-bottom: 1px solid var(--rule); min-width: 0; }
+.steps li::before { counter-increment: st; content: counter(st); font-family: var(--font-display); color: var(--accent); font-size: 1.25rem; line-height: 1.2; }
+.steps b { display: block; }
+.steps span { color: var(--muted); font-size: 0.97rem; }
+
+/* tables */
+.tbl { overflow-x: auto; border: 1px solid var(--rule); border-radius: 6px; background: var(--surface); }
+table { border-collapse: collapse; width: 100%; min-width: 760px; font-size: 0.96rem; }
+th, td { text-align: left; vertical-align: top; padding: 0.7rem 0.85rem; border-bottom: 1px solid var(--rule); }
+tr:last-child td { border-bottom: 0; }
+th { font-family: var(--font-caps); font-weight: 400; letter-spacing: 0.05em; color: var(--muted); font-size: 0.92rem; background: var(--bg); }
+td .hp { font-family: var(--font-display); font-size: 1.12rem; display: block; line-height: 1.2; }
+td .plain { color: var(--muted); font-size: 0.92rem; }
+.num { font-variant-numeric: tabular-nums; white-space: nowrap; }
+
+/* memory */
+.two { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 1.5rem; align-items: start; }
+@media (max-width: 860px) { .two { grid-template-columns: 1fr; } }
+.plain-list { margin: 0; padding-left: 1.1rem; display: grid; gap: 0.55rem; }
+.plain-list li { padding-left: 0.2rem; }
+pre.tree, pre.block {
+  margin: 0; background: var(--code-bg); border-radius: 6px; padding: 1rem 1.1rem;
+  overflow: auto; line-height: 1.5; font-size: 0.82rem; white-space: pre; color: var(--ink);
+}
+pre.tree .c { color: var(--muted); }
+
+/* charts */
+.chart { display: grid; gap: 0.55rem; }
+.bar-row { display: grid; grid-template-columns: minmax(9rem, 15rem) minmax(0, 1fr) 4.5rem; gap: 0.75rem; align-items: center; font-size: 0.95rem; }
+@media (max-width: 600px) { .bar-row { grid-template-columns: 1fr 4rem; } .bar-row .track { grid-column: 1 / -1; grid-row: 2; } }
+.bar-row .lab { min-width: 0; }
+.bar-row .lab small { display: block; color: var(--muted); font-size: 0.85rem; line-height: 1.3; }
+.track { position: relative; height: 0.95rem; background: transparent; border-left: 1px solid var(--rule); }
+.fill { position: absolute; inset: 0 auto 0 0; background: var(--bar); border-radius: 0 3px 3px 0; }
+.fill.soft { background: var(--bar-soft); }
+.val { text-align: right; font-variant-numeric: tabular-nums; font-weight: 700; }
+.chart-note { color: var(--muted); font-size: 0.9rem; max-width: 46rem; }
+.panel { background: var(--surface); border: 1px solid var(--rule); border-radius: 6px; padding: 1.2rem; display: grid; gap: 1rem; min-width: 0; }
+
+/* rtk + firstmate */
+.cols3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 1.4rem; }
+@media (max-width: 860px) { .cols3 { grid-template-columns: 1fr; } }
+.col { display: grid; gap: 0.6rem; align-content: start; min-width: 0; }
+.col h3 { font-size: 1.3rem; }
+.cmds { display: grid; gap: 0.6rem; counter-reset: c; }
+.cmd { display: grid; grid-template-columns: 1.6rem minmax(0, 1fr); gap: 0.6rem; align-items: start; }
+.cmd::before { counter-increment: c; content: counter(c); font-family: var(--font-display); color: var(--accent); font-size: 1.2rem; line-height: 1.3; }
+.cmd p { font-size: 0.97rem; }
+.cmd pre { margin: 0.3rem 0 0; background: var(--code-bg); border-radius: 5px; padding: 0.5rem 0.7rem; overflow-x: auto; font-size: 0.8rem; white-space: pre; }
+.borrow { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.9rem 2rem; }
+@media (max-width: 760px) { .borrow { grid-template-columns: 1fr; } }
+.borrow div { border-top: 1px solid var(--rule); padding-top: 0.6rem; display: grid; gap: 0.25rem; min-width: 0; }
+.borrow b { font-weight: 700; }
+.borrow p { color: var(--muted); font-size: 0.97rem; }
+
+/* rollout */
+.stages { list-style: none; margin: 0; padding: 0; display: grid; gap: 0; }
+.stage { display: grid; grid-template-columns: 4.2rem minmax(0, 1fr); gap: 1rem; padding-block: 1.1rem; border-top: 1px solid var(--rule); }
+.stage .n { font-family: var(--font-display); font-size: 2.6rem; line-height: 0.9; color: var(--accent); }
+.stage .n small { display: block; font-family: var(--font-body); font-size: 0.8rem; color: var(--muted); margin-top: 0.35rem; line-height: 1.3; }
+.stage h3 { font-size: 1.35rem; margin-bottom: 0.3rem; }
+.stage ul { margin: 0.5rem 0 0.6rem; padding-left: 1.1rem; display: grid; gap: 0.3rem; }
+.done { font-size: 0.95rem; }
+.done b { font-family: var(--font-caps); letter-spacing: 0.04em; color: var(--gold); font-weight: 400; }
+
+/* gates + lists */
+.gates { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 2rem; list-style: none; margin: 0; padding: 0; }
+@media (max-width: 760px) { .gates { grid-template-columns: 1fr; } }
+.gates li { padding-block: 0.6rem; border-top: 1px solid var(--rule); min-width: 0; }
+.gates b { display: block; }
+.gates span { color: var(--muted); font-size: 0.95rem; }
+
+/* copy blocks */
+.copy { display: grid; gap: 0.5rem; min-width: 0; }
+.copy-head { display: flex; justify-content: space-between; align-items: center; gap: 1rem; flex-wrap: wrap; }
+.copy-head h3 { font-size: 1.3rem; }
+.btn {
+  font: inherit; font-size: 0.9rem; font-weight: 700; cursor: pointer;
+  color: var(--accent); background: transparent; border: 1px solid currentColor; border-radius: 999px; padding: 0.3rem 0.9rem;
+}
+.btn:hover { background: var(--surface); }
+pre.block { max-height: 30rem; white-space: pre-wrap; overflow-wrap: anywhere; }
+
+/* glossary */
+.gloss { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0.2rem 1.8rem; margin: 0; }
+@media (max-width: 860px) { .gloss { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 560px) { .gloss { grid-template-columns: 1fr; } }
+.gloss div { padding-block: 0.55rem; border-top: 1px solid var(--rule); min-width: 0; }
+.gloss dt { font-family: var(--font-display); font-size: 1.12rem; }
+.gloss dd { margin: 0; color: var(--muted); font-size: 0.94rem; }
+
+.closing { padding-block: 4rem 1rem; display: grid; gap: 0.8rem; justify-items: start; }
+.closing h2 { font-size: clamp(2.2rem, 6vw, 3.4rem); font-style: italic; }
+.sources { display: grid; gap: 0.3rem; font-size: 0.95rem; }
+
+/* avatars */
+.who { display: flex; align-items: center; gap: 0.8rem; min-width: 0; }
+.av { width: 56px; height: 56px; flex: none; border-radius: 50%; }
+.script .av { width: 40px; height: 40px; }
+.script-top { display: flex; align-items: center; gap: 0.7rem; }
+
+/* status */
+.status { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 0; border-block: 1px solid var(--rule); }
+@media (max-width: 900px) { .status { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 560px) { .status { grid-template-columns: 1fr; } }
+.st-col { padding: 1rem 1.1rem 1.1rem 0; display: grid; gap: 0.5rem; align-content: start; min-width: 0; }
+.st-col + .st-col { padding-left: 1.1rem; border-left: 1px solid var(--rule); }
+@media (max-width: 900px) { .st-col:nth-child(3) { padding-left: 0; border-left: 0; } .st-col:nth-child(n+3) { border-top: 1px solid var(--rule); } }
+@media (max-width: 560px) { .st-col + .st-col { padding-left: 0; border-left: 0; border-top: 1px solid var(--rule); } }
+.st-col h3 { font-size: 1.15rem; }
+.st-col ul { margin: 0; padding-left: 1rem; display: grid; gap: 0.4rem; font-size: 0.96rem; }
+.st-col.done h3 { color: var(--gold); }
+.st-col.wait h3 { color: var(--accent); }
+
+/* risk matrix */
+.mx td, .mx th { text-align: center; }
+.mx td:first-child, .mx th:first-child { text-align: left; }
+.yes { color: var(--gold); font-weight: 700; }
+.no { color: var(--muted); }
+.risk-n { font-family: var(--font-display); font-size: 1.5rem; color: var(--accent); line-height: 1; }
+.tick { display: inline-block; font-size: 0.75rem; font-weight: 700; letter-spacing: 0.04em; color: var(--claude); background: var(--claude-bg); border-radius: 999px; padding: 0.05rem 0.5rem; margin-right: 0.35rem; vertical-align: 0.1em; }
+.note { font-size: 0.92rem; color: var(--muted); max-width: 52rem; }
+.suffix { color: var(--muted); font-size: 0.72em; white-space: nowrap; }
+.scripts { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+@media (max-width: 900px) { .scripts { grid-template-columns: 1fr; } }
+.ask td:first-child { width: 45%; }
+.ask .who-cell { display: flex; align-items: center; gap: 0.6rem; }
+.ask .who-cell img { width: 32px; height: 32px; flex: none; }
+
+/* review fixes */
+body { margin: 0; }
+td.num { white-space: normal; }
+code { font-variant-ligatures: none; -webkit-box-decoration-break: clone; box-decoration-break: clone; }
+.borrow div { align-content: start; }
+.script { grid-template-columns: minmax(0, 1fr) auto; align-items: center; align-content: start; }
+.script .chip { justify-self: end; }
+.steps b { color: var(--ink); }
+.stage .n { font-family: var(--font-body); font-variant-numeric: lining-nums; font-weight: 700; }
+.copy-head { flex-wrap: nowrap; align-items: flex-start; }
+.copy-head h3 { min-width: 0; }
+.copy-head .btn { flex: none; }
+.st-col.ok h3 { color: var(--gold); }
+.st-col.built h3 { color: var(--claude); }
+pre.cmdline { margin: 0.4rem 0 0; background: var(--code-bg); border-radius: 5px; padding: 0.5rem 0.7rem; overflow-x: auto; font-size: 0.8rem; white-space: pre; }
+@media (min-width: 761px) { .nav ul { flex-wrap: wrap; overflow: visible; white-space: normal; } section { scroll-margin-top: 5.5rem; } }
+@media (max-width: 760px) { .nav ul { -webkit-mask-image: linear-gradient(90deg, #000 80%, transparent); mask-image: linear-gradient(90deg, #000 80%, transparent); padding-right: 2.5rem; } }
+@media (max-width: 560px) { .card-top { flex-direction: column; align-items: flex-start; gap: 0.5rem; } .card:not(.head) .card-top .chip { margin-left: calc(56px + 0.8rem); } }
+@media (max-width: 700px) { .map-cap span:last-child::after { content: " \00B7  swipe to follow the trail"; } }
+@media (max-width: 640px) {
+  .tbl { border: 0; background: transparent; overflow: visible; }
+  .tbl table { min-width: 0; }
+  .tbl thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+  .tbl tbody, .tbl tr, .tbl td { display: block; }
+  .tbl tr { background: var(--surface); border: 1px solid var(--rule); border-radius: 6px; padding: 0.85rem 1rem; margin-bottom: 0.75rem; }
+  .tbl td { border: 0; padding: 0.2rem 0; text-align: left; }
+  .tbl td[data-label]:not([data-label=""])::before { content: attr(data-label); display: block; font-family: var(--font-caps); font-size: 0.8rem; letter-spacing: 0.05em; color: var(--muted); margin-top: 0.3rem; }
+  .ask td:first-child { width: auto; }
+}
+</style>
+<style>
+.hero h1 { font-size: clamp(2.4rem, 7vw, 4.2rem); }
+.two .tbl table { min-width: 0; }
+.cols3 .tbl table { min-width: 0; }
+.cols3 .tbl td:first-child { white-space: nowrap; }
+@media (max-width: 640px) { .cols3 .tbl td:first-child { white-space: normal; } }
+</style>
+</head>
+<body>
+<nav class="nav" aria-label="Sections">
+  <ul>
+    <li><a href="#tools">The tools</a></li>
+    <li><a href="#setup">One-time setup</a></li>
+    <li><a href="#first">First session</a></li>
+    <li><a href="#ask">Which desk</a></li>
+    <li><a href="#live">What's live</a></li>
+    <li><a href="#rhythm">Daily rhythm</a></li>
+    <li><a href="#herdr">herdr</a></li>
+    <li><a href="#cheats">Cheat sheet</a></li>
+    <li><a href="#rules">Rules</a></li>
+    <li><a href="#trouble">Troubleshooting</a></li>
+    <li><a href="#uninstall">Uninstall</a></li>
+  </ul>
+</nav>
+
+<main class="wrap">
+
+<header class="hero">
+  <p class="eyebrow">Hogwarts fleet handbook</p>
+  <h1>How to work with <em>the fleet</em></h1>
+  <p class="lede">This is the practical guide: which program to open, what to type, and who to ask. It assumes you've never used Claude Code, Codex or herdr from a terminal before.</p>
+  <p class="muted small">Setting the fleet up is in <a href="ONBOARDING.md">ONBOARDING.md</a>. The design and why it's safe are in <a href="DESIGN.md">DESIGN.md</a>.</p>
+  <div class="figures" role="list">
+    <div class="fig" role="listitem"><b>1</b><span>place to start every time: McGonagall, in a session opened in <code>~/hogwarts</code>.</span></div>
+    <div class="fig" role="listitem"><b>7</b><span>desks, each named for its job, like "Snape - Data Analyst".</span></div>
+    <div class="fig" role="listitem"><b>0</b><span>things an agent can merge, deploy or send without you.</span></div>
+    <div class="fig" role="listitem"><b>2</b><span>words that close a task: "Mischief managed", followed by its id.</span></div>
+  </div>
+</header>
+
+<section id="tools">
+  <div class="sec-head">
+    <p class="eyebrow">The tools</p>
+    <h2>Four programs, and only one you need every day</h2>
+    <p>Three of these live in the terminal. The terminal is the Terminal app on your Mac: press Cmd+Space, type Terminal, and press Enter. Spotlight only finds Mac apps, so typing a command-line tool's name there finds nothing. You type those names inside Terminal instead.</p>
+  </div>
+  <div class="roster">
+    <article class="card">
+      <div class="card-top"><div><p class="eyebrow">Every day</p><h3>Claude Code</h3></div><span class="chip claude">Claude</span></div>
+      <p class="role">Anthropic's coding agent. It runs McGonagall, Hermione, Ron, Snape and the portrait.</p>
+      <dl class="kv">
+        <dt>Open it</dt><dd>The Code tab in the Claude desktop app, or type <code>claude</code> in Terminal.</dd>
+        <dt>You'll use</dt><dd>McGonagall's session in <code>~/hogwarts</code>, and Snape from any session.</dd>
+      </dl>
+    </article>
+    <article class="card">
+      <div class="card-top"><div><p class="eyebrow">Behind the scenes</p><h3>Codex</h3></div><span class="chip codex">Codex</span></div>
+      <p class="role">OpenAI's coding agent. It runs Harry, who builds, and Moody, who reviews Claude-written code.</p>
+      <dl class="kv">
+        <dt>Open it</dt><dd>Type <code>codex</code> in Terminal for your own experiments. The fleet runs it for Harry and Moody through a script.</dd>
+        <dt>You'll use</dt><dd>Rarely by hand. McGonagall routes work to Harry.</dd>
+      </dl>
+    </article>
+    <article class="card">
+      <div class="card-top"><div><p class="eyebrow">When you want to look</p><h3>castle</h3></div><span class="chip none">No model</span></div>
+      <p class="role">The command line for the fleet's database: tasks, requests between desks, reviews and memory. Only you and the fleet's scripts use it.</p>
+      <dl class="kv">
+        <dt>Open it</dt><dd>Type <code>~/.hogwarts/bin/castle</code> in Terminal, followed by a command such as <code>task list</code>.</dd>
+        <dt>You'll use</dt><dd>To check what's in flight, or to close a task by hand.</dd>
+      </dl>
+    </article>
+    <article class="card">
+      <div class="card-top"><div><p class="eyebrow">Optional</p><h3>herdr</h3></div><span class="chip none">No model</span></div>
+      <p class="role">A terminal workspace manager: tabs and split panes for running several of your own agent sessions side by side.</p>
+      <dl class="kv">
+        <dt>Open it</dt><dd>Type <code>herdr</code> in Terminal. It isn't a Mac app, which is why Spotlight can't see it.</dd>
+        <dt>You'll use</dt><dd>Only if you like a multi-pane view of your own sessions. Fleet desks never run inside it.</dd>
+      </dl>
+    </article>
+  </div>
+</section>
+
+<section id="setup">
+  <div class="sec-head">
+    <p class="eyebrow">One-time setup</p>
+    <h2>Onboarding does the setup</h2>
+    <p><a href="ONBOARDING.md">ONBOARDING.md</a> takes a fresh Mac to a working fleet in stages, each with a check. One extra is worth doing once.</p>
+  </div>
+  <ol class="stages">
+    <li class="stage"><div class="n">1<small>Shortcut</small></div><div>
+      <h3>Make <code>castle</code> a short command</h3>
+      <p>This adds one line to your shell settings so you can type <code>castle</code> instead of the full path. Open a new Terminal window afterwards.</p>
+      <pre class="cmdline">echo "alias castle='$HOME/.hogwarts/bin/castle'" &gt;&gt; ~/.zshrc</pre>
+    </div></li>
+  </ol>
+</section>
+
+<section id="first">
+  <div class="sec-head">
+    <p class="eyebrow">Your first session</p>
+    <h2>Talk to McGonagall, and let her route the rest</h2>
+    <p>You don't need to remember which desk does what. Start every piece of work with McGonagall, and she writes it up and sends it to the right desk.</p>
+  </div>
+  <ol class="steps">
+    <li><span><b>Open her session.</b> In the Claude desktop app, open the Code tab, start a new session and pick the <code>hogwarts</code> folder in your home folder. Or in Terminal, type <code>cd ~/hogwarts</code> and then <code>claude</code>. The folder's settings make McGonagall the default.</span></li>
+    <li><span><b>Read her digest.</b> Her first message lists what's in flight, anything waiting on you, and queued work. On a fresh install it's short.</span></li>
+    <li><span><b>Ask in your own words.</b> For example: "Add a unit test for the retry path when the cache is empty, in my web-app repo." Small questions she answers directly.</span></li>
+    <li><span><b>Check her ticket.</b> For real work she writes <code>tasks/&lt;id&gt;/TASK.md</code>: your words under Intent, numbered acceptance criteria with the check for each, and what's out of scope. Claude asks you before she writes it. Fix anything that's wrong, then reply "go". She hands you one <code>castle task create</code> command to register it; run that in Terminal.</span></li>
+    <li><span><b>Let it move.</b> She posts the work to the right desk through her outbox, and Claude asks you before each post. The Owl Post delivers it. You'll see rows for anything that needs you at the start of your next message to her.</span></li>
+    <li><span><b>Merge and close.</b> When a PR is green and reviewed, you merge it yourself. Then type <code>Mischief managed &lt;task-id&gt;</code> to her. That exact phrase is the only thing that closes a task.</span></li>
+  </ol>
+  <div class="panel">
+    <h3>Good first prompts</h3>
+    <ul class="plain-list">
+      <li>"What's in flight, and is anything waiting on me?"</li>
+      <li>"Write a TASK.md for: rename the retry constant in my web-app repo and update its tests. Don't route it yet."</li>
+      <li>"Use the snape agent to get p50, p75, p90 and p95 page load time for yesterday, with the query."</li>
+      <li>"Draft a reply to the latest message in the release thread. Don't send it."</li>
+    </ul>
+  </div>
+</section>
+
+<section id="ask">
+  <div class="sec-head">
+    <p class="eyebrow">Which desk do I ask?</p>
+    <h2>The name after the dash is the job</h2>
+    <p>When in doubt, ask McGonagall. When you know exactly what you want, you can go straight to a desk.</p>
+  </div>
+  <div class="tbl">
+    <table class="ask">
+      <thead><tr><th>When I want to</th><th>Ask</th><th>How to reach them</th></tr></thead>
+      <tbody>
+        <tr><td data-label="When I want to">Get something done, or I'm not sure who should do it</td><td data-label="Ask"><div class="who-cell"><img src="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA1MTIgNTEyIiB3aWR0aD0iNTEyIiBoZWlnaHQ9IjUxMiI+CiAgPGRlZnM+CiAgICA8cmFkaWFsR3JhZGllbnQgaWQ9ImZpZWxkIiBncmFkaWVudFVuaXRzPSJ1c2VyU3BhY2VPblVzZSIgY3g9IjE3NiIgY3k9IjE1NiIgcj0iMzYwIj4KICAgICAgPHN0b3Agb2Zmc2V0PSIwIiBzdG9wLWNvbG9yPSIjMzE1QjRBIi8+CiAgICAgIDxzdG9wIG9mZnNldD0iMSIgc3RvcC1jb2xvcj0iIzFGNEQzQSIvPgogICAgPC9yYWRpYWxHcmFkaWVudD4KICAgIDxjbGlwUGF0aCBpZD0iaW5uZXIiPgogICAgICA8Y2lyY2xlIGN4PSIyNTYiIGN5PSIyNTYiIHI9IjIyMiIgZmlsbD0iI0ZGRkZGRiIvPgogICAgPC9jbGlwUGF0aD4KICA8L2RlZnM+CgogIDxjaXJjbGUgY3g9IjI1NiIgY3k9IjI1NiIgcj0iMjQwIiBmaWxsPSJ1cmwoI2ZpZWxkKSIvPgoKICA8ZyBjbGlwLXBhdGg9InVybCgjaW5uZXIpIj4KICAgIDwhLS0gdGFydGFuOiB3aWRlIGRhcmtlciBiYW5kcyAtLT4KICAgIDxyZWN0IHg9IjE0MCIgeT0iMCIgd2lkdGg9IjUyIiBoZWlnaHQ9IjUxMiIgZmlsbD0iIzBFMUYxOCIgZmlsbC1vcGFjaXR5PSIwLjIyIi8+CiAgICA8cmVjdCB4PSIzMjAiIHk9IjAiIHdpZHRoPSI1MiIgaGVpZ2h0PSI1MTIiIGZpbGw9IiMwRTFGMTgiIGZpbGwtb3BhY2l0eT0iMC4yMiIvPgogICAgPHJlY3QgeD0iMCIgeT0iMTQwIiB3aWR0aD0iNTEyIiBoZWlnaHQ9IjUyIiBmaWxsPSIjMEUxRjE4IiBmaWxsLW9wYWNpdHk9IjAuMjIiLz4KICAgIDxyZWN0IHg9IjAiIHk9IjMyMCIgd2lkdGg9IjUxMiIgaGVpZ2h0PSI1MiIgZmlsbD0iIzBFMUYxOCIgZmlsbC1vcGFjaXR5PSIwLjIyIi8+CiAgICA8IS0tIHRhcnRhbjogdGhpbiByZWQgb3ZlcmNoZWNrIGNyb3NzaW5nIGluc2lkZSB0aGUgZmllbGQsIGNsZWFyIG9mIHdoaXNrZXJzIGFuZCBjaGluIC0tPgogICAgPHJlY3QgeD0iMCIgeT0iMzUyIiB3aWR0aD0iNTEyIiBoZWlnaHQ9IjgiIGZpbGw9IiM4RTJBMkEiIGZpbGwtb3BhY2l0eT0iMC40NSIvPgogICAgPHJlY3QgeD0iODQiIHk9IjAiIHdpZHRoPSI4IiBoZWlnaHQ9IjUxMiIgZmlsbD0iIzhFMkEyQSIgZmlsbC1vcGFjaXR5PSIwLjQ1Ii8+CgogICAgPCEtLSBoZWFkIC0tPgogICAgPHBhdGggZD0iTSAyNTYgMTQ4IFEgMjI4IDE0NiAyMDYgMTU2IEwgMTU2IDEwMCBMIDE0MCAyMDggQyAxMjAgMjQ0IDExNiAyOTAgMTMwIDMyMCBDIDE1NCAzNjggMjA0IDM5MCAyNTYgMzkwIEMgMzA4IDM5MCAzNTggMzY4IDM4MiAzMjAgQyAzOTYgMjkwIDM5MiAyNDQgMzcyIDIwOCBMIDM1NiAxMDAgTCAzMDYgMTU2IFEgMjg0IDE0NiAyNTYgMTQ4IFoiIGZpbGw9IiNGM0U2QzQiIHN0cm9rZT0iI0YzRTZDNCIgc3Ryb2tlLXdpZHRoPSI4IiBzdHJva2UtbGluZWpvaW49InJvdW5kIi8+CgogICAgPCEtLSBpbm5lciBlYXJzIC0tPgogICAgPHBvbHlnb24gcG9pbnRzPSIxNjAsMTIyIDE5MiwxNTggMTQ4LDE4NiIgZmlsbD0iI0M5QjQ4QSIgc3Ryb2tlPSIjQzlCNDhBIiBzdHJva2Utd2lkdGg9IjgiIHN0cm9rZS1saW5lam9pbj0icm91bmQiLz4KICAgIDxwb2x5Z29uIHBvaW50cz0iMzUyLDEyMiAzMjAsMTU4IDM2NCwxODYiIGZpbGw9IiNDOUI0OEEiIHN0cm9rZT0iI0M5QjQ4QSIgc3Ryb2tlLXdpZHRoPSI4IiBzdHJva2UtbGluZWpvaW49InJvdW5kIi8+CgogICAgPCEtLSB0YWJieSBzdHJpcGVzIGFuZCBmb3JlaGVhZCB0dWZ0cyAoc3BsaXQgYXQgdGhlIGNlbnRyZSBzbyB0aGV5IG9ubHkgaW1wbHkgYW4gTSkgLS0+CiAgICA8ZyBzdHJva2U9IiNDOUI0OEEiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIgc3Ryb2tlLWxpbmVqb2luPSJyb3VuZCI+CiAgICAgIDxwYXRoIGQ9Ik0gMjI2IDIwOCBRIDIyNiAxODYgMjM0IDE3MiBRIDI0MCAxODIgMjQyIDE5NCIgZmlsbD0ibm9uZSIgc3Ryb2tlLXdpZHRoPSIxNiIvPgogICAgICA8cGF0aCBkPSJNIDI4NiAyMDggUSAyODYgMTg2IDI3OCAxNzIgUSAyNzIgMTgyIDI3MCAxOTQiIGZpbGw9Im5vbmUiIHN0cm9rZS13aWR0aD0iMTYiLz4KICAgICAgPHBhdGggZD0iTSAxOTIgMTg2IFEgMjAyIDE5OCAyMDQgMjE0IiBmaWxsPSJub25lIiBzdHJva2Utd2lkdGg9IjkiLz4KICAgICAgPHBhdGggZD0iTSAzMjAgMTg2IFEgMzEwIDE5OCAzMDggMjE0IiBmaWxsPSJub25lIiBzdHJva2Utd2lkdGg9IjkiLz4KICAgICAgPHBhdGggZD0iTSAxMjcgMjcwIEwgMTUwIDI3NCIgZmlsbD0ibm9uZSIgc3Ryb2tlLXdpZHRoPSI5Ii8+CiAgICAgIDxwYXRoIGQ9Ik0gMTI4IDI5MCBMIDE1MCAyOTAiIGZpbGw9Im5vbmUiIHN0cm9rZS13aWR0aD0iOSIvPgogICAgICA8cGF0aCBkPSJNIDM4NSAyNzAgTCAzNjIgMjc0IiBmaWxsPSJub25lIiBzdHJva2Utd2lkdGg9IjkiLz4KICAgICAgPHBhdGggZD0iTSAzODQgMjkwIEwgMzYyIDI5MCIgZmlsbD0ibm9uZSIgc3Ryb2tlLXdpZHRoPSI5Ii8+CiAgICA8L2c+CgogICAgPCEtLSBleWVzOiBmbGF0IHVwcGVyIGxpZHMgc2xhbnRpbmcgdG8gdGhlIG5vc2UgZm9yIGEgc3Rlcm4gbG9vayAtLT4KICAgIDxwYXRoIGQ9Ik0gMTgyIDI1NCBRIDIxMCAyNTAgMjM2IDI2NCBRIDIxMCAyODIgMTgyIDI1NCBaIiBmaWxsPSIjMzRBNTZGIi8+CiAgICA8cGF0aCBkPSJNIDMzMCAyNTQgUSAzMDIgMjUwIDI3NiAyNjQgUSAzMDIgMjgyIDMzMCAyNTQgWiIgZmlsbD0iIzM0QTU2RiIvPgogICAgPGVsbGlwc2UgY3g9IjIxMCIgY3k9IjI2NCIgcng9IjUiIHJ5PSI5IiBmaWxsPSIjMEUxRjE4Ii8+CiAgICA8ZWxsaXBzZSBjeD0iMzAyIiBjeT0iMjY0IiByeD0iNSIgcnk9IjkiIGZpbGw9IiMwRTFGMTgiLz4KICAgIDxnIHN0cm9rZT0iIzBFMUYxOCIgc3Ryb2tlLXdpZHRoPSI4IiBzdHJva2UtbGluZWNhcD0icm91bmQiPgogICAgICA8cGF0aCBkPSJNIDE4MCAyNTMgUSAyMTAgMjQ4IDIzOCAyNjQiIGZpbGw9Im5vbmUiLz4KICAgICAgPHBhdGggZD0iTSAzMzIgMjUzIFEgMzAyIDI0OCAyNzQgMjY0IiBmaWxsPSJub25lIi8+CiAgICA8L2c+CgogICAgPCEtLSBzcXVhcmUgc3BlY3RhY2xlcyAtLT4KICAgIDxnIHN0cm9rZT0iIzBFMUYxOCIgc3Ryb2tlLXdpZHRoPSIxNCIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIiBzdHJva2UtbGluZWpvaW49InJvdW5kIj4KICAgICAgPHJlY3QgeD0iMTcwIiB5PSIyMzAiIHdpZHRoPSI3NiIgaGVpZ2h0PSI2MCIgcng9IjgiIGZpbGw9Im5vbmUiLz4KICAgICAgPHJlY3QgeD0iMjY2IiB5PSIyMzAiIHdpZHRoPSI3NiIgaGVpZ2h0PSI2MCIgcng9IjgiIGZpbGw9Im5vbmUiLz4KICAgICAgPGxpbmUgeDE9IjI0NiIgeTE9IjI1MiIgeDI9IjI2NiIgeTI9IjI1MiIgZmlsbD0ibm9uZSIvPgogICAgICA8bGluZSB4MT0iMTcwIiB5MT0iMjUwIiB4Mj0iMTMwIiB5Mj0iMjQ0IiBmaWxsPSJub25lIi8+CiAgICAgIDxsaW5lIHgxPSIzNDIiIHkxPSIyNTAiIHgyPSIzODIiIHkyPSIyNDQiIGZpbGw9Im5vbmUiLz4KICAgIDwvZz4KCiAgICA8IS0tIG5vc2UgYW5kIG1vdXRoIC0tPgogICAgPHBhdGggZD0iTSAyNDQgMzA4IEwgMjY4IDMwOCBMIDI1NiAzMjIgWiIgZmlsbD0iIzhFMkEyQSIgc3Ryb2tlPSIjOEUyQTJBIiBzdHJva2Utd2lkdGg9IjgiIHN0cm9rZS1saW5lam9pbj0icm91bmQiLz4KICAgIDxwYXRoIGQ9Ik0gMjU2IDMyNCBMIDI1NiAzMzYgTSAyNTYgMzM2IFEgMjQ2IDM0OCAyMzQgMzQyIE0gMjU2IDMzNiBRIDI2NiAzNDggMjc4IDM0MiIgZmlsbD0ibm9uZSIgc3Ryb2tlPSIjMEUxRjE4IiBzdHJva2Utd2lkdGg9IjgiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIgc3Ryb2tlLWxpbmVqb2luPSJyb3VuZCIvPgoKICAgIDwhLS0gd2hpc2tlcnMgLS0+CiAgICA8ZyBzdHJva2U9IiNDOUI0OEEiIHN0cm9rZS13aWR0aD0iOCIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIj4KICAgICAgPGxpbmUgeDE9IjIwNCIgeTE9IjMxOCIgeDI9IjExMiIgeTI9IjMwNiIgZmlsbD0ibm9uZSIvPgogICAgICA8bGluZSB4MT0iMjA0IiB5MT0iMzMyIiB4Mj0iMTEwIiB5Mj0iMzM0IiBmaWxsPSJub25lIi8+CiAgICAgIDxsaW5lIHgxPSIzMDgiIHkxPSIzMTgiIHgyPSI0MDAiIHkyPSIzMDYiIGZpbGw9Im5vbmUiLz4KICAgICAgPGxpbmUgeDE9IjMwOCIgeTE9IjMzMiIgeDI9IjQwMiIgeTI9IjMzNCIgZmlsbD0ibm9uZSIvPgogICAgPC9nPgogIDwvZz4KCiAgPGNpcmNsZSBjeD0iMjU2IiBjeT0iMjU2IiByPSIyNDAiIGZpbGw9Im5vbmUiIHN0cm9rZT0iI0Q5QTQ0MSIgc3Ryb2tlLXdpZHRoPSIxNiIvPgogIDxjaXJjbGUgY3g9IjI1NiIgY3k9IjI1NiIgcj0iMjIyIiBmaWxsPSJub25lIiBzdHJva2U9IiNEOUE0NDEiIHN0cm9rZS13aWR0aD0iMyIgc3Ryb2tlLW9wYWNpdHk9IjAuNDUiLz4KPC9zdmc+Cg==" alt=""><span><b>McGonagall - Chief of Staff</b></span></div></td><td data-label="How to reach them">A session opened in <code>~/hogwarts</code></td></tr>
+        <tr><td data-label="When I want to">Build a feature or fix a bug</td><td data-label="Ask"><div class="who-cell"><img src="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA1MTIgNTEyIiB3aWR0aD0iNTEyIiBoZWlnaHQ9IjUxMiI+CiAgPGRlZnM+CiAgICA8cmFkaWFsR3JhZGllbnQgaWQ9ImZpZWxkIiBncmFkaWVudFVuaXRzPSJ1c2VyU3BhY2VPblVzZSIgY3g9IjE3NiIgY3k9IjE1NiIgcj0iMzYwIj4KICAgICAgPHN0b3Agb2Zmc2V0PSIwIiBzdG9wLWNvbG9yPSIjODUyRTJFIi8+CiAgICAgIDxzdG9wIG9mZnNldD0iMSIgc3RvcC1jb2xvcj0iIzdBMUMxQyIvPgogICAgPC9yYWRpYWxHcmFkaWVudD4KICAgIDxjbGlwUGF0aCBpZD0iaW5uZXIiPgogICAgICA8Y2lyY2xlIGN4PSIyNTYiIGN5PSIyNTYiIHI9IjIyMiIgZmlsbD0iI0ZGRkZGRiIvPgogICAgPC9jbGlwUGF0aD4KICA8L2RlZnM+CgogIDxjaXJjbGUgY3g9IjI1NiIgY3k9IjI1NiIgcj0iMjQwIiBmaWxsPSJ1cmwoI2ZpZWxkKSIvPgoKICA8ZyBjbGlwLXBhdGg9InVybCgjaW5uZXIpIj4KICAgIDwhLS0gbGVucyB0aW50IC0tPgogICAgPGNpcmNsZSBjeD0iMTgwIiBjeT0iMjg0IiByPSI2MCIgZmlsbD0iI0YzRTZDNCIgZmlsbC1vcGFjaXR5PSIwLjE2Ii8+CiAgICA8Y2lyY2xlIGN4PSIzMzIiIGN5PSIyODQiIHI9IjYwIiBmaWxsPSIjRjNFNkM0IiBmaWxsLW9wYWNpdHk9IjAuMTYiLz4KCiAgICA8IS0tIGxlbnMgZ2xpbnRzIC0tPgogICAgPGcgc3Ryb2tlPSIjRjNFNkM0IiBzdHJva2Utb3BhY2l0eT0iMC41NSIgc3Ryb2tlLXdpZHRoPSI5IiBzdHJva2UtbGluZWNhcD0icm91bmQiPgogICAgICA8cGF0aCBkPSJNIDE0NiAyNjYgQSA0MCA0MCAwIDAgMSAxNzIgMjQ0IiBmaWxsPSJub25lIi8+CiAgICAgIDxwYXRoIGQ9Ik0gMjk4IDI2NiBBIDQwIDQwIDAgMCAxIDMyNCAyNDQiIGZpbGw9Im5vbmUiLz4KICAgIDwvZz4KCiAgICA8IS0tIHdpcmUgcmltcywgYnJpZGdlLCB0ZW1wbGUgc3R1YnMgLS0+CiAgICA8ZyBzdHJva2U9IiNGM0U2QzQiIHN0cm9rZS13aWR0aD0iMTYiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIgc3Ryb2tlLWxpbmVqb2luPSJyb3VuZCI+CiAgICAgIDxjaXJjbGUgY3g9IjE4MCIgY3k9IjI4NCIgcj0iNjAiIGZpbGw9Im5vbmUiLz4KICAgICAgPGNpcmNsZSBjeD0iMzMyIiBjeT0iMjg0IiByPSI2MCIgZmlsbD0ibm9uZSIvPgogICAgICA8cGF0aCBkPSJNIDI0MCAyNzYgUSAyNTYgMjU4IDI3MiAyNzYiIGZpbGw9Im5vbmUiLz4KICAgICAgPGxpbmUgeDE9IjEyMSIgeTE9IjI3MCIgeDI9IjEwNiIgeTI9IjI2MiIgZmlsbD0ibm9uZSIvPgogICAgICA8bGluZSB4MT0iMzkxIiB5MT0iMjcwIiB4Mj0iNDA2IiB5Mj0iMjYyIiBmaWxsPSJub25lIi8+CiAgICA8L2c+CgogICAgPCEtLSBsaWdodG5pbmcgYm9sdCAtLT4KICAgIDxwb2x5Z29uIHBvaW50cz0iMjc4LDExMiAyMzYsMTc2IDI2MCwxNzYgMjQwLDIzMiAyOTIsMTYwIDI2NiwxNjAgMzAwLDExMiIgZmlsbD0iI0UwQjY1QyIgc3Ryb2tlPSIjRTBCNjVDIiBzdHJva2Utd2lkdGg9IjgiIHN0cm9rZS1saW5lam9pbj0icm91bmQiLz4KICA8L2c+CgogIDxjaXJjbGUgY3g9IjI1NiIgY3k9IjI1NiIgcj0iMjQwIiBmaWxsPSJub25lIiBzdHJva2U9IiM2RjkzRDYiIHN0cm9rZS13aWR0aD0iMTYiLz4KICA8Y2lyY2xlIGN4PSIyNTYiIGN5PSIyNTYiIHI9IjIyMiIgZmlsbD0ibm9uZSIgc3Ryb2tlPSIjNkY5M0Q2IiBzdHJva2Utd2lkdGg9IjMiIHN0cm9rZS1vcGFjaXR5PSIwLjQ1Ii8+Cjwvc3ZnPgo=" alt=""><span><b>Harry - Senior Engineer</b></span></div></td><td data-label="How to reach them">Through McGonagall, once Codex is approved</td></tr>
+        <tr><td data-label="When I want to">Review a diff, make an architecture call, or decide whether a bot comment is right</td><td data-label="Ask"><div class="who-cell"><img src="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA1MTIgNTEyIiB3aWR0aD0iNTEyIiBoZWlnaHQ9IjUxMiI+CiAgPGRlZnM+CiAgICA8cmFkaWFsR3JhZGllbnQgaWQ9ImZpZWxkIiBncmFkaWVudFVuaXRzPSJ1c2VyU3BhY2VPblVzZSIgY3g9IjE3NiIgY3k9IjE1NiIgcj0iMzYwIj4KICAgICAgPHN0b3Agb2Zmc2V0PSIwIiBzdG9wLWNvbG9yPSIjNUQyQzM0Ii8+CiAgICAgIDxzdG9wIG9mZnNldD0iMSIgc3RvcC1jb2xvcj0iIzRGMUEyMiIvPgogICAgPC9yYWRpYWxHcmFkaWVudD4KICAgIDxjbGlwUGF0aCBpZD0iaW5uZXIiPgogICAgICA8Y2lyY2xlIGN4PSIyNTYiIGN5PSIyNTYiIHI9IjIyMiIgZmlsbD0iI0ZGRkZGRiIvPgogICAgPC9jbGlwUGF0aD4KICA8L2RlZnM+CgogIDxjaXJjbGUgY3g9IjI1NiIgY3k9IjI1NiIgcj0iMjQwIiBmaWxsPSJ1cmwoI2ZpZWxkKSIvPgoKICA8ZyBjbGlwLXBhdGg9InVybCgjaW5uZXIpIj4KICAgIDwhLS0gcGFnZSBibG9jayAtLT4KICAgIDxwYXRoIGQ9Ik0gMTIyIDMwOCBDIDE2OCAzMDAgMjIyIDMwNiAyNTYgMzI4IEwgMjU2IDM0NiBDIDIyMCAzMjQgMTY2IDMxOCAxMTYgMzI2IFoiIGZpbGw9IiNDOUI0OEEiIHN0cm9rZT0iI0M5QjQ4QSIgc3Ryb2tlLXdpZHRoPSI4IiBzdHJva2UtbGluZWpvaW49InJvdW5kIi8+CiAgICA8cGF0aCBkPSJNIDM5MCAzMDggQyAzNDQgMzAwIDI5MCAzMDYgMjU2IDMyOCBMIDI1NiAzNDYgQyAyOTIgMzI0IDM0NiAzMTggMzk2IDMyNiBaIiBmaWxsPSIjQzlCNDhBIiBzdHJva2U9IiNDOUI0OEEiIHN0cm9rZS13aWR0aD0iOCIgc3Ryb2tlLWxpbmVqb2luPSJyb3VuZCIvPgoKICAgIDwhLS0gcGFnZXMgLS0+CiAgICA8cGF0aCBkPSJNIDI1NiAyMDIgQyAyMjIgMTgwIDE3MCAxNzQgMTI2IDE4MiBMIDEyMiAzMDggQyAxNjggMzAwIDIyMiAzMDYgMjU2IDMyOCBaIiBmaWxsPSIjRjNFNkM0IiBzdHJva2U9IiNGM0U2QzQiIHN0cm9rZS13aWR0aD0iOCIgc3Ryb2tlLWxpbmVqb2luPSJyb3VuZCIvPgogICAgPHBhdGggZD0iTSAyNTYgMjAyIEMgMjkwIDE4MCAzNDIgMTc0IDM4NiAxODIgTCAzOTAgMzA4IEMgMzQ0IDMwMCAyOTAgMzA2IDI1NiAzMjggWiIgZmlsbD0iI0YzRTZDNCIgc3Ryb2tlPSIjRjNFNkM0IiBzdHJva2Utd2lkdGg9IjgiIHN0cm9rZS1saW5lam9pbj0icm91bmQiLz4KCiAgICA8IS0tIHNwaW5lIGd1dHRlciAtLT4KICAgIDxwYXRoIGQ9Ik0gMjU2IDIwMiBDIDI0NiAyMzYgMjQ2IDI5NiAyNTYgMzI4IEMgMjY2IDI5NiAyNjYgMjM2IDI1NiAyMDIgWiIgZmlsbD0iI0M5QjQ4QSIvPgoKICAgIDwhLS0gcGFnZSBsaW5lcyAtLT4KICAgIDxnIHN0cm9rZT0iI0M5QjQ4QSIgc3Ryb2tlLXdpZHRoPSI5IiBzdHJva2UtbGluZWNhcD0icm91bmQiPgogICAgICA8cGF0aCBkPSJNIDE0OCAyMTIgUSAxOTYgMjA2IDIzNCAyMjQiIGZpbGw9Im5vbmUiLz4KICAgICAgPHBhdGggZD0iTSAxNDggMjM2IFEgMTk2IDIzMCAyMzQgMjQ4IiBmaWxsPSJub25lIi8+CiAgICAgIDxwYXRoIGQ9Ik0gMTQ4IDI2MCBRIDE5NiAyNTQgMjM0IDI3MiIgZmlsbD0ibm9uZSIvPgogICAgICA8cGF0aCBkPSJNIDE0OCAyODQgUSAxOTYgMjc4IDIzNCAyOTYiIGZpbGw9Im5vbmUiLz4KICAgICAgPHBhdGggZD0iTSAyNzggMjI0IFEgMzE2IDIwNiAzNjQgMjEyIiBmaWxsPSJub25lIi8+CiAgICAgIDxwYXRoIGQ9Ik0gMjc4IDI0OCBRIDMxNiAyMzAgMzY0IDIzNiIgZmlsbD0ibm9uZSIvPgogICAgICA8cGF0aCBkPSJNIDI3OCAyNzIgUSAzMTYgMjU0IDM2NCAyNjAiIGZpbGw9Im5vbmUiLz4KICAgIDwvZz4KCiAgICA8IS0tIHF1aWxsOiBzaGFmdCwgbm90Y2hlZCB2YW5lLCByYWNoaXMgLS0+CiAgICA8bGluZSB4MT0iMjg2IiB5MT0iMzA4IiB4Mj0iMzE4IiB5Mj0iMjU3IiBmaWxsPSJub25lIiBzdHJva2U9IiNFMEI2NUMiIHN0cm9rZS13aWR0aD0iOSIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIi8+CiAgICA8cGF0aCBkPSJNIDMxOCAyNTcgUSAzNDAgMjQ0IDM1NSAyMzEgTCAzNDYgMjMyIEwgMzY1IDIyMiBRIDM3NiAyMDkgMzgzIDE5NiBMIDM3NCAxOTcgTCAzODcgMTg4IFEgMzk3IDE2NSAzOTIgMTQwIFEgMzMwIDE3MCAzMTggMjU3IFoiIGZpbGw9IiNFMEI2NUMiIHN0cm9rZT0iI0UwQjY1QyIgc3Ryb2tlLXdpZHRoPSI4IiBzdHJva2UtbGluZWpvaW49InJvdW5kIi8+CiAgICA8bGluZSB4MT0iMzE4IiB5MT0iMjU3IiB4Mj0iMzc5IiB5Mj0iMTYwIiBmaWxsPSJub25lIiBzdHJva2U9InVybCgjZmllbGQpIiBzdHJva2Utd2lkdGg9IjgiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIvPgogIDwvZz4KCiAgPGNpcmNsZSBjeD0iMjU2IiBjeT0iMjU2IiByPSIyNDAiIGZpbGw9Im5vbmUiIHN0cm9rZT0iI0Q5QTQ0MSIgc3Ryb2tlLXdpZHRoPSIxNiIvPgogIDxjaXJjbGUgY3g9IjI1NiIgY3k9IjI1NiIgcj0iMjIyIiBmaWxsPSJub25lIiBzdHJva2U9IiNEOUE0NDEiIHN0cm9rZS13aWR0aD0iMyIgc3Ryb2tlLW9wYWNpdHk9IjAuNDUiLz4KPC9zdmc+Cg==" alt=""><span><b>Hermione - Staff Engineer</b></span></div></td><td data-label="How to reach them">Through McGonagall. Reviews also start on their own after Harry hands off</td></tr>
+        <tr><td data-label="When I want to">Get my own Claude-written change reviewed, or a security read</td><td data-label="Ask"><div class="who-cell"><img src="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA1MTIgNTEyIiB3aWR0aD0iNTEyIiBoZWlnaHQ9IjUxMiI+CiAgPGRlZnM+CiAgICA8cmFkaWFsR3JhZGllbnQgaWQ9ImZpZWxkIiBncmFkaWVudFVuaXRzPSJ1c2VyU3BhY2VPblVzZSIgY3g9IjE3NiIgY3k9IjE1NiIgcj0iMzYwIj4KICAgICAgPHN0b3Agb2Zmc2V0PSIwIiBzdG9wLWNvbG9yPSIjMzUzQjQzIi8+CiAgICAgIDxzdG9wIG9mZnNldD0iMSIgc3RvcC1jb2xvcj0iIzIzMkEzMyIvPgogICAgPC9yYWRpYWxHcmFkaWVudD4KICAgIDxjbGlwUGF0aCBpZD0iaW5uZXIiPgogICAgICA8Y2lyY2xlIGN4PSIyNTYiIGN5PSIyNTYiIHI9IjIyMiIgZmlsbD0iI0ZGRkZGRiIvPgogICAgPC9jbGlwUGF0aD4KICAgIDxjbGlwUGF0aCBpZD0icmltIj4KICAgICAgPGNpcmNsZSBjeD0iMjU2IiBjeT0iMjU2IiByPSIxMzIiIGZpbGw9IiNGRkZGRkYiLz4KICAgIDwvY2xpcFBhdGg+CiAgICA8Y2xpcFBhdGggaWQ9ImJhbGwiPgogICAgICA8Y2lyY2xlIGN4PSIyNTYiIGN5PSIyNTYiIHI9IjkyIiBmaWxsPSIjRkZGRkZGIi8+CiAgICA8L2NsaXBQYXRoPgogIDwvZGVmcz4KCiAgPCEtLSBmaWVsZCAtLT4KICA8Y2lyY2xlIGN4PSIyNTYiIGN5PSIyNTYiIHI9IjI0MCIgZmlsbD0idXJsKCNmaWVsZCkiLz4KCiAgPCEtLSBlbWJsZW06IGJhdHRlcmVkIG1lY2hhbmljYWwgbWFnaWNhbCBleWUgb24gYSBsZWF0aGVyIHN0cmFwIC0tPgogIDxnIGNsaXAtcGF0aD0idXJsKCNpbm5lcikiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIgc3Ryb2tlLWxpbmVqb2luPSJyb3VuZCI+CiAgICA8IS0tIHN0cmFwIGF0IC0yMCBkZWdyZWVzLCB1bmRlciB0aGUgcmltLCBvdXQgdG8gdGhlIGNsaXAgZWRnZSwgaGVsZCBieSBhIHBld3RlciBsdWcgZWFjaCBzaWRlIC0tPgogICAgPGcgdHJhbnNmb3JtPSJyb3RhdGUoLTIwIDI1NiAyNTYpIj4KICAgICAgPHJlY3QgeD0iMCIgeT0iMjIwIiB3aWR0aD0iNTEyIiBoZWlnaHQ9IjcyIiBmaWxsPSIjNUE0NjMyIi8+CiAgICAgIDxsaW5lIHgxPSIwIiB5MT0iMjM0IiB4Mj0iNTEyIiB5Mj0iMjM0IiBmaWxsPSJub25lIiBzdHJva2U9IiM5QUEwQTYiIHN0cm9rZS13aWR0aD0iOCIgc3Ryb2tlLWRhc2hhcnJheT0iMTQgMTQiIHN0cm9rZS1vcGFjaXR5PSIwLjUiLz4KICAgICAgPGxpbmUgeDE9IjAiIHkxPSIyNzgiIHgyPSI1MTIiIHkyPSIyNzgiIGZpbGw9Im5vbmUiIHN0cm9rZT0iIzlBQTBBNiIgc3Ryb2tlLXdpZHRoPSI4IiBzdHJva2UtZGFzaGFycmF5PSIxNCAxNCIgc3Ryb2tlLW9wYWNpdHk9IjAuNSIvPgogICAgICA8cmVjdCB4PSIxMTAiIHk9IjIzNCIgd2lkdGg9IjI2IiBoZWlnaHQ9IjQ0IiByeD0iNiIgZmlsbD0iIzlBQTBBNiIgc3Ryb2tlPSIjMjMyQTMzIiBzdHJva2Utd2lkdGg9IjgiLz4KICAgICAgPHJlY3QgeD0iMzc2IiB5PSIyMzQiIHdpZHRoPSIyNiIgaGVpZ2h0PSI0NCIgcng9IjYiIGZpbGw9IiM5QUEwQTYiIHN0cm9rZT0iIzIzMkEzMyIgc3Ryb2tlLXdpZHRoPSI4Ii8+CiAgICA8L2c+CgogICAgPCEtLSBoZWF2eSBwZXd0ZXIgcmltIHdpdGggYSBsaXQgdXBwZXIgYmV2ZWwgYW5kIGEgc2hhZGVkIGxvd2VyIGJldmVsIC0tPgogICAgPGNpcmNsZSBjeD0iMjU2IiBjeT0iMjU2IiByPSIxMzIiIGZpbGw9IiM5QUEwQTYiLz4KICAgIDxnIGNsaXAtcGF0aD0idXJsKCNyaW0pIj4KICAgICAgPHBhdGggZmlsbD0iI0YzRTZDNCIgZmlsbC1vcGFjaXR5PSIwLjMiIGZpbGwtcnVsZT0iZXZlbm9kZCIgZD0iTSAxMjQgMjU2IEEgMTMyIDEzMiAwIDEgMSAzODggMjU2IEEgMTMyIDEzMiAwIDEgMSAxMjQgMjU2IFogTSAxMzAgMjYyIEEgMTMyIDEzMiAwIDEgMSAzOTQgMjYyIEEgMTMyIDEzMiAwIDEgMSAxMzAgMjYyIFoiLz4KICAgICAgPHBhdGggZmlsbD0iIzIzMkEzMyIgZmlsbC1vcGFjaXR5PSIwLjM1IiBmaWxsLXJ1bGU9ImV2ZW5vZGQiIGQ9Ik0gMTI0IDI1NiBBIDEzMiAxMzIgMCAxIDEgMzg4IDI1NiBBIDEzMiAxMzIgMCAxIDEgMTI0IDI1NiBaIE0gMTE2IDI0OCBBIDEzMiAxMzIgMCAxIDEgMzgwIDI0OCBBIDEzMiAxMzIgMCAxIDEgMTE2IDI0OCBaIi8+CiAgICA8L2c+CiAgICA8Y2lyY2xlIGN4PSIyNTYiIGN5PSIyNTYiIHI9IjEzMiIgZmlsbD0ibm9uZSIgc3Ryb2tlPSIjMjMyQTMzIiBzdHJva2Utd2lkdGg9IjgiLz4KCiAgICA8IS0tIGVuZ3JhdmVkIHRpY2sgbWFya3MgLS0+CiAgICA8cGF0aCBmaWxsPSJub25lIiBzdHJva2U9IiMyMzJBMzMiIHN0cm9rZS13aWR0aD0iOCIgZD0iTSAyNTYgMTM0IFYgMTU0IE0gMzc4IDI1NiBIIDM1OCBNIDI1NiAzNzggViAzNTggTSAxMzQgMjU2IEggMTU0Ii8+CgogICAgPCEtLSByaXZldHMgd2l0aCB3b3JuIGhpZ2hsaWdodHMgLS0+CiAgICA8Y2lyY2xlIGN4PSIxNzciIGN5PSIxNzciIHI9IjExIiBmaWxsPSIjMjMyQTMzIi8+CiAgICA8Y2lyY2xlIGN4PSIzMzUiIGN5PSIxNzciIHI9IjExIiBmaWxsPSIjMjMyQTMzIi8+CiAgICA8Y2lyY2xlIGN4PSIxNzciIGN5PSIzMzUiIHI9IjExIiBmaWxsPSIjMjMyQTMzIi8+CiAgICA8Y2lyY2xlIGN4PSIzMzUiIGN5PSIzMzUiIHI9IjExIiBmaWxsPSIjMjMyQTMzIi8+CiAgICA8Y2lyY2xlIGN4PSIxNzQiIGN5PSIxNzQiIHI9IjQiIGZpbGw9IiNGM0U2QzQiIGZpbGwtb3BhY2l0eT0iMC43NSIvPgogICAgPGNpcmNsZSBjeD0iMzMyIiBjeT0iMTc0IiByPSI0IiBmaWxsPSIjRjNFNkM0IiBmaWxsLW9wYWNpdHk9IjAuNzUiLz4KICAgIDxjaXJjbGUgY3g9IjE3NCIgY3k9IjMzMiIgcj0iNCIgZmlsbD0iI0YzRTZDNCIgZmlsbC1vcGFjaXR5PSIwLjc1Ii8+CiAgICA8Y2lyY2xlIGN4PSIzMzIiIGN5PSIzMzIiIHI9IjQiIGZpbGw9IiNGM0U2QzQiIGZpbGwtb3BhY2l0eT0iMC43NSIvPgoKICAgIDwhLS0gYmF0dGxlIGRhbWFnZTogYSBjaHVuayBrbm9ja2VkIG91dCBvZiB0aGUgcmltIC0tPgogICAgPHBhdGggZmlsbD0idXJsKCNmaWVsZCkiIGQ9Ik0gMjk2IDEyOCBRIDMwNiAxNTggMzM2IDE1MiBMIDM0NiAxMjQgWiIvPgoKICAgIDwhLS0gZXllYmFsbCB3aXRoIGEgc2hhZGVkIGxvd2VyIGVkZ2UsIGFuZCB0aGUgYmV6ZWwgc2VhbSAtLT4KICAgIDxjaXJjbGUgY3g9IjI1NiIgY3k9IjI1NiIgcj0iOTIiIGZpbGw9IiNGM0U2QzQiLz4KICAgIDxwYXRoIGNsaXAtcGF0aD0idXJsKCNiYWxsKSIgZmlsbD0iIzIzMkEzMyIgZmlsbC1vcGFjaXR5PSIwLjE2IiBmaWxsLXJ1bGU9ImV2ZW5vZGQiIGQ9Ik0gMTY0IDI1NiBBIDkyIDkyIDAgMSAxIDM0OCAyNTYgQSA5MiA5MiAwIDEgMSAxNjQgMjU2IFogTSAxNTIgMjQ0IEEgOTYgOTYgMCAxIDEgMzQ0IDI0NCBBIDk2IDk2IDAgMSAxIDE1MiAyNDQgWiIvPgogICAgPGNpcmNsZSBjeD0iMjU2IiBjeT0iMjU2IiByPSI5MiIgZmlsbD0ibm9uZSIgc3Ryb2tlPSIjMjMyQTMzIiBzdHJva2Utd2lkdGg9IjkiLz4KCiAgICA8IS0tIGlyaXMgc3dpdmVsbGVkIHVwIGFuZCB0byB0aGUgbGVmdCwgcHVwaWwsIGNhdGNobGlnaHQgLS0+CiAgICA8Y2lyY2xlIGN4PSIyMjciIGN5PSIyMzkiIHI9IjQ2IiBmaWxsPSIjM0ZBN0ZGIiBzdHJva2U9IiMyMzJBMzMiIHN0cm9rZS13aWR0aD0iOCIvPgogICAgPGNpcmNsZSBjeD0iMjI3IiBjeT0iMjM5IiByPSIxOSIgZmlsbD0iIzIzMkEzMyIvPgogICAgPGNpcmNsZSBjeD0iMjE1IiBjeT0iMjI2IiByPSI3IiBmaWxsPSIjRjNFNkM0Ii8+CiAgPC9nPgoKICA8IS0tIHJpbmdzIC0tPgogIDxjaXJjbGUgY3g9IjI1NiIgY3k9IjI1NiIgcj0iMjQwIiBmaWxsPSJub25lIiBzdHJva2U9IiM2RjkzRDYiIHN0cm9rZS13aWR0aD0iMTYiLz4KICA8Y2lyY2xlIGN4PSIyNTYiIGN5PSIyNTYiIHI9IjIyMiIgZmlsbD0ibm9uZSIgc3Ryb2tlPSIjNkY5M0Q2IiBzdHJva2Utd2lkdGg9IjMiIHN0cm9rZS1vcGFjaXR5PSIwLjQ1Ii8+Cjwvc3ZnPgo=" alt=""><span><b>Moody - Security Reviewer</b></span></div></td><td data-label="How to reach them">Through McGonagall, once Codex is approved</td></tr>
+        <tr><td data-label="When I want to">Know where my PRs stand, whether a red build is real, or watch a rollout</td><td data-label="Ask"><div class="who-cell"><img src="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA1MTIgNTEyIiB3aWR0aD0iNTEyIiBoZWlnaHQ9IjUxMiI+CiAgPGRlZnM+CiAgICA8cmFkaWFsR3JhZGllbnQgaWQ9ImZpZWxkIiBncmFkaWVudFVuaXRzPSJ1c2VyU3BhY2VPblVzZSIgY3g9IjE3NiIgY3k9IjE1NiIgcj0iMzYwIj4KICAgICAgPHN0b3Agb2Zmc2V0PSIwIiBzdG9wLWNvbG9yPSIjQkU1RTJDIi8+CiAgICAgIDxzdG9wIG9mZnNldD0iMSIgc3RvcC1jb2xvcj0iI0I4NTAxQSIvPgogICAgPC9yYWRpYWxHcmFkaWVudD4KICAgIDxjbGlwUGF0aCBpZD0iaW5uZXIiPgogICAgICA8Y2lyY2xlIGN4PSIyNTYiIGN5PSIyNTYiIHI9IjIyMiIgZmlsbD0iI0ZGRkZGRiIvPgogICAgPC9jbGlwUGF0aD4KICA8L2RlZnM+CgogIDwhLS0gZmllbGQgLS0+CiAgPGNpcmNsZSBjeD0iMjU2IiBjeT0iMjU2IiByPSIyNDAiIGZpbGw9InVybCgjZmllbGQpIi8+CgogIDwhLS0gZW1ibGVtOiBTdGF1bnRvbiBjaGVzcyBrbmlnaHQsIHNpZGUgcHJvZmlsZSAoc2NhbGVkIDAuOTIgYW5kIHBsYWNlZCBmb3Igb3B0aWNhbCBjZW50cmUpIC0tPgogIDxnIGNsaXAtcGF0aD0idXJsKCNpbm5lcikiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIgc3Ryb2tlLWxpbmVqb2luPSJyb3VuZCI+CiAgICA8ZyB0cmFuc2Zvcm09Im1hdHJpeCgwLjkyIDAgMCAwLjkyIDE1IDE3KSI+CiAgICAgIDwhLS0gYmFzZSAtLT4KICAgICAgPHJlY3QgeD0iMTUyIiB5PSIzNzAiIHdpZHRoPSIyMjAiIGhlaWdodD0iMjYiIHJ4PSIxMiIgZmlsbD0iI0M5QjQ4QSIvPgogICAgICA8cmVjdCB4PSIxNjgiIHk9IjM1MCIgd2lkdGg9IjE4OCIgaGVpZ2h0PSIyMiIgcng9IjEwIiBmaWxsPSIjRjNFNkM0Ii8+CgogICAgICA8IS0tIGhlYWQgYW5kIG5lY2s7IGV5ZSBhbmQgbm9zdHJpbCBhcmUgdHJ1ZSBob2xlcyBvbnRvIHRoZSBmaWVsZCAtLT4KICAgICAgPHBhdGggZmlsbD0iI0YzRTZDNCIgZmlsbC1ydWxlPSJldmVub2RkIiBkPSJNIDI3MCA5NiBMIDI5MiAxMjggTCAyODggMTQyIEMgMzM2IDE2OCAzNTYgMjI0IDM1MCAyNzIgQyAzNDYgMzAwIDMzNiAzMjAgMzMwIDM0MCBMIDIwMiAzNDAgQyAxOTYgMzA2IDIwMiAyODAgMjI0IDI2MCBDIDIzNiAyNTAgMjQyIDIzOCAyMzggMjI0IEwgMTgwIDI1NCBDIDE2NCAyNjAgMTQ2IDI1MiAxNDQgMjM2IEMgMTQyIDIyMiAxNDggMjEwIDE1OCAyMDIgTCAyMzIgMTM0IEMgMjM4IDEyOCAyNDYgMTI0IDI1NCAxMjAgWiBNIDIxNiAxNjggQSAxMCAxMCAwIDEgMCAyMzYgMTY4IEEgMTAgMTAgMCAxIDAgMjE2IDE2OCBaIE0gMTU2IDIyNiBBIDcgNyAwIDEgMCAxNzAgMjI2IEEgNyA3IDAgMSAwIDE1NiAyMjYgWiIvPgoKICAgICAgPCEtLSBtYW5lIC0tPgogICAgICA8cGF0aCBmaWxsPSIjQzlCNDhBIiBkPSJNIDI4OCAxNDIgQyAzMzYgMTY4IDM1NiAyMjQgMzUwIDI3MiBDIDM0NyAyOTIgMzQyIDMwNyAzMzYgMzIyIEwgMzEyIDMxNCBMIDMxOCAyOTIgTCAzMDIgMjgyIEwgMzE0IDI1OCBMIDI5OCAyNDYgTCAzMTAgMjIyIEwgMjkyIDIxMCBMIDMwMCAxODYgTCAyODIgMTc2IEwgMjg2IDE1NCBaIi8+CgogICAgICA8IS0tIGVuZ3JhdmVkIGRldGFpbDogY2hlZWsgYW5kIG1vdXRoIC0tPgogICAgICA8cGF0aCBmaWxsPSJub25lIiBzdHJva2U9IiNDOUI0OEEiIHN0cm9rZS13aWR0aD0iOSIgZD0iTSAxOTYgMjQyIEMgMjE0IDIyMiAyMzYgMjEwIDI1OCAyMTQiLz4KICAgICAgPHBhdGggZmlsbD0ibm9uZSIgc3Ryb2tlPSIjQzlCNDhBIiBzdHJva2Utd2lkdGg9IjkiIGQ9Ik0gMTUwIDI0MCBDIDE2MCAyNDQgMTcwIDI0NCAxODAgMjQwIi8+CgogICAgICA8IS0tIGNvbGxhciAtLT4KICAgICAgPHJlY3QgeD0iMTg0IiB5PSIzMzAiIHdpZHRoPSIxNjAiIGhlaWdodD0iMjIiIHJ4PSIxMSIgZmlsbD0iI0M5QjQ4QSIvPgogICAgPC9nPgogIDwvZz4KCiAgPCEtLSByaW5ncyAtLT4KICA8Y2lyY2xlIGN4PSIyNTYiIGN5PSIyNTYiIHI9IjI0MCIgZmlsbD0ibm9uZSIgc3Ryb2tlPSIjRDlBNDQxIiBzdHJva2Utd2lkdGg9IjE2Ii8+CiAgPGNpcmNsZSBjeD0iMjU2IiBjeT0iMjU2IiByPSIyMjIiIGZpbGw9Im5vbmUiIHN0cm9rZT0iI0Q5QTQ0MSIgc3Ryb2tlLXdpZHRoPSIzIiBzdHJva2Utb3BhY2l0eT0iMC40NSIvPgo8L3N2Zz4K" alt=""><span><b>Ron - Release Engineer</b></span></div></td><td data-label="How to reach them">His morning lineup, or ask McGonagall</td></tr>
+        <tr><td data-label="When I want to">Pull numbers from the warehouse or observability tools, or read an experiment</td><td data-label="Ask"><div class="who-cell"><img src="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA1MTIgNTEyIiB3aWR0aD0iNTEyIiBoZWlnaHQ9IjUxMiI+CiAgPGRlZnM+CiAgICA8cmFkaWFsR3JhZGllbnQgaWQ9ImZpZWxkIiBncmFkaWVudFVuaXRzPSJ1c2VyU3BhY2VPblVzZSIgY3g9IjE3NiIgY3k9IjE1NiIgcj0iMzYwIj4KICAgICAgPHN0b3Agb2Zmc2V0PSIwIiBzdG9wLWNvbG9yPSIjMjYyQTJDIi8+CiAgICAgIDxzdG9wIG9mZnNldD0iMSIgc3RvcC1jb2xvcj0iIzEzMTgxQSIvPgogICAgPC9yYWRpYWxHcmFkaWVudD4KICAgIDxyYWRpYWxHcmFkaWVudCBpZD0iZ2xvdyIgZ3JhZGllbnRVbml0cz0idXNlclNwYWNlT25Vc2UiIGN4PSIyNTYiIGN5PSIyNTYiIHI9IjE4MCI+CiAgICAgIDxzdG9wIG9mZnNldD0iMCIgc3RvcC1jb2xvcj0iIzFFM0IyQyIgc3RvcC1vcGFjaXR5PSIxIi8+CiAgICAgIDxzdG9wIG9mZnNldD0iMC42IiBzdG9wLWNvbG9yPSIjMUUzQjJDIiBzdG9wLW9wYWNpdHk9IjAuNTUiLz4KICAgICAgPHN0b3Agb2Zmc2V0PSIxIiBzdG9wLWNvbG9yPSIjMUUzQjJDIiBzdG9wLW9wYWNpdHk9IjAiLz4KICAgIDwvcmFkaWFsR3JhZGllbnQ+CiAgICA8Y2xpcFBhdGggaWQ9ImlubmVyIj4KICAgICAgPGNpcmNsZSBjeD0iMjU2IiBjeT0iMjU2IiByPSIyMjIiIGZpbGw9IiNGRkZGRkYiLz4KICAgIDwvY2xpcFBhdGg+CiAgPC9kZWZzPgoKICA8IS0tIGZpZWxkIC0tPgogIDxjaXJjbGUgY3g9IjI1NiIgY3k9IjI1NiIgcj0iMjQwIiBmaWxsPSJ1cmwoI2ZpZWxkKSIvPgoKICA8ZyBjbGlwLXBhdGg9InVybCgjaW5uZXIpIiBzdHJva2UtbGluZWNhcD0icm91bmQiIHN0cm9rZS1saW5lam9pbj0icm91bmQiPgogICAgPCEtLSBmYWludCBncmVlbiBnbG93IGJlaGluZCB0aGUgZmxhc2sgLS0+CiAgICA8Y2lyY2xlIGN4PSIyNTYiIGN5PSIyNTYiIHI9IjE4MCIgZmlsbD0idXJsKCNnbG93KSIvPgoKICAgIDwhLS0gZW1ibGVtOiBFcmxlbm1leWVyIHBvdGlvbiBmbGFzaywgbGlmdGVkIGZvciBvcHRpY2FsIGNlbnRyZSAtLT4KICAgIDxnIHRyYW5zZm9ybT0idHJhbnNsYXRlKDAgLTYpIj4KICAgICAgPCEtLSBmYWludCBnbGFzcyB0aW50IC0tPgogICAgICA8cGF0aCBmaWxsPSIjRjNFNkM0IiBmaWxsLW9wYWNpdHk9IjAuMTQiIGQ9Ik0gMjM0IDE1NiBWIDE5NiBMIDE2NiAzMjYgUSAxNTQgMzU0IDE4NCAzNTggSCAzMjggUSAzNTggMzU0IDM0NiAzMjYgTCAyNzggMTk2IFYgMTU2IFoiLz4KCiAgICAgIDwhLS0gcG90aW9uLCB0d28gdGhpcmRzIGZ1bGwgLS0+CiAgICAgIDxwYXRoIGZpbGw9IiMzRTlCNkEiIGQ9Ik0gMjA2IDI1MCBRIDIzMSAyNDIgMjU2IDI1MCBRIDI4MSAyNTggMzA2IDI1MCBMIDM0NiAzMjYgUSAzNTggMzU0IDMyOCAzNTggSCAxODQgUSAxNTQgMzU0IDE2NiAzMjYgWiIvPgoKICAgICAgPCEtLSBidWJibGVzIHJpc2luZyBvdXQgb2YgdGhlIHBvdGlvbiAtLT4KICAgICAgPGNpcmNsZSBjeD0iMjY0IiBjeT0iMjIyIiByPSIxMCIgZmlsbD0iIzNFOUI2QSIvPgogICAgICA8Y2lyY2xlIGN4PSIyNTIiIGN5PSIxODYiIHI9IjciIGZpbGw9IiMzRTlCNkEiLz4KCiAgICAgIDwhLS0gZ2xhc3MgaGlnaGxpZ2h0IC0tPgogICAgICA8cGF0aCBmaWxsPSJub25lIiBzdHJva2U9IiNGM0U2QzQiIHN0cm9rZS13aWR0aD0iOCIgc3Ryb2tlLW9wYWNpdHk9IjAuNSIgZD0iTSAyOTYgMjc0IEwgMzE2IDMxMiIvPgoKICAgICAgPCEtLSBncmFkdWF0aW9uIG1hcmtzLCBsZWZ0IHNpZGUgLS0+CiAgICAgIDxwYXRoIGZpbGw9Im5vbmUiIHN0cm9rZT0iI0YzRTZDNCIgc3Ryb2tlLXdpZHRoPSI4IiBkPSJNIDE5MiAyNzYgSCAyMTYgTSAxNzkgMzAxIEggMTk1IE0gMTY2IDMyNiBIIDE5MCIvPgoKICAgICAgPCEtLSBmbGFzayBvdXRsaW5lIGFuZCBsaXAgLS0+CiAgICAgIDxwYXRoIGZpbGw9Im5vbmUiIHN0cm9rZT0iI0YzRTZDNCIgc3Ryb2tlLXdpZHRoPSIxNiIgZD0iTSAyMzQgMTY0IFYgMTk2IEwgMTY2IDMyNiBRIDE1NCAzNTQgMTg0IDM1OCBIIDMyOCBRIDM1OCAzNTQgMzQ2IDMyNiBMIDI3OCAxOTYgViAxNjQiLz4KICAgICAgPGxpbmUgeDE9IjIyNCIgeTE9IjE1NiIgeDI9IjI4OCIgeTI9IjE1NiIgZmlsbD0ibm9uZSIgc3Ryb2tlPSIjRjNFNkM0IiBzdHJva2Utd2lkdGg9IjE2Ii8+CgogICAgICA8IS0tIGNvcmsgLS0+CiAgICAgIDxwYXRoIGZpbGw9IiNDOUI0OEEiIGQ9Ik0gMjMyIDExMCBIIDI4MCBMIDI3NCAxNTAgSCAyMzggWiIvPgogICAgPC9nPgogIDwvZz4KCiAgPCEtLSByaW5ncyAtLT4KICA8Y2lyY2xlIGN4PSIyNTYiIGN5PSIyNTYiIHI9IjI0MCIgZmlsbD0ibm9uZSIgc3Ryb2tlPSIjRDlBNDQxIiBzdHJva2Utd2lkdGg9IjE2Ii8+CiAgPGNpcmNsZSBjeD0iMjU2IiBjeT0iMjU2IiByPSIyMjIiIGZpbGw9Im5vbmUiIHN0cm9rZT0iI0Q5QTQ0MSIgc3Ryb2tlLXdpZHRoPSIzIiBzdHJva2Utb3BhY2l0eT0iMC40NSIvPgo8L3N2Zz4K" alt=""><span><b>Snape - Data Analyst</b></span></div></td><td data-label="How to reach them">From any Claude session: "Use the snape agent to..."</td></tr>
+        <tr><td data-label="When I want to">Find out why a desk lacked context, or tidy what the fleet remembers</td><td data-label="Ask"><div class="who-cell"><img src="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA1MTIgNTEyIiB3aWR0aD0iNTEyIiBoZWlnaHQ9IjUxMiI+CiAgPGRlZnM+CiAgICA8cmFkaWFsR3JhZGllbnQgaWQ9ImZpZWxkIiBncmFkaWVudFVuaXRzPSJ1c2VyU3BhY2VPblVzZSIgY3g9IjE3NiIgY3k9IjE1NiIgcj0iMzYwIj4KICAgICAgPHN0b3Agb2Zmc2V0PSIwIiBzdG9wLWNvbG9yPSIjMkYyRDRFIi8+CiAgICAgIDxzdG9wIG9mZnNldD0iMSIgc3RvcC1jb2xvcj0iIzFEMUIzRiIvPgogICAgPC9yYWRpYWxHcmFkaWVudD4KICAgIDxjbGlwUGF0aCBpZD0iaW5uZXIiPgogICAgICA8Y2lyY2xlIGN4PSIyNTYiIGN5PSIyNTYiIHI9IjIyMiIgZmlsbD0iI0ZGRkZGRiIvPgogICAgPC9jbGlwUGF0aD4KICA8L2RlZnM+CgogIDwhLS0gZmllbGQgLS0+CiAgPGNpcmNsZSBjeD0iMjU2IiBjeT0iMjU2IiByPSIyNDAiIGZpbGw9InVybCgjZmllbGQpIi8+CgogIDxnIGNsaXAtcGF0aD0idXJsKCNpbm5lcikiPgogICAgPCEtLSBuaWdodCBza3k6IHNtYWxsIGZvdXItcG9pbnQgc3RhcnMgLS0+CiAgICA8cGF0aCBkPSJNNzQsMTc2IFE3OCwxODYgODgsMTkwIFE3OCwxOTQgNzQsMjA0IFE3MCwxOTQgNjAsMTkwIFE3MCwxODYgNzQsMTc2IFoiIGZpbGw9IiNGM0U2QzQiIGZpbGwtb3BhY2l0eT0iMC40Ii8+CiAgICA8cGF0aCBkPSJNNjYsMzAwIFE2OSwzMDggNzcsMzExIFE2OSwzMTQgNjYsMzIyIFE2MywzMTQgNTUsMzExIFE2MywzMDggNjYsMzAwIFoiIGZpbGw9IiNGM0U2QzQiIGZpbGwtb3BhY2l0eT0iMC40Ii8+CiAgICA8cGF0aCBkPSJNNDQwLDE5NiBRNDQ0LDIwNiA0NTQsMjEwIFE0NDQsMjE0IDQ0MCwyMjQgUTQzNiwyMTQgNDI2LDIxMCBRNDM2LDIwNiA0NDAsMTk2IFoiIGZpbGw9IiNGM0U2QzQiIGZpbGwtb3BhY2l0eT0iMC40Ii8+CiAgICA8cGF0aCBkPSJNNDQ0LDMyMCBRNDQ3LDMyOCA0NTUsMzMxIFE0NDcsMzM0IDQ0NCwzNDIgUTQ0MSwzMzQgNDMzLDMzMSBRNDQxLDMyOCA0NDQsMzIwIFoiIGZpbGw9IiNGM0U2QzQiIGZpbGwtb3BhY2l0eT0iMC40Ii8+CiAgICA8cGF0aCBkPSJNMTg4LDU4IFExOTEsNjYgMTk5LDY5IFExOTEsNzIgMTg4LDgwIFExODUsNzIgMTc3LDY5IFExODUsNjYgMTg4LDU4IFoiIGZpbGw9IiNGM0U2QzQiIGZpbGwtb3BhY2l0eT0iMC40Ii8+CiAgICA8cGF0aCBkPSJNMzI2LDQzNiBRMzI5LDQ0NCAzMzcsNDQ3IFEzMjksNDUwIDMyNiw0NTggUTMyMyw0NTAgMzE1LDQ0NyBRMzIzLDQ0NCAzMjYsNDM2IFoiIGZpbGw9IiNGM0U2QzQiIGZpbGwtb3BhY2l0eT0iMC40Ii8+CgogICAgPCEtLSBnaWxkZWQgZnJhbWUgLS0+CiAgICA8cmVjdCB4PSIxMjAiIHk9IjExNiIgd2lkdGg9IjI3MiIgaGVpZ2h0PSIyODAiIHJ4PSI2IiBmaWxsPSIjRDlBNDQxIi8+CiAgICA8IS0tIHRvcCBhbmQgYm90dG9tIGNhcnRvdWNoZXMgLS0+CiAgICA8ZWxsaXBzZSBjeD0iMjU2IiBjeT0iMTE2IiByeD0iMzQiIHJ5PSIxNiIgZmlsbD0iI0Q5QTQ0MSIvPgogICAgPGVsbGlwc2UgY3g9IjI1NiIgY3k9IjM5NiIgcng9IjM0IiByeT0iMTYiIGZpbGw9IiNEOUE0NDEiLz4KICAgIDxjaXJjbGUgY3g9IjI1NiIgY3k9IjExMyIgcj0iNiIgZmlsbD0iI0E5N0QyQyIvPgogICAgPGNpcmNsZSBjeD0iMjU2IiBjeT0iMzk5IiByPSI2IiBmaWxsPSIjQTk3RDJDIi8+CiAgICA8IS0tIGNvcm5lciBmbG91cmlzaGVzIC0tPgogICAgPGNpcmNsZSBjeD0iMTIwIiBjeT0iMTE2IiByPSIxMSIgZmlsbD0iI0Q5QTQ0MSIvPgogICAgPGNpcmNsZSBjeD0iMzkyIiBjeT0iMTE2IiByPSIxMSIgZmlsbD0iI0Q5QTQ0MSIvPgogICAgPGNpcmNsZSBjeD0iMTIwIiBjeT0iMzk2IiByPSIxMSIgZmlsbD0iI0Q5QTQ0MSIvPgogICAgPGNpcmNsZSBjeD0iMzkyIiBjeT0iMzk2IiByPSIxMSIgZmlsbD0iI0Q5QTQ0MSIvPgogICAgPGNpcmNsZSBjeD0iMTIwIiBjeT0iMTE2IiByPSI0IiBmaWxsPSIjQTk3RDJDIi8+CiAgICA8Y2lyY2xlIGN4PSIzOTIiIGN5PSIxMTYiIHI9IjQiIGZpbGw9IiNBOTdEMkMiLz4KICAgIDxjaXJjbGUgY3g9IjEyMCIgY3k9IjM5NiIgcj0iNCIgZmlsbD0iI0E5N0QyQyIvPgogICAgPGNpcmNsZSBjeD0iMzkyIiBjeT0iMzk2IiByPSI0IiBmaWxsPSIjQTk3RDJDIi8+CiAgICA8IS0tIHNoYWRvdyBiZXZlbCB3aXRoIGNvbmNhdmUgY29ybmVycyAtLT4KICAgIDxwYXRoIGQ9Ik0xNjQsMTQwIEwzNDgsMTQwIEEyMCwyMCAwIDAgMCAzNjgsMTYwIEwzNjgsMzUyIEEyMCwyMCAwIDAgMCAzNDgsMzcyIEwxNjQsMzcyIEEyMCwyMCAwIDAgMCAxNDQsMzUyIEwxNDQsMTYwIEEyMCwyMCAwIDAgMCAxNjQsMTQwIFoiIGZpbGw9IiNBOTdEMkMiLz4KICAgIDwhLS0gZGFyayBpbm5lciBwYW5lbCAtLT4KICAgIDxwYXRoIGQ9Ik0xNzIuNiwxNDkgTDMzOS40LDE0OSBBMjksMjkgMCAwIDAgMzU5LDE2OC42IEwzNTksMzQzLjQgQTI5LDI5IDAgMCAwIDMzOS40LDM2MyBMMTcyLjYsMzYzIEEyOSwyOSAwIDAgMCAxNTMsMzQzLjQgTDE1MywxNjguNiBBMjksMjkgMCAwIDAgMTcyLjYsMTQ5IFoiIGZpbGw9IiMxMDBGMjQiLz4KCiAgICA8IS0tIGNyZXNjZW50IG1vb24sIHVwcGVyIHJpZ2h0IG9mIHRoZSBwYW5lbCAtLT4KICAgIDxwYXRoIHRyYW5zZm9ybT0idHJhbnNsYXRlKDU2IC00KSIgZD0iTTI3MiwxNzIgQTI4LDI4IDAgMSAwIDI3MiwyMjQgQTM0LDM0IDAgMCAxIDI3MiwxNzIgWiIgZmlsbD0iI0YzRTZDNCIvPgoKICAgIDwhLS0gaGFsZi1tb29uIHNwZWN0YWNsZXM6IHR3byBsZW5zZXMsIDMwcHggY2xlYXIgZ2FwLCBsb3cgYnJpZGdlLCB0ZW1wbGUgc3R1YnMgLS0+CiAgICA8ZyBzdHJva2U9IiNGM0U2QzQiIHN0cm9rZS13aWR0aD0iMTYiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIgc3Ryb2tlLWxpbmVqb2luPSJyb3VuZCI+CiAgICAgIDxwYXRoIGQ9Ik0xNzMsMjc2IEwyMzMsMjc2IEEzMCw0MiAwIDAgMSAxNzMsMjc2IFoiIGZpbGw9IiNGM0U2QzQiIGZpbGwtb3BhY2l0eT0iMC4xMiIvPgogICAgICA8cGF0aCBkPSJNMjc5LDI3NiBMMzM5LDI3NiBBMzAsNDIgMCAwIDEgMjc5LDI3NiBaIiBmaWxsPSIjRjNFNkM0IiBmaWxsLW9wYWNpdHk9IjAuMTIiLz4KICAgICAgPHBhdGggZD0iTTIzMywyNzYgUTI1NiwyNTAgMjc5LDI3NiIgZmlsbD0ibm9uZSIvPgogICAgICA8bGluZSB4MT0iMTczIiB5MT0iMjc2IiB4Mj0iMTYzIiB5Mj0iMjcwIiBmaWxsPSJub25lIi8+CiAgICAgIDxsaW5lIHgxPSIzMzkiIHkxPSIyNzYiIHgyPSIzNDkiIHkyPSIyNzAiIGZpbGw9Im5vbmUiLz4KICAgIDwvZz4KICA8L2c+CgogIDwhLS0gcmluZyAtLT4KICA8Y2lyY2xlIGN4PSIyNTYiIGN5PSIyNTYiIHI9IjI0MCIgZmlsbD0ibm9uZSIgc3Ryb2tlPSIjRDlBNDQxIiBzdHJva2Utd2lkdGg9IjE2Ii8+CiAgPGNpcmNsZSBjeD0iMjU2IiBjeT0iMjU2IiByPSIyMjIiIGZpbGw9Im5vbmUiIHN0cm9rZT0iI0Q5QTQ0MSIgc3Ryb2tlLXdpZHRoPSIzIiBzdHJva2Utb3BhY2l0eT0iMC40NSIvPgo8L3N2Zz4K" alt=""><span><b>Dumbledore - Knowledge Manager</b></span></div></td><td data-label="How to reach them">His nightly patch, or ask McGonagall</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section id="live">
+  <div class="sec-head">
+    <p class="eyebrow">What's live</p>
+    <h2>What works once onboarding stage 4 passes, and what switches on next</h2>
+  </div>
+  <div class="tbl">
+    <table>
+      <thead><tr><th>Desk or piece</th><th>State</th><th>What switches it on</th></tr></thead>
+      <tbody>
+        <tr><td data-label="Desk or piece"><b>The store and the castle</b></td><td data-label="State">Live</td><td data-label="What switches it on">Nothing. <code>castle doctor</code> confirms it.</td></tr>
+        <tr><td data-label="Desk or piece"><b>McGonagall - Chief of Staff</b></td><td data-label="State">Live</td><td data-label="What switches it on">A session opened in <code>~/hogwarts</code>.</td></tr>
+        <tr><td data-label="Desk or piece"><b>Snape - Data Analyst</b></td><td data-label="State">Live in every Claude session</td><td data-label="What switches it on">The <code>a1</code> deny rules first, so your own sessions can't read the office.</td></tr>
+        <tr><td data-label="Desk or piece"><b>Owl Post - Message Router</b></td><td data-label="State">Loaded</td><td data-label="What switches it on"><code>~/.hogwarts/pending/b-owlpost-launchctl.txt</code>, in onboarding stage 3.</td></tr>
+        <tr><td data-label="Desk or piece"><b>Hermione - Staff Engineer</b></td><td data-label="State">Installed, off</td><td data-label="What switches it on">The review loop, onboarding stage 5.1.</td></tr>
+        <tr><td data-label="Desk or piece"><b>Harry - Senior Engineer</b> and <b>Moody - Security Reviewer</b></td><td data-label="State">Installed, off</td><td data-label="What switches it on">Codex approved for your organization's source code, then the review loop.</td></tr>
+        <tr><td data-label="Desk or piece"><b>Ron - Release Engineer</b> and the <b>Marauder's Map</b></td><td data-label="State">Ron installed and off. The Map is not built yet</td><td data-label="What switches it on">The shadow stage, 5.2.</td></tr>
+        <tr><td data-label="Desk or piece"><b>Dumbledore - Knowledge Manager</b></td><td data-label="State">Installed, off</td><td data-label="What switches it on">The memory stage, 5.3.</td></tr>
+        <tr><td data-label="Desk or piece"><b>Gringotts - Backup</b></td><td data-label="State">Not built yet</td><td data-label="What switches it on">The shadow stage, 5.2.</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="note">A desk switches on when you create its <code>enabled</code> file after reading its dry run, one desk at a time. Nothing switches itself on.</p>
+</section>
+
+<section id="rhythm">
+  <div class="sec-head">
+    <p class="eyebrow">Daily rhythm</p>
+    <h2>A normal day with the fleet</h2>
+  </div>
+  <ul class="gates">
+    <li><b>Morning</b><span>Open McGonagall's session. Her digest, and Ron's lineup once he's on, tell you what's in flight and what needs you.</span></li>
+    <li><b>Starting work</b><span>Ask her in your own words. Check the TASK.md she writes, then say "go".</span></li>
+    <li><b>Quick data questions</b><span>From any session: "Use the snape agent to..." He answers with the query behind every number.</span></li>
+    <li><b>When a session gets long</b><span>If you see the Tempus warning (past about 200k tokens), ask for a Checkpoint and start a fresh session. Long sessions are the single biggest cost.</span></li>
+    <li><b>Reviews</b><span>They happen before anything is pushed, by the other model family. You'll see the verdict in your rows.</span></li>
+    <li><b>Wrapping up</b><span>Merge what's ready yourself, then type <code>Mischief managed &lt;task-id&gt;</code> for each finished task.</span></li>
+  </ul>
+</section>
+
+<section id="herdr">
+  <div class="sec-head">
+    <p class="eyebrow">herdr in five minutes</p>
+    <h2>Tabs and panes for your own sessions</h2>
+    <p>herdr keeps several terminal sessions in one window and keeps them running after you close it. It's handy for watching a couple of your own <code>claude</code> or <code>codex</code> sessions side by side. Fleet desks never run inside it, because any pane in herdr can type into any other pane.</p>
+  </div>
+  <div class="two">
+    <ol class="steps">
+      <li><span><b>Start it.</b> Open Terminal and type <code>herdr</code>. The first launch walks you through a short setup.</span></li>
+      <li><span><b>Use the prefix.</b> Every shortcut starts with Ctrl+B. Press it, let go, then press the next key.</span></li>
+      <li><span><b>Make room.</b> Ctrl+B then c opens a tab. Ctrl+B then v splits side by side, and Ctrl+B then minus splits top and bottom.</span></li>
+      <li><span><b>Run something.</b> In a pane, type <code>cd ~/hogwarts</code> and <code>claude</code>, or <code>codex</code> in a project folder.</span></li>
+      <li><span><b>Leave it running.</b> Ctrl+B then q detaches. Your sessions keep going. Type <code>herdr</code> again to come back.</span></li>
+    </ol>
+    <div class="tbl">
+      <table>
+        <thead><tr><th>Press Ctrl+B, then</th><th>Does</th></tr></thead>
+        <tbody>
+          <tr><td data-label="Press Ctrl+B, then"><code>?</code></td><td data-label="Does">Shows every shortcut</td></tr>
+          <tr><td data-label="Press Ctrl+B, then"><code>c</code></td><td data-label="Does">New tab</td></tr>
+          <tr><td data-label="Press Ctrl+B, then"><code>n</code> / <code>p</code></td><td data-label="Does">Next or previous tab</td></tr>
+          <tr><td data-label="Press Ctrl+B, then"><code>v</code> / <code>-</code></td><td data-label="Does">Split side by side, or top and bottom</td></tr>
+          <tr><td data-label="Press Ctrl+B, then"><code>h</code> <code>j</code> <code>k</code> <code>l</code></td><td data-label="Does">Move between panes</td></tr>
+          <tr><td data-label="Press Ctrl+B, then"><code>z</code></td><td data-label="Does">Zoom the current pane</td></tr>
+          <tr><td data-label="Press Ctrl+B, then"><code>x</code></td><td data-label="Does">Close the current pane</td></tr>
+          <tr><td data-label="Press Ctrl+B, then"><code>w</code></td><td data-label="Does">Switch workspace</td></tr>
+          <tr><td data-label="Press Ctrl+B, then"><code>q</code></td><td data-label="Does">Detach and leave everything running</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</section>
+
+<section id="cheats">
+  <div class="sec-head">
+    <p class="eyebrow">Cheat sheet</p>
+    <h2>Commands worth keeping</h2>
+    <p>Everything <code>castle</code> prints is JSON. If you added the shortcut in one-time setup, type <code>castle</code> instead of the full path.</p>
+  </div>
+  <div class="cols3">
+    <div class="col">
+      <h3>castle</h3>
+      <div class="tbl"><table>
+        <thead><tr><th>Type</th><th>To</th></tr></thead>
+        <tbody>
+          <tr><td data-label="Type"><code>castle task list</code></td><td data-label="To">See every task and its status</td></tr>
+          <tr><td data-label="Type"><code>castle task list --desk harry</code></td><td data-label="To">See one desk's tasks</td></tr>
+          <tr><td data-label="Type"><code>castle event drain</code></td><td data-label="To">See what needs you</td></tr>
+          <tr><td data-label="Type"><code>castle event ack &lt;id&gt;</code></td><td data-label="To">Clear a row once you've dealt with it</td></tr>
+          <tr><td data-label="Type"><code>castle request list --open</code></td><td data-label="To">See requests between desks still in flight</td></tr>
+          <tr><td data-label="Type"><code>castle audit</code></td><td data-label="To">Find stuck requests and unanswered owls</td></tr>
+          <tr><td data-label="Type"><code>castle fact current</code></td><td data-label="To">See what the fleet currently believes</td></tr>
+          <tr><td data-label="Type"><code>castle desk list</code></td><td data-label="To">See every desk and its job</td></tr>
+          <tr><td data-label="Type"><code>castle doctor</code></td><td data-label="To">Health check</td></tr>
+        </tbody>
+      </table></div>
+    </div>
+    <div class="col">
+      <h3>Claude Code</h3>
+      <div class="tbl"><table>
+        <thead><tr><th>Type</th><th>To</th></tr></thead>
+        <tbody>
+          <tr><td data-label="Type"><code>claude</code></td><td data-label="To">Start a session in the current folder</td></tr>
+          <tr><td data-label="Type"><code>claude --agent snape</code></td><td data-label="To">Start a session as one desk</td></tr>
+          <tr><td data-label="Type"><code>/agents</code></td><td data-label="To">List the agents a session can use</td></tr>
+          <tr><td data-label="Type"><code>/context</code></td><td data-label="To">See what's using your context</td></tr>
+          <tr><td data-label="Type"><code>/model</code></td><td data-label="To">Switch model for this session</td></tr>
+          <tr><td data-label="Type"><code>/mcp</code></td><td data-label="To">See your MCP servers and their tools</td></tr>
+          <tr><td data-label="Type"><code>claude auth status</code></td><td data-label="To">Check you're signed in</td></tr>
+        </tbody>
+      </table></div>
+    </div>
+    <div class="col">
+      <h3>Codex</h3>
+      <div class="tbl"><table>
+        <thead><tr><th>Type</th><th>To</th></tr></thead>
+        <tbody>
+          <tr><td data-label="Type"><code>codex</code></td><td data-label="To">Start an interactive session</td></tr>
+          <tr><td data-label="Type"><code>codex exec "..."</code></td><td data-label="To">Run one prompt and exit</td></tr>
+          <tr><td data-label="Type"><code>codex review</code></td><td data-label="To">Run a code review non-interactively</td></tr>
+          <tr><td data-label="Type"><code>codex resume --last</code></td><td data-label="To">Continue your last session</td></tr>
+          <tr><td data-label="Type"><code>codex login status</code></td><td data-label="To">Check you're signed in</td></tr>
+        </tbody>
+      </table></div>
+    </div>
+  </div>
+</section>
+
+<section id="rules">
+  <div class="sec-head">
+    <p class="eyebrow">Rules worth remembering</p>
+    <h2>Six things only you do</h2>
+  </div>
+  <ul class="gates">
+    <li><b>Merge and deploy</b><span>No desk can merge, deploy, press a pipeline gate or change prod.</span></li>
+    <li><b>Close tasks</b><span>Only "Mischief managed &lt;task-id&gt;" in McGonagall's session closes one. Silence and a green build don't.</span></li>
+    <li><b>Send things</b><span>Desks draft messages. You send them.</span></li>
+    <li><b>Sign in</b><span>Desks never see a password or token. If something needs a login, it stops and tells you.</span></li>
+    <li><b>Change settings</b><span>Security, permissions, hooks and background jobs are yours to apply. The fleet only prepares the change.</span></li>
+    <li><b>Never bypass</b><span>Don't start Claude or Codex with any skip-permissions or bypass flag, and don't run fleet desks inside herdr.</span></li>
+  </ul>
+</section>
+
+<section id="trouble">
+  <div class="sec-head">
+    <p class="eyebrow">When something looks off</p>
+    <h2>Troubleshooting</h2>
+  </div>
+  <div class="tbl">
+    <table>
+      <thead><tr><th>You see</th><th>Do this</th></tr></thead>
+      <tbody>
+        <tr><td data-label="You see">Spotlight can't find herdr, castle or codex</td><td data-label="Do this">They're command-line tools. Open Terminal and type the name there.</td></tr>
+        <tr><td data-label="You see"><code>command not found: castle</code></td><td data-label="Do this">Use the full path <code>~/.hogwarts/bin/castle</code>, or add the shortcut from one-time setup and open a new Terminal window.</td></tr>
+        <tr><td data-label="You see"><code>install.sh</code> says a folder already exists</td><td data-label="Do this">Nothing was changed. The fleet is already installed. Use <code>./install.sh --force</code> only if you want a fresh copy; it moves the old folders aside first.</td></tr>
+        <tr><td data-label="You see">A tool name with <code>&lt;warehouse-mcp&gt;</code>, <code>&lt;observability-mcp&gt;</code> or <code>&lt;chat-mcp&gt;</code> in it</td><td data-label="Do this">A placeholder was never filled. See onboarding stage 2.</td></tr>
+        <tr><td data-label="You see">A headless desk never answers</td><td data-label="Do this">Run <code>claude auth status</code>. Headless desks need the command line signed in. Check the desk has an <code>enabled</code> file. Then run <code>castle audit</code> to see where the request stopped.</td></tr>
+        <tr><td data-label="You see">McGonagall doesn't introduce herself</td><td data-label="Do this">Make sure the session's folder is <code>~/hogwarts</code>. Her settings only apply there.</td></tr>
+        <tr><td data-label="You see">The Tempus warning appears</td><td data-label="Do this">Ask for a Checkpoint, then start a fresh session. She picks up from the digest.</td></tr>
+        <tr><td data-label="You see">"Mischief managed" says it could not confirm</td><td data-label="Do this">Close the task from your terminal: <code>castle token mint &lt;task-id&gt;</code>, then <code>castle task close &lt;task-id&gt; --reason complete --token-stdin</code> and paste the token.</td></tr>
+        <tr><td data-label="You see"><code>castle</code> exits with code 3</td><td data-label="Do this">The database was busy or a rule refused the change, such as a second active task for one desk. Read the JSON message.</td></tr>
+        <tr><td data-label="You see"><code>castle doctor</code> exits with code 5</td><td data-label="Do this">Something about permissions or the database looks unsafe. The JSON says what. Don't loosen permissions to make it pass.</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section id="uninstall">
+  <div class="sec-head">
+    <p class="eyebrow">Uninstall</p>
+    <h2>Taking the fleet off a Mac</h2>
+    <p>Everything the fleet adds lives in two folders, a few background jobs and one agent file. Your own settings only change if you applied the prepared changes yourself, so undoing those is also yours.</p>
+  </div>
+  <ol class="stages">
+    <li class="stage"><div class="n">1<small>Look</small></div><div>
+      <h3>See every step first</h3>
+      <p>From your clone of the repo. This is a dry run and changes nothing.</p>
+      <pre class="cmdline">./uninstall.sh</pre>
+    </div></li>
+    <li class="stage"><div class="n">2<small>Act</small></div><div>
+      <h3>Do it</h3>
+      <p>It stops the background jobs, archives both folders to <code>~/hogwarts-fleet-archive-&lt;timestamp&gt;.tar.gz</code> before it removes them, and never edits your Claude or Codex settings. If your settings still mention the fleet, it shows the lines and the backup to restore.</p>
+      <pre class="cmdline">./uninstall.sh --yes</pre>
+    </div></li>
+  </ol>
+  <p class="note"><a href="UNINSTALL.md">UNINSTALL.md</a> has the same steps by hand, and how to restore from the archive.</p>
+</section>
+
+</main>
+<footer class="closing wrap">
+  <div class="sources muted">
+    <span>The design, the risks it closes and the rollout are in <a href="DESIGN.md">DESIGN.md</a>. Setup is in <a href="ONBOARDING.md">ONBOARDING.md</a>.</span>
+    <span>Commands checked against Claude Code 2.1.274, Codex 0.160.0 and herdr 0.9.3.</span>
+  </div>
+</footer>
+
+</body>
+</html>

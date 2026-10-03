@@ -1,0 +1,41 @@
+# Fleet-owned Codex profile for Harry - Senior Engineer.
+#
+# run_desk passes every key below as `-c key=value`, together with
+# --ignore-user-config and --ignore-rules, so ~/.codex/config.toml and every
+# user or project execpolicy .rules file are never loaded. A loaded allow rule
+# would run a matching command, such as git push, outside the sandbox.
+# Format: flat dotted keys, one per line, TOML scalar values only. No tables.
+#
+# The sandbox comes from flags, checked against `codex exec --help` on 0.160.0:
+#   codex exec --ignore-user-config --ignore-rules --sandbox workspace-write
+#     -C <his own request task's worktree, else desks/harry/work>
+#     --add-dir /Users/crisryantan/hogwarts/desks/harry/outbox
+#     --ephemeral --output-last-message <office file>
+# Never any bypass or auto-approve flag, and never the full-access sandbox mode.
+#
+# sandbox_mode is deliberately not set here: --sandbox sets it.
+# Known gap on 0.160.0: read limits (deny_read) exist only in permission
+# profiles, which cannot be combined with --sandbox. This profile does not
+# stop Harry reading ~/.hogwarts. Stage 2 must prove or close that.
+
+approval_policy = "never"
+sandbox_workspace_write.network_access = false
+sandbox_workspace_write.exclude_slash_tmp = true
+sandbox_workspace_write.exclude_tmpdir_env_var = false
+allow_login_shell = false
+shell_environment_policy.inherit = "core"
+shell_environment_policy.ignore_default_excludes = false
+web_search = "disabled"
+history.persistence = "none"
+check_for_update_on_startup = false
+analytics.enabled = false
+features.hooks = false
+features.memories = false
+features.apps = false
+features.tool_suggest = false
+features.plugins = false
+features.remote_plugin = false
+features.skill_mcp_dependency_install = false
+features.computer_use = false
+features.browser_use = false
+features.browser_use_external = false

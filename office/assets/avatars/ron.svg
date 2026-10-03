@@ -1,0 +1,40 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <radialGradient id="field" gradientUnits="userSpaceOnUse" cx="176" cy="156" r="360">
+      <stop offset="0" stop-color="#BE5E2C"/>
+      <stop offset="1" stop-color="#B8501A"/>
+    </radialGradient>
+    <clipPath id="inner">
+      <circle cx="256" cy="256" r="222" fill="#FFFFFF"/>
+    </clipPath>
+  </defs>
+
+  <!-- field -->
+  <circle cx="256" cy="256" r="240" fill="url(#field)"/>
+
+  <!-- emblem: Staunton chess knight, side profile (scaled 0.92 and placed for optical centre) -->
+  <g clip-path="url(#inner)" stroke-linecap="round" stroke-linejoin="round">
+    <g transform="matrix(0.92 0 0 0.92 15 17)">
+      <!-- base -->
+      <rect x="152" y="370" width="220" height="26" rx="12" fill="#C9B48A"/>
+      <rect x="168" y="350" width="188" height="22" rx="10" fill="#F3E6C4"/>
+
+      <!-- head and neck; eye and nostril are true holes onto the field -->
+      <path fill="#F3E6C4" fill-rule="evenodd" d="M 270 96 L 292 128 L 288 142 C 336 168 356 224 350 272 C 346 300 336 320 330 340 L 202 340 C 196 306 202 280 224 260 C 236 250 242 238 238 224 L 180 254 C 164 260 146 252 144 236 C 142 222 148 210 158 202 L 232 134 C 238 128 246 124 254 120 Z M 216 168 A 10 10 0 1 0 236 168 A 10 10 0 1 0 216 168 Z M 156 226 A 7 7 0 1 0 170 226 A 7 7 0 1 0 156 226 Z"/>
+
+      <!-- mane -->
+      <path fill="#C9B48A" d="M 288 142 C 336 168 356 224 350 272 C 347 292 342 307 336 322 L 312 314 L 318 292 L 302 282 L 314 258 L 298 246 L 310 222 L 292 210 L 300 186 L 282 176 L 286 154 Z"/>
+
+      <!-- engraved detail: cheek and mouth -->
+      <path fill="none" stroke="#C9B48A" stroke-width="9" d="M 196 242 C 214 222 236 210 258 214"/>
+      <path fill="none" stroke="#C9B48A" stroke-width="9" d="M 150 240 C 160 244 170 244 180 240"/>
+
+      <!-- collar -->
+      <rect x="184" y="330" width="160" height="22" rx="11" fill="#C9B48A"/>
+    </g>
+  </g>
+
+  <!-- rings -->
+  <circle cx="256" cy="256" r="240" fill="none" stroke="#D9A441" stroke-width="16"/>
+  <circle cx="256" cy="256" r="222" fill="none" stroke="#D9A441" stroke-width="3" stroke-opacity="0.45"/>
+</svg>

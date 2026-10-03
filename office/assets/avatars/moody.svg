@@ -1,0 +1,70 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <radialGradient id="field" gradientUnits="userSpaceOnUse" cx="176" cy="156" r="360">
+      <stop offset="0" stop-color="#353B43"/>
+      <stop offset="1" stop-color="#232A33"/>
+    </radialGradient>
+    <clipPath id="inner">
+      <circle cx="256" cy="256" r="222" fill="#FFFFFF"/>
+    </clipPath>
+    <clipPath id="rim">
+      <circle cx="256" cy="256" r="132" fill="#FFFFFF"/>
+    </clipPath>
+    <clipPath id="ball">
+      <circle cx="256" cy="256" r="92" fill="#FFFFFF"/>
+    </clipPath>
+  </defs>
+
+  <!-- field -->
+  <circle cx="256" cy="256" r="240" fill="url(#field)"/>
+
+  <!-- emblem: battered mechanical magical eye on a leather strap -->
+  <g clip-path="url(#inner)" stroke-linecap="round" stroke-linejoin="round">
+    <!-- strap at -20 degrees, under the rim, out to the clip edge, held by a pewter lug each side -->
+    <g transform="rotate(-20 256 256)">
+      <rect x="0" y="220" width="512" height="72" fill="#5A4632"/>
+      <line x1="0" y1="234" x2="512" y2="234" fill="none" stroke="#9AA0A6" stroke-width="8" stroke-dasharray="14 14" stroke-opacity="0.5"/>
+      <line x1="0" y1="278" x2="512" y2="278" fill="none" stroke="#9AA0A6" stroke-width="8" stroke-dasharray="14 14" stroke-opacity="0.5"/>
+      <rect x="110" y="234" width="26" height="44" rx="6" fill="#9AA0A6" stroke="#232A33" stroke-width="8"/>
+      <rect x="376" y="234" width="26" height="44" rx="6" fill="#9AA0A6" stroke="#232A33" stroke-width="8"/>
+    </g>
+
+    <!-- heavy pewter rim with a lit upper bevel and a shaded lower bevel -->
+    <circle cx="256" cy="256" r="132" fill="#9AA0A6"/>
+    <g clip-path="url(#rim)">
+      <path fill="#F3E6C4" fill-opacity="0.3" fill-rule="evenodd" d="M 124 256 A 132 132 0 1 1 388 256 A 132 132 0 1 1 124 256 Z M 130 262 A 132 132 0 1 1 394 262 A 132 132 0 1 1 130 262 Z"/>
+      <path fill="#232A33" fill-opacity="0.35" fill-rule="evenodd" d="M 124 256 A 132 132 0 1 1 388 256 A 132 132 0 1 1 124 256 Z M 116 248 A 132 132 0 1 1 380 248 A 132 132 0 1 1 116 248 Z"/>
+    </g>
+    <circle cx="256" cy="256" r="132" fill="none" stroke="#232A33" stroke-width="8"/>
+
+    <!-- engraved tick marks -->
+    <path fill="none" stroke="#232A33" stroke-width="8" d="M 256 134 V 154 M 378 256 H 358 M 256 378 V 358 M 134 256 H 154"/>
+
+    <!-- rivets with worn highlights -->
+    <circle cx="177" cy="177" r="11" fill="#232A33"/>
+    <circle cx="335" cy="177" r="11" fill="#232A33"/>
+    <circle cx="177" cy="335" r="11" fill="#232A33"/>
+    <circle cx="335" cy="335" r="11" fill="#232A33"/>
+    <circle cx="174" cy="174" r="4" fill="#F3E6C4" fill-opacity="0.75"/>
+    <circle cx="332" cy="174" r="4" fill="#F3E6C4" fill-opacity="0.75"/>
+    <circle cx="174" cy="332" r="4" fill="#F3E6C4" fill-opacity="0.75"/>
+    <circle cx="332" cy="332" r="4" fill="#F3E6C4" fill-opacity="0.75"/>
+
+    <!-- battle damage: a chunk knocked out of the rim -->
+    <path fill="url(#field)" d="M 296 128 Q 306 158 336 152 L 346 124 Z"/>
+
+    <!-- eyeball with a shaded lower edge, and the bezel seam -->
+    <circle cx="256" cy="256" r="92" fill="#F3E6C4"/>
+    <path clip-path="url(#ball)" fill="#232A33" fill-opacity="0.16" fill-rule="evenodd" d="M 164 256 A 92 92 0 1 1 348 256 A 92 92 0 1 1 164 256 Z M 152 244 A 96 96 0 1 1 344 244 A 96 96 0 1 1 152 244 Z"/>
+    <circle cx="256" cy="256" r="92" fill="none" stroke="#232A33" stroke-width="9"/>
+
+    <!-- iris swivelled up and to the left, pupil, catchlight -->
+    <circle cx="227" cy="239" r="46" fill="#3FA7FF" stroke="#232A33" stroke-width="8"/>
+    <circle cx="227" cy="239" r="19" fill="#232A33"/>
+    <circle cx="215" cy="226" r="7" fill="#F3E6C4"/>
+  </g>
+
+  <!-- rings -->
+  <circle cx="256" cy="256" r="240" fill="none" stroke="#6F93D6" stroke-width="16"/>
+  <circle cx="256" cy="256" r="222" fill="none" stroke="#6F93D6" stroke-width="3" stroke-opacity="0.45"/>
+</svg>

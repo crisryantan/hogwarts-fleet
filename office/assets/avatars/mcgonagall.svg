@@ -1,0 +1,77 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <radialGradient id="field" gradientUnits="userSpaceOnUse" cx="176" cy="156" r="360">
+      <stop offset="0" stop-color="#315B4A"/>
+      <stop offset="1" stop-color="#1F4D3A"/>
+    </radialGradient>
+    <clipPath id="inner">
+      <circle cx="256" cy="256" r="222" fill="#FFFFFF"/>
+    </clipPath>
+  </defs>
+
+  <circle cx="256" cy="256" r="240" fill="url(#field)"/>
+
+  <g clip-path="url(#inner)">
+    <!-- tartan: wide darker bands -->
+    <rect x="140" y="0" width="52" height="512" fill="#0E1F18" fill-opacity="0.22"/>
+    <rect x="320" y="0" width="52" height="512" fill="#0E1F18" fill-opacity="0.22"/>
+    <rect x="0" y="140" width="512" height="52" fill="#0E1F18" fill-opacity="0.22"/>
+    <rect x="0" y="320" width="512" height="52" fill="#0E1F18" fill-opacity="0.22"/>
+    <!-- tartan: thin red overcheck crossing inside the field, clear of whiskers and chin -->
+    <rect x="0" y="352" width="512" height="8" fill="#8E2A2A" fill-opacity="0.45"/>
+    <rect x="84" y="0" width="8" height="512" fill="#8E2A2A" fill-opacity="0.45"/>
+
+    <!-- head -->
+    <path d="M 256 148 Q 228 146 206 156 L 156 100 L 140 208 C 120 244 116 290 130 320 C 154 368 204 390 256 390 C 308 390 358 368 382 320 C 396 290 392 244 372 208 L 356 100 L 306 156 Q 284 146 256 148 Z" fill="#F3E6C4" stroke="#F3E6C4" stroke-width="8" stroke-linejoin="round"/>
+
+    <!-- inner ears -->
+    <polygon points="160,122 192,158 148,186" fill="#C9B48A" stroke="#C9B48A" stroke-width="8" stroke-linejoin="round"/>
+    <polygon points="352,122 320,158 364,186" fill="#C9B48A" stroke="#C9B48A" stroke-width="8" stroke-linejoin="round"/>
+
+    <!-- tabby stripes and forehead tufts (split at the centre so they only imply an M) -->
+    <g stroke="#C9B48A" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M 226 208 Q 226 186 234 172 Q 240 182 242 194" fill="none" stroke-width="16"/>
+      <path d="M 286 208 Q 286 186 278 172 Q 272 182 270 194" fill="none" stroke-width="16"/>
+      <path d="M 192 186 Q 202 198 204 214" fill="none" stroke-width="9"/>
+      <path d="M 320 186 Q 310 198 308 214" fill="none" stroke-width="9"/>
+      <path d="M 127 270 L 150 274" fill="none" stroke-width="9"/>
+      <path d="M 128 290 L 150 290" fill="none" stroke-width="9"/>
+      <path d="M 385 270 L 362 274" fill="none" stroke-width="9"/>
+      <path d="M 384 290 L 362 290" fill="none" stroke-width="9"/>
+    </g>
+
+    <!-- eyes: flat upper lids slanting to the nose for a stern look -->
+    <path d="M 182 254 Q 210 250 236 264 Q 210 282 182 254 Z" fill="#34A56F"/>
+    <path d="M 330 254 Q 302 250 276 264 Q 302 282 330 254 Z" fill="#34A56F"/>
+    <ellipse cx="210" cy="264" rx="5" ry="9" fill="#0E1F18"/>
+    <ellipse cx="302" cy="264" rx="5" ry="9" fill="#0E1F18"/>
+    <g stroke="#0E1F18" stroke-width="8" stroke-linecap="round">
+      <path d="M 180 253 Q 210 248 238 264" fill="none"/>
+      <path d="M 332 253 Q 302 248 274 264" fill="none"/>
+    </g>
+
+    <!-- square spectacles -->
+    <g stroke="#0E1F18" stroke-width="14" stroke-linecap="round" stroke-linejoin="round">
+      <rect x="170" y="230" width="76" height="60" rx="8" fill="none"/>
+      <rect x="266" y="230" width="76" height="60" rx="8" fill="none"/>
+      <line x1="246" y1="252" x2="266" y2="252" fill="none"/>
+      <line x1="170" y1="250" x2="130" y2="244" fill="none"/>
+      <line x1="342" y1="250" x2="382" y2="244" fill="none"/>
+    </g>
+
+    <!-- nose and mouth -->
+    <path d="M 244 308 L 268 308 L 256 322 Z" fill="#8E2A2A" stroke="#8E2A2A" stroke-width="8" stroke-linejoin="round"/>
+    <path d="M 256 324 L 256 336 M 256 336 Q 246 348 234 342 M 256 336 Q 266 348 278 342" fill="none" stroke="#0E1F18" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/>
+
+    <!-- whiskers -->
+    <g stroke="#C9B48A" stroke-width="8" stroke-linecap="round">
+      <line x1="204" y1="318" x2="112" y2="306" fill="none"/>
+      <line x1="204" y1="332" x2="110" y2="334" fill="none"/>
+      <line x1="308" y1="318" x2="400" y2="306" fill="none"/>
+      <line x1="308" y1="332" x2="402" y2="334" fill="none"/>
+    </g>
+  </g>
+
+  <circle cx="256" cy="256" r="240" fill="none" stroke="#D9A441" stroke-width="16"/>
+  <circle cx="256" cy="256" r="222" fill="none" stroke="#D9A441" stroke-width="3" stroke-opacity="0.45"/>
+</svg>

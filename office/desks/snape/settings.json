@@ -1,0 +1,86 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(~/hogwarts/CLAUDE.md)",
+      "Read(~/hogwarts/desks/snape/**)",
+      "Edit(~/hogwarts/desks/snape/scratchpad.md)",
+      "Edit(~/hogwarts/desks/snape/outbox/**)",
+      "Read(~/hogwarts/tasks/**)",
+      "mcp__<warehouse-mcp>__list_catalogs",
+      "mcp__<warehouse-mcp>__list_schemas",
+      "mcp__<warehouse-mcp>__list_tables",
+      "mcp__<warehouse-mcp>__get_table_schema",
+      "mcp__<warehouse-mcp>__explain_query",
+      "mcp__<warehouse-mcp>__execute_query",
+      "mcp__<observability-mcp>__search_logs",
+      "mcp__<observability-mcp>__search_metrics",
+      "mcp__<observability-mcp>__get_metric",
+      "mcp__<observability-mcp>__search_spans",
+      "mcp__<observability-mcp>__get_trace",
+      "mcp__<observability-mcp>__search_monitors",
+      "mcp__<observability-mcp>__get_dashboard"
+    ],
+    "deny": [
+      "Read(~/.hogwarts/**)",
+      "Edit(~/.hogwarts/**)",
+      "Write(~/.hogwarts/**)",
+      "Edit(~/hogwarts/desks/snape/inbox/**)",
+      "Write(~/hogwarts/desks/snape/inbox/**)",
+      "mcp__<chat-mcp>__send_message"
+    ],
+    "disableBypassPermissionsMode": "disable"
+  },
+  "sandbox": {
+    "enabled": true,
+    "failIfUnavailable": true,
+    "autoAllowBashIfSandboxed": false,
+    "allowUnsandboxedCommands": false,
+    "filesystem": {
+      "allowWrite": [
+        "/Users/crisryantan/hogwarts/desks/snape"
+      ],
+      "denyWrite": [
+        "/Users/crisryantan/.hogwarts",
+        "/Users/crisryantan/hogwarts/.git",
+        "/Users/crisryantan/hogwarts/.claude",
+        "/Users/crisryantan/hogwarts/tasks",
+        "/Users/crisryantan/hogwarts/worktrees",
+        "/Users/crisryantan/hogwarts/CLAUDE.md",
+        "/Users/crisryantan/hogwarts/PLAN.md",
+        "/Users/crisryantan/hogwarts/standing-orders.md",
+        "/Users/crisryantan/hogwarts/.gitignore",
+        "/Users/crisryantan/hogwarts/desks/mcgonagall",
+        "/Users/crisryantan/hogwarts/desks/harry",
+        "/Users/crisryantan/hogwarts/desks/hermione",
+        "/Users/crisryantan/hogwarts/desks/moody",
+        "/Users/crisryantan/hogwarts/desks/ron",
+        "/Users/crisryantan/hogwarts/desks/portrait",
+        "/Users/crisryantan/hogwarts/desks/snape/inbox"
+      ],
+      "denyRead": [
+        "/Users/crisryantan/.hogwarts",
+        "/Users/crisryantan/.ssh",
+        "/Users/crisryantan/.aws",
+        "/Users/crisryantan/.codex",
+        "/Users/crisryantan/.claude.json",
+        "/Users/crisryantan/.claude/.credentials.json",
+        "/Users/crisryantan/.claude/settings.json",
+        "/Users/crisryantan/.claude/settings.local.json",
+        "/Users/crisryantan/.claude/history.jsonl",
+        "/Users/crisryantan/.claude/projects",
+        "/Users/crisryantan/.netrc",
+        "/Users/crisryantan/.npmrc",
+        "/Users/crisryantan/.docker",
+        "/Users/crisryantan/.kube",
+        "/Users/crisryantan/.gnupg",
+        "/Users/crisryantan/.config/gh"
+      ]
+    },
+    "network": {
+      "allowUnixSockets": [],
+      "allowAllUnixSockets": false,
+      "allowLocalBinding": false,
+      "allowedDomains": []
+    }
+  }
+}

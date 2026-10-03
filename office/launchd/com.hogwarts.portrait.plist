@@ -1,0 +1,75 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.hogwarts.portrait</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/usr/bin/env</string>
+		<string>-i</string>
+		<string>/usr/bin/python3</string>
+		<string>-I</string>
+		<string>-B</string>
+		<string>-X</string>
+		<string>pycache_prefix=/var/empty</string>
+		<string>-c</string>
+		<string>import sys; sys.path.insert(0, "/Users/crisryantan/.hogwarts"); from fleet.portrait import main; sys.exit(main())</string>
+	</array>
+	<key>WorkingDirectory</key>
+	<string>/Users/crisryantan/.hogwarts</string>
+	<key>StandardOutPath</key>
+	<string>/Users/crisryantan/.hogwarts/logs/portrait.out.log</string>
+	<key>StandardErrorPath</key>
+	<string>/Users/crisryantan/.hogwarts/logs/portrait.err.log</string>
+	<key>Umask</key>
+	<integer>63</integer>
+	<key>ProcessType</key>
+	<string>Background</string>
+	<key>RunAtLoad</key>
+	<false/>
+	<key>StartCalendarInterval</key>
+	<array>
+		<dict>
+			<key>Weekday</key>
+			<integer>1</integer>
+			<key>Hour</key>
+			<integer>22</integer>
+			<key>Minute</key>
+			<integer>30</integer>
+		</dict>
+		<dict>
+			<key>Weekday</key>
+			<integer>2</integer>
+			<key>Hour</key>
+			<integer>22</integer>
+			<key>Minute</key>
+			<integer>30</integer>
+		</dict>
+		<dict>
+			<key>Weekday</key>
+			<integer>3</integer>
+			<key>Hour</key>
+			<integer>22</integer>
+			<key>Minute</key>
+			<integer>30</integer>
+		</dict>
+		<dict>
+			<key>Weekday</key>
+			<integer>4</integer>
+			<key>Hour</key>
+			<integer>22</integer>
+			<key>Minute</key>
+			<integer>30</integer>
+		</dict>
+		<dict>
+			<key>Weekday</key>
+			<integer>5</integer>
+			<key>Hour</key>
+			<integer>22</integer>
+			<key>Minute</key>
+			<integer>30</integer>
+		</dict>
+	</array>
+</dict>
+</plist>
