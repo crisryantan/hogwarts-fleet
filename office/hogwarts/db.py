@@ -715,6 +715,29 @@ def stray_bytecode(root: Path) -> list[str]:
     return sorted(found)
 
 
+def _describe_wrapper(root: Path, name: str, module: str) -> dict:
+    path = root / "bin" / name
+    label = f"{name} wrapper"
+    check = _describe(path, label, False)
+    if not check["exists"]:
+        return check
+    if check["mode"] != "0o700":
+        check["problems"].append(f"{label} mode is {check['mode']}, expected 0o700")
+    if not check["problems"]:
+        expected = (
+            "#!/bin/sh\n"
+            "exec /usr/bin/env -i /usr/bin/python3 -I -B -X pycache_prefix=/var/empty "
+            "-c 'import sys; sys.path.insert(0, \"/Users/crisryantan/.hogwarts\"); "
+            f"from {module} import main; sys.exit(main())' \"$@\"\n"
+        ).encode("utf-8")
+        try:
+            if path.read_bytes() != expected:
+                check["problems"].append(f"{label} content differs from the expected wrapper")
+        except OSError as exc:
+            check["problems"].append(f"{label} cannot be read: {exc}")
+    return check
+
+
 def doctor(path: PathLike, code_root: Optional[PathLike] = None) -> dict:
     db_path = _absolute(path)
     checks = {
@@ -731,8 +754,14 @@ def doctor(path: PathLike, code_root: Optional[PathLike] = None) -> dict:
         problems.append("FTS5 is not available")
     if not problems:
         report.update(_inspect_database(db_path, problems))
-    report["bytecode"] = stray_bytecode(_absolute(CODE_ROOT if code_root is None else code_root))
+    root = _absolute(CODE_ROOT if code_root is None else code_root)
+    report["bytecode"] = stray_bytecode(root)
     problems += [f"bytecode can load in place of reviewed source: {item}" for item in report["bytecode"]]
+    report["wrappers"] = {
+        name: _describe_wrapper(root, name, module)
+        for name, module in (("castle", "hogwarts.cli"), ("fleet", "fleet.tools"))
+    }
+    problems += [problem for check in report["wrappers"].values() for problem in check["problems"]]
     report["problems"] = problems
     report["ok"] = not problems
     return report

@@ -258,6 +258,16 @@ class DoctorTests(StoreCase):
         super().setUp()
         self.code = self.tmp / "code"
         shutil.copytree(PACKAGE, self.code / "hogwarts", ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+        (self.code / "bin").mkdir()
+        for name, module in (("castle", "hogwarts.cli"), ("fleet", "fleet.tools")):
+            wrapper = self.code / "bin" / name
+            wrapper.write_text(
+                "#!/bin/sh\n"
+                "exec /usr/bin/env -i /usr/bin/python3 -I -B -X pycache_prefix=/var/empty "
+                "-c 'import sys; sys.path.insert(0, \"/Users/crisryantan/.hogwarts\"); "
+                f"from {module} import main; sys.exit(main())' \"$@\"\n"
+            )
+            wrapper.chmod(0o700)
         patcher = mock.patch.object(db, "CODE_ROOT", self.code)
         patcher.start()
         self.addCleanup(patcher.stop)
@@ -275,6 +285,57 @@ class DoctorTests(StoreCase):
         report = db.doctor(missing)
         self.assertFalse(report["ok"])
         self.assertFalse(os.path.exists(missing.parent))
+
+    def test_doctor_reports_both_healthy_wrappers(self):
+        report = db.doctor(self.db_path, code_root=self.code)
+        self.assertTrue(report["ok"], report["problems"])
+        self.assertEqual(set(report["wrappers"]), {"castle", "fleet"})
+        for name, check in report["wrappers"].items():
+            self.assertEqual(check["path"], str(self.code / "bin" / name))
+            self.assertTrue(check["exists"])
+            self.assertEqual(check["mode"], "0o700")
+            self.assertEqual(check["problems"], [])
+
+    def test_doctor_rejects_missing_edited_or_unsafe_wrappers(self):
+        for name in ("castle", "fleet"):
+            wrapper = self.code / "bin" / name
+            expected = wrapper.read_bytes()
+            for defect in ("missing", "edited", "binary", "mode", "symlink", "directory", "owner"):
+                with self.subTest(wrapper=name, defect=defect):
+                    wrapper.unlink()
+                    wrapper.write_bytes(expected)
+                    wrapper.chmod(0o700)
+                    if defect == "missing":
+                        wrapper.unlink()
+                    elif defect == "edited":
+                        wrapper.write_bytes(expected + b"echo changed\n")
+                    elif defect == "binary":
+                        wrapper.write_bytes(b"\xff")
+                    elif defect == "mode":
+                        wrapper.chmod(0o755)
+                    elif defect == "symlink":
+                        wrapper.unlink()
+                        wrapper.symlink_to(self.code / "bin" / ("fleet" if name == "castle" else "castle"))
+                    elif defect == "directory":
+                        wrapper.unlink()
+                        wrapper.mkdir(mode=0o700)
+                    try:
+                        with mock.patch.object(db, "_uid", return_value=os.getuid() + 1 if defect == "owner" else os.getuid()):
+                            report = db.doctor(self.db_path, code_root=self.code)
+                        self.assertFalse(report["ok"])
+                        problems = report["wrappers"][name]["problems"]
+                        self.assertTrue(problems)
+                        self.assertTrue(all(problem in report["problems"] for problem in problems))
+                        if defect != "owner":
+                            other = "fleet" if name == "castle" else "castle"
+                            self.assertEqual(report["wrappers"][other]["problems"], [])
+                    finally:
+                        if defect == "directory":
+                            wrapper.rmdir()
+                        elif os.path.lexists(wrapper):
+                            wrapper.unlink()
+                        wrapper.write_bytes(expected)
+                        wrapper.chmod(0o700)
 
     def test_doctor_flags_loose_permissions(self):
         os.chmod(self.db_path.parent, 0o770)
