@@ -17,7 +17,7 @@ from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest import mock
 
-from hogwarts import cli, db, facts, owlery, pensieve
+from hogwarts import cli, db, facts, ids, owlery, pensieve
 from hogwarts.errors import IntegrityError, ValidationError
 from tests.support import DAY, NOW, REPO, SHA, TEST_TMP_ROOT, StoreCase, temp_dir
 
@@ -376,6 +376,7 @@ class InputSecurityTests(StoreCase):
     OVERRIDES = {
         ("record_review", "verdict"): "CHANGES", ("defer", "reason"): "conflict", ("decline", "reason"): "safety",
         ("consume", "token"): "x" * 43, ("add_extract", "role"): "user",
+        ("set_worktree", "worktree"): f"{ids.WORKTREES_ROOT}/wt",
     }
 
     def targets(self) -> list:
@@ -619,6 +620,7 @@ class TransactionCoverageTests(unittest.TestCase):
             pensieve.add_desk(conn, name, family, now=NOW)
         task = pensieve.start_task(conn, pensieve.create_task(conn, "alpha", "build", now=NOW)["id"], now=NOW)["id"]
         pensieve.record_commit(conn, task, REPO, SHA, now=NOW)
+        pensieve.set_worktree(conn, pensieve.create_task(conn, "beta", "wt", now=NOW)["id"], f"{ids.WORKTREES_ROOT}/wt")
         pensieve.mark_awaiting_close(conn, task, now=NOW)
         owlery.open_request(conn, "alpha", "beta", "child", parent_task_id=task, now=NOW)
         owlery.record_review(conn, REPO, SHA, task, "ryan", "PASS", now=NOW)

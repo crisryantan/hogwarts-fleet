@@ -7,8 +7,13 @@ Claude desks (hermione, ron, portrait), run from their own castle desk folder:
          "<owl prompt>"
 Codex desks (harry, moody):
   codex exec --ignore-user-config --ignore-rules -c <key=value from the office codex.toml>...
-         --sandbox <mode> -C <own task worktree, or desks/<desk>/work> [--add-dir <own outbox>]
+         -c permissions.fleet-<desk>={<allowlist>} -c default_permissions="fleet-<desk>"
+         -C <own task worktree, or desks/<desk>/work>
          --ephemeral --json --output-last-message <office runs file> "<brief and owl prompt>"
+
+A Codex desk never gets --sandbox: on 0.160.0 its modes let commands read the whole disk. The
+permission profile is an allowlist (see codex_permissions), proven on 0.160.0 by
+codex-boundary-test.sh (scripts/ in the fleet kit): no office, no folder it was not given, no network.
 
 A desk works in a worktree only when the owl belongs to a request addressed to that desk
 and the request's task is the desk's own. Any other owl runs in the desk's work folder.
@@ -43,7 +48,7 @@ if __name__ == "__main__" and "/Users/crisryantan/.hogwarts" not in sys.path:
 from hogwarts import ids, owlery, pensieve  # noqa: E402
 from hogwarts.errors import NotFoundError, StoreError  # noqa: E402
 
-from fleet import common, config, safefs  # noqa: E402
+from fleet import common, config, gitops, safefs  # noqa: E402
 from fleet.safefs import FleetError  # noqa: E402
 
 FORBIDDEN_PARTS = (
@@ -65,8 +70,9 @@ _TOML_SCALAR = rf"(?:{_TOML_STRING}|true|false|-?[0-9]{{1,12}}(?:\.[0-9]{{1,6}})
 _TOML_ARRAY = rf"\[\s*(?:(?:{_TOML_STRING})\s*(?:,\s*(?:{_TOML_STRING})\s*)*,?\s*)?\]"
 _TOML_LINE = re.compile(rf"({_TOML_KEY})\s*=\s*({_TOML_SCALAR}|{_TOML_ARRAY})\s*(?:#.*)?")
 _TOML_TABLE = re.compile(rf"\[\s*({_TOML_KEY})\s*\]\s*(?:#.*)?")
-# The sandbox comes from --sandbox on the command line, never from the profile.
-PROFILE_KEYS_REFUSED = ("sandbox_mode", "sandbox_permissions")
+# The sandbox comes from the permission profile run_desk builds, never from the codex.toml file.
+PROFILE_KEYS_REFUSED = ("sandbox_mode", "sandbox_permissions", "default_permissions")
+PROFILE_PREFIXES_REFUSED = ("permissions", "sandbox_workspace_write")
 PROFILE_WORDS_REFUSED = ("danger", "bypass", "full-access", "full_access", "yolo")
 PROFILE_MAX_OVERRIDES = 64
 SOCKET_KEYS = ("allowUnixSockets", "allowAllUnixSockets")
@@ -156,7 +162,7 @@ def _check_override(key: str, value: str, number: int) -> None:
     lowered = (key + "=" + value).lower()
     if any(word in lowered for word in PROFILE_WORDS_REFUSED):
         raise FleetError(f"codex profile line {number} names a bypass or full access setting")
-    if key.split(".")[-1] in PROFILE_KEYS_REFUSED:
+    if key.split(".")[-1] in PROFILE_KEYS_REFUSED or key.split(".")[0] in PROFILE_PREFIXES_REFUSED:
         raise FleetError(f"codex profile line {number} sets the sandbox, which run_desk sets itself")
     if key.endswith("network_access") and value == "true":
         raise FleetError(f"codex profile line {number} turns network access on")
@@ -253,17 +259,43 @@ def _claude_argv(desk: str, row: dict, brief: str, prompt: str, mcp_job: Optiona
     return argv, config.castle_desk_dir(desk), model
 
 
+def _toml_path(path: str) -> str:
+    return '"' + gitops.check_safe_path(path, "a codex profile path") + '"'
+
+
+def codex_permissions(desk: str, git_common_dir: Optional[str]) -> list:
+    """The -c overrides that define and select this desk's permission profile.
+
+    Overlapping entries resolve deny, then write, then read. So the outbox stays writable inside the
+    readable desk folder, and the office stays denied whatever else is granted.
+    """
+    name = f"fleet-{desk}"
+    access = config.CODEX_ACCESS[desk]
+    entries = ['":minimal"="read"']
+    entries += [f'{_toml_path(path)}="read"' for path in config.CODEX_EXTRA_READS]
+    entries.append(f'":workspace_roots"={{"."="{access}"}}')
+    entries.append(f'{_toml_path(config.castle_desk_dir(desk))}="read"')
+    entries.append(f'{_toml_path(config.CASTLE_ROOT + "/tasks")}="read"')
+    if desk in config.CODEX_OUTBOX_WRITERS:
+        entries.append(f'{_toml_path(config.castle_desk_dir(desk) + "/outbox")}="write"')
+    if git_common_dir is not None:
+        entries.append(f'{_toml_path(git_common_dir)}="read"')
+    entries.append(f'{_toml_path(config.OFFICE_ROOT)}="deny"')
+    table = "{filesystem={" + ", ".join(entries) + "}, network={enabled=false}}"
+    return ["-c", f"permissions.{name}={table}", "-c", f'default_permissions="{name}"']
+
+
 def _codex_argv(desk: str, task: Optional[dict], brief: str, prompt: str, run_id: str) -> tuple:
     profile = _text(_read_office(desk, config.CODEX_PROFILE_FILE, config.SETTINGS_MAX_BYTES, "codex profile"),
                     "codex profile")
     worktree = None if task is None else task.get("worktree")
     cwd = _castle_path(worktree) if worktree else work_dir(desk)
+    record = gitops.find_record(cwd) if worktree else None
     argv = [config.CODEX_BIN, "exec", "--ignore-user-config", "--ignore-rules"]
     for override in parse_codex_profile(profile):
         argv += ["-c", override]
-    argv += ["--sandbox", config.CODEX_SANDBOX[desk], "-C", cwd]
-    if desk in config.CODEX_OUTBOX_WRITERS:
-        argv += ["--add-dir", f"{config.castle_desk_dir(desk)}/outbox"]
+    argv += codex_permissions(desk, None if record is None else record["common_dir"])
+    argv += ["-C", cwd]
     argv += [
         "--ephemeral",
         "--json",

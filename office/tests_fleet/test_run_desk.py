@@ -179,18 +179,34 @@ class CodexDeskTests(RunDeskCase):
                 argv = self.dry_run(desk)["argv"]
                 self.assertEqual(argv[:4], [config.CODEX_BIN, "exec", "--ignore-user-config", "--ignore-rules"])
 
+    def overrides(self, argv: list) -> list:
+        return [argv[index + 1] for index, arg in enumerate(argv) if arg == "-c"]
+
+    def profile(self, argv: list, desk: str) -> str:
+        [table] = [item for item in self.overrides(argv) if item.startswith(f"permissions.fleet-{desk}=")]
+        return table
+
+    def test_codex_desks_never_get_the_sandbox_flag_or_add_dir(self):
+        for desk in config.HEADLESS_CODEX:
+            with self.subTest(desk=desk):
+                argv = self.dry_run(desk)["argv"]
+                self.assertNotIn("--sandbox", argv)
+                self.assertNotIn("--add-dir", argv)
+                self.assertIn(f'default_permissions="fleet-{desk}"', self.overrides(argv))
+
     def test_moody_runs_read_only_with_the_fleet_profile(self):
         argv = self.dry_run("moody")["argv"]
         self.assertEqual(argv[:4], [config.CODEX_BIN, "exec", "--ignore-user-config", "--ignore-rules"])
-        self.assertEqual(argv[argv.index("--sandbox") + 1], "read-only")
-        self.assertNotIn("--add-dir", argv)
         self.assertIn("--ephemeral", argv)
         last = argv[argv.index("--output-last-message") + 1]
         self.assertTrue(last.startswith(f"{self.office}/runs/moody/run-"))
-        overrides = [argv[index + 1] for index, arg in enumerate(argv) if arg == "-c"]
-        self.assertEqual(overrides, ['model_reasoning_effort="high"', 'approval_policy="never"',
-                                     "sandbox_workspace_write.network_access=false",
-                                     'shell_environment_policy.inherit="core"'])
+        self.assertEqual(self.overrides(argv)[:3], ['model_reasoning_effort="high"', 'approval_policy="never"',
+                                                    'shell_environment_policy.inherit="core"'])
+        table = self.profile(argv, "moody")
+        self.assertIn('":workspace_roots"={"."="read"}', table)
+        self.assertIn(f'"{self.office}"="deny"', table)
+        self.assertIn("network={enabled=false}", table)
+        self.assertNotIn('="write"', table)
         self.assertTrue(argv[-1].startswith("# moody brief"))
         self.assert_no_bypass(argv)
 
@@ -199,12 +215,36 @@ class CodexDeskTests(RunDeskCase):
         plan = self.dry_run("harry", "--owl", owl_id)
         argv = plan["argv"]
         self.assertEqual(argv[:4], [config.CODEX_BIN, "exec", "--ignore-user-config", "--ignore-rules"])
-        self.assertEqual(argv[argv.index("--sandbox") + 1], "workspace-write")
         self.assertEqual(argv[argv.index("-C") + 1], f"{self.castle}/worktrees/tk-demo")
-        self.assertEqual([argv[index + 1] for index, arg in enumerate(argv) if arg == "--add-dir"],
-                         [f"{self.castle}/desks/harry/outbox"])
+        table = self.profile(argv, "harry")
+        writes = [entry for entry in table.split(", ") if entry.endswith('="write"') or '"."="write"' in entry]
+        self.assertEqual(writes, ['":workspace_roots"={"."="write"}', f'"{self.castle}/desks/harry/outbox"="write"'])
+        self.assertIn(f'"{self.castle}/desks/harry"="read"', table)
+        self.assertIn(f'"{self.castle}/tasks"="read"', table)
+        self.assertIn(f'"{self.office}"="deny"', table)
+        self.assertTrue(table.endswith("network={enabled=false}}"))
         self.assertIn(f"Owl {owl_id} was delivered", argv[-1])
         self.assert_no_bypass(argv)
+
+    def test_the_repo_git_folder_is_readable_only_from_the_office_record(self):
+        owl_id, task_id = self.request("harry", worktree="tk-demo")
+        repo = self.tmp / "repo"
+        (repo / ".git" / "worktrees" / "tk-demo").mkdir(parents=True)
+        self.assertNotIn('/.git"="read"', self.profile(self.dry_run("harry", "--owl", owl_id)["argv"], "harry"))
+        (self.office / "worktrees").mkdir(mode=0o700)
+        record = {"name": "tk-demo", "task_id": task_id, "path": f"{self.castle}/worktrees/tk-demo",
+                  "repo_dir": str(repo), "common_dir": f"{repo}/.git", "git_dir": f"{repo}/.git/worktrees/tk-demo",
+                  "branch": "fix/widget", "base": "origin/main", "repo": "acme/web-app"}
+        self.write_file(self.office / "worktrees" / "tk-demo.json", json.dumps(record))
+        table = self.profile(self.dry_run("harry", "--owl", owl_id)["argv"], "harry")
+        self.assertIn(f'"{repo}/.git"="read"', table)
+
+    def test_a_profile_path_with_unsafe_characters_is_refused(self):
+        for path in ('/tmp/a"b', "/tmp/a b", "relative", "/tmp/../etc", "/tmp//x"):
+            with self.subTest(path=path), mock.patch.object(config, "CODEX_EXTRA_READS", (path,)):
+                code, _, err = self.main("harry", "--dry-run")
+                self.assertEqual(code, 1)
+                self.assertIn("codex profile path", err)
 
     def test_another_desks_task_never_gives_harry_its_worktree(self):
         (self.castle / "worktrees" / "hermione-task").mkdir(mode=0o700)
@@ -236,6 +276,9 @@ class CodexDeskTests(RunDeskCase):
         profile = self.office / "desks" / "harry" / "codex.toml"
         for text in ('sandbox_mode = "danger-full-access"\n', 'sandbox_mode = "workspace-write"\n',
                      "[sandbox_workspace_write]\nnetwork_access = true\n",
+                     "[sandbox_workspace_write]\nnetwork_access = false\n",
+                     'default_permissions = "mine"\n', '[permissions.mine]\ndescription = "x"\n',
+                     'permissions.mine.description = "x"\n',
                      'notify = "bypass-me"\n', "[[profiles]]\nname = 1\n",
                      'model = """multi"""\n', "key = value with spaces\n"):
             with self.subTest(text=text):

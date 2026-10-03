@@ -13,7 +13,9 @@ For each regular *.json file in /Users/crisryantan/hogwarts/desks/<sender>/outbo
 6. Write a delivered copy to the recipient's inbox as <owl_id>.json (mode 0600) and mark it
    delivered. The copy names the task's parent and the TASK.md path found up the task chain.
 7. Ring the doorbell: a routine event for an interactive desk. A request to an enabled
-   headless desk under its daily cap starts run_desk. No other owl starts a run.
+   headless desk under its daily cap starts run_desk. No other owl starts a run. A desk that
+   builds in a worktree (Harry) is not started until its task has one: Ryan gets a headmaster
+   event instead, and the worktree script starts the run once the worktree is attached.
 8. Move the file, and any body file, into outbox/.sent/. A refused file goes to
    outbox/.rejected/ with a .reason file, and Ryan gets a headmaster event.
 
@@ -56,6 +58,7 @@ REJECTED_DIR = ".rejected"
 LOCK_NAME = "owl-post.lock"
 REPLY_KINDS = ("answer", "result")
 TASK_CHAIN_LIMIT = 16
+WORKTREE_SUMMARY = "a build task is waiting for its worktree: run fleet worktree for this task in your terminal"
 
 
 class Rejected(Exception):
@@ -230,6 +233,10 @@ def _ring(conn, recipient: str, owl: dict, newly_delivered: bool, now: Optional[
             return "delivered, no run"
         if not run_desk.is_enabled(recipient):
             return "headless desk not enabled"
+        if recipient in config.WORKTREE_DESKS and not pensieve.get_task(conn, owl["task_id"])["worktree"]:
+            pensieve.add_event(conn, recipient, "owlpost.needs-worktree", "headmaster", WORKTREE_SUMMARY,
+                               task_id=owl["task_id"], dedupe_key=f"owlpost:needs-worktree:{owl['id']}", now=now)
+            return "waiting for a worktree"
         if run_desk.over_daily_cap(conn, recipient, now) is not None:
             run_desk.report_cap(conn, recipient, now)
             return "daily cap reached"

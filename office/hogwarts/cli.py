@@ -203,6 +203,7 @@ HANDLERS: dict[str, Callable] = {
     "task start": lambda c, a: pensieve.start_task(c, a.task),
     "task await-close": lambda c, a: pensieve.mark_awaiting_close(c, a.task, a.repo, a.sha),
     "task commit": lambda c, a: pensieve.record_commit(c, a.task, a.repo, a.sha),
+    "task worktree": lambda c, a: pensieve.set_worktree(c, a.task, a.path),
     "task close": lambda c, a: pensieve.close_task(c, a.task, a.reason, _token(a)),
     "task show": lambda c, a: pensieve.get_task(c, a.task),
     "task list": lambda c, a: pensieve.list_tasks(c, a.desk, a.status),
@@ -314,6 +315,9 @@ def _task_parsers(commands: argparse._SubParsersAction) -> None:
     awaiting.add_argument("task")
     awaiting.add_argument("--repo")
     awaiting.add_argument("--sha")
+    attach = _sub(group, "worktree", "task worktree")
+    attach.add_argument("task")
+    attach.add_argument("--path", required=True)
     commit = _sub(group, "commit", "task commit")
     commit.add_argument("task")
     commit.add_argument("--repo", required=True)

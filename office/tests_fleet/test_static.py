@@ -38,7 +38,16 @@ KNOWN_FLAGS = {
     "--ignore-rules",
     "-c", "--sandbox", "-C", "--add-dir", "--ephemeral", "--json", "--output-last-message", "--owl", "--dry-run",
     "--mcp-job", "--desk", "-i", "-I", "-B", "-X",
+    # git, run only through gitops with the hardening flags
+    "--git-dir", "--work-tree", "--verify", "--end-of-options", "--get", "--porcelain", "--no-verify",
+    "--no-ext-diff", "--no-textconv", "--detach", "-b", "-m", "-F", "--stdin", "--force", "-z",
+    "--no-decorate", "--oneline", "--format", "--is-ancestor", "--quiet", "--name-only",
+    # the review, worktree, verify and push scripts and the push gate
+    "--task", "--repo-dir", "--branch", "--base", "--title", "--no-fetch", "--yes", "--mode",
+    "--intent-file", "--permission-profile", "--cd", "--noprofile", "--norc", "sandbox",
 }
+# Modules allowed to start processes, and the only module each may use for it.
+PROCESS_MODULES_ALLOWED = {"run_desk.py": {"subprocess"}, "gitops.py": {"subprocess"}, "verify.py": {"subprocess"}}
 PLISTS = ("owlpost", "map", "morning", "keeper", "portrait", "gringotts")
 REAL_OFFICE = "/Users/crisryantan/.hogwarts"
 REAL_CASTLE = "/Users/crisryantan/hogwarts"
@@ -103,7 +112,8 @@ class EnvironmentTests(unittest.TestCase):
         self.assertTrue(all(families[desk] == "codex" for desk in config.HEADLESS_CODEX))
         self.assertEqual(set(config.CLAUDE_TOOLS), set(config.HEADLESS_CLAUDE))
         self.assertEqual(set(config.MAX_BUDGET_USD), set(config.HEADLESS_CLAUDE))
-        self.assertEqual(set(config.CODEX_SANDBOX), set(config.HEADLESS_CODEX))
+        self.assertEqual(set(config.CODEX_ACCESS), set(config.HEADLESS_CODEX))
+        self.assertEqual(config.CODEX_ACCESS, {"harry": "write", "moody": "read"})
 
 
 class ProcessTests(unittest.TestCase):
@@ -114,18 +124,21 @@ class ProcessTests(unittest.TestCase):
                      and node.attr in PROCESS_CALLS]
             modules = imported_modules(tree) & PROCESS_MODULES
             with self.subTest(path=path.name):
-                if path.name == "run_desk.py":
-                    self.assertEqual(modules, {"subprocess"})
+                if path.name in PROCESS_MODULES_ALLOWED:
+                    self.assertEqual((modules, calls), (PROCESS_MODULES_ALLOWED[path.name], []))
                 else:
                     self.assertEqual((sorted(modules), calls), ([], []))
 
-    def test_run_desk_never_uses_a_shell(self):
-        tree = ast.parse((FLEET / "run_desk.py").read_text())
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Call):
-                for keyword in node.keywords:
-                    if keyword.arg == "shell":
-                        self.fail(f"shell= used on line {node.lineno}")
+    def test_no_process_module_uses_a_shell_keyword(self):
+        for name in PROCESS_MODULES_ALLOWED:
+            path = FLEET / name
+            if not path.exists():
+                continue
+            for node in ast.walk(ast.parse(path.read_text())):
+                if isinstance(node, ast.Call):
+                    for keyword in node.keywords:
+                        with self.subTest(path=name, line=node.lineno):
+                            self.assertNotEqual(keyword.arg, "shell")
 
     def test_nothing_is_evaluated(self):
         for path in SOURCES:

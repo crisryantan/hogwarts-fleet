@@ -17,6 +17,8 @@ USER_HOME_DIR = "/Users/crisryantan"
 CLAUDE_BIN = "/Users/crisryantan/.local/bin/claude"
 CODEX_BIN = "/opt/homebrew/bin/codex"
 PYTHON_WRAPPER = ("/usr/bin/env", "-i", "/usr/bin/python3", "-I", "-B", "-X", "pycache_prefix=/var/empty")
+GIT_BIN = "/usr/bin/git"
+BASH_BIN = "/bin/bash"
 CHILD_PATH = "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin"
 
 # Filled in at onboarding (docs/ONBOARDING.md stage 2). Later-stage scripts such as the Map read these.
@@ -48,9 +50,18 @@ CLAUDE_TOOLS = {
     "portrait": "Read,Grep,Glob,Write,Edit",
 }
 MAX_BUDGET_USD = {"hermione": "2.00", "ron": "0.25", "portrait": "2.00"}
-CODEX_SANDBOX = {"harry": "workspace-write", "moody": "read-only"}
-# Only these desks get --add-dir, and only for their own outbox.
+# Codex desks run under a fleet permission profile, never --sandbox: on 0.160.0 the --sandbox modes
+# let commands read the whole disk, and only a profile can limit reads. The profile is an allowlist:
+# the platform paths tools need, the reads below, the desk's working folder with this access,
+# its own castle folder to read, the castle tasks to read, its repo's .git to read, and no network.
+CODEX_ACCESS = {"harry": "write", "moody": "read"}
+CODEX_EXTRA_READS = ("/opt/homebrew",)
+# Only these desks may write their own outbox.
 CODEX_OUTBOX_WRITERS = ("harry",)
+# Desks that build in a worktree. The Owl Post starts them only once their task has one.
+WORKTREE_DESKS = ("harry",)
+# Reviewer for each author family. A pass needs the other family.
+REVIEWER_FOR_FAMILY = {"codex": "hermione", "claude": "moody"}
 # A Codex desk with no worktree of its own runs here, never in its desk folder.
 CODEX_WORK_DIR = "work"
 # Castle folders each Claude desk may read through --add-dir. Writes there are denied by its settings.
@@ -67,6 +78,16 @@ CLAUDE_SETTINGS_FILE = "settings.json"
 CODEX_PROFILE_FILE = "codex.toml"
 BRIEF_FILE = "BRIEF.md"
 MCP_JOB_PREFIX = "mcp-"
+
+# Git, verify and review scripts.
+GIT_TIMEOUT_SECONDS = 300
+VERIFY_TIMEOUT_SECONDS = 900
+VERIFY_OUTPUT_MAX_BYTES = 262144
+EVIDENCE_EXCERPT_LINES = 40
+DEFAULT_BASE = "origin/main"
+# Words that never leave the fleet: in branch names, commit messages and PR text.
+FLEET_WORDS = ("hogwarts", "mcgonagall", "harry", "hermione", "moody", "ron", "snape", "dumbledore",
+               "marauder", "marauders", "gringotts", "owlpost", "headmaster", "pensieve")
 
 # Size limits.
 OWL_MAX_BYTES = 65536
@@ -119,3 +140,7 @@ def runs_dir() -> str:
 
 def logs_dir() -> str:
     return f"{OFFICE_ROOT}/logs"
+
+
+def worktree_dir(name: str) -> str:
+    return f"{CASTLE_ROOT}/worktrees/{name}"

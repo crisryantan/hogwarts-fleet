@@ -132,6 +132,22 @@ def start_task(conn: Conn, task_id: str, now: Optional[int] = None) -> dict:
     return get_task(conn, task_id)
 
 
+def set_worktree(conn: Conn, task_id: str, worktree: str) -> dict:
+    """Attach a worktree to a queued or active task that has none. Write once: it never changes."""
+    task_id = ids.check("task", task_id)
+    worktree = ids.check_path(worktree, "worktree", ids.WORKTREES_ROOT)
+    with db.transaction(conn):
+        task = get_task(conn, task_id)
+        if task["status"] not in ("queued", "active"):
+            raise ConflictError("a worktree can only be attached to a queued or active task")
+        if task["worktree"] == worktree:
+            return task
+        if task["worktree"] is not None:
+            raise ConflictError("this task already has a different worktree")
+        conn.execute("UPDATE tasks SET worktree = ? WHERE id = ? AND worktree IS NULL", (worktree, task_id))
+    return get_task(conn, task_id)
+
+
 def closed_ancestors(conn: Conn, task_id: str) -> list[str]:
     return [row["id"] for row in db.fetch_all(
         conn,

@@ -4,9 +4,14 @@ Harry and Moody run on Codex, so their runs send code and diffs to OpenAI.
 Keep both desks disabled until your organization confirms Codex is approved for its source code.
 Never send warehouse rows, customer data or secrets to either reviewer, approved or not.
 
-Keep them disabled until Stage 2 also proves their read boundary. On 0.160.0 the
-fleet profile cannot stop a Codex desk reading the whole disk, including
-~/.hogwarts, ~/.ssh and ~/.codex/auth.json.
+The read boundary is closed. On 0.160.0 the --sandbox modes let commands read the
+whole disk, so run_desk never passes --sandbox to a Codex desk. It builds a fleet
+permission profile instead: an allowlist with the desk's working folder, its own
+castle folder, the castle tasks, its repo's .git folder, no network, and the office
+denied by name. Run scripts/codex-boundary-test.sh from the kit to prove that kind
+of profile on your Mac, and confirm it once more under a real codex exec run before
+enabling Harry. Permission profiles are beta in Codex, so rerun the test after
+every Codex upgrade.
 
 run_desk passes --ignore-user-config and --ignore-rules, so neither your
 ~/.codex/config.toml nor any user or project .rules file applies to a desk run.

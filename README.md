@@ -58,6 +58,7 @@ A Harry Potter themed fleet of single-purpose AI agents for Claude Code and Code
 | `claude-agents/snape.md` | Snape's user-level agent file | `~/.claude/agents/snape.md`, only if absent |
 | `install.sh` | Installs the two homes, creates the database, registers the desks and runs the tests | |
 | `scripts/owlpost-setup.sh` | Your one command to switch on the Owl Post and send a test owl (onboarding stage 3) | |
+| `scripts/codex-boundary-test.sh` | Proves the Codex desks' permission profile on your Mac: no office, no folder it isn't given, no network. Run it before enabling Harry or Moody, and after every Codex upgrade | |
 | `uninstall.sh` | A dry run by default. With `--yes` it removes the fleet and keeps an archive | |
 
 `install.sh` never touches `~/.claude/settings.json`, `~/.codex` or launchd. Those changes are yours to apply, and the onboarding guide shows how.

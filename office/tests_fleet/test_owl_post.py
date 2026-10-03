@@ -350,6 +350,15 @@ class DoorbellTests(OwlPostCase):
             self.run_pass()
         spawn.assert_called_once_with("hermione", delivered["owl_id"])
 
+    def test_a_build_desk_waits_for_its_worktree(self):
+        self.enable("harry")
+        with mock.patch.object(run_desk, "spawn", side_effect=AssertionError("spawned")) as spawn:
+            summary = self.request("harry")
+        spawn.assert_not_called()
+        self.assertEqual(summary["delivered"][0]["doorbell"], "waiting for a worktree")
+        waiting = [event for event in self.events() if event["kind"] == "owlpost.needs-worktree"]
+        self.assertEqual([(event["desk"], event["verdict"]) for event in waiting], [("harry", "headmaster")])
+
     def test_only_a_request_starts_a_run(self):
         self.enable("hermione")
         self.enable("ron")

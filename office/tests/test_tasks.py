@@ -365,3 +365,36 @@ class StartRaceTests(StoreCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class WorktreeTests(StoreCase):
+    def setUp(self):
+        super().setUp()
+        self.desks()
+
+    def test_a_worktree_attaches_once_to_an_open_task(self):
+        task = self.task()
+        attached = pensieve.set_worktree(self.conn, task["id"], worktree("tk-one"))
+        self.assertEqual(attached["worktree"], worktree("tk-one"))
+        self.assertEqual(pensieve.set_worktree(self.conn, task["id"], worktree("tk-one"))["worktree"],
+                         worktree("tk-one"))
+        with self.assertRaises(ConflictError):
+            pensieve.set_worktree(self.conn, task["id"], worktree("tk-two"))
+        self.assertEqual(pensieve.get_task(self.conn, task["id"])["worktree"], worktree("tk-one"))
+
+    def test_a_worktree_must_sit_under_the_castle_worktrees(self):
+        task = self.task()
+        for path in ("/Users/crisryantan/hogwarts/tasks/x", "/Users/crisryantan/.hogwarts/x",
+                     worktree("a/../b"), "relative/path", worktree("x") + "\n"):
+            with self.subTest(path=path), self.assertRaises(ValidationError):
+                pensieve.set_worktree(self.conn, task["id"], path)
+        self.assertIsNone(pensieve.get_task(self.conn, task["id"])["worktree"])
+
+    def test_a_task_awaiting_close_or_closed_takes_no_worktree(self):
+        task = self.task()
+        pensieve.start_task(self.conn, task["id"])
+        pensieve.mark_awaiting_close(self.conn, task["id"])
+        with self.assertRaises(ConflictError):
+            pensieve.set_worktree(self.conn, task["id"], worktree())
+        with self.assertRaises(NotFoundError):
+            pensieve.set_worktree(self.conn, "tk_ffffffffffffffff", worktree())

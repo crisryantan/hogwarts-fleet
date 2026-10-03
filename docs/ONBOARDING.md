@@ -216,7 +216,7 @@ If a step prints FAILED, the lines above it say why. The same steps by hand, wit
 ### Leave for later
 
 - `a2`, the push gate, waits for stage 5. Its script does not exist yet, and a hook that cannot import fails open and adds noise.
-- `~/.hogwarts/pending/c-codex-approval.txt` explains why Harry and Moody stay off. They send code to OpenAI, so they wait until your organization approves Codex for its source code, and until stage 5 proves their read boundary.
+- `~/.hogwarts/pending/c-codex-approval.txt` explains why Harry and Moody stay off. They send code to OpenAI, so they wait until your organization approves Codex for its source code, and until `sh scripts/codex-boundary-test.sh` passes on your Mac.
 - Optional clean-up that saves tokens in every session: switch off connectors and MCP servers you never call, with `/mcp` in a session or in your claude.ai connector settings.
 
 ## Stage 4: First session with McGonagall, and a smoke test

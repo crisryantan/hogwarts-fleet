@@ -64,9 +64,6 @@ CODEX_PROFILE = """# fleet-owned Codex profile
 model_reasoning_effort = "high"
 approval_policy = "never"
 
-[sandbox_workspace_write]
-network_access = false
-
 [shell_environment_policy]
 inherit = "core"
 """

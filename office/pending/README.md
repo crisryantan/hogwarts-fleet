@@ -69,7 +69,7 @@ File: `c-codex-approval.txt`.
 
 Every headless desk starts disabled. The Owl Post delivers to a disabled desk's inbox but never launches it, and `castle audit` escalates an owl that sits unacked for two hours. Hermione, Ron and the portrait stay disabled until you run `claude auth login`. To enable a desk you make a plain file named `enabled` in its office folder. Read the desk's `--dry-run` command first.
 
-Harry and Moody stay disabled until two things hold. Your organization must approve Codex for its source code. Stage 2 must also prove their read boundary. The fleet profile cannot stop a Codex desk reading the whole disk on 0.160.0, which includes `~/.hogwarts`, `~/.ssh` and `~/.codex/auth.json`.
+Harry and Moody stay disabled until your organization approves Codex for its source code. Their read boundary is closed: run_desk runs them under a fleet permission profile, an allowlist that denies the office and every folder it does not name, with no network. `scripts/codex-boundary-test.sh` in the kit proves that kind of profile on your Mac. Confirm it once under a real `codex exec` run before enabling Harry.
 
 ## (d) Registering and closing a task
 
