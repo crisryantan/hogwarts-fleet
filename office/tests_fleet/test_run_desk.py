@@ -207,6 +207,7 @@ class CodexDeskTests(RunDeskCase):
         self.assertIn(f'"{self.office}"="deny"', table)
         self.assertIn("network={enabled=false}", table)
         self.assertNotIn('="write"', table)
+        self.assertIn(f'"{config.TMP_WRITE_ROOT}"="deny"', table)
         self.assertTrue(argv[-1].startswith("# moody brief"))
         self.assert_no_bypass(argv)
 

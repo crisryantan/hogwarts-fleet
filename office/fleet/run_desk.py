@@ -306,6 +306,10 @@ def codex_permissions(desk: str, git_common_dir: Optional[str]) -> list:
         temp = user_temp_dir()
         if temp is not None:
             entries.append(f'{_toml_path(temp)}="write"')
+    else:
+        # Codex's ":minimal" set makes /private/tmp writable. A read-only desk writes nothing, and only
+        # a deny outranks that write, so the folder is denied outright (reads included).
+        entries.append(f'{_toml_path(config.TMP_WRITE_ROOT)}="deny"')
     if git_common_dir is not None:
         entries.append(f'{_toml_path(git_common_dir)}="read"')
     entries.append(f'{_toml_path(config.OFFICE_ROOT)}="deny"')
