@@ -8,7 +8,10 @@
       "Bash(~/.hogwarts/bin/castle *)",
       "Bash(castle *)",
       "Bash(/usr/bin/env -i /usr/bin/python3 *)",
-      "Bash(/usr/bin/python3 -I -B *)"
+      "Bash(/usr/bin/python3 -I -B *)",
+      "Bash(/Users/crisryantan/.hogwarts/bin/fleet *)",
+      "Bash(~/.hogwarts/bin/fleet *)",
+      "Bash(fleet *)"
     ]
   }
 }

@@ -14,7 +14,7 @@ A Harry Potter themed fleet of single-purpose AI agents for Claude Code and Code
   </tr>
 </table>
 
-**What ships today:** the store and its `castle` CLI, the castle, McGonagall, Snape, the Owl Post and the session hooks, with 380 store tests and 119 fleet tests. The review loop, the PR patrol and the nightly memory review are designed, and their desks, briefs, settings and launchd templates are here, but the scripts that drive them come in later stages. [DESIGN.md](docs/DESIGN.md#known-limits) lists the gaps.
+**What ships today:** the store and its `castle` CLI, the castle, McGonagall, Snape, the Owl Post and the session hooks, and the review loop: the `fleet` command's worktree, verify, review and push scripts and the push gate, with 383 store tests and 159 fleet tests. The review loop is tested on temp repos but not yet on real tasks. The PR patrol and the nightly memory review are designed, and their desks, briefs, settings and launchd templates are here, but the scripts that drive them come in later stages. [DESIGN.md](docs/DESIGN.md#known-limits) lists the gaps.
 
 ## Start here
 
@@ -53,7 +53,7 @@ A Harry Potter themed fleet of single-purpose AI agents for Claude Code and Code
 
 | Path | What it is | Installed to |
 | --- | --- | --- |
-| `office/` | The store, `bin/castle`, the fleet scripts and hooks, both test suites, desk briefs and settings, launchd templates, pending settings snippets and the avatars | `~/.hogwarts` |
+| `office/` | The store, `bin/castle`, `bin/fleet`, the fleet scripts and hooks, both test suites, desk briefs and settings, launchd templates, pending settings snippets and the avatars | `~/.hogwarts` |
 | `castle/` | The charter, an empty plan, standing orders, desk folders, and McGonagall's settings and agent file | `~/hogwarts` |
 | `claude-agents/snape.md` | Snape's user-level agent file | `~/.claude/agents/snape.md`, only if absent |
 | `install.sh` | Installs the two homes, creates the database, registers the desks and runs the tests | |

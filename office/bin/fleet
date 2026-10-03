@@ -1,0 +1,2 @@
+#!/bin/sh
+exec /usr/bin/env -i /usr/bin/python3 -I -B -X pycache_prefix=/var/empty -c 'import sys; sys.path.insert(0, "/Users/crisryantan/.hogwarts"); from fleet.tools import main; sys.exit(main())' "$@"

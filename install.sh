@@ -169,7 +169,7 @@ fi
 
 find "$OFFICE" "$CASTLE" -type d -exec chmod 700 {} +
 find "$OFFICE" "$CASTLE" -type f -exec chmod 600 {} +
-chmod 700 "$OFFICE/bin/castle"
+chmod 700 "$OFFICE/bin/castle" "$OFFICE/bin/fleet"
 
 # --- Snape's agent file, only if missing ------------------------------------
 

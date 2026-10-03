@@ -117,15 +117,21 @@ def child_env() -> dict:
     }
 
 
-def git(args: list, git_dir: str, work_tree: Optional[str] = None, check: bool = True,
-        timeout: Optional[int] = None) -> str:
+def git(args: list, git_dir: Optional[str], work_tree: Optional[str] = None, check: bool = True,
+        timeout: Optional[int] = None, folder: Optional[str] = None) -> str:
     """Run one git command with the hardening flags. Returns stdout. Never uses a shell."""
-    argv = [config.GIT_BIN, "--git-dir", git_dir]
-    if work_tree is not None:
-        argv += ["--work-tree", work_tree]
+    if git_dir is not None:
+        argv = [config.GIT_BIN, "--git-dir", git_dir]
+        if work_tree is not None:
+            argv += ["--work-tree", work_tree]
+        cwd = work_tree or git_dir
+    elif folder is not None:
+        argv, cwd = [config.GIT_BIN, "-C", folder], folder
+    else:
+        raise FleetError("git needs a git folder or a working folder")
     argv += [*HARDENING, *args]
     try:
-        done = subprocess.run(argv, cwd=work_tree or git_dir, env=child_env(), stdin=subprocess.DEVNULL,
+        done = subprocess.run(argv, cwd=cwd, env=child_env(), stdin=subprocess.DEVNULL,
                               capture_output=True, timeout=timeout or config.GIT_TIMEOUT_SECONDS, check=False)
     except subprocess.TimeoutExpired:
         raise FleetError(f"git {args[0]} timed out") from None
@@ -134,6 +140,14 @@ def git(args: list, git_dir: str, work_tree: Optional[str] = None, check: bool =
         err = common.one_line(done.stderr.decode("utf-8", "replace"), 300)
         raise FleetError(f"git {args[0]} failed: {err}")
     return out
+
+
+def git_in(folder: str, args: list, check: bool = True, timeout: int = 10) -> str:
+    """git in a folder Ryan's own session works in, found the normal way, with the hardening flags.
+
+    Only the push gate uses this, for checks that must stay fast. Desk worktrees use git() instead.
+    """
+    return git(args, git_dir=None, work_tree=None, check=check, timeout=timeout, folder=folder)
 
 
 def rev(record: dict, ref: str = "HEAD") -> str:

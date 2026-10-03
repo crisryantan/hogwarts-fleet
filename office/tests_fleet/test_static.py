@@ -45,7 +45,10 @@ KNOWN_FLAGS = {
     # the review, worktree, verify and push scripts and the push gate
     "--task", "--repo-dir", "--branch", "--base", "--title", "--no-fetch", "--yes", "--mode",
     "--intent-file", "--permission-profile", "--cd", "--noprofile", "--norc", "sandbox",
+    "-A", "-P", "--no-tags", "-U0",
 }
+# Modules whose flag-shaped constants describe commands they read and refuse, never ones they run.
+FLAG_TABLE_MODULES = {"push_gate.py"}
 # Modules allowed to start processes, and the only module each may use for it.
 PROCESS_MODULES_ALLOWED = {"run_desk.py": {"subprocess"}, "gitops.py": {"subprocess"}, "verify.py": {"subprocess"}}
 PLISTS = ("owlpost", "map", "morning", "keeper", "portrait", "gringotts")
@@ -150,6 +153,8 @@ class ProcessTests(unittest.TestCase):
 
     def test_every_flag_in_the_code_is_a_known_safe_flag(self):
         for path in SOURCES:
+            if path.name in FLAG_TABLE_MODULES:
+                continue
             for node in ast.walk(ast.parse(path.read_text())):
                 if isinstance(node, ast.Constant) and isinstance(node.value, str) and FLAG_SHAPE.fullmatch(node.value):
                     with self.subTest(path=path.name, flag=node.value):

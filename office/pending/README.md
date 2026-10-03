@@ -16,7 +16,7 @@ cd /Users/crisryantan/.hogwarts && /usr/bin/env -i /usr/bin/python3 -I -B -X pyc
 /Users/crisryantan/.hogwarts/bin/castle doctor
 ```
 
-## (a) User settings: deny the office, then the push gate
+## (a) User settings: the deny rules and the push gate
 
 File: `~/.claude/settings.json`. Back it up first:
 
@@ -26,30 +26,11 @@ cp ~/.claude/settings.json ~/.claude/settings.json.pre-hogwarts-$(date +%Y%m%d-%
 
 There are two snippets. Merge each one by hand: add the list items to the existing arrays and keep everything else.
 
-`a1-user-settings-deny.merge.json` is safe to apply now:
+`a1-user-settings-deny.merge.json` denies the office to your own Claude sessions through the file tools, and denies the usual ways of running `castle` and `fleet` from Bash. If your settings have no `deny` list yet, this adds one. A Bash deny rule only matches the command as Claude usually writes it. It is not a wall around the program, so the sandbox stays the real boundary for desks. Apply a1 before you first summon Snape. He is a user-level subagent with Read, so until a1 is in place he could read the office from any of your sessions.
 
-```json
-{
-  "permissions": {
-    "deny": [
-      "Read(~/.hogwarts/**)",
-      "Edit(~/.hogwarts/**)",
-      "Write(~/.hogwarts/**)",
-      "Bash(/Users/crisryantan/.hogwarts/bin/castle *)",
-      "Bash(~/.hogwarts/bin/castle *)",
-      "Bash(castle *)",
-      "Bash(/usr/bin/env -i /usr/bin/python3 *)",
-      "Bash(/usr/bin/python3 -I -B *)"
-    ]
-  }
-}
-```
+`a2-user-settings-push-gate.merge.json` adds a `PreToolUse` hook on `Bash` that runs the push gate. If you already have a `PreToolUse` Bash hook, it goes next to it as a new entry in the same array. Check afterwards: `grep -c push_gate ~/.claude/settings.json` prints 1.
 
-Your own Claude sessions get no access to the office through the file tools, and the usual ways of running the store from Bash are denied. If your settings have no `deny` list yet, this adds one. The castle and desk settings use the same Read, Edit and Write rules. A Bash deny rule only matches the command as Claude usually writes it. It is not a wall around the program, so the sandbox stays the real boundary for desks.
-
-Apply a1 before you first summon Snape. He is a user-level subagent with Read, so until a1 is in place he could read the office from any of your sessions.
-
-`a2-user-settings-push-gate.merge.json` adds a `PreToolUse` hook on `Bash` that runs the push gate. If you already have a `PreToolUse` Bash hook, it goes next to it as a new entry in the same array. Apply it only after the push gate script (`fleet/hooks/push_gate.py`, Stage 2) exists and passes its tests. Until then the hook would fail to import on every Bash call. A failing hook exits 1, which Claude Code treats as a non-blocking error, so it would fail open and add noise.
+The push gate blocks an agent's `git push` unless every commit it pushes has a review pass from the other model family. It refuses force, delete and mirror pushes, pushes chained to other commands, and anything it cannot read, and it fails closed. It never allows anything your settings would otherwise ask about. It reads text, so it is a guardrail against an agent pushing by habit or mistake, not a wall: a session with your permissions can always push some other way. Pushes you type in your own terminal never reach it.
 
 Undo: copy the backup back over `~/.claude/settings.json`.
 
@@ -91,3 +72,61 @@ She routes the task only after you say it is registered. A request for a task th
 Paste the token from the first command into the second when it waits for stdin. The token works once and expires.
 
 Headmaster events stay in the digest and on each prompt until you ack them with `castle event ack <id>`.
+
+## (e) Codex hooks: the push gate for your own Codex sessions
+
+File: `~/.codex/hooks.json`. Create it if it doesn't exist, and back it up first if it does. Merge `a3-codex-hooks-push-gate.merge.json` into it: the `PreToolUse` entry goes into its `hooks` object. Codex sends hooks the same fields as Claude Code and blocks on exit 2, so the same gate script works.
+
+Codex runs a hook only after you trust it: open a Codex session, type `/hooks`, and trust the push gate entry.
+
+Harry and Moody never load it, because their runs use `--ignore-user-config` and `features.hooks = false`, and they have no network. So this covers your own interactive Codex sessions only.
+
+Undo: restore the backup, or remove the entry.
+
+## (f) Desk settings: the push gate for headless desks
+
+Files: `~/.hogwarts/desks/hermione/settings.json`, `ron/settings.json` and `portrait/settings.json`. Merge `a4-desk-settings-push-gate.merge.json` into each one's top level as a `hooks` object.
+
+This is defence in depth: those desks have no network, so a push fails anyway. Whether hooks in a `--settings` file run under `--restricted` is still an open check. If the hook cannot load, it exits 1, which Claude Code treats as a non-blocking error, so it changes nothing else.
+
+Undo: remove the `hooks` object again.
+
+## (g) The review loop, step by step
+
+Every `fleet` command prints one JSON object with `"ok": true` or `"ok": false` and a reason. Find task ids with `~/.hogwarts/bin/castle task list`.
+
+1. McGonagall writes TASK.md, you say go, and you register her task as in (d).
+2. She posts a request to Harry. The Owl Post holds it and you get a headmaster event: a build task is waiting for its worktree.
+3. Give Harry's task a worktree on a new branch. If Harry is enabled, his run starts:
+
+```
+~/.hogwarts/bin/fleet worktree <harry-task-id> --repo-dir ~/Documents/<repo> --branch <new-branch>
+```
+
+4. Harry leaves his changes uncommitted and posts a handoff with a COMMIT MESSAGE section. The review script commits for him outside his sandbox, runs the acceptance checks, and runs Hermione:
+
+```
+~/.hogwarts/bin/fleet review <harry-task-id>
+```
+
+5. On CHANGES, start Harry's fix round, then review again. He reads `review-latest.md` next to TASK.md:
+
+```
+~/.hogwarts/bin/fleet build <harry-task-id>
+```
+
+6. On PASS, push exactly the reviewed commit. It shows the commits and waits for you to type the branch name, then prints the `gh` command for a draft PR. Read the PR text before you run that:
+
+```
+~/.hogwarts/bin/fleet push <harry-task-id>
+```
+
+7. For a commit from one of your own Claude sessions, Moody reviews it in a detached worktree. On PASS, that session's `git push` gets through the gate. For a fix round, pass `--task <id>` instead of `--title`:
+
+```
+~/.hogwarts/bin/fleet review own --repo-dir ~/Documents/<repo> --title "<what the change does>"
+```
+
+8. To rerun the acceptance checks on their own: `~/.hogwarts/bin/fleet verify <task-id>`. Each check runs inside a Codex permission profile with no network and no office, through `codex sandbox`, which runs no model.
+
+Moody's reviews send the diff to OpenAI, so `fleet review own` runs only once Moody is enabled, after your organization approves Codex for its source code.
