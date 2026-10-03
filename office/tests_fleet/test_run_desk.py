@@ -212,13 +212,17 @@ class CodexDeskTests(RunDeskCase):
 
     def test_harry_writes_only_his_worktree_and_outbox(self):
         owl_id, _ = self.request("harry", worktree="tk-demo")
-        plan = self.dry_run("harry", "--owl", owl_id)
+        with mock.patch.object(run_desk, "user_temp_dir", return_value="/private/var/folders/ab/cd/T"):
+            plan = self.dry_run("harry", "--owl", owl_id)
         argv = plan["argv"]
         self.assertEqual(argv[:4], [config.CODEX_BIN, "exec", "--ignore-user-config", "--ignore-rules"])
         self.assertEqual(argv[argv.index("-C") + 1], f"{self.castle}/worktrees/tk-demo")
         table = self.profile(argv, "harry")
         writes = [entry for entry in table.split(", ") if entry.endswith('="write"') or '"."="write"' in entry]
-        self.assertEqual(writes, ['":workspace_roots"={"."="write"}', f'"{self.castle}/desks/harry/outbox"="write"'])
+        self.assertEqual(writes, ['":workspace_roots"={"."="write"}', f'"{self.castle}/desks/harry/outbox"="write"',
+                                  f'"{config.TMP_WRITE_ROOT}"="write"', '"/private/var/folders/ab/cd/T"="write"'])
+        self.assertIn(f'"{self.castle}/CLAUDE.md"="read"', table)
+        self.assertIn(f'"{self.castle}/AGENTS.md"="read"', table)
         self.assertIn(f'"{self.castle}/desks/harry"="read"', table)
         self.assertIn(f'"{self.castle}/tasks"="read"', table)
         self.assertIn(f'"{self.office}"="deny"', table)

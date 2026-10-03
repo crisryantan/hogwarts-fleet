@@ -10,12 +10,14 @@
 #   -c permissions.fleet-moody={...} -c default_permissions="fleet-moody"
 # never from --sandbox. On 0.160.0 the --sandbox modes let commands read the whole disk.
 # The profile is an allowlist:
-#   - ":minimal" platform paths and /opt/homebrew, read
+#   - ":minimal" platform paths, /opt/homebrew, /Applications/Xcode.app and /Library/Developer, read
+#   - the castle charter (CLAUDE.md and AGENTS.md), read
 #   - the working folder (his task's worktree, else desks/moody/work), read
 #   - ~/hogwarts/desks/moody and ~/hogwarts/tasks, read
 #   - the repo's .git folder from the office worktree record, read
 #   - ~/.hogwarts, denied by name; network off
-# Proven on 0.160.0 by codex-boundary-test.sh (scripts/ in the fleet kit).
+# Proven on 0.160.0 by codex-boundary-test.sh and, under real codex exec runs,
+# codex-exec-boundary-test.py (both in scripts/ in the fleet kit).
 # This file must not set sandbox_mode, default_permissions, [permissions.*] or
 # [sandbox_workspace_write]: run_desk refuses a profile that does.
 # Never any bypass or auto-approve flag.

@@ -1,0 +1,167 @@
+"""Proves the Codex desks' boundaries under real `codex exec` runs, the way run_desk launches them.
+
+Run it yourself in Terminal:
+  /usr/bin/python3 -I -B scripts/codex-exec-boundary-test.py   (from your clone of the kit)
+
+For Harry (who writes) and Moody (read-only) in turn, it builds the desk's exact Codex command from
+the office (its codex.toml and the fleet permission profile) and points it at a throwaway git folder
+holding one small script, probe.sh. Codex is asked only to run `sh probe.sh`. The probes inside it run
+under the sandbox whatever the model thinks of them, and each prints its own exit code and error,
+which this script reads from Codex's event stream.
+
+A probe that should be blocked passes only when the sandbox itself refused it ("Operation not
+permitted", or a failed name lookup for the network). Any other failure is inconclusive, and
+inconclusive counts as failed. The script exits 1 unless every probe for both desks passed.
+
+This sends a short prompt and the probes' error messages to OpenAI, and costs a few cents per desk.
+No code, no office file and no secret is sent. The throwaway folders are deleted at the end.
+"""
+import json
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+
+OFFICE = str(Path.home() / ".hogwarts")
+HOME_DIR = str(Path.home())
+sys.path.insert(0, OFFICE)
+from fleet import config, run_desk  # noqa: E402
+
+PID = os.getpid()
+TMP_PROBE = f"{config.TMP_WRITE_ROOT}/fleet-exec-probe-{PID}"
+USER_TEMP = run_desk.user_temp_dir()
+REFUSED = ("Operation not permitted",)
+NO_NETWORK = ("Could not resolve host", "Couldn't connect", "Operation not permitted")
+PROMPT = ("This is a check of your sandbox. Run exactly one shell command, `sh probe.sh`, in the current folder. "
+          "It only prints test results. Do not run anything else, do not edit the script, and then reply with its "
+          "output.")
+
+passed = failed = 0
+
+
+def probes(desk, work, other):
+    """(name, label, command, expect) for one desk. expect is allow, refuse or offline."""
+    writes = desk in config.CODEX_ACCESS and config.CODEX_ACCESS[desk] == "write"
+    rows = [
+        ("office", "cannot list the office", f"ls {OFFICE}", "refuse"),
+        ("other_read", "cannot read a folder it was not given", f"cat {other}/notes.txt", "refuse"),
+        ("other_write", "cannot write outside its folders", f"touch {other}/new.txt", "refuse"),
+        ("network", "has no network", "curl -sS -m 8 -o /dev/null https://example.com", "offline"),
+        ("own_read", "can read its own worktree", f"cat {work}/probe.sh", "allow"),
+        ("python", "can run Python from Xcode", "/usr/bin/python3 -I -c pass", "allow"),
+        ("own_write", "can write its own worktree" if writes else "cannot write its own worktree",
+         f"touch {work}/ok.txt", "allow" if writes else "refuse"),
+        ("tmp_write", "can write /private/tmp" if writes else "cannot write /private/tmp",
+         f"touch {TMP_PROBE}-{desk}", "allow" if writes else "refuse"),
+    ]
+    if USER_TEMP:
+        rows.append(("user_temp", "can write the user temp folder" if writes else "cannot write the user temp folder",
+                     f"touch {USER_TEMP}/fleet-exec-probe-{PID}-{desk}", "allow" if writes else "refuse"))
+    return rows
+
+
+def probe_script(rows):
+    lines = ["#!/bin/sh"]
+    for name, _, command, _ in rows:
+        lines.append(f"out=$({command} 2>&1 >/dev/null); printf 'PROBE {name} %s %s\\n' \"$?\" "
+                     f"\"$(printf '%s' \"$out\" | head -c 160 | tr '\\n' ' ')\"")
+    lines.append("echo PROBES DONE")
+    return "\n".join(lines) + "\n"
+
+
+def report(ok, label, detail=""):
+    global passed, failed
+    if ok is True:
+        passed += 1
+        print(f"   OK           {label}")
+        return
+    failed += 1
+    word = "FAILED      " if ok is False else "INCONCLUSIVE"
+    print(f"   {word} {label}{(': ' + detail) if detail else ''}")
+
+
+def judge(expect, code, err):
+    if expect == "allow":
+        return (True, "") if code == 0 else (False, f"exit {code} {err}".strip())
+    if code == 0:
+        return False, "the desk got in"
+    markers = REFUSED if expect == "refuse" else NO_NETWORK
+    if any(marker in err for marker in markers):
+        return True, ""
+    return None, f"exit {code} without a sandbox refusal: {err}".strip()
+
+
+def run_desk_check(desk):
+    test = f"{HOME_DIR}/.fleet-exec-test-{PID}-{desk}"
+    work, other = f"{test}/work", f"{test}/other-project"
+    rows = probes(desk, work, other)
+    print(f"\n{desk}: running its Codex command (about a minute)")
+    try:
+        os.makedirs(work, mode=0o700)
+        os.makedirs(other, mode=0o700)
+        with open(f"{other}/notes.txt", "w") as handle:
+            handle.write("not for the desk\n")
+        with open(f"{work}/probe.sh", "w") as handle:
+            handle.write(probe_script(rows))
+        subprocess.run([config.GIT_BIN, "init", "-q", work], check=True)
+        profile = run_desk._text(open(f"{OFFICE}/desks/{desk}/codex.toml", "rb").read(), "codex profile")
+        argv = [config.CODEX_BIN, "exec", "--ignore-user-config", "--ignore-rules"]
+        for override in run_desk.parse_codex_profile(profile):
+            argv += ["-c", override]
+        argv += run_desk.codex_permissions(desk, None)
+        argv += ["-C", work, "--ephemeral", "--json", "--output-last-message", f"{test}/last.md", PROMPT]
+        run_desk.guard(argv)
+        done = subprocess.run(argv, cwd=work, env=run_desk.child_env(), stdin=subprocess.DEVNULL,
+                              capture_output=True, timeout=600)
+        if done.returncode != 0:
+            report(False, "Codex finished cleanly", f"exit {done.returncode}")
+        results = {}
+        for line in done.stdout.decode("utf-8", "replace").splitlines():
+            try:
+                event = json.loads(line)
+            except ValueError:
+                continue
+            item = event.get("item") if isinstance(event, dict) else None
+            if event.get("type") != "item.completed" or not isinstance(item, dict):
+                continue
+            if item.get("type") != "command_execution":
+                continue
+            for out_line in str(item.get("aggregated_output", "")).splitlines():
+                parts = out_line.split(" ", 3)
+                if len(parts) >= 3 and parts[0] == "PROBE" and parts[2].isdigit():
+                    results.setdefault(parts[1], (int(parts[2]), parts[3] if len(parts) > 3 else ""))
+        for name, label, _, expect in rows:
+            if name not in results:
+                report(None, label, "the probe printed nothing")
+                continue
+            ok, detail = judge(expect, *results[name])
+            report(ok, label, detail)
+        if len(results) < len(rows):
+            try:
+                with open(f"{test}/last.md") as handle:
+                    reply = handle.read().strip()
+            except OSError:
+                reply = "(no final reply)"
+            print("   Codex's final reply, first lines:")
+            print("\n".join("      " + line for line in reply.splitlines()[:6]))
+    finally:
+        shutil.rmtree(test, ignore_errors=True)
+
+
+try:
+    for desk in ("harry", "moody"):
+        run_desk_check(desk)
+finally:
+    for path in [f"{TMP_PROBE}-harry", f"{TMP_PROBE}-moody"] + (
+            [f"{USER_TEMP}/fleet-exec-probe-{PID}-{d}" for d in ("harry", "moody")] if USER_TEMP else []):
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+print("")
+if failed == 0:
+    print(f"All {passed} checks passed for Harry and Moody under real codex exec runs. Test folders deleted.")
+    sys.exit(0)
+print(f"{failed} check(s) failed or were inconclusive, {passed} passed. Copy everything above and paste it to Claude.")
+sys.exit(1)

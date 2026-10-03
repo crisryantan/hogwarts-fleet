@@ -259,6 +259,27 @@ def _claude_argv(desk: str, row: dict, brief: str, prompt: str, mcp_job: Optiona
     return argv, config.castle_desk_dir(desk), model
 
 
+DARWIN_USER_TEMP_DIR = 65537  # _CS_DARWIN_USER_TEMP_DIR in macOS unistd.h; os.confstr_names lacks it on 3.9
+
+
+def user_temp_dir() -> Optional[str]:
+    """The per-user temp folder macOS tools such as xcrun cache into, as a real path, or None.
+
+    Codex's own workspace-write mode allows it too. Without it /usr/bin/python3 prints an xcrun
+    cache error into every test that reads a child's stderr.
+    """
+    try:
+        value = os.confstr(DARWIN_USER_TEMP_DIR)
+    except (OSError, ValueError):
+        return None
+    if not value:
+        return None
+    try:
+        return gitops.check_safe_path(os.path.realpath(value.rstrip("/")), "the user temp folder")
+    except FleetError:
+        return None
+
+
 def _toml_path(path: str) -> str:
     return '"' + gitops.check_safe_path(path, "a codex profile path") + '"'
 
@@ -276,8 +297,15 @@ def codex_permissions(desk: str, git_common_dir: Optional[str]) -> list:
     entries.append(f'":workspace_roots"={{"."="{access}"}}')
     entries.append(f'{_toml_path(config.castle_desk_dir(desk))}="read"')
     entries.append(f'{_toml_path(config.CASTLE_ROOT + "/tasks")}="read"')
+    for charter in config.CASTLE_CHARTERS:
+        entries.append(f'{_toml_path(config.CASTLE_ROOT + "/" + charter)}="read"')
     if desk in config.CODEX_OUTBOX_WRITERS:
         entries.append(f'{_toml_path(config.castle_desk_dir(desk) + "/outbox")}="write"')
+    if access == "write":
+        entries.append(f'{_toml_path(config.TMP_WRITE_ROOT)}="write"')
+        temp = user_temp_dir()
+        if temp is not None:
+            entries.append(f'{_toml_path(temp)}="write"')
     if git_common_dir is not None:
         entries.append(f'{_toml_path(git_common_dir)}="read"')
     entries.append(f'{_toml_path(config.OFFICE_ROOT)}="deny"')
