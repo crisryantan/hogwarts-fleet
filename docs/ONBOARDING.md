@@ -52,7 +52,7 @@ command -v git jq gh rg shellcheck claude codex
 
 ## Stage 1: Clone and install
 
-1. Sign `gh` in so you can clone a private repo. A browser window opens and you approve it there.
+1. Sign `gh` in. The PR watcher uses it in a later stage. A browser window opens and you approve it there.
 
    ```
    gh auth login
