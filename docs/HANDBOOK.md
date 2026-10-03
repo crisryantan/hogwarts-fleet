@@ -7,6 +7,56 @@ This is the practical guide: which program to open, what to type, and who to ask
 - **0** things an agent can merge, deploy or send without you.
 - **2** words that close a task: "Mischief managed", followed by its id.
 
+## Start here
+
+From McGonagall to the whole fleet. Part 1 works as soon as onboarding stage 4 passes. Part 2 builds the rest with Claude, one stage at a time. Each step says where to do it: the **Terminal** app, or the **Code tab** in the Claude desktop app. You don't need an IDE.
+
+### Part 1: McGonagall, from day one
+
+1. **Terminal: sign the Claude command line in.** A browser window opens. Approve it there, then check. Done when it says you're logged in.
+
+   ```
+   claude auth login
+   claude auth status
+   ```
+
+2. **Code tab: open McGonagall.** Start a new session and pick the `hogwarts` folder in your home folder (no dot). Say yes when it asks whether you trust the folder. Then send: "What's in flight, and is anything waiting on me?" Done when she answers as McGonagall with a short digest. If she doesn't, type `/agents` and pick mcgonagall, or use the Terminal instead: `cd ~/hogwarts && claude --agent mcgonagall`.
+3. **Code tab: give her one real ask.** Say what you want in your own words. Claude asks before she writes `tasks/<id>/TASK.md`; allow it, read it, fix anything wrong, then reply "go". She hands you one `castle task create` command.
+4. **Terminal: register the task.** Paste the command she gave you, then check it's there with `~/.hogwarts/bin/castle task list`.
+5. **Both: do the work.** Until Harry is switched on, you do the work in your usual Claude session in that repo. Mark the task started first:
+
+   ```
+   ~/.hogwarts/bin/castle task start <task-id>
+   ```
+
+6. **Both: close it.** After you merge, mark it ready to close in the Terminal, then type `Mischief managed <task-id>` to McGonagall. Done when she confirms the task closed. If she says she couldn't confirm it was you typing, close it from the Terminal with `castle token mint` and `castle task close`, as in [Troubleshooting](#troubleshooting).
+
+   ```
+   ~/.hogwarts/bin/castle task await-close <task-id>
+   ```
+
+7. **Any session: ask Snape for numbers.** "Use the snape agent to..." He answers with the query behind every number.
+
+### Part 2: building the rest, one stage at a time
+
+8. **Decide on Codex for your organization's code.** Harry and Moody run on Codex, which sends code to OpenAI. Confirm it's approved before the review stage.
+9. **Terminal: lift the deny rules for the build.** Claude can't edit the fleet's office while the rules are on. Keep a copy of your settings with the rules, then restore the backup you made before adding them. That also drops any other settings change made since that backup, so if you've changed settings since, ask Claude to remove just the eight fleet rules instead.
+
+   ```
+   cp -p ~/.claude/settings.json ~/.claude/settings.json.with-hogwarts-deny
+   cp -p ~/.claude/settings.json.pre-hogwarts-<timestamp> ~/.claude/settings.json
+   ```
+
+10. **Code tab: ask Claude to build the stage.** Start a new session in a folder outside `~/hogwarts`, such as your clone of this repo, and send: "Build the review-loop stage of the Hogwarts fleet from docs/DESIGN.md and docs/ONBOARDING.md stage 5. The deny rules are lifted for this session." Claude builds, tests and reviews it, and shows you anything that touches your settings or background jobs before it changes.
+11. **Terminal: put the deny rules back.** Done when `grep -c hogwarts ~/.claude/settings.json` prints a number above zero.
+
+    ```
+    cp -p ~/.claude/settings.json.with-hogwarts-deny ~/.claude/settings.json
+    ```
+
+12. **Terminal: switch desks on, one at a time.** Claude gives you each desk's dry run to read and the one command that switches it on. Do one desk, try it, then the next.
+13. **Repeat** steps 9 to 12 for the shadow stage (Ron, the Map and Gringotts, three days in shadow mode) and the memory stage (Dumbledore's nightly review).
+
 ## The tools
 
 Four programs, and only one you need every day. Three of them live in the terminal. The terminal is the Terminal app on your Mac: press Cmd+Space, type Terminal, and press Enter. Spotlight only finds Mac apps, so typing a command-line tool's name there finds nothing. You type those names inside Terminal instead.
@@ -20,13 +70,49 @@ Four programs, and only one you need every day. Three of them live in the termin
 
 ## One-time setup
 
-[ONBOARDING.md](ONBOARDING.md) covers the whole setup. One extra is worth doing once.
+[ONBOARDING.md](ONBOARDING.md) walks through the whole setup with a check at every stage. These are the six steps to have done before the first run. Paste one command at a time into Terminal and press Enter.
 
-**Make `castle` a short command.** This adds one line to your shell settings so you can type `castle` instead of the full path. Open a new Terminal window afterwards.
+1. **Sign the Claude command line in.** The desktop app has its own sign-in, so the terminal version needs one too. Headless desks like Ron and the portrait use it. A browser window opens and you approve it there.
 
-```
-echo "alias castle='$HOME/.hogwarts/bin/castle'" >> ~/.zshrc
-```
+   ```
+   claude auth login
+   ```
+
+   Check: `claude auth status` shows you as logged in.
+
+2. **Confirm Codex is signed in, and approved.** Before Harry or Moody touch your organization's code, confirm Codex is approved for it. Until then, none of that code goes to Codex.
+
+   ```
+   codex login status
+   ```
+
+3. **Check the fleet's database is healthy.** This reports permissions, the schema version and an integrity check, all as JSON.
+
+   ```
+   ~/.hogwarts/bin/castle doctor
+   ```
+
+4. **Optional: make `castle` a short command.** This adds one line to your shell settings so you can type `castle` instead of the full path. Open a new Terminal window afterwards.
+
+   ```
+   echo "alias castle='$HOME/.hogwarts/bin/castle'" >> ~/.zshrc
+   ```
+
+5. **Keep your own Claude sessions out of the office.** Back up your Claude settings first, then add the deny rules from `~/.hogwarts/pending/a1-user-settings-deny.merge.json`. They stop your own sessions, and Snape, from reading the fleet's office or running `castle`. Onboarding stage 3.1 has the merge command. You can also ask Claude to do the merge; approve the edit yourself and keep the backup next to the file.
+
+   ```
+   cp -p ~/.claude/settings.json ~/.claude/settings.json.pre-hogwarts-$(date +%Y%m%d-%H%M)
+   ```
+
+   Check: `grep -c hogwarts ~/.claude/settings.json` prints a number above zero.
+
+6. **Switch on the Owl Post.** One command runs every step and prints OK or FAILED after each one. It checks the outboxes, runs one pass by hand, installs the background job, and sends a test owl from McGonagall to Hermione. Run it from your clone of the repo.
+
+   ```
+   sh ~/hogwarts-fleet/scripts/owlpost-setup.sh
+   ```
+
+   Check: the last line says all six steps passed. The sent file is renamed to `owl_<id>-hello.json`, and the owl lands in Hermione's inbox as `owl_<id>.json`.
 
 ## Your first session
 
@@ -62,19 +148,19 @@ The name after the dash is the job. When in doubt, ask McGonagall. When you know
 
 ## What's live
 
-What works once onboarding stage 4 passes, and what switches on next.
+What each piece looks like once onboarding is done, and what switches on next.
 
 | Desk or piece | State | What switches it on |
 | --- | --- | --- |
-| The store and the castle | Live | Nothing. `castle doctor` confirms it. |
-| McGonagall - Chief of Staff | Live | A session opened in `~/hogwarts`. |
-| Snape - Data Analyst | Live in every Claude session | The `a1` deny rules first, so your own sessions can't read the office. |
-| Owl Post - Message Router | Loaded | `~/.hogwarts/pending/b-owlpost-launchctl.txt`, in onboarding stage 3. |
-| Hermione - Staff Engineer | Installed, off | The review loop, onboarding stage 5.1. |
-| Harry - Senior Engineer and Moody - Security Reviewer | Installed, off | Codex approved for your organization's source code, then the review loop. |
-| Ron - Release Engineer and the Marauder's Map | Ron installed and off. The Map is not built yet | The shadow stage, 5.2. |
-| Dumbledore - Knowledge Manager | Installed, off | The memory stage, 5.3. |
-| Gringotts - Backup | Not built yet | The shadow stage, 5.2. |
+| The store and the castle | Live after onboarding stage 1 | Nothing. `castle doctor` confirms it. |
+| McGonagall - Chief of Staff | Installed at stage 1, live from stage 4 | Open a session in `~/hogwarts` and trust the folder. |
+| Snape - Data Analyst | Live in every Claude session after stage 3 | Nothing more, once the stage 3 deny rules keep your own sessions out of the office. |
+| Owl Post - Message Router | Live after onboarding stage 3 | Nothing more. It wakes whenever a desk writes to its outbox. `scripts/owlpost-setup.sh` switches it on and sends a test owl to Hermione. |
+| Hermione - Staff Engineer | Installed, off | `claude auth login` (stage 2), then the review stage's scripts (5.1). |
+| Harry - Senior Engineer and Moody - Security Reviewer | Installed, off | Codex approved for your organization's source code, then the review stage (5.1). |
+| Ron - Release Engineer and the Marauder's Map | Ron installed and off. The Map is not built yet | `claude auth login`, then the shadow stage (5.2). |
+| Dumbledore - Knowledge Manager | Installed, off | `claude auth login`, then the memory stage (5.3). |
+| Gringotts - Backup | Not built yet | The shadow stage (5.2). |
 
 A desk switches on when you create its `enabled` file after reading its dry run, one desk at a time. Nothing switches itself on.
 
@@ -165,6 +251,7 @@ Six things only you do.
 | You see | Do this |
 | --- | --- |
 | Spotlight can't find herdr, castle or codex | They're command-line tools. Open Terminal and type the name there. |
+| `owlpost-setup.sh` prints FAILED | It stopped at that step and changed nothing after it. The lines above say why. Fix that, then run it again; steps that already passed are safe to repeat. |
 | `command not found: castle` | Use the full path `~/.hogwarts/bin/castle`, or add the shortcut from one-time setup and open a new Terminal window. |
 | `install.sh` says a folder already exists | Nothing was changed. The fleet is already installed. Use `./install.sh --force` only if you want a fresh copy; it moves the old folders aside first. |
 | A tool name with `<warehouse-mcp>`, `<observability-mcp>` or `<chat-mcp>` in it | A placeholder was never filled. See onboarding stage 2. |

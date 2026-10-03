@@ -314,6 +314,7 @@ pre.cmdline { margin: 0.4rem 0 0; background: var(--code-bg); border-radius: 5px
 <body>
 <nav class="nav" aria-label="Sections">
   <ul>
+    <li><a href="#start">Start here</a></li>
     <li><a href="#tools">The tools</a></li>
     <li><a href="#setup">One-time setup</a></li>
     <li><a href="#first">First session</a></li>
@@ -342,6 +343,84 @@ pre.cmdline { margin: 0.4rem 0 0; background: var(--code-bg); border-radius: 5px
     <div class="fig" role="listitem"><b>2</b><span>words that close a task: "Mischief managed", followed by its id.</span></div>
   </div>
 </header>
+
+<section id="start">
+  <div class="sec-head">
+    <p class="eyebrow">Start here</p>
+    <h2>From McGonagall to the whole fleet</h2>
+    <p>Part 1 works as soon as onboarding stage 4 passes. Part 2 builds the rest with Claude, one stage at a time. Each step says where to do it: the <b>Terminal</b> app, or the <b>Code tab</b> in the Claude desktop app. You don't need an IDE.</p>
+  </div>
+  <h3>Part 1: McGonagall, from day one</h3>
+  <ol class="stages">
+    <li class="stage"><div class="n">1<small>Terminal</small></div><div>
+      <h3>Sign the Claude command line in</h3>
+      <p>A browser window opens. Approve it there, then check.</p>
+      <pre class="cmdline">claude auth login</pre>
+      <pre class="cmdline">claude auth status</pre>
+      <p class="done"><b>Done when</b> it says you're logged in.</p>
+    </div></li>
+    <li class="stage"><div class="n">2<small>Code tab</small></div><div>
+      <h3>Open McGonagall</h3>
+      <p>Start a new session and pick the <code>hogwarts</code> folder in your home folder (no dot). Say yes when it asks whether you trust the folder. Then send: "What's in flight, and is anything waiting on me?"</p>
+      <p class="done"><b>Done when</b> she answers as McGonagall with a short digest. If she doesn't, type <code>/agents</code> and pick mcgonagall, or use the Terminal instead: <code>cd ~/hogwarts &amp;&amp; claude --agent mcgonagall</code>.</p>
+    </div></li>
+    <li class="stage"><div class="n">3<small>Code tab</small></div><div>
+      <h3>Give her one real ask</h3>
+      <p>Say what you want in your own words. Claude asks before she writes <code>tasks/&lt;id&gt;/TASK.md</code>; allow it, read it, fix anything wrong, then reply "go". She hands you one <code>castle task create</code> command.</p>
+    </div></li>
+    <li class="stage"><div class="n">4<small>Terminal</small></div><div>
+      <h3>Register the task</h3>
+      <p>Paste the command she gave you, then check it's there.</p>
+      <pre class="cmdline">~/.hogwarts/bin/castle task list</pre>
+    </div></li>
+    <li class="stage"><div class="n">5<small>Both</small></div><div>
+      <h3>Do the work</h3>
+      <p>Until Harry is switched on, you do the work in your usual Claude session in that repo. Mark the task started first.</p>
+      <pre class="cmdline">~/.hogwarts/bin/castle task start &lt;task-id&gt;</pre>
+    </div></li>
+    <li class="stage"><div class="n">6<small>Both</small></div><div>
+      <h3>Close it</h3>
+      <p>After you merge, mark it ready to close in the Terminal, then type <code>Mischief managed &lt;task-id&gt;</code> to McGonagall.</p>
+      <pre class="cmdline">~/.hogwarts/bin/castle task await-close &lt;task-id&gt;</pre>
+      <p class="done"><b>Done when</b> she confirms the task closed. If she says she couldn't confirm it was you typing, close it from the Terminal with <code>castle token mint</code> and <code>castle task close</code>, as in Troubleshooting.</p>
+    </div></li>
+    <li class="stage"><div class="n">7<small>Any session</small></div><div>
+      <h3>Ask Snape for numbers</h3>
+      <p>In any Claude session: "Use the snape agent to..." He answers with the query behind every number.</p>
+    </div></li>
+  </ol>
+
+  <h3>Part 2: building the rest, one stage at a time</h3>
+  <ol class="stages">
+    <li class="stage"><div class="n">8<small>Decide</small></div><div>
+      <h3>Decide on Codex for your organization's code</h3>
+      <p>Harry and Moody run on Codex, which sends code to OpenAI. Confirm it's approved before the review stage.</p>
+    </div></li>
+    <li class="stage"><div class="n">9<small>Terminal</small></div><div>
+      <h3>Lift the deny rules for the build</h3>
+      <p>Claude can't edit the fleet's office while the rules are on. Keep a copy of your settings with the rules, then restore the backup you made before adding them. That also drops any other settings change made since that backup, so if you've changed settings since, ask Claude to remove just the eight fleet rules instead.</p>
+      <pre class="cmdline">cp -p ~/.claude/settings.json ~/.claude/settings.json.with-hogwarts-deny</pre>
+      <pre class="cmdline">cp -p ~/.claude/settings.json.pre-hogwarts-&lt;timestamp&gt; ~/.claude/settings.json</pre>
+    </div></li>
+    <li class="stage"><div class="n">10<small>Code tab</small></div><div>
+      <h3>Ask Claude to build the stage</h3>
+      <p>Start a new session in a folder outside <code>~/hogwarts</code>, such as your clone of this repo, and send: "Build the review-loop stage of the Hogwarts fleet from docs/DESIGN.md and docs/ONBOARDING.md stage 5. The deny rules are lifted for this session." Claude builds, tests and reviews it, and shows you anything that touches your settings or background jobs before it changes.</p>
+    </div></li>
+    <li class="stage"><div class="n">11<small>Terminal</small></div><div>
+      <h3>Put the deny rules back</h3>
+      <pre class="cmdline">cp -p ~/.claude/settings.json.with-hogwarts-deny ~/.claude/settings.json</pre>
+      <p class="done"><b>Done when</b> <code>grep -c hogwarts ~/.claude/settings.json</code> prints a number above zero.</p>
+    </div></li>
+    <li class="stage"><div class="n">12<small>Terminal</small></div><div>
+      <h3>Switch desks on, one at a time</h3>
+      <p>Claude gives you each desk's dry run to read and the one command that switches it on. Do one desk, try it, then the next.</p>
+    </div></li>
+    <li class="stage"><div class="n">13<small>Repeat</small></div><div>
+      <h3>The shadow and memory stages</h3>
+      <p>Repeat steps 9 to 12 for the shadow stage (Ron, the Map and Gringotts, three days in shadow mode) and the memory stage (Dumbledore's nightly review).</p>
+    </div></li>
+  </ol>
+</section>
 
 <section id="tools">
   <div class="sec-head">
@@ -388,14 +467,42 @@ pre.cmdline { margin: 0.4rem 0 0; background: var(--code-bg); border-radius: 5px
 <section id="setup">
   <div class="sec-head">
     <p class="eyebrow">One-time setup</p>
-    <h2>Onboarding does the setup</h2>
-    <p><a href="ONBOARDING.md">ONBOARDING.md</a> takes a fresh Mac to a working fleet in stages, each with a check. One extra is worth doing once.</p>
+    <h2>Six steps before the first run</h2>
+    <p><a href="ONBOARDING.md">ONBOARDING.md</a> walks through the whole setup with a check at every stage. Paste one command at a time into Terminal and press Enter.</p>
   </div>
   <ol class="stages">
-    <li class="stage"><div class="n">1<small>Shortcut</small></div><div>
-      <h3>Make <code>castle</code> a short command</h3>
+    <li class="stage"><div class="n">1<small>Claude</small></div><div>
+      <h3>Sign the Claude command line in</h3>
+      <p>The desktop app has its own sign-in, so the terminal version needs one too. Headless desks like Ron and the portrait use it. A browser window opens and you approve it there.</p>
+      <pre class="cmdline">claude auth login</pre>
+      <p class="done"><b>Check</b> <code>claude auth status</code> shows you as logged in.</p>
+    </div></li>
+    <li class="stage"><div class="n">2<small>Codex</small></div><div>
+      <h3>Confirm Codex is signed in, and approved</h3>
+      <p>Before Harry or Moody touch your organization's code, confirm Codex is approved for it. Until then, none of that code goes to Codex.</p>
+      <pre class="cmdline">codex login status</pre>
+    </div></li>
+    <li class="stage"><div class="n">3<small>Store</small></div><div>
+      <h3>Check the fleet's database is healthy</h3>
+      <p>This reports permissions, the schema version and an integrity check, all as JSON.</p>
+      <pre class="cmdline">~/.hogwarts/bin/castle doctor</pre>
+    </div></li>
+    <li class="stage"><div class="n">4<small>Shortcut</small></div><div>
+      <h3>Optional: make <code>castle</code> a short command</h3>
       <p>This adds one line to your shell settings so you can type <code>castle</code> instead of the full path. Open a new Terminal window afterwards.</p>
       <pre class="cmdline">echo "alias castle='$HOME/.hogwarts/bin/castle'" &gt;&gt; ~/.zshrc</pre>
+    </div></li>
+    <li class="stage"><div class="n">5<small>Deny rules</small></div><div>
+      <h3>Keep your own Claude sessions out of the office</h3>
+      <p>Back up your Claude settings first, then add the deny rules from <code>~/.hogwarts/pending/a1-user-settings-deny.merge.json</code>. They stop your own sessions, and Snape, from reading the fleet's office or running <code>castle</code>. Onboarding stage 3.1 has the merge command. You can also ask Claude to do the merge; approve the edit yourself and keep the backup next to the file.</p>
+      <pre class="cmdline">cp -p ~/.claude/settings.json ~/.claude/settings.json.pre-hogwarts-$(date +%Y%m%d-%H%M)</pre>
+      <p class="done"><b>Check</b> <code>grep -c hogwarts ~/.claude/settings.json</code> prints a number above zero.</p>
+    </div></li>
+    <li class="stage"><div class="n">6<small>Owl Post</small></div><div>
+      <h3>Switch on the Owl Post</h3>
+      <p>One command runs every step and prints OK or FAILED after each one. It checks the outboxes, runs one pass by hand, installs the background job, and sends a test owl from McGonagall to Hermione. Run it from your clone of the repo.</p>
+      <pre class="cmdline">sh ~/hogwarts-fleet/scripts/owlpost-setup.sh</pre>
+      <p class="done"><b>Check</b> the last line says all six steps passed. The sent file is renamed to <code>owl_&lt;id&gt;-hello.json</code>, and the owl lands in Hermione's inbox as <code>owl_&lt;id&gt;.json</code>.</p>
     </div></li>
   </ol>
 </section>
@@ -450,21 +557,21 @@ pre.cmdline { margin: 0.4rem 0 0; background: var(--code-bg); border-radius: 5px
 <section id="live">
   <div class="sec-head">
     <p class="eyebrow">What's live</p>
-    <h2>What works once onboarding stage 4 passes, and what switches on next</h2>
+    <h2>What each piece looks like once onboarding is done, and what switches on next</h2>
   </div>
   <div class="tbl">
     <table>
       <thead><tr><th>Desk or piece</th><th>State</th><th>What switches it on</th></tr></thead>
       <tbody>
-        <tr><td data-label="Desk or piece"><b>The store and the castle</b></td><td data-label="State">Live</td><td data-label="What switches it on">Nothing. <code>castle doctor</code> confirms it.</td></tr>
-        <tr><td data-label="Desk or piece"><b>McGonagall - Chief of Staff</b></td><td data-label="State">Live</td><td data-label="What switches it on">A session opened in <code>~/hogwarts</code>.</td></tr>
-        <tr><td data-label="Desk or piece"><b>Snape - Data Analyst</b></td><td data-label="State">Live in every Claude session</td><td data-label="What switches it on">The <code>a1</code> deny rules first, so your own sessions can't read the office.</td></tr>
-        <tr><td data-label="Desk or piece"><b>Owl Post - Message Router</b></td><td data-label="State">Loaded</td><td data-label="What switches it on"><code>~/.hogwarts/pending/b-owlpost-launchctl.txt</code>, in onboarding stage 3.</td></tr>
-        <tr><td data-label="Desk or piece"><b>Hermione - Staff Engineer</b></td><td data-label="State">Installed, off</td><td data-label="What switches it on">The review loop, onboarding stage 5.1.</td></tr>
-        <tr><td data-label="Desk or piece"><b>Harry - Senior Engineer</b> and <b>Moody - Security Reviewer</b></td><td data-label="State">Installed, off</td><td data-label="What switches it on">Codex approved for your organization's source code, then the review loop.</td></tr>
-        <tr><td data-label="Desk or piece"><b>Ron - Release Engineer</b> and the <b>Marauder's Map</b></td><td data-label="State">Ron installed and off. The Map is not built yet</td><td data-label="What switches it on">The shadow stage, 5.2.</td></tr>
-        <tr><td data-label="Desk or piece"><b>Dumbledore - Knowledge Manager</b></td><td data-label="State">Installed, off</td><td data-label="What switches it on">The memory stage, 5.3.</td></tr>
-        <tr><td data-label="Desk or piece"><b>Gringotts - Backup</b></td><td data-label="State">Not built yet</td><td data-label="What switches it on">The shadow stage, 5.2.</td></tr>
+        <tr><td data-label="Desk or piece"><b>The store and the castle</b></td><td data-label="State">Live after onboarding stage 1</td><td data-label="What switches it on">Nothing. <code>castle doctor</code> confirms it.</td></tr>
+        <tr><td data-label="Desk or piece"><b>McGonagall - Chief of Staff</b></td><td data-label="State">Installed at stage 1, live from stage 4</td><td data-label="What switches it on">Open a session in <code>~/hogwarts</code> and trust the folder.</td></tr>
+        <tr><td data-label="Desk or piece"><b>Snape - Data Analyst</b></td><td data-label="State">Live in every Claude session after stage 3</td><td data-label="What switches it on">Nothing more, once the stage 3 deny rules keep your own sessions out of the office.</td></tr>
+        <tr><td data-label="Desk or piece"><b>Owl Post - Message Router</b></td><td data-label="State">Live after onboarding stage 3</td><td data-label="What switches it on">Nothing more. It wakes whenever a desk writes to its outbox. <code>scripts/owlpost-setup.sh</code> switches it on and sends a test owl to Hermione.</td></tr>
+        <tr><td data-label="Desk or piece"><b>Hermione - Staff Engineer</b></td><td data-label="State">Installed, off</td><td data-label="What switches it on"><code>claude auth login</code> (stage 2), then the review stage's scripts (5.1).</td></tr>
+        <tr><td data-label="Desk or piece"><b>Harry - Senior Engineer</b> and <b>Moody - Security Reviewer</b></td><td data-label="State">Installed, off</td><td data-label="What switches it on">Codex approved for your organization's source code, then the review stage (5.1).</td></tr>
+        <tr><td data-label="Desk or piece"><b>Ron - Release Engineer</b> and the <b>Marauder's Map</b></td><td data-label="State">Ron installed and off. The Map is not built yet</td><td data-label="What switches it on"><code>claude auth login</code>, then the shadow stage (5.2).</td></tr>
+        <tr><td data-label="Desk or piece"><b>Dumbledore - Knowledge Manager</b></td><td data-label="State">Installed, off</td><td data-label="What switches it on"><code>claude auth login</code>, then the memory stage (5.3).</td></tr>
+        <tr><td data-label="Desk or piece"><b>Gringotts - Backup</b></td><td data-label="State">Not built yet</td><td data-label="What switches it on">The shadow stage (5.2).</td></tr>
       </tbody>
     </table>
   </div>
@@ -599,6 +706,7 @@ pre.cmdline { margin: 0.4rem 0 0; background: var(--code-bg); border-radius: 5px
       <thead><tr><th>You see</th><th>Do this</th></tr></thead>
       <tbody>
         <tr><td data-label="You see">Spotlight can't find herdr, castle or codex</td><td data-label="Do this">They're command-line tools. Open Terminal and type the name there.</td></tr>
+        <tr><td data-label="You see"><code>owlpost-setup.sh</code> prints FAILED</td><td data-label="Do this">It stopped at that step and changed nothing after it. The lines above say why. Fix that, then run it again; steps that already passed are safe to repeat.</td></tr>
         <tr><td data-label="You see"><code>command not found: castle</code></td><td data-label="Do this">Use the full path <code>~/.hogwarts/bin/castle</code>, or add the shortcut from one-time setup and open a new Terminal window.</td></tr>
         <tr><td data-label="You see"><code>install.sh</code> says a folder already exists</td><td data-label="Do this">Nothing was changed. The fleet is already installed. Use <code>./install.sh --force</code> only if you want a fresh copy; it moves the old folders aside first.</td></tr>
         <tr><td data-label="You see">A tool name with <code>&lt;warehouse-mcp&gt;</code>, <code>&lt;observability-mcp&gt;</code> or <code>&lt;chat-mcp&gt;</code> in it</td><td data-label="Do this">A placeholder was never filled. See onboarding stage 2.</td></tr>

@@ -50,6 +50,8 @@ It exits with 0 when nothing is left for you, with 1 when your settings still me
 
    If there is no backup, remove the lines that mention the fleet by hand. You're done when the grep prints nothing.
 
+   If you kept a `settings.json.with-hogwarts-deny` copy for building later stages, delete it too.
+
 3. **RTK.** If your settings mention `rtk hook` and you added it for the fleet, remove it with `rtk init -g --uninstall`.
 
 4. **Git worktrees.** Harry works in git worktrees under `~/hogwarts/worktrees`. Remove each one from its repo first, so the repo forgets it. Commit or discard any changes in it before you do.
@@ -95,7 +97,7 @@ tar -xzf ~/hogwarts-fleet-archive-<timestamp>.tar.gz -C ~
 ~/.hogwarts/bin/castle doctor
 ```
 
-Then reload the Owl Post with `~/.hogwarts/pending/b-owlpost-launchctl.txt`, and re-apply any settings you restored away in step 2.
+Then switch the Owl Post back on with `sh scripts/owlpost-setup.sh` from your clone, and re-apply any settings you restored away in step 2.
 
 ## Remove the repo
 

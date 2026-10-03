@@ -160,24 +160,25 @@ If it printed a note that `CLAUDE_BIN` or `CODEX_BIN` was not found, fix that no
 
 ## Stage 3: Apply the pending settings yourself
 
-Some changes touch your own Claude settings and start a background job. The fleet only prepares them. You read each one and apply it. The full notes are in `~/.hogwarts/pending/README.md`.
+Two changes touch your own Claude settings and start a background job. The fleet only prepares them. You apply each one yourself, in this order. The full notes are in `~/.hogwarts/pending/README.md`.
 
-1. Back up your user settings first, with a timestamped name the uninstaller knows how to find.
+### 3.1 Keep your own Claude sessions out of the office
+
+The deny rules in `~/.hogwarts/pending/a1-user-settings-deny.merge.json` stop your own Claude sessions, and Snape, from reading the office or running `castle`. Apply them before you first use Snape, since he is a user-level agent with Read.
+
+1. Back up your Claude settings first, with a timestamped name the uninstaller knows how to find. Skip this if you have no `~/.claude/settings.json` yet.
 
    ```
-   cd ~/.claude
-   [ -f settings.json ] && cp -p settings.json "settings.json.pre-hogwarts-$(date +%Y%m%d-%H%M)"
+   cp -p ~/.claude/settings.json ~/.claude/settings.json.pre-hogwarts-$(date +%Y%m%d-%H%M)
    ```
 
-2. Apply `a1`, the deny rules. They stop your own Claude sessions from reading the office or running the store. Do this before you first use Snape, since he is a user-level agent with Read.
-
-   If you have no `~/.claude/settings.json` yet, copy the snippet in:
+2. Add the deny rules. If you have no settings file yet, copy the snippet in:
 
    ```
    cp ~/.hogwarts/pending/a1-user-settings-deny.merge.json ~/.claude/settings.json
    ```
 
-   If you have one, merge the deny rules into it, check the difference, then move it into place:
+   If you have one, merge the rules into it, read the difference, then move it into place:
 
    ```
    cd ~/.claude
@@ -187,19 +188,36 @@ Some changes touch your own Claude settings and start a background job. The flee
    mv settings.json.new settings.json
    ```
 
-3. Leave `a2`, the push gate, for stage 5. Its script does not exist yet, and a hook that cannot import fails open and adds noise.
-
-4. Load the Owl Post. Follow `~/.hogwarts/pending/b-owlpost-launchctl.txt` one step at a time. It has a dry pass, the load, a test and the undo.
-
-5. Read `~/.hogwarts/pending/c-codex-approval.txt`. Harry and Moody send code to OpenAI, so they stay off until your organization approves Codex for its source code, and until stage 5 proves their read boundary.
-
-6. Optional clean-up that saves tokens in every session: switch off connectors and MCP servers you never call, with `/mcp` in a session or in your claude.ai connector settings.
+   You can also ask Claude to do the merge. Approve the edit yourself, and keep the backup next to the file.
 
 **You're done when** all of these hold:
 
+- `grep -c hogwarts ~/.claude/settings.json` prints a number above zero.
 - `jq '.permissions.deny' ~/.claude/settings.json` lists the three `~/.hogwarts/**` rules.
-- `ls ~/.claude/*.pre-hogwarts-*` shows your backup, if you had a settings file before.
+- `ls ~/.claude/settings.json.pre-hogwarts-*` shows your backup, if you had a settings file before.
+
+### 3.2 Switch on the Owl Post
+
+One command runs every step and prints OK or FAILED after each one. It checks the seven outboxes, makes the logs folder, runs one Owl Post pass by hand, lints and copies the job file, loads the launchd job, then sends a test owl from McGonagall to Hermione and waits for it. It stops at the first failure. Run it from your clone:
+
+```
+cd ~/hogwarts-fleet
+sh scripts/owlpost-setup.sh
+```
+
+If a step prints FAILED, the lines above it say why. The same steps by hand, with a test and the undo, are in `~/.hogwarts/pending/b-owlpost-launchctl.txt`.
+
+**You're done when** all of these hold:
+
+- The last line says all six steps passed.
+- `~/hogwarts/desks/mcgonagall/outbox/.sent/` holds the test owl renamed to `owl_<id>-hello.json`, and `~/hogwarts/desks/hermione/inbox/` holds the delivered copy as `owl_<id>.json`.
 - `launchctl print gui/$(id -u)/com.hogwarts.owlpost | head -5` shows the job.
+
+### Leave for later
+
+- `a2`, the push gate, waits for stage 5. Its script does not exist yet, and a hook that cannot import fails open and adds noise.
+- `~/.hogwarts/pending/c-codex-approval.txt` explains why Harry and Moody stay off. They send code to OpenAI, so they wait until your organization approves Codex for its source code, and until stage 5 proves their read boundary.
+- Optional clean-up that saves tokens in every session: switch off connectors and MCP servers you never call, with `/mcp` in a session or in your claude.ai connector settings.
 
 ## Stage 4: First session with McGonagall, and a smoke test
 
@@ -213,35 +231,28 @@ These checks prove the store, the Owl Post and the task flow work before any des
 
    It prints JSON ending in `"ok": true`.
 
-2. Send an owl from McGonagall to Hermione. You write the file by hand here, the same way a desk would.
+2. Complete the owl round trip. Stage 3's script already sent a test owl from McGonagall to Hermione. Now send one back. You write the file by hand here, the same way a desk would.
 
    ```
-   printf '%s\n' '{"to": "hermione", "kind": "fyi", "subject": "owl post test", "body": "hello"}' > ~/hogwarts/desks/mcgonagall/outbox/hello.json
+   printf '%s\n' '{"to": "mcgonagall", "kind": "fyi", "subject": "owl post reply", "body": "hello back"}' > ~/hogwarts/desks/hermione/outbox/reply.json
    ```
 
-   The Owl Post moves it within a few seconds. If you have not loaded it yet, run one pass by hand. Your shell fills in `$HOME` before `env -i` clears the environment, so the script itself still reads nothing from it. It prints one line of JSON.
+   The Owl Post moves it within a few seconds. It renames the sent file to `owl_<id>-reply.json` in Hermione's `outbox/.sent/` and delivers the copy to McGonagall's inbox as `owl_<id>.json`. Check both, and the store's view:
+
+   ```
+   ls ~/hogwarts/desks/hermione/outbox/.sent/ ~/hogwarts/desks/mcgonagall/inbox/
+   ~/.hogwarts/bin/castle owl inbox mcgonagall
+   ```
+
+   If nothing moved after 30 seconds, run one pass by hand and read what it prints. Your shell fills in `$HOME` before `env -i` clears the environment, so the script itself still reads nothing from it.
 
    ```
    /usr/bin/env -i /usr/bin/python3 -I -B -X pycache_prefix=/var/empty -c "import sys; sys.path.insert(0, '$HOME/.hogwarts'); from fleet.owl_post import main; sys.exit(main())"
    ```
 
-3. Check that it arrived. Hermione's inbox holds a copy named after the owl id, and McGonagall's `.sent/` folder holds your file with the owl id in front. Then send one back.
+3. Open McGonagall's first session. In the Claude desktop app, open the Code tab, start a session and pick the `hogwarts` folder in your home folder. Or type `cd ~/hogwarts` and then `claude`. Trust the folder when asked. Her first line is "McGonagall - Chief of Staff." and her digest follows. It lists the reply owl you just sent her, and marks that fyi owl as read once it has shown it to you.
 
-   ```
-   ls ~/hogwarts/desks/hermione/inbox/ ~/hogwarts/desks/mcgonagall/outbox/.sent/
-   printf '%s\n' '{"to": "mcgonagall", "kind": "fyi", "subject": "owl post reply", "body": "hello back"}' > ~/hogwarts/desks/hermione/outbox/reply.json
-   ```
-
-   Run the pass again if the Owl Post is not loaded. Then:
-
-   ```
-   ls ~/hogwarts/desks/mcgonagall/inbox/
-   ~/.hogwarts/bin/castle owl inbox mcgonagall
-   ```
-
-4. Open McGonagall's first session. In the Claude desktop app, open the Code tab, start a session and pick the `hogwarts` folder in your home folder. Or type `cd ~/hogwarts` and then `claude`. Trust the folder when asked. Her first line is "McGonagall - Chief of Staff." and her digest follows. It lists the reply owl you just sent her, and marks that fyi owl as read once it has shown it to you.
-
-5. Ask her for a TASK.md. For example: "Write a TASK.md for: add a short CONTRIBUTING note to one of my repos. Don't route it yet." Claude asks you before she writes the file. Read the draft and say go. She then gives you one `castle task create` command. Run it in Terminal, then check it:
+4. Ask her for a TASK.md. For example: "Write a TASK.md for: add a short CONTRIBUTING note to one of my repos. Don't route it yet." Claude asks you before she writes the file. Read the draft and say go. She then gives you one `castle task create` command. Run it in Terminal, then check it:
 
    ```
    ~/.hogwarts/bin/castle task list
@@ -256,13 +267,13 @@ These checks prove the store, the Owl Post and the task flow work before any des
    ~/.hogwarts/bin/castle task create --id $id --desk mcgonagall --title "smoke test" --intent-path ~/hogwarts/tasks/$id/TASK.md
    ```
 
-6. Close each test task as abandoned. That needs no close token. Use `"$id"` for the one you made by hand, or the id McGonagall gave you.
+5. Close each test task as abandoned. That needs no close token. Use `"$id"` for the one you made by hand, or the id McGonagall gave you.
 
    ```
    ~/.hogwarts/bin/castle task close "$id" --reason abandoned
    ```
 
-**You're done when** `castle doctor` says ok, each inbox holds the other desk's owl as `<owl id>.json`, each outbox's `.sent/` folder holds the file you wrote with the owl id in front of its name, McGonagall introduced herself with a digest, and `castle task list` shows your test task as closed.
+**You're done when** `castle doctor` says ok, Hermione's inbox holds stage 3's test owl and McGonagall's inbox holds the reply, each as `owl_<id>.json`, the two sent files sit in their `.sent/` folders as `owl_<id>-hello.json` and `owl_<id>-reply.json`, McGonagall introduced herself with a digest, and `castle task list` shows your test task as closed.
 
 ## Stage 5: Switch on the later stages, one at a time
 
@@ -276,6 +287,8 @@ touch ~/.hogwarts/desks/hermione/enabled
 ```
 
 Remove the file to switch the desk off again: `rm ~/.hogwarts/desks/hermione/enabled`.
+
+How each stage gets built: your own Claude sessions can't edit the office while the stage 3 deny rules are on. So for a build you lift them, ask Claude in a session outside `~/hogwarts` to build that stage, then put them back. The [handbook](HANDBOOK.md#part-2-building-the-rest-one-stage-at-a-time) has those steps.
 
 ### 5.1 The review loop
 
@@ -319,12 +332,11 @@ From here on, the [handbook](HANDBOOK.md) is your guide: which desk to ask, the 
 - [ ] **2** `claude auth login`, `codex login`, right `gh` account active.
 - [ ] **2** Five placeholders filled. The placeholder grep prints nothing. JSON parses. Fleet tests pass.
 - [ ] **2** McGonagall's deny list covers every other MCP server you have.
-- [ ] **3** `~/.claude/settings.json` backed up as `.pre-hogwarts-<timestamp>`.
-- [ ] **3** `a1` deny rules applied. `a2` left for later.
-- [ ] **3** Owl Post loaded with `b-owlpost-launchctl.txt`.
-- [ ] **3** Codex approval note read. Harry and Moody stay off.
+- [ ] **3.1** `~/.claude/settings.json` backed up as `.pre-hogwarts-<timestamp>`, then the `a1` deny rules applied. `grep -c hogwarts` prints more than zero.
+- [ ] **3.2** `sh scripts/owlpost-setup.sh` printed OK for all six steps. The test owl reached Hermione.
+- [ ] **3** `a2` left for later. Codex approval note read. Harry and Moody stay off.
 - [ ] **4** `castle doctor` ok.
-- [ ] **4** Owl round trip: McGonagall to Hermione and back.
+- [ ] **4** Owl round trip: Hermione's reply reached McGonagall.
 - [ ] **4** McGonagall introduced herself with a digest.
 - [ ] **4** A TASK.md registered with `castle task create`, then closed as abandoned.
 - [ ] **5.1** Review loop built, `a2` applied, Hermione on. Codex desks only after approval.
