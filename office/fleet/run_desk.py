@@ -22,10 +22,11 @@ and the request's task is the desk's own. Any other owl runs in the desk's work 
 enabled (a plain file named "enabled" in its office folder, made by Ryan), stays under
 the desk's daily run and spend caps plus any bump Ryan made today, waits for the per-desk
 lock, and records usage to the store's metrics. A refusal by a cap tells Ryan which cap, how
-many requests wait and when it resets; a desk at 80% of a cap gets one warning a day. A run
-that exits 0 reads and acks its owl. A run that fails raises a headmaster event, labelled
-claude_plan or codex_plan when the vendor's own usage limit stopped it. No bypass flag is
-ever built, and the guard refuses one if it appears.
+many requests wait and when it resets, once per cap and effective limit a day; a desk at 80% of
+a cap gets one warning per effective limit a day. A run that exits 0 reads and acks its owl.
+A run that fails raises a headmaster event, labelled claude_plan or codex_plan when the
+vendor's own usage limit stopped it. No bypass flag is ever built, and the guard refuses one
+if it appears.
 
 This is the only fleet module that starts processes.
 
@@ -471,8 +472,16 @@ def _used_text(status: dict, cap: str) -> str:
     return f"${status['spend_used_usd']:.2f} of ${status['spend_limit_usd']:.2f}"
 
 
+def _limit_key(status: dict, cap: str) -> str:
+    """The effective limit (cap plus bumps) as it appears in a dedupe key, so a raised limit is a new event."""
+    if cap == "runs":
+        return str(status["runs_limit"])
+    return repr(float(status["spend_limit_usd"]))
+
+
 def report_cap(conn, desk: str, now: Optional[int] = None) -> None:
-    """Record a refusal by a fleet cap. Ryan hears once per desk, cap and day: which cap, what waits, when it resets."""
+    """Record a refusal by a fleet cap. Ryan hears once per desk, cap, effective limit and day: which cap,
+    what waits, when it resets. After a bump, reaching the raised limit is news again."""
     status = cap_status(conn, desk, now)
     cap = status["reached"] or "runs"
     capacity.record_cap_hit(conn, desk, cap, "fleet", now=now)
@@ -481,11 +490,13 @@ def report_cap(conn, desk: str, now: Optional[int] = None) -> None:
                f" cap_source fleet. {waiting} request(s) waiting for {desk}. The cap resets at"
                f" {status['resets_at_local']}; castle desk cap {desk} {CAP_FLAGS[cap]} lifts it until then")
     pensieve.add_event(conn, desk, "rundesk.cap", "headmaster", summary,
-                       dedupe_key=f"rundesk:cap:{desk}:{cap}:{status['day_start']}", now=now)
+                       dedupe_key=f"rundesk:cap:{desk}:{cap}:{_limit_key(status, cap)}:{status['day_start']}",
+                       now=now)
 
 
 def warn_near_cap(conn, desk: str, now: Optional[int] = None) -> list:
-    """One headmaster event per desk, cap and day once today's runs or spend reach CAP_WARN_FRACTION of it."""
+    """One headmaster event per desk, cap, effective limit and day once today's runs or spend reach
+    CAP_WARN_FRACTION of it, so a bumped limit warns again near its own end."""
     status = cap_status(conn, desk, now)
     caps = [("runs", status["runs_used"], status["runs_limit"])]
     if status["spend_limit_usd"] is not None:
@@ -497,7 +508,8 @@ def warn_near_cap(conn, desk: str, now: Optional[int] = None) -> list:
         summary = (f"{desk} has used {_used_text(status, cap)} of its fleet daily {cap} cap today;"
                    f" the cap resets at {status['resets_at_local']}")
         event = pensieve.add_event(conn, desk, "rundesk.cap-near", "headmaster", summary,
-                                   dedupe_key=f"rundesk:cap-near:{desk}:{cap}:{status['day_start']}", now=now)
+                                   dedupe_key=f"rundesk:cap-near:{desk}:{cap}:{_limit_key(status, cap)}"
+                                              f":{status['day_start']}", now=now)
         if event["created"]:
             warned.append(cap)
     return warned

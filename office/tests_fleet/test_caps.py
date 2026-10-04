@@ -175,6 +175,28 @@ class CapEventTests(CapCase):
         run_desk.report_cap(self.conn, "ron", RESET + 20)
         self.assertEqual(len(self.events_of("rundesk.cap")), 2)
 
+    def test_reaching_a_bumped_limit_the_same_day_is_a_new_event(self):
+        self.runs("ron", 120)
+        run_desk.report_cap(self.conn, "ron", NOW)
+        capacity.add_bump(self.conn, "ron", "runs", 5, RESET, now=NOW + 10)
+        self.runs("ron", 5, ts=NOW + 20)
+        run_desk.report_cap(self.conn, "ron", NOW + 30)
+        run_desk.report_cap(self.conn, "ron", NOW + 40)
+        first, second = self.summaries("rundesk.cap")
+        self.assertIn("(120 of 120 runs)", first)
+        self.assertIn("(125 of 125 runs)", second)
+        self.assertEqual(len(capacity.list_cap_hits(self.conn, "ron")), 3)
+
+    def test_reaching_a_bumped_spend_limit_is_a_new_event(self):
+        self.runs("portrait", 1, cost=4.0)
+        run_desk.report_cap(self.conn, "portrait", NOW)
+        capacity.add_bump(self.conn, "portrait", "spend", 0.5, RESET, now=NOW + 10)
+        self.runs("portrait", 1, ts=NOW + 20, cost=0.5)
+        run_desk.report_cap(self.conn, "portrait", NOW + 30)
+        run_desk.report_cap(self.conn, "portrait", NOW + 40)
+        self.assertEqual([summary.split("(")[1].split(")")[0] for summary in self.summaries("rundesk.cap")],
+                         ["$4.00 of $4.00", "$4.50 of $4.50"])
+
     def test_the_spend_cap_has_its_own_event(self):
         self.runs("portrait", 1, cost=4.0)
         run_desk.report_cap(self.conn, "portrait", NOW)
@@ -196,6 +218,18 @@ class CapEventTests(CapCase):
         self.runs("moody", 64, ts=RESET + 1)
         self.assertEqual(run_desk.warn_near_cap(self.conn, "moody", RESET + 2), ["runs"])
         self.assertEqual(len(self.events_of("rundesk.cap-near")), 2)
+
+    def test_a_bump_warns_again_near_the_raised_limit_once(self):
+        self.runs("moody", 64)
+        self.assertEqual(run_desk.warn_near_cap(self.conn, "moody", NOW), ["runs"])
+        capacity.add_bump(self.conn, "moody", "runs", 20, RESET, now=NOW + 10)
+        self.assertEqual(run_desk.warn_near_cap(self.conn, "moody", NOW + 20), [])  # 64 of 100 is under 80%
+        self.runs("moody", 16, ts=NOW + 30)
+        self.assertEqual(run_desk.warn_near_cap(self.conn, "moody", NOW + 40), ["runs"])
+        self.assertEqual(run_desk.warn_near_cap(self.conn, "moody", NOW + 50), [])
+        first, second = self.summaries("rundesk.cap-near")
+        self.assertIn("64 of 80 runs", first)
+        self.assertIn("80 of 100 runs", second)
 
     def test_runs_and_spend_warn_separately(self):
         self.runs("hermione", 1, cost=48.0)
