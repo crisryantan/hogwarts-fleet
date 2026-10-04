@@ -5,7 +5,8 @@ hook folders such as .husky. So every git call here:
 - takes --git-dir and --work-tree from the office record for that worktree, never from the worktree;
 - runs with core.hooksPath=/dev/null and core.fsmonitor=false, so no hook or monitor command runs;
 - uses the absolute git binary and a fixed environment. HOME is kept so Ryan's own ~/.gitconfig
-  (name, email, credential helper) still applies. No desk can write that file.
+  (name, email, credential helper) still applies. No desk can write that file. GIT_NO_LAZY_FETCH is set, so
+  a partial clone never fetches a missing object quietly with those credentials: git reports it missing.
 
 Office records live in ~/.hogwarts/worktrees/<name>.json, one per castle worktree, written only by
 the worktree and review scripts. They name the main checkout, its .git folder, the branch and base.
@@ -159,6 +160,7 @@ def child_env() -> dict:
         "PATH": config.CHILD_PATH,
         "LANG": "en_US.UTF-8",
         "GIT_TERMINAL_PROMPT": "0",
+        **config.GIT_NO_LAZY_FETCH_ENV,
         "RTK_DISABLED": "1",
     }
 

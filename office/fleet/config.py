@@ -21,6 +21,10 @@ PYTHON_WRAPPER = ("/usr/bin/env", "-i", "/usr/bin/python3", "-I", "-B", "-X", "p
 GIT_BIN = "/usr/bin/git"
 BASH_BIN = "/bin/bash"
 CHILD_PATH = "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin"
+# A partial clone fetches an object it lacks from its remote the moment git needs it, with nothing said and
+# with Ryan's credentials. The environment the fleet gives git sets this, so a missing object is an error
+# instead of a silent fetch. An explicit git fetch is unaffected.
+GIT_NO_LAZY_FETCH_ENV = {"GIT_NO_LAZY_FETCH": "1"}
 
 # Filled in at onboarding (docs/ONBOARDING.md stage 2). Later-stage scripts such as the Map read these.
 GITHUB_ACCOUNT = "<github-account>"

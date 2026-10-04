@@ -7,6 +7,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import signal
 import subprocess
 from unittest import mock
 
@@ -14,7 +15,7 @@ from hogwarts import capacity, owlery, pensieve
 from tests.support import DAY, NOW
 
 from fleet import config, run_desk
-from tests_fleet.support import fake_children
+from tests_fleet.support import FakeChild, fake_children
 from tests_fleet.test_run_desk import RunDeskCase
 
 DAY_START = NOW - NOW % DAY
@@ -430,6 +431,41 @@ class KilledRunSpendTests(CapCase):
         result = self.killed("moody", codex_out(CODEX_OK[:2]), -9)
         self.assertEqual(result["cost_usd"], 0.0)
         self.assertNotIn("spend_unknown", result)
+
+    def test_sigterm_kills_the_desk_process_records_the_run_and_frees_the_locks(self):
+        # The Owl Post starts run_desk detached, so a SIGTERM reaches the run itself, mid-wait on the desk.
+        self.enable("hermione")
+        owl_id, _ = self.request("hermione")
+        made, before = [], signal.getsignal(signal.SIGTERM)
+
+        def run(argv, **kwargs):
+            os.write(kwargs["stdout"], stream_out(self.STREAM))
+            os.kill(os.getpid(), signal.SIGTERM)
+            raise AssertionError("SIGTERM did not end the run")
+
+        def start(argv, **kwargs):
+            made.append(FakeChild(run, argv, kwargs))
+            return made[-1]
+
+        with mock.patch.object(run_desk, "start_child", side_effect=start), \
+                mock.patch("time.time", return_value=NOW):
+            with self.assertRaises(SystemExit) as caught:
+                self.main("hermione", "--owl", owl_id)
+        self.assertEqual(caught.exception.code, 128 + signal.SIGTERM)
+        self.assertEqual(len(made), 1)
+        self.assertEqual(made[0].returncode, -9)  # the desk's process was killed, not left running
+        self.assertIs(signal.getsignal(signal.SIGTERM), before)
+        # The run is on record as a killed one: counted, with its tokens and its budget as spend.
+        [launch] = capacity.list_launches(self.conn, "hermione")
+        self.assertIsNotNone(launch["metric_id"])
+        [metric] = self.conn.execute("SELECT * FROM metrics WHERE desk = 'hermione'").fetchall()
+        self.assertEqual((metric["cost_usd"], metric["input_tokens"], metric["output_tokens"]), (2.0, 130, 120))
+        self.assertEqual(run_desk.cap_status(self.conn, "hermione", NOW)["runs_used"], 1)
+        # Both locks are free again, the owl waits for another run, and Ryan is told.
+        with run_desk.desk_lock("hermione", wait=False), run_desk.launch_gate():
+            pass
+        self.assertEqual([owl["id"] for owl in owlery.inbox(self.conn, "hermione")], [owl_id])
+        self.assertEqual(len(self.events_of("rundesk.failed")), 1)
 
     def test_streamed_tokens_count_each_message_once(self):
         self.assertEqual(run_desk.killed_claude_usage("hermione", stream_out(self.STREAM)),

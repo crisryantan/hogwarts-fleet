@@ -53,6 +53,9 @@ run's task, or for a review round by its author task, so the rounds of one revie
 run makes it under the desk lock just before launch, never on a dry run, and the prompt names it in
 one trusted line.
 A run that gives up waiting for its desk lock raises its own event, not a failed-run one.
+SIGTERM or SIGHUP, sent to a real run the Owl Post started, ends it through its finally blocks: the desk's
+process is killed, a Claude run records its usage as a killed run, the locks are released, the owl stays in
+the inbox and Ryan gets the failed-run event.
 
 --dry-run prints the argv as JSON and runs nothing. A real run needs the desk to be
 enabled (a plain file named "enabled" in its office folder, made by Ryan), stays under
@@ -749,6 +752,7 @@ def child_env(path_prefix: list = (), extra: Optional[dict] = None) -> dict:
         "LANG": "en_US.UTF-8",
         "SHELL": "/bin/bash",
         "RTK_DISABLED": "1",
+        **config.GIT_NO_LAZY_FETCH_ENV,
         **(extra or {}),
     }
 
@@ -1258,6 +1262,32 @@ def wait_child(child, timeout: int) -> int:
         raise
 
 
+def _run_output(run_fd: int, run_id: str) -> bytes:
+    """What the desk's process wrote to its output file, or nothing when that cannot be read, so usage then
+    records as zero. The run log keeps the full output."""
+    try:
+        output, _ = safefs.read_range(run_fd, f"{run_id}.out", None, RUN_OUTPUT_MAX_BYTES, "run output")
+    except FleetError:
+        return b""
+    return output
+
+
+def _record_interrupted(conn, plan: dict, run_fd: int, started: float, now: Optional[int]) -> None:
+    """A Claude run cut short by SIGTERM, SIGHUP or an interrupt, once its process is killed, still records what
+    it used, as a killed run, so its spend is not lost with the signal. It does not count toward a model trial:
+    the desk did not fail. A Codex run has no spend to lose, and its launch already counts toward the run cap.
+    Never raises, so it cannot hide the interrupt."""
+    if plan["family"] != "claude":
+        return
+    try:
+        usage = run_usage(plan, _run_output(run_fd, plan["run_id"]), -1)  # -1: killed, as a timeout is
+        capacity.record_launch_usage(conn, plan["run_id"], usage["input_tokens"], usage["output_tokens"],
+                                     usage["cache_read_tokens"], usage["cost_usd"],
+                                     int((time.monotonic() - started) * 1000), model=plan["model"], now=now)
+    except (StoreError, FleetError, OSError):
+        pass
+
+
 def _launch(conn, plan: dict, now: Optional[int], keep_fds: tuple = ()) -> dict:
     """Start the planned run and record what it did. The process inherits every fd in keep_fds."""
     desk, run_id = plan["desk"], plan["run_id"]
@@ -1269,18 +1299,20 @@ def _launch(conn, plan: dict, now: Optional[int], keep_fds: tuple = ()) -> dict:
         out_fd = safefs.create_new(run_fd, f"{run_id}.out")
         err_fd = safefs.create_new(run_fd, f"{run_id}.err")
         started = time.monotonic()
+        child = None
         try:
             child = start_child(plan["argv"], cwd=plan["cwd"], env=plan.get("env") or child_env(),
                                 stdin=subprocess.DEVNULL, stdout=out_fd, stderr=err_fd, pass_fds=tuple(keep_fds))
             exit_code = wait_child(child, config.RUN_TIMEOUT_SECONDS)
+        except BaseException:
+            if child is not None:  # started, and wait_child has killed it: record what it did, then keep unwinding
+                _record_interrupted(conn, plan, run_fd, started, now)
+            raise
         finally:
             os.close(out_fd)
             os.close(err_fd)
         duration_ms = int((time.monotonic() - started) * 1000)
-        try:
-            output, _ = safefs.read_range(run_fd, f"{run_id}.out", None, RUN_OUTPUT_MAX_BYTES, "run output")
-        except FleetError:
-            output = b""  # usage then records as zero; the run log keeps the full output
+        output = _run_output(run_fd, run_id)
         try:
             errors = safefs.read_regular(run_fd, f"{run_id}.err", config.RUN_ERROR_MAX_BYTES, "run errors")
         except FleetError:
@@ -1333,7 +1365,10 @@ def main(argv: Optional[list] = None) -> int:
                                                     "cwd", "argv")}}
             sys.stdout.write(json.dumps(result, ensure_ascii=True, indent=2) + "\n")
             return 0
-        result = run(conn, args.desk, args.owl, args.mcp_job)
+        # The Owl Post starts this run detached. SIGTERM or SIGHUP then ends it through its finally blocks, not
+        # mid-step: the desk's process is killed and the locks are released as the run unwinds.
+        with common.ended_by_signals():
+            result = run(conn, args.desk, args.owl, args.mcp_job)
         clean = result["exit_code"] == 0 and result["cap_source"] is None
         sys.stdout.write(json.dumps({"ok": clean, **result}, ensure_ascii=True) + "\n")
         if not clean and result["cap_source"] is None:
@@ -1346,6 +1381,12 @@ def main(argv: Optional[list] = None) -> int:
         elif not args.dry_run and not isinstance(exc, (Capped, Stopped, Blocked, TaskClosed)):
             report_failure(conn, args.desk, args.owl)
         return 1
+    except SystemExit:
+        # Ended by SIGTERM or SIGHUP. The run has unwound, so its owl stays unacknowledged in the inbox and Ryan
+        # hears of it like any run that did not finish.
+        if not args.dry_run:
+            report_failure(conn, args.desk, args.owl)
+        raise
     finally:
         conn.close()
 

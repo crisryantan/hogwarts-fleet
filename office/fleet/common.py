@@ -1,11 +1,14 @@
 """Helpers shared by the fleet scripts and hooks: store access, hook input, exit codes."""
 from __future__ import annotations
 
+import contextlib
 import json
 import re
+import signal
 import sys
+import threading
 import time
-from typing import Callable, Optional, Sequence
+from typing import Callable, Iterator, Optional, Sequence
 
 from hogwarts import db, ids
 from hogwarts.errors import StoreError
@@ -23,6 +26,25 @@ def connect():
 
 def now_stamp(now: Optional[int] = None) -> int:
     return int(time.time()) if now is None else now
+
+
+@contextlib.contextmanager
+def ended_by_signals() -> Iterator[None]:
+    """SIGTERM or SIGHUP (a closed terminal, a caller's timeout) ends the command through its finally blocks,
+    so a review closes its reviewer task and a desk run kills its child, instead of Python dying mid-step."""
+    if threading.current_thread() is not threading.main_thread():
+        yield
+        return
+
+    def stop(signum, frame) -> None:
+        raise SystemExit(128 + signum)
+
+    previous = {number: signal.signal(number, stop) for number in (signal.SIGTERM, signal.SIGHUP)}
+    try:
+        yield
+    finally:
+        for number, handler in previous.items():
+            signal.signal(number, signal.SIG_DFL if handler is None else handler)
 
 
 def _no_constants(name: str) -> None:
