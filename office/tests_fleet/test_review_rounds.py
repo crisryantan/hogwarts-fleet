@@ -85,8 +85,28 @@ class ReviewRoundTests(LoopCase):
 
     def test_a_vendor_limit_on_the_reviewer_is_named_and_never_offered_a_bump(self):
         self.commit("my fix")
-        def limited(conn, desk, owl_id, mcp_job=None, now=None):
+        def limited(conn, desk, owl_id, mcp_job=None, now=None, on_start=None):
+            on_start()
             return {"desk": desk, "run_id": "run-" + "b" * 16, "exit_code": 1, "cap_source": "codex_plan"}
         with mock.patch.object(run_desk, "run", side_effect=limited):
             with self.assertRaisesRegex(FleetError, "cap_source codex_plan.*does not lift it"):
                 review.review_own(self.conn, str(self.repo), title="my own fix", fetch=False)
+
+    def test_a_cap_reached_while_waiting_for_the_desk_lock_leaves_the_round_waiting(self):
+        # Another moody run held the lock and used the last run: the check inside the lock refuses.
+        first_sha = self.commit("first try")
+        with mock.patch.object(run_desk, "over_daily_cap", side_effect=[None, "daily run cap reached"]), \
+                mock.patch.object(run_desk, "report_cap") as reported, \
+                mock.patch.object(run_desk, "_launch", side_effect=AssertionError("a capped reviewer ran")):
+            with self.assertRaisesRegex(run_desk.Capped, "while it waited for its desk lock.*waits as request"):
+                review.review_own(self.conn, str(self.repo), title="my own fix", fetch=False)
+        reported.assert_called_once()
+        [task] = pensieve.list_tasks(self.conn, desk="ryan-claude-1")
+        [waiting] = capacity.review_rounds(self.conn, task["id"])
+        self.assertEqual((waiting["sha"], waiting["waiting"]), (first_sha, True))
+        request = owlery.get_request(self.conn, waiting["request_id"])
+        self.assertEqual((request["phase"], request["outcome"]), ("queued", None))
+        self.assertEqual(pensieve.get_task(self.conn, request["task_id"])["status"], "queued")
+        second_sha = self.commit("second try")
+        result = self.own_review(task["id"], verdict="PASS")
+        self.assertEqual((result["sha"], result["round"], result["superseded"]), (second_sha, 1, [waiting["request_id"]]))

@@ -217,16 +217,26 @@ def run_review(conn, task: dict, record: dict, sha: str, holder_id: str, handoff
     request_id, reviewer_task, owl_id = opened["request"]["id"], opened["task"], opened["owl"]["id"]
     _deliver(conn, owl_id, reviewer, body)
     pensieve.set_worktree(conn, reviewer_task["id"], task["worktree"])
+    waits = (f"round {opened['round']} of {task['id']} @ {sha[:12]} waits as request {request_id}; run the review"
+             f" again after the reset or a castle desk cap bump, and that review supersedes this one")
     if run_desk.over_daily_cap(conn, reviewer, now) is not None:
         run_desk.report_cap(conn, reviewer, now)
-        raise run_desk.Capped(f"{reviewer} is at its fleet daily cap, so round {opened['round']} of {task['id']}"
-                              f" @ {sha[:12]} waits as request {request_id}; run the review again after the reset"
-                              f" or a castle desk cap bump, and that review supersedes this one")
-    pensieve.start_task(conn, reviewer_task["id"])
-    owlery.advance(conn, request_id, "claimed", detail="review script")
-    owlery.advance(conn, request_id, "running", detail="review script")
+        raise run_desk.Capped(f"{reviewer} is at its fleet daily cap, so {waits}")
+    started = []
+
+    def start() -> None:
+        # Under the reviewer's desk lock, once its caps allow the run: a refused run leaves the request waiting.
+        pensieve.start_task(conn, reviewer_task["id"])
+        owlery.advance(conn, request_id, "claimed", detail="review script")
+        owlery.advance(conn, request_id, "running", detail="review script")
+        started.append(True)
+
     try:
-        result = run_desk.run(conn, reviewer, owl_id)
+        try:
+            result = run_desk.run(conn, reviewer, owl_id, on_start=start)
+        except run_desk.Capped:
+            raise run_desk.Capped(f"{reviewer} reached its fleet daily cap while it waited for its desk lock,"
+                                  f" so {waits}") from None
         if result.get("cap_source") is not None:
             raise FleetError(f"the {reviewer} run stopped at the vendor's own usage limit (cap_source"
                              f" {result['cap_source']}); a fleet cap bump does not lift it")
@@ -248,7 +258,8 @@ def run_review(conn, task: dict, record: dict, sha: str, holder_id: str, handoff
         owlery.ack(conn, posted["id"], task["desk"])
         owlery.advance(conn, request_id, "result_posted", detail=verdict)
     finally:
-        _finish_reviewer_task(conn, request_id, reviewer_task["id"])
+        if started:
+            _finish_reviewer_task(conn, request_id, reviewer_task["id"])
     if verdict == "PASS" and pensieve.get_task(conn, task["id"])["status"] == "active":
         pensieve.mark_awaiting_close(conn, task["id"])
     if verdict == "HEADMASTER":

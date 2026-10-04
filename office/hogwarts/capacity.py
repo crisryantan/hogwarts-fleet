@@ -42,9 +42,27 @@ class RoundCapReached(ConflictError):
 # The cap day
 
 
-def day_bounds(now: Optional[int] = None, reset_offset: int = 0) -> tuple:
-    """(start, end) of the cap day holding now. A cap day starts reset_offset seconds after UTC midnight."""
+def local_utc_offset(ts: int) -> int:
+    """Seconds east of UTC in this Mac's own time zone at ts, daylight saving included."""
+    return time.localtime(ts).tm_gmtoff
+
+
+def _utc_of_local(local: int) -> int:
+    # The moment whose local clock reads local. The second pass settles the offset across a clock change.
+    return local - local_utc_offset(local - local_utc_offset(local))
+
+
+def day_bounds(now: Optional[int] = None, reset_offset: Optional[int] = 0) -> tuple:
+    """(start, end) of the cap day holding now. A cap day starts reset_offset seconds after UTC midnight,
+    or at local midnight when reset_offset is None, so a day can be 23 or 25 hours long."""
     ts = ids.stamp(now)
+    if reset_offset is None:
+        midnight = (ts + local_utc_offset(ts)) // DAY * DAY
+        start, end = _utc_of_local(midnight), _utc_of_local(midnight + DAY)
+        if start <= ts < end:
+            return start, end
+        start = midnight - local_utc_offset(ts)  # a midnight the clock change skipped: keep today's offset
+        return start, start + DAY
     reset_offset = ids.check_int(reset_offset, "reset offset", maximum=DAY - 1)
     start = (ts - reset_offset) // DAY * DAY + reset_offset
     return start, start + DAY
@@ -52,6 +70,15 @@ def day_bounds(now: Optional[int] = None, reset_offset: int = 0) -> tuple:
 
 def utc_text(ts: int) -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(ids.check_int(ts, "timestamp", maximum=ids.MAX_TIME)))
+
+
+def local_text(ts: int) -> str:
+    """ts on this Mac's own clock, with its offset from UTC, for events Ryan reads."""
+    ts = ids.check_int(ts, "timestamp", maximum=ids.MAX_TIME)
+    offset = local_utc_offset(ts)
+    sign, minutes = ("-" if offset < 0 else "+"), abs(offset) // 60
+    clock = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(ts + offset))
+    return f"{clock}{sign}{minutes // 60:02d}:{minutes % 60:02d}"
 
 
 # Bumps
@@ -110,7 +137,7 @@ def list_bumps(conn: Conn, desk: Optional[str] = None) -> list[dict]:
 
 
 def cap_status(conn: Conn, desk: str, run_cap: int, spend_cap: Optional[float] = None,
-               now: Optional[int] = None, reset_offset: int = 0) -> dict:
+               now: Optional[int] = None, reset_offset: Optional[int] = 0) -> dict:
     """Runs and spend this cap day against the desk's caps plus today's bumps, and which cap is reached."""
     desk = ids.check("desk", desk)
     run_cap = ids.check_int(run_cap, "run cap", maximum=RUN_CAP_MAX)
@@ -136,6 +163,7 @@ def cap_status(conn: Conn, desk: str, run_cap: int, spend_cap: Optional[float] =
         reached = "spend"
     return {
         "desk": desk, "day_start": start, "resets_at": end, "resets_at_utc": utc_text(end),
+        "resets_at_local": local_text(end),
         "runs_used": used["runs"], "run_cap": run_cap, "runs_bump": bumps["runs"], "runs_limit": runs_limit,
         "spend_used_usd": spend_used, "spend_cap_usd": spend_cap, "spend_bump_usd": bumps["spend"],
         "spend_limit_usd": spend_limit, "reached": reached,

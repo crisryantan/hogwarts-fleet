@@ -18,7 +18,10 @@ from tests_fleet.test_run_desk import RunDeskCase
 
 DAY_START = NOW - NOW % DAY
 RESET = DAY_START + DAY
-RESET_TEXT = "2027-01-16T00:00:00Z"
+RESET_TEXT = "2027-01-16T00:00:00+00:00"
+ZONE = 10 * 3600  # a desk clock ten hours east of UTC
+LOCAL_START = DAY_START - ZONE
+LOCAL_RESET = DAY_START + DAY - ZONE
 
 CLAUDE_OK = {"type": "result", "subtype": "success", "is_error": False, "total_cost_usd": 0.5,
              "result": "REVIEW notes: the rate limit on the login form looks right. VERDICT: PASS"}
@@ -50,10 +53,31 @@ CODEX_OK = [
     {"type": "turn.completed", "usage": {"input_tokens": 10, "cached_input_tokens": 0, "output_tokens": 5}},
 ]
 CODEX_CRASH = [{"type": "turn.failed", "error": {"message": "sandbox denied the write"}}]
+# A transient rate limit Codex retried through: the run went on and finished.
+CODEX_RETRIED = [
+    {"type": "turn.started"},
+    {"type": "error", "message": "Reconnecting... 1/5 (stream disconnected before completion: Rate limit reached)"},
+    {"type": "error", "message": "stream error: 429 Too Many Requests; retrying 2/5"},
+    {"type": "item.completed", "item": {"type": "agent_message", "text": "REVIEW done. VERDICT: PASS"}},
+    {"type": "turn.completed", "usage": {"input_tokens": 10, "cached_input_tokens": 0, "output_tokens": 5}},
+]
+# Retried through a 429, then failed for another reason.
+CODEX_RETRIED_THEN_CRASH = CODEX_RETRIED[:3] + [{"type": "turn.failed", "error": {"message": "sandbox denied"}}]
+CLAUDE_CONTEXT = {"type": "result", "subtype": "success", "is_error": True, "result": "Context limit reached"}
+CLAUDE_SESSION = {"type": "result", "subtype": "success", "is_error": True,
+                  "result": "Session limit reached - resets 3pm"}
+CLAUDE_INIT = {"type": "system", "subtype": "init", "session_id": "s-1", "tools": ["Read"] * 400}
+CLAUDE_TALK = {"type": "assistant", "message": {"content": [
+    {"type": "text", "text": "The login form has a rate limit; too many requests get a 429. " * 40}]}}
 
 
 def claude_out(data: dict) -> bytes:
     return json.dumps(data).encode("utf-8")
+
+
+def stream_out(events: list) -> bytes:
+    """claude -p --output-format stream-json: one event per line."""
+    return "".join(json.dumps(event) + "\n" for event in events).encode("utf-8")
 
 
 def codex_out(events: list) -> bytes:
@@ -82,7 +106,7 @@ class CapNumberTests(CapCase):
         self.assertEqual(config.DAILY_SPEND_CAP_USD, {"hermione": 60.0, "ron": 10.0, "portrait": 4.0})
         self.assertEqual(config.MAX_BUDGET_USD, {"hermione": "2.00", "ron": "0.25", "portrait": "2.00"})
         self.assertEqual(set(config.DAILY_RUN_CAP), set(config.HEADLESS_DESKS))
-        self.assertEqual((config.REVIEW_ROUND_CAP, config.CAP_WARN_FRACTION, config.CAP_RESET_UTC_SECONDS), (3, 0.8, 0))
+        self.assertEqual((config.REVIEW_ROUND_CAP, config.CAP_WARN_FRACTION, config.CAP_RESET_UTC_SECONDS), (3, 0.8, None))
 
 
 class CapDayTests(CapCase):
@@ -259,3 +283,106 @@ class PlanLimitTests(CapCase):
         for pattern in config.CLAUDE_PLAN_LIMIT_PATTERNS + config.CODEX_PLAN_LIMIT_PATTERNS:
             with self.subTest(pattern=pattern):
                 self.assertIsNotNone(re.compile(pattern))
+
+
+class PlanLimitFalsePositiveTests(CapCase):
+    def test_a_codex_run_that_exits_0_is_never_a_plan_limit(self):
+        self.assertIsNone(run_desk.plan_limit("codex", codex_out(CODEX_RETRIED), False))
+        self.assertIsNone(run_desk.plan_limit("codex", codex_out(CODEX_USAGE_LIMIT), False))
+
+    def test_a_codex_error_the_run_recovered_from_is_not_what_stopped_it(self):
+        self.assertIsNone(run_desk.plan_limit("codex", codex_out(CODEX_RETRIED_THEN_CRASH), True))
+        recovered = CODEX_RETRIED + [{"type": "error", "message": "connection closed"}]
+        self.assertIsNone(run_desk.plan_limit("codex", codex_out(recovered), True))
+        stopped = [{"type": "error", "message": "You've hit your usage limit. Try again later."}]
+        self.assertEqual(run_desk.plan_limit("codex", codex_out(stopped), True), "codex_plan")
+
+    def test_a_retried_codex_review_is_acked_and_reported_clean(self):
+        self.enable("moody")
+        owl_id, _ = self.request("moody")
+        with self.fake_output(codex_out(CODEX_RETRIED), 0), mock.patch("time.time", return_value=NOW):
+            code, out, err = self.main("moody", "--owl", owl_id)
+        self.assertEqual(code, 0, err)
+        self.assertEqual((json.loads(out)["ok"], json.loads(out)["cap_source"]), (True, None))
+        self.assertEqual(self.events_of("rundesk.plan-limit"), [])
+        self.assertEqual(capacity.list_cap_hits(self.conn, "moody"), [])
+        self.assertEqual(owlery.inbox(self.conn, "moody"), [])
+
+    def test_a_claude_limit_that_is_not_the_plan_is_not_labelled(self):
+        self.assertIsNone(run_desk.plan_limit("claude", claude_out(CLAUDE_CONTEXT), True))
+        self.assertEqual(run_desk.plan_limit("claude", claude_out(CLAUDE_SESSION), True), "claude_plan")
+
+    def test_stream_json_output_reads_its_result_event(self):
+        limited = stream_out([CLAUDE_INIT, CLAUDE_TALK, CLAUDE_USAGE_LIMIT])
+        self.assertGreater(len(limited), run_desk.ERROR_TEXT_MAX)
+        self.assertEqual(run_desk.plan_limit("claude", limited, True), "claude_plan")
+        self.assertEqual(run_desk.plan_limit("claude", limited, False), "claude_plan")
+        self.assertIsNone(run_desk.plan_limit("claude", stream_out([CLAUDE_INIT, CLAUDE_TALK, CLAUDE_CRASH]), True))
+        self.assertIsNone(run_desk.plan_limit("claude", stream_out([CLAUDE_INIT, CLAUDE_TALK, CLAUDE_OK]), False))
+        cut = stream_out([CLAUDE_INIT, CLAUDE_TALK])[:-200]  # killed before any result event
+        self.assertIsNone(run_desk.plan_limit("claude", cut, True))
+        self.assertIsNone(run_desk.plan_limit("claude", stream_out([CLAUDE_INIT, CLAUDE_TALK]), True))
+
+
+class LocalCapDayTests(CapCase):
+    def setUp(self) -> None:
+        super().setUp()
+        zone = mock.patch.object(capacity, "local_utc_offset", return_value=ZONE)
+        zone.start()
+        self.addCleanup(zone.stop)
+
+    def test_the_cap_day_runs_from_local_midnight_to_local_midnight(self):
+        status = run_desk.cap_status(self.conn, "moody", NOW)
+        self.assertEqual((status["day_start"], status["resets_at"]), (LOCAL_START, LOCAL_RESET))
+        self.assertEqual(status["resets_at_local"], "2027-01-16T00:00:00+10:00")
+        self.assertEqual(status["resets_at_utc"], "2027-01-15T14:00:00Z")
+        self.runs("moody", 80, ts=LOCAL_START - 1)
+        self.assertIsNone(run_desk.over_daily_cap(self.conn, "moody", NOW))
+        self.runs("moody", 80, ts=LOCAL_START)
+        self.assertEqual(run_desk.over_daily_cap(self.conn, "moody", NOW), "daily run cap reached")
+        self.assertIsNone(run_desk.over_daily_cap(self.conn, "moody", LOCAL_RESET))
+
+    def test_a_bump_made_through_castle_expires_at_local_midnight(self):
+        from hogwarts import cli
+
+        self.runs("moody", 80)
+        with mock.patch.object(cli, "_clock", return_value=NOW), mock.patch.object(cli, "_fleet_caps",
+                                                                                    return_value=config):
+            made = cli._desk_cap(self.conn, mock.Mock(desk="moody", runs=5, spend=None))
+        self.assertEqual((made["bump"]["created_at"], made["bump"]["expires_at"]), (NOW, LOCAL_RESET))
+        self.assertIsNone(run_desk.over_daily_cap(self.conn, "moody", LOCAL_RESET - 1))
+        self.runs("moody", 80, ts=LOCAL_RESET)
+        after = run_desk.cap_status(self.conn, "moody", LOCAL_RESET + 1)
+        self.assertEqual((after["runs_bump"], after["reached"]), (0, "runs"))
+
+    def test_cap_events_dedupe_by_the_local_day(self):
+        self.runs("ron", 120)
+        run_desk.report_cap(self.conn, "ron", NOW)
+        run_desk.report_cap(self.conn, "ron", LOCAL_RESET - 1)
+        [summary] = self.summaries("rundesk.cap")
+        self.assertIn("resets at 2027-01-16T00:00:00+10:00", summary)
+        self.runs("ron", 120, ts=LOCAL_RESET)
+        run_desk.report_cap(self.conn, "ron", LOCAL_RESET + 1)
+        self.assertEqual(len(self.events_of("rundesk.cap")), 2)
+        self.runs("moody", 64)
+        self.assertEqual(run_desk.warn_near_cap(self.conn, "moody", NOW), ["runs"])
+        self.assertEqual(run_desk.warn_near_cap(self.conn, "moody", LOCAL_RESET - 1), [])
+
+    def test_a_daylight_saving_day_is_23_or_25_hours(self):
+        spring = LOCAL_START + 2 * 3600  # clocks go forward an hour at 02:00 local
+
+        def zone(ts):
+            return ZONE if ts < spring else ZONE + 3600
+
+        with mock.patch.object(capacity, "local_utc_offset", side_effect=zone):
+            start, end = capacity.day_bounds(NOW, None)
+            self.assertEqual((start, end - start), (LOCAL_START, DAY - 3600))
+            self.assertEqual(capacity.day_bounds(LOCAL_START - 1, None), (LOCAL_START - DAY, LOCAL_START))
+        autumn = LOCAL_START + 2 * 3600  # clocks go back an hour at 02:00 local
+
+        def back(ts):
+            return ZONE if ts < autumn else ZONE - 3600
+
+        with mock.patch.object(capacity, "local_utc_offset", side_effect=back):
+            start, end = capacity.day_bounds(NOW, None)
+            self.assertEqual((start, end - start), (LOCAL_START, DAY + 3600))

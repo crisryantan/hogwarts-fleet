@@ -25,6 +25,18 @@ class CapDayTests(StoreCase):
                 capacity.day_bounds(NOW, bad)
 
 
+    def test_day_bounds_follow_local_midnight_when_the_offset_is_none(self):
+        for zone in (0, 10 * 3600, -5 * 3600, 5 * 3600 + 1800):
+            with self.subTest(zone=zone), mock.patch.object(capacity, "local_utc_offset", return_value=zone):
+                start, end = capacity.day_bounds(NOW, None)
+                self.assertEqual((start + zone) % DAY, 0)
+                self.assertEqual(end - start, DAY)
+                self.assertTrue(start <= NOW < end)
+        with mock.patch.object(capacity, "local_utc_offset", return_value=-(5 * 3600 + 1800)):
+            self.assertEqual(capacity.local_text(RESET), "2027-01-15T18:30:00-05:30")
+        self.assertIsInstance(capacity.local_utc_offset(NOW), int)
+
+
 class BumpTests(StoreCase):
     def setUp(self):
         super().setUp()
@@ -233,6 +245,9 @@ class MigrationV4Tests(StoreCase):
 class CapCliTests(CliCase):
     def setUp(self):
         super().setUp()
+        zone = mock.patch.object(capacity, "local_utc_offset", return_value=0)
+        zone.start()
+        self.addCleanup(zone.stop)
         self.ok("init")
         for name, family in (("moody", "codex"), ("hermione", "claude"), ("snape", "claude")):
             self.ok("desk", "add", name, "--family", family)

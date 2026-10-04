@@ -74,18 +74,21 @@ CLAUDE_READ_DIRS = {"hermione": ("tasks", "worktrees"), "ron": ("tasks",), "port
 DAILY_RUN_CAP = {"hermione": 80, "ron": 120, "portrait": 3, "harry": 40, "moody": 80}
 DAILY_SPEND_CAP_USD = {"hermione": 60.0, "ron": 10.0, "portrait": 4.0}
 DAY_SECONDS = 86400
-# The cap day starts this many seconds after UTC midnight: caps, bumps and cap events all reset then.
-# 0 keeps UTC midnight, the day the cap event key has always used.
-CAP_RESET_UTC_SECONDS = 0
+# When the cap day starts: caps, bumps and cap events all reset then. None is local midnight on this Mac,
+# daylight saving included; a number fixes the reset that many seconds after UTC midnight instead.
+# A cap day resets all at once, so a desk busy on both sides of the reset can use up to two days' cap
+# within hours. Ryan's call whether to add a rolling 24 hour guard on top.
+CAP_RESET_UTC_SECONDS = None
 # A desk at this share of a cap today gets one headmaster event per cap per day.
 CAP_WARN_FRACTION = 0.8
 # Review rounds per author task. The next one waits for Ryan's castle task allow-round.
 REVIEW_ROUND_CAP = 3
 # A failed run whose error text matches one of these hit the vendor's own usage or rate limit, not a
 # fleet cap. Matched without case against Claude's result text when is_error is set, and against the
-# message of Codex's error and turn.failed events.
+# message that ended a failed Codex run (its last turn.failed, else its last error event).
 CLAUDE_PLAN_LIMIT_PATTERNS = (
-    r"usage limit", r"limit reached", r"hit your (?:usage )?limit", r"out of (?:extra )?usage",
+    r"usage limit", r"(?:session|weekly|opus|sonnet|[0-9]+[ -]hour) limit reached",
+    r"hit your (?:usage |session |weekly )?limit", r"out of (?:extra )?usage",
     r"rate[ _-]?limit", r"too many requests", r"\b429\b",
 )
 CODEX_PLAN_LIMIT_PATTERNS = (

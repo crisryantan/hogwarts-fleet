@@ -44,7 +44,7 @@ import shutil
 import subprocess
 import sys
 import time
-from typing import Optional
+from typing import Callable, Optional
 
 if __name__ == "__main__" and "/Users/crisryantan/.hogwarts" not in sys.path:
     sys.path.insert(0, "/Users/crisryantan/.hogwarts")
@@ -479,7 +479,7 @@ def report_cap(conn, desk: str, now: Optional[int] = None) -> None:
     waiting = len(capacity.waiting_requests(conn, desk))
     summary = (f"{desk} was not started: its fleet daily {cap} cap is reached ({_used_text(status, cap)}),"
                f" cap_source fleet. {waiting} request(s) waiting for {desk}. The cap resets at"
-               f" {status['resets_at_utc']}; castle desk cap {desk} {CAP_FLAGS[cap]} lifts it until then")
+               f" {status['resets_at_local']}; castle desk cap {desk} {CAP_FLAGS[cap]} lifts it until then")
     pensieve.add_event(conn, desk, "rundesk.cap", "headmaster", summary,
                        dedupe_key=f"rundesk:cap:{desk}:{cap}:{status['day_start']}", now=now)
 
@@ -495,7 +495,7 @@ def warn_near_cap(conn, desk: str, now: Optional[int] = None) -> list:
         if limit <= 0 or used < round(config.CAP_WARN_FRACTION * limit, 6):
             continue
         summary = (f"{desk} has used {_used_text(status, cap)} of its fleet daily {cap} cap today;"
-                   f" the cap resets at {status['resets_at_utc']}")
+                   f" the cap resets at {status['resets_at_local']}")
         event = pensieve.add_event(conn, desk, "rundesk.cap-near", "headmaster", summary,
                                    dedupe_key=f"rundesk:cap-near:{desk}:{cap}:{status['day_start']}", now=now)
         if event["created"]:
@@ -610,16 +610,44 @@ def parse_codex_usage(raw: bytes) -> dict:
     return usage
 
 
-def _claude_error_texts(raw: bytes, failed: bool) -> list:
+def _result_of(data: object) -> dict:
+    if isinstance(data, list):  # the older single JSON array form
+        data = next((item for item in reversed(data) if isinstance(item, dict) and item.get("type") == "result"), None)
+    return data if isinstance(data, dict) and data.get("type") == "result" else {}
+
+
+def _claude_result_event(raw: bytes) -> dict:
+    """The last {"type": "result"} event, from one JSON document or from stream-json output with one
+    event per line, or {} when there is none."""
     try:
-        data = json.loads(raw.decode("utf-8"))
-    except (UnicodeDecodeError, ValueError):
-        # Output that is not the JSON result is read as plain text, but only from a failed run.
-        return [raw[:ERROR_TEXT_MAX].decode("utf-8", "replace")] if failed else []
-    if isinstance(data, list):
-        data = next((item for item in reversed(data) if isinstance(item, dict) and item.get("type") == "result"), {})
-    if not isinstance(data, dict):
-        return []
+        return _result_of(json.loads(raw))
+    except (ValueError, RecursionError):
+        pass
+    found: dict = {}
+    for line in raw.split(b"\n"):
+        if b'"result"' not in line:
+            continue
+        try:
+            found = _result_of(json.loads(line)) or found
+        except (ValueError, RecursionError):
+            continue
+    return found
+
+
+def _claude_error_texts(raw: bytes, failed: bool) -> list:
+    data = _claude_result_event(raw)
+    if not data:
+        # No result event. A failed run that printed plain text, and no JSON event at all, is read as
+        # its error text. A JSON stream cut short is not, so a desk's own words never count.
+        if not failed:
+            return []
+        for line in raw.split(b"\n"):
+            try:
+                if isinstance(json.loads(line), dict):
+                    return []
+            except (ValueError, RecursionError):
+                continue
+        return [raw[-ERROR_TEXT_MAX:].decode("utf-8", "replace")]
     subtype = data.get("subtype") if isinstance(data.get("subtype"), str) else ""
     if subtype.startswith("error_max"):
         return []  # the fleet's own per-run turn or budget limit, never the plan's
@@ -631,20 +659,31 @@ def _claude_error_texts(raw: bytes, failed: bool) -> list:
     return texts
 
 
-def _codex_error_texts(raw: bytes) -> list:
-    texts = []
+def _codex_error_texts(raw: bytes, failed: bool) -> list:
+    """The message that ended a failed Codex run: its last turn.failed, else its last error event.
+
+    A run that exits 0 was not stopped, whatever retries it logged on the way, and an error event the
+    run recovered from (a turn.completed came after it) is not what stopped it."""
+    if not failed:
+        return []
+    turn_failed, last_error = None, None
     for line in raw.split(b"\n"):
         try:
             event = json.loads(line)
-        except ValueError:
+        except (ValueError, RecursionError):
             continue
         if not isinstance(event, dict):
             continue
-        error = event.get("error") if event.get("type") == "turn.failed" else event
-        if event.get("type") in ("error", "turn.failed") and isinstance(error, dict) \
-                and isinstance(error.get("message"), str):
-            texts.append(error["message"][:ERROR_TEXT_MAX])
-    return texts
+        kind = event.get("type")
+        if kind == "turn.completed":
+            last_error = None
+        elif kind == "error" and isinstance(event.get("message"), str):
+            last_error = event["message"]
+        elif kind == "turn.failed" and isinstance(event.get("error"), dict) \
+                and isinstance(event["error"].get("message"), str):
+            turn_failed = event["error"]["message"]
+    message = turn_failed if turn_failed is not None else last_error
+    return [] if message is None else [message[:ERROR_TEXT_MAX]]
 
 
 def plan_limit(family: str, raw: bytes, failed: bool) -> Optional[str]:
@@ -652,7 +691,7 @@ def plan_limit(family: str, raw: bytes, failed: bool) -> Optional[str]:
     if family == "claude":
         texts, patterns, source = _claude_error_texts(raw, failed), config.CLAUDE_PLAN_LIMIT_PATTERNS, "claude_plan"
     else:
-        texts, patterns, source = _codex_error_texts(raw), config.CODEX_PLAN_LIMIT_PATTERNS, "codex_plan"
+        texts, patterns, source = _codex_error_texts(raw, failed), config.CODEX_PLAN_LIMIT_PATTERNS, "codex_plan"
     for text in texts:
         if any(re.search(pattern, text, re.IGNORECASE) for pattern in patterns):
             return source
@@ -679,7 +718,10 @@ def require_castle_dir(path: str) -> None:
         pass
 
 
-def run(conn, desk: str, owl_id: str, mcp_job: Optional[str] = None, now: Optional[int] = None) -> dict:
+def run(conn, desk: str, owl_id: str, mcp_job: Optional[str] = None, now: Optional[int] = None,
+        on_start: Optional[Callable[[], None]] = None) -> dict:
+    """Run one desk on one owl. on_start is called under the desk lock once the caps allow the run,
+    just before it launches, so a caller's own bookkeeping never runs for a refused run."""
     if not is_enabled(desk):
         raise FleetError(f"{desk} is not enabled; Ryan enables a headless desk by hand")
     plan = build_plan(conn, desk, owl_id, mcp_job)
@@ -694,6 +736,8 @@ def run(conn, desk: str, owl_id: str, mcp_job: Optional[str] = None, now: Option
         if cap is not None:
             report_cap(conn, plan["desk"], now)
             raise Capped(cap)
+        if on_start is not None:
+            on_start()
         result = _launch(conn, plan, now)
     warn_near_cap(conn, plan["desk"], now)
     if result["cap_source"] is not None:

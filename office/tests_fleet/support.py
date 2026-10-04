@@ -14,7 +14,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from hogwarts import db, ids, pensieve
+from hogwarts import capacity, db, ids, pensieve
 from tests.support import NOW, temp_dir
 
 from fleet import config
@@ -94,6 +94,10 @@ class FleetCase(unittest.TestCase):
             patcher = mock.patch.object(config, name, value)
             patcher.start()
             self.addCleanup(patcher.stop)
+        # The cap day follows this Mac's time zone. Tests pin it to UTC unless they set their own.
+        zone = mock.patch.object(capacity, "local_utc_offset", return_value=0)
+        zone.start()
+        self.addCleanup(zone.stop)
 
     def _build_castle(self) -> None:
         for name in ("desks", "tasks", "worktrees"):
