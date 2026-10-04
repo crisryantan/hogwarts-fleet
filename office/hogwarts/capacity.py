@@ -502,6 +502,11 @@ def round_author(conn: Conn, reviewer_task_id: str) -> Optional[str]:
 # Tasks with a launch of their own that has no usage yet and is recent enough to still be running.
 _OPEN_LAUNCH_TASKS = """SELECT task_id FROM run_launches WHERE metric_id IS NULL AND launched_at > ?
        AND task_id IS NOT NULL"""
+# Author tasks with a round a reviewer desk is running or has queued: a live round whose reviewer task is open.
+_REVIEWING = """SELECT review_rounds.task_id FROM review_rounds JOIN requests ON requests.id = review_rounds.request_id
+       JOIN tasks AS round_task ON round_task.id = requests.task_id
+       WHERE review_rounds.reviewer = ? AND review_rounds.superseded_by IS NULL
+       AND round_task.status IN ('queued', 'active')"""
 # A launch with no usage yet, recent enough to still be running, for the task or one of its rounds' reviewers.
 _RUNNING = """SELECT 1 AS found FROM run_launches WHERE metric_id IS NULL AND launched_at > ? AND (task_id = ?
        OR task_id IN (SELECT requests.task_id FROM review_rounds JOIN requests ON requests.id = review_rounds.request_id
@@ -541,6 +546,7 @@ def _flight_row(conn: Conn, task: dict, since: int, max_rounds: int) -> dict:
         "id": task["id"], "desk": task["desk"], "title": task["title"], "status": task["status"],
         "created_at": task["created_at"], "worktree": task["worktree"], "request_id": task["request_id"],
         "round": None if latest is None else latest["round"],
+        "reviewer": None if latest is None else latest["reviewer"],
         "verdict": None if latest is None else latest["verdict"],
         "waiting": bool(latest is not None and latest["waiting"]),
         "rounds_used": len(holding), "max_rounds": max_rounds, "needs_allowance": needs_allowance,
@@ -554,9 +560,11 @@ def in_flight(conn: Conn, now: Optional[int] = None, running_window: int = 3600,
     by desk, with where it stands. Owl Post starts an ordinary request's run without starting its task, so a
     queued task whose run is going is listed as running, and so is one closed while its run still goes.
 
-    A reviewer's round task is folded into its author task and never listed alone. running means a launch
-    for the task, or for one of its rounds' reviewer tasks, has no usage yet and started within
-    running_window: a run killed before it recorded usage stops counting as running once the window passes.
+    A reviewer's round task is folded into its author task and never listed alone. So a board for one desk also
+    lists, under their own desks, the author tasks whose rounds that desk is running or has queued, and a
+    reviewer mid-review never shows no tasks. running means a launch for the task, or for one of its rounds'
+    reviewer tasks, has no usage yet and started within running_window: a run killed before it recorded usage
+    stops counting as running once the window passes.
     A latest round with no verdict reads "in review" while its run is going, and "review died" once none is or
     once its run ended without a verdict: that round does not count toward the cap, and the task needs its
     review run again.
@@ -573,8 +581,9 @@ def in_flight(conn: Conn, now: Optional[int] = None, running_window: int = 3600,
         since = ts - running_window
         tasks = [task for task in db.fetch_all(
             conn, "SELECT * FROM tasks WHERE (status IN ('active', 'awaiting_close') OR id IN ("
-                  + _OPEN_LAUNCH_TASKS + ")) AND (? IS NULL OR desk = ?) ORDER BY created_at, rowid",
-            (since, desk, desk)) if task["id"] not in reviews]
+                  + _OPEN_LAUNCH_TASKS + ")) AND (? IS NULL OR desk = ? OR id IN (" + _REVIEWING + "))"
+                  " ORDER BY created_at, rowid",
+            (since, desk, desk, desk)) if task["id"] not in reviews]
         rows = [_flight_row(conn, task, since, max_rounds) for task in tasks]
     desks: dict = {}
     for row in rows:

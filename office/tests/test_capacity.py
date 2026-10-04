@@ -625,8 +625,33 @@ class ManyTaskCapacityTests(RoundCase):
         found = capacity.in_flight(self.conn, NOW, self.WINDOW)
         self.assertEqual([(row["desk"], [task["id"] for task in row["tasks"]]) for row in found["desks"]],
                          [("alpha", [self.author])])
-        self.assertEqual(capacity.in_flight(self.conn, NOW, self.WINDOW, desk="beta")["tasks"], 0)
         self.assertEqual(capacity.review_task_ids(self.conn), {opened["task"]["id"]})
+
+    def board_for(self, desk: str) -> list:
+        found = capacity.in_flight(self.conn, NOW, self.WINDOW, desk=desk)
+        return [(row["desk"], [(task["id"], task["state"], task["reviewer"]) for task in row["tasks"]])
+                for row in found["desks"]]
+
+    def test_a_reviewers_board_lists_the_author_tasks_it_is_reviewing_or_has_queued(self):
+        # Moody round 4: filtering by a reviewer folded its round tasks away and showed it with no tasks.
+        queued = self.round(SHAS[0])
+        other = self.started("alpha")["id"]
+        self.assertEqual(self.board_for("beta"), [("alpha", [(self.author, "review queued", "beta")])])
+        pensieve.start_task(self.conn, queued["task"]["id"], now=NOW)
+        capacity.record_launch(self.conn, "beta", "run-review", "model-y", task_id=queued["task"]["id"], now=NOW - 60)
+        self.assertEqual(self.board_for("beta"), [("alpha", [(self.author, "in review", "beta")])])
+        # The author's own board is unchanged, and a task with no round never shows on the reviewer's.
+        self.assertEqual(self.board_for("alpha"), [("alpha", [(self.author, "in review", "beta"),
+                                                              (other, "working", None)])])
+        # Once the verdict is in and the reviewer's task is closed, the reviewer has nothing in flight.
+        self.record_verdict(queued, "CHANGES")
+        pensieve.close_task(self.conn, queued["task"]["id"], "superseded", now=NOW)
+        capacity.record_launch_usage(self.conn, "run-review", 1, 1, 0, 0.1, 10, now=NOW)
+        self.assertEqual(capacity.in_flight(self.conn, NOW, self.WINDOW, desk="beta")["tasks"], 0)
+        # A queued round that a newer one superseded counts once, as the newer round.
+        self.round(SHAS[1])
+        self.round(SHAS[2])
+        self.assertEqual(self.board_for("beta"), [("alpha", [(self.author, "review queued", "beta")])])
 
     def test_stranded_rounds_ignore_a_reviewers_other_active_tasks(self):
         own = self.started("beta")["id"]
