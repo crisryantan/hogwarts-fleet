@@ -95,13 +95,11 @@ def link_deps(record: dict, names: list) -> None:
 def unlink_deps(record: dict) -> None:
     """Drop the links link_deps made, so git sees no untracked files when the worktree is removed.
 
-    A link counts only while it still points where link_deps aimed it. Anything else a desk left under
-    that name stays, and git refuses the removal.
+    Only a link that still points where link_deps aimed it is dropped. Anything else under that name stays.
     """
     for name in record.get("links") or []:
-        link = f"{record['path']}/{name}"
-        if os.path.islink(link) and os.readlink(link) == f"{record['repo_dir']}/{name}":
-            os.unlink(link)
+        if gitops.borrowed_link(record, name):
+            os.unlink(f"{record['path']}/{name}")
 
 
 def for_record(record: Optional[dict]) -> dict:

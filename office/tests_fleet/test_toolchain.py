@@ -8,7 +8,7 @@ from unittest import mock
 
 from hogwarts import pensieve
 
-from fleet import config, gitops, review, run_desk, toolchain, verify, worktree
+from fleet import config, gitops, push, review, run_desk, toolchain, verify, worktree
 from fleet.safefs import FleetError
 from tests_fleet.test_review_loop import HANDOFF, REAL_SANDBOX_ARGV, LoopCase
 
@@ -107,9 +107,37 @@ class DependencyLinkTests(ToolchainCase):
         os.remove(path / "widget.txt")
         os.unlink(path / "node_modules")
         os.symlink(self.tmp, path / "node_modules")
-        with self.assertRaisesRegex(FleetError, "worktree failed"):
+        with self.assertRaisesRegex(FleetError, "no longer the read-only link"):
             worktree.remove(self.conn, task["id"])
         self.assertEqual(os.readlink(path / "node_modules"), str(self.tmp))
+
+    def test_a_replaced_link_stops_verify_commit_and_push(self):
+        self.node_repo()
+        _, task, _, created, _ = self.build()
+        path = Path(created["worktree"])
+        record = gitops.read_record(task["id"])
+        self.assertFalse(gitops.dirty(record))
+        os.unlink(path / "node_modules")
+        (path / "node_modules" / "left-pad").mkdir(parents=True)
+        self.write_file(path / "node_modules" / "left-pad" / "index.js", "module.exports = 2\n")
+        self.assertEqual(self.git("status", "--porcelain", "--", ".", ":(exclude)node_modules", cwd=str(path)), "")
+        with self.assertRaisesRegex(FleetError, "no longer the read-only link"):
+            gitops.dirty(record)
+        with self.assertRaisesRegex(FleetError, "no longer the read-only link"):
+            verify.verify(self.conn, task["id"])
+        with self.assertRaisesRegex(FleetError, "no longer the read-only link"):
+            push.check(self.conn, task["id"])
+        self.write_file(path / "widget.txt", "widget\n")
+        self.handoff(task, HANDOFF.format(task_id=task["id"]))
+        with self.assertRaisesRegex(FleetError, "no longer the read-only link"):
+            review.review_build(self.conn, task["id"])
+        self.assertEqual(self.git("rev-parse", "HEAD", cwd=str(path)), self.git("rev-parse", "origin/main"))
+
+    def test_a_deleted_link_is_not_a_change(self):
+        self.node_repo()
+        _, task, _, created, _ = self.build()
+        os.unlink(Path(created["worktree"]) / "node_modules")
+        self.assertFalse(gitops.dirty(gitops.read_record(task["id"])))
 
     def test_a_repo_without_package_json_or_ignore_rule_gets_no_link(self):
         (self.repo / "node_modules").mkdir()
