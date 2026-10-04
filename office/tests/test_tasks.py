@@ -393,6 +393,19 @@ class ManyTaskDeskTests(StoreCase):
             pensieve.allow_many_tasks(self.conn, "fleet")
         self.assertEqual(self.count("many_task_desks"), 1)
 
+    def test_mcgonagall_snape_dumbledore_ryan_and_the_scripts_stay_single(self):
+        singles = (("mcgonagall", "claude"), ("snape", "claude"), ("portrait", "claude"), ("ryan", "human"),
+                   ("owl-post", "script"))
+        for name, family in singles:
+            self.desk(name, family)
+            with self.subTest(desk=name):
+                with self.assertRaisesRegex(ValidationError, f"{name} keeps one active task at a time"):
+                    pensieve.allow_many_tasks(self.conn, name)
+                with self.assertRaisesRegex(sqlite3.IntegrityError, "keeps one active task at a time"):
+                    self.conn.execute("INSERT INTO many_task_desks(desk, granted_at) VALUES (?, 1)", (name,))
+                self.assertFalse(pensieve.takes_many_tasks(self.conn, name))
+        self.assertEqual(self.count("many_task_desks"), 1)
+
     def test_list_tasks_open_filter(self):
         queued = self.task("beta")
         active = self.started("beta")

@@ -51,7 +51,9 @@ the desk lock. Only Ryan closes a task as complete.
 
 Author tasks run side by side: Harry, Hermione, Moody, Ron and Ryan's own sessions may each hold many active
 tasks, so a task waiting for a fix round blocks nothing. Ryan's own sessions start a new review whatever else
-of theirs is in review or waiting for fixes.
+of theirs is in review or waiting for fixes, with two refusals made before anything changes: a commit another
+task already holds (review it with --task), and a checkout whose open task is at its round cap, so leaving out
+--task never gets past the cap. A new task that fails before its first round opens is closed as abandoned.
 """
 from __future__ import annotations
 
@@ -263,7 +265,14 @@ def _queued(conn, task: dict, reviewer: str, sha: str, body: str, now: Optional[
     opened = _open_and_deliver(conn, task, reviewer, sha, body, now)
     return {**result, "verdict": None, "round": opened["round"], "request_id": opened["request"]["id"],
             "superseded": [item["request_id"] for item in opened["superseded"]], "review": None,
-            "queued": f"queued: {reviewer} is busy; run fleet review again later"}
+            "queued": f"queued: {reviewer} is busy; run {_again(task)} again later"}
+
+
+def _again(task: dict) -> str:
+    """The command that reviews this task again."""
+    if task["desk"] == OWN_DESK:
+        return f"fleet review own --repo-dir <checkout> --task {task['id']}"
+    return f"fleet review {task['id']}"
 
 
 def _review_and_record(conn, task: dict, record: dict, sha: str, holder_id: str, reviewer: str,
@@ -423,6 +432,7 @@ def _review_own(conn, repo_dir: str, title: Optional[str], intent: Optional[str]
         title = ids.clean_text(title or "", "title", 200, single_line=True)
         if not title:
             raise FleetError("a new review needs --title")
+        _check_new_own(conn, repo_dir, common_dir, sha)
         intent_path = _write_own_task_md(target, title, intent or title)
         task = pensieve.create_task(conn, OWN_DESK, title, intent_path=intent_path, task_id=target)
         try:
@@ -432,8 +442,16 @@ def _review_own(conn, repo_dir: str, title: Optional[str], intent: Optional[str]
             pensieve.close_task(conn, task["id"], "abandoned")
             raise FleetError(f"{OWN_DESK} could not start a new task: {exc}; castle desk many-tasks {OWN_DESK}"
                              " lets it hold many") from None
-        record = worktree.add_worktree(conn, task["id"], repo_dir, base, None, fetch, detach_at=sha)
-        task = pensieve.set_worktree(conn, task["id"], f"{ids.WORKTREES_ROOT}/{task['id']}")
+        try:
+            record = worktree.add_worktree(conn, task["id"], repo_dir, base, None, fetch, detach_at=sha)
+            task = pensieve.set_worktree(conn, task["id"], f"{ids.WORKTREES_ROOT}/{task['id']}")
+            return _review_own_at(conn, task, record, sha, lock_fd)
+        except BaseException:
+            # A new task that failed before its first round opened is closed, so it never sits active.
+            with contextlib.suppress(Exception):
+                if not capacity.review_rounds(conn, task["id"]):
+                    pensieve.close_task(conn, task["id"], "abandoned")
+            raise
     else:
         task = pensieve.get_task(conn, target)
         if task["desk"] != OWN_DESK or task["status"] != "active":
@@ -442,6 +460,31 @@ def _review_own(conn, repo_dir: str, title: Optional[str], intent: Optional[str]
         if record is None or record["repo_dir"] != repo_dir:
             raise FleetError("that task's worktree is for a different checkout")
         gitops.git(["checkout", "--detach", sha], record["git_dir"], record["path"])
+    return _review_own_at(conn, task, record, sha, lock_fd)
+
+
+def _check_new_own(conn, repo_dir: str, common_dir: str, sha: str) -> None:
+    """Refuse a new own task, before anything is made, while an open task on the same checkout is at its round
+    cap, so leaving out --task never gets past the cap, or for a commit another task already holds."""
+    for other in pensieve.list_tasks(conn, desk=OWN_DESK, status="active"):
+        record = None if other["worktree"] is None else gitops.find_record(worktree.castle_path(other["worktree"]))
+        if record is None or record["repo_dir"] != repo_dir:
+            continue
+        if capacity.needs_allowance(conn, other["id"], config.REVIEW_ROUND_CAP):
+            raise FleetError(f"task {other['id']} on this checkout is at its review round cap; castle task"
+                             f" allow-round {other['id']} allows one more round on it, or close it first")
+    repo = gitops.repo_slug(gitops.git(["config", "--get", "remote.origin.url"], common_dir))
+    held = pensieve.get_commit(conn, repo, sha)
+    if held is not None:
+        owner = pensieve.get_task(conn, held["task_id"])
+        if owner["desk"] == OWN_DESK and owner["status"] == "active":
+            raise FleetError(f"HEAD {sha[:12]} is already task {owner['id']}; run fleet review own --repo-dir"
+                             f" <checkout> --task {owner['id']} to review it again")
+        raise FleetError(f"HEAD {sha[:12]} already belongs to task {owner['id']}, which is"
+                         f" {owner['status'].replace('_', ' ')}; make a new commit for a new review")
+
+
+def _review_own_at(conn, task: dict, record: dict, sha: str, lock_fd: int) -> dict:
     if gitops.rev(record) != sha:
         raise FleetError("the review worktree is not at your checkout's HEAD")
     with safefs.opened_dir(config.CASTLE_ROOT, "tasks", task["id"]) as fd:

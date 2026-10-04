@@ -527,8 +527,8 @@ class ManyTaskCapacityTests(RoundCase):
         running = self.started("alpha")["id"]
         capacity.record_launch(self.conn, "alpha", "run-going", "model-x", task_id=running, now=NOW - 60)
         states["running"] = running
-        for index, name in enumerate(("review queued", "in review", "CHANGES", "HEADMASTER", "round cap",
-                                      "awaiting close")):
+        for index, name in enumerate(("review queued", "in review", "review died", "CHANGES", "HEADMASTER",
+                                      "round cap", "awaiting close")):
             self.author = self.started("alpha")["id"]
             states[name] = self.author
             shas = [f"{index}{digit}".ljust(40, "a") for digit in range(3)]
@@ -542,6 +542,12 @@ class ManyTaskCapacityTests(RoundCase):
                 pensieve.start_task(self.conn, opened["task"]["id"], now=NOW)
                 capacity.record_launch(self.conn, "beta", "run-review", "model-y", task_id=opened["task"]["id"],
                                        now=NOW - 60)
+                continue
+            if name == "review died":
+                # Its reviewer task is still active, but the launch is older than the window: no run is going.
+                pensieve.start_task(self.conn, opened["task"]["id"], now=NOW)
+                capacity.record_launch(self.conn, "beta", "run-dead", "model-y", task_id=opened["task"]["id"],
+                                       now=NOW - 2 * 3600)
                 continue
             if name == "round cap":
                 self.run_reviewer(opened)
@@ -562,7 +568,9 @@ class ManyTaskCapacityTests(RoundCase):
         capacity.allow_round(self.conn, states["round cap"], now=NOW)
         self.assertEqual(self.flight()[states["round cap"]]["state"], "CHANGES")
         [row] = capacity.in_flight(self.conn, NOW, self.WINDOW)["desks"]
-        self.assertEqual((row["desk"], row["count"], row["running"]), ("alpha", 8, 2))
+        self.assertEqual((flight[states["review died"]]["running"], flight[states["review died"]]["round"]), (False, 1))
+        self.assertIn("review died", capacity.NEEDS_RYAN)
+        self.assertEqual((row["desk"], row["count"], row["running"]), ("alpha", 9, 2))
         self.assertEqual(list(row["states"]), [state for state in capacity.FLIGHT_STATES if state in row["states"]])
 
     def test_a_killed_launch_older_than_the_window_is_not_running(self):

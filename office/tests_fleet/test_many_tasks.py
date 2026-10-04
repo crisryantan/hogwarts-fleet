@@ -25,6 +25,7 @@ from tests_fleet.support import MANY_TASK_DESKS, fake_children
 from tests_fleet.test_hooks import HookCase
 from tests_fleet.test_push import GateCase
 from tests_fleet.test_review_loop import HANDOFF, TASK_MD, LoopCase
+from tests_fleet.test_review_rounds import queued_text
 from tests_fleet.test_run_desk import RunDeskCase
 
 KIT = Path(__file__).resolve().parents[2]
@@ -125,11 +126,62 @@ class OwnSessionTests(ManyCase):
     def test_a_store_that_keeps_own_sessions_single_names_the_fix(self):
         self.commit("first")
         self.own_review()
+        self.commit("second")
         with mock.patch.object(pensieve, "start_task", side_effect=ConflictError("desk already has an active task")):
             with self.assertRaisesRegex(FleetError, "castle desk many-tasks ryan-claude-1"):
                 self.own_review()
         [abandoned] = self.own_tasks("closed")
         self.assertEqual(pensieve.get_task(self.conn, abandoned)["close_reason"], "abandoned")
+
+
+class OwnSessionGuardTests(ManyCase):
+    def test_a_new_review_of_a_commit_another_task_holds_is_refused_before_anything_is_made(self):
+        self.commit("site")
+        self.enable("moody")
+        with run_desk.desk_lock("moody", wait=False):
+            queued = review.review_own(self.conn, str(self.repo), title="site", fetch=False)
+        first = queued["task_id"]
+        self.assertEqual(queued["queued"], queued_text(first))
+        with mock.patch.object(pensieve, "create_task", side_effect=AssertionError("made a task")):
+            with self.assertRaisesRegex(FleetError, f"is already task {first}; run fleet review own --repo-dir"
+                                                    f" <checkout> --task {first} to review it again"):
+                review.review_own(self.conn, str(self.repo), title="site", fetch=False)
+        self.assertEqual(self.own_tasks(), [first])
+        self.assertEqual(self.own_tasks("closed"), [])
+        done = self.own_review(first, verdict="PASS")
+        self.assertEqual((done["round"], done["verdict"], done["superseded"]), (1, "PASS", [queued["request_id"]]))
+        with self.assertRaisesRegex(FleetError, f"already belongs to task {first}, which is awaiting close"):
+            review.review_own(self.conn, str(self.repo), title="site again", fetch=False)
+
+    def test_leaving_out_task_never_gets_past_the_round_cap(self):
+        self.commit("round one")
+        capped = self.own_review()["task_id"]
+        for number in (2, 3):
+            self.commit(f"round {number}")
+            self.assertEqual(self.own_review(capped)["round"], number)
+        self.commit("round four")
+        with self.assertRaisesRegex(FleetError, "review round 4"):
+            self.own_review(capped)
+        self.commit("one more change")
+        with mock.patch.object(pensieve, "create_task", side_effect=AssertionError("made a task")):
+            with self.assertRaisesRegex(FleetError, f"task {capped} on this checkout is at its review round cap;"
+                                                    f" castle task allow-round {capped}"):
+                self.own_review()
+        self.assertEqual(self.own_tasks(), [capped])
+        capacity.allow_round(self.conn, capped)
+        other = self.own_review()
+        self.assertEqual((other["round"], other["verdict"]), (1, "CHANGES"))
+        self.assertNotEqual(other["task_id"], capped)
+
+    def test_a_new_task_that_fails_before_its_first_round_is_closed(self):
+        self.commit("first")
+        with mock.patch.object(review.verify, "verify", side_effect=FleetError("verify broke")):
+            with self.assertRaisesRegex(FleetError, "verify broke"):
+                self.own_review()
+        self.assertEqual(self.own_tasks(), [])
+        [closed] = self.own_tasks("closed")
+        self.assertEqual(pensieve.get_task(self.conn, closed)["close_reason"], "abandoned")
+        self.assertEqual(self.own_review()["round"], 1)
 
 
 class ParallelAuthorTests(ManyCase):
@@ -204,7 +256,7 @@ class SingleReviewerTests(ManyCase):
         self.enable("moody")
         with mock.patch.object(run_desk, "run", side_effect=AssertionError("ran while moody was busy")):
             queued = review.review_own(self.conn, str(self.repo), title="my own fix", fetch=False)
-        self.assertEqual(queued["queued"], "queued: moody is busy; run fleet review again later")
+        self.assertEqual(queued["queued"], queued_text(queued["task_id"]))
         self.assertEqual(pensieve.get_task(self.conn, other["id"])["status"], "active")
         self.assertEqual(self.recovered(), [])
 
@@ -272,13 +324,25 @@ class RunDeskTaskTests(ManyCase):
         review._deliver(self.conn, opened["owl"]["id"], desk, "read the diff")
         return parent, task, opened
 
-    def test_a_review_rounds_pad_is_the_authors_task_md_holder(self):
-        parent, _, opened = self.review_owl()
+    def test_a_review_rounds_pad_is_its_author_tasks(self):
+        _, task, opened = self.review_owl()
         plan = run_desk.build_plan(self.conn, "hermione", opened["owl"]["id"])
-        pad = f"{self.castle}/desks/hermione/pads/{parent}.md"
-        self.assertEqual((plan["task_id"], plan["pad"], plan["pad_key"]), (opened["task"]["id"], pad, parent))
+        pad = f"{self.castle}/desks/hermione/pads/{task['id']}.md"
+        self.assertEqual((plan["task_id"], plan["pad"], plan["pad_key"]), (opened["task"]["id"], pad, task["id"]))
         self.assertIn(run_desk.PAD_LINE.format(task_id=opened["task"]["id"], pad=pad), plan["argv"][-1])
         self.assertFalse((self.castle / "desks" / "hermione" / "pads").exists())
+
+    def test_another_task_under_the_same_task_md_gets_its_own_pad(self):
+        parent, task, opened = self.review_owl()
+        triage = owlery.open_request(self.conn, "mcgonagall", "hermione", "triage the PR comments",
+                                     body="read the comments", parent_task_id=parent)
+        review._deliver(self.conn, triage["owl"]["id"], "hermione", "read the comments")
+        plan = run_desk.build_plan(self.conn, "hermione", triage["owl"]["id"])
+        self.assertEqual((plan["task_id"], plan["pad_key"]), (triage["task"]["id"], triage["task"]["id"]))
+        review_plan = run_desk.build_plan(self.conn, "hermione", opened["owl"]["id"])
+        self.assertNotEqual(plan["pad"], review_plan["pad"])
+        self.assertEqual(capacity.round_author(self.conn, opened["task"]["id"]), task["id"])
+        self.assertIsNone(capacity.round_author(self.conn, triage["task"]["id"]))
 
     def test_only_pad_desks_get_a_pad(self):
         _, task, _ = self.review_owl()
@@ -409,6 +473,17 @@ class DigestTests(HookCase):
         self.assertIn("1 in flight", out)
         self.assertIn("0 queued", out)
 
+    def test_a_round_whose_review_died_needs_ryan_and_never_says_a_run_is_going(self):
+        author = self.started_task("ryan-claude-1", "site copy")
+        pensieve.record_commit(self.conn, author["id"], "acme/web-app", "a" * 40)
+        opened = capacity.open_review_round(self.conn, author["id"], "moody", "a" * 40, "review it")
+        pensieve.start_task(self.conn, opened["task"]["id"])  # the review died before closing it, and no run is going
+        lines = self.digest()
+        self.assertIn("Needs you (1 shown, 0 more):", lines)
+        self.assertIn(f"- {author['id']} ryan-claude-1 review died r1: site copy | its review run ended with no"
+                      " verdict; run the review again", lines)
+        self.assertNotIn("a run is going", "\n".join(lines))
+
     def test_thirty_open_tasks_stay_inside_the_line_budget(self):
         desks = ("harry", "ryan-claude-1", "moody", "ron", "hermione")
         for index in range(30):
@@ -456,7 +531,7 @@ class DeskTextTests(unittest.TestCase):
             with self.subTest(desk=desk):
                 brief = self.text("office", "desks", desk, "BRIEF.md")
                 self.assertIn(f"~/hogwarts/desks/{desk}/pads/<key>.md", brief)
-                self.assertIn("<task-id>-", brief)
+                self.assertIn({"hermione": "<task-id>-drafts-r<round>.md", "ron": "<owl-id>-report.md"}[desk], brief)
         self.assertIn("task pad", self.text("castle", "CLAUDE.md"))
 
     def test_harry_and_moody_keep_no_scratchpad(self):

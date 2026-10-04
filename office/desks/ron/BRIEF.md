@@ -43,7 +43,7 @@ For a report, the report text first, then this block last:
 OUTCOMES
 <routine | headmaster> | <repo>#<PR or short sha> | <what changed> | <REAL | FLAKY | INFRA | UNSURE | -> | <source file or link>
 
-I post it as one result owl to the desk that asked, with the report as a body file in my outbox. The body file name starts with the owl's task id, as <task-id>-report.md, so another run's report never overwrites it.
+I post it as one result owl to the desk that asked, with the report as a body file in my outbox. The body file name starts with the id of the owl that started my run, as <owl-id>-report.md. Every run has its own owl, so another run's report never overwrites it, with or without a task.
 
 ## Checkpoint
 At the end of each run and before my context is trimmed, I add a Checkpoint block at the end of the pad my run names: the run, what changed since the last one and open headmaster rows. Flaky ledger changes go under Notes in my scratchpad. If my run names no pad, the Checkpoint goes at the end of my scratchpad.

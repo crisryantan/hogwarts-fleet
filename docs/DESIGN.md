@@ -129,7 +129,7 @@ Standard-library Python that runs on the Mac's built-in Python 3.9, with a CLI c
 
 | What it holds | What it guarantees |
 | --- | --- |
-| Desks and tasks | One active task per desk, except the desks granted many tasks (Harry, Hermione, Moody, Ron and your own sessions), and one per session always. The grant is one way. A closed task never reopens. Closing as complete needs a hashed, single-use, expiring token only you can mint. |
+| Desks and tasks | One active task per desk, except the desks granted many tasks (Harry, Hermione, Moody, Ron and your own sessions), and one per session always. The grant is one way, and McGonagall, Snape, Dumbledore, Ryan and the scripts are refused it. A task never changes desk. A closed task never reopens. Closing as complete needs a hashed, single-use, expiring token only you can mint. |
 | Owls | A duplicate send collapses into one. Reading is separate from acknowledging. One answer per question, and a result only from the desk that was asked. |
 | Requests | Phases only move forward. A desk can defer or decline with a reason. |
 | Review passes | A pass counts only for that exact commit, only when it is registered on the author's task, and only when the reviewer's family differs from the author's. |
@@ -188,7 +188,7 @@ These are honest gaps in what ships today.
 - **Deny rules for Bash match the usual command form only.** They are not a wall around a program. The sandbox stays the real boundary for desks.
 - **The push gate only covers agent pushes.** Pushes you make by hand from a terminal stay yours.
 - **Many tasks still share one desk process.** Runs of one desk wait for each other on its desk lock, so a burst of more than about ten Harry runs can outlast the 31 minute wait, and the late ones give up with their own event. Each desk's Codex work folder and private temp folder are shared by its runs, which is safe only while one process runs per desk.
-- **Two open build tasks never share one TASK.md.** The evidence, the handoff and the reviews are written next to TASK.md, so `fleet worktree` refuses a second open Harry task under the same McGonagall task. The rest rests on the briefs: Hermione's and Ron's outbox body files start with the task id.
+- **Two open build tasks never share one TASK.md.** The evidence, the handoff and the reviews are written next to TASK.md, so `fleet worktree` refuses a second open Harry task under the same McGonagall task. The rest rests on the briefs: Hermione's outbox body files start with the task id, and Ron's with the id of the owl that started his run.
 
 ## Where the ideas came from
 

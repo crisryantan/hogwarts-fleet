@@ -62,13 +62,15 @@ def list_desks(conn: Conn) -> list[dict]:
 
 def allow_many_tasks(conn: Conn, desk: str, now: Optional[int] = None) -> dict:
     """Let a desk hold many active tasks at once. One way: a desk never goes back to one task at a time,
-    and a second call changes nothing."""
+    and a second call changes nothing. McGonagall, Snape, Dumbledore, Ryan and the scripts are refused."""
     desk = ids.check("desk", desk)
     if desk in RESERVED_DESKS:
         raise ValidationError("desk name is reserved")
     ts = ids.stamp(now)
     with db.transaction(conn):
-        get_desk(conn, desk)
+        row = get_desk(conn, desk)
+        if desk in db.SINGLE_TASK_DESKS or row["family"] in db.SINGLE_TASK_FAMILIES:
+            raise ValidationError(f"{desk} keeps one active task at a time")
         created = not takes_many_tasks(conn, desk)
         if created:
             conn.execute("INSERT INTO many_task_desks(desk, granted_at) VALUES (?, ?)", (desk, ts))

@@ -221,6 +221,16 @@ class MigrationV7Tests(unittest.TestCase):
         self.assertEqual(db.migrate(conn), 7)
         self.assertEqual(conn.total_changes, changes)
 
+    def test_a_raw_write_never_moves_an_active_task_onto_a_single_desk(self):
+        conn = self.v6_database()
+        # harry is granted many tasks and mcgonagall is single; both hold an active task.
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "a task keeps its desk"):
+            conn.execute("UPDATE tasks SET desk = 'mcgonagall' WHERE id = 'tk_0000000000000000'")
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "a task keeps its desk"):
+            conn.execute("UPDATE tasks SET desk = 'harry' WHERE id = 'tk_0000000000000001'")
+        self.assertEqual([row[0] for row in conn.execute("SELECT desk FROM tasks WHERE status = 'active' ORDER BY id")],
+                         ["harry", "mcgonagall", "moody"])
+
     def test_a_fresh_database_grants_no_desk(self):
         conn = db.connect(temp_dir(self) / "state" / "pensieve.db")
         self.addCleanup(conn.close)

@@ -21,6 +21,11 @@ from tests_fleet.support import fake_children
 from tests_fleet.test_review_loop import LoopCase, REPO_ID
 
 
+def queued_text(task_id: str) -> str:
+    """What an own-session review says when Moody is busy: the command that reviews that task again."""
+    return f"queued: moody is busy; run fleet review own --repo-dir <checkout> --task {task_id} again later"
+
+
 class ReviewRoundTests(LoopCase):
     def setUp(self) -> None:
         super().setUp()
@@ -313,7 +318,7 @@ class ReviewRoundTests(LoopCase):
         not_run = mock.patch.object(run_desk, "run", side_effect=AssertionError("ran while moody was busy"))
         with run_desk.desk_lock("moody", wait=False), not_run:  # another review's run holds moody's desk
             queued = review.review_own(self.conn, str(self.repo), title="my own fix", fetch=False)
-        self.assertEqual(queued["queued"], "queued: moody is busy; run fleet review again later")
+        self.assertEqual(queued["queued"], queued_text(queued["task_id"]))
         self.assertEqual((queued["sha"], queued["round"], queued["verdict"], queued["review"]), (first_sha, 1, None, None))
         task_id = queued["task_id"]
         [row] = capacity.review_rounds(self.conn, task_id)
@@ -390,7 +395,7 @@ class ReviewRoundTests(LoopCase):
         with run_desk.desk_lock("moody", wait=False), \
                 mock.patch.object(run_desk, "run", side_effect=AssertionError("ran under a held desk lock")):
             queued = review.review_own(self.conn, str(self.repo), task_id=task["id"], fetch=False)
-        self.assertEqual(queued["queued"], "queued: moody is busy; run fleet review again later")
+        self.assertEqual(queued["queued"], queued_text(task["id"]))
         self.assertEqual(self.moody_active(), [stranded])
         self.assertEqual(self.recovered_events(), [])
         result = self.own_review(task["id"])
@@ -418,7 +423,7 @@ class ReviewRoundTests(LoopCase):
         with run_desk.desk_lock("moody", wait=False), \
                 mock.patch.object(run_desk, "run", side_effect=AssertionError("ran under a held desk lock")):
             queued = review.review_own(self.conn, str(self.repo), task_id=task_id, fetch=False)
-        self.assertEqual((queued["round"], queued["queued"]), (3, "queued: moody is busy; run fleet review again later"))
+        self.assertEqual((queued["round"], queued["queued"]), (3, queued_text(task_id)))
         self.assertEqual((self.round_cap_events(), self.moody_active()), ([], [stranded]))
         result = self.own_review(task_id)
         self.assertEqual((result["round"], result["verdict"], result["superseded"]), (3, "CHANGES", [queued["request_id"]]))

@@ -49,8 +49,9 @@ is the run's task, never "the desk's active task": its launch row names it, and 
 is closed is refused before it waits for the lock. A desk may hold many tasks, but its runs take
 turns on its desk lock, so its work folder and its private temp folder never serve two processes.
 Hermione and Ron (TASK_PAD_DESKS) keep one pad per task, desks/<desk>/pads/<key>.md, keyed by the
-task that holds TASK.md up the chain from the run's task, else that task. The run makes it under
-the desk lock just before launch, never on a dry run, and the prompt names it in one trusted line.
+run's task, or for a review round by its author task, so the rounds of one review share a pad. The
+run makes it under the desk lock just before launch, never on a dry run, and the prompt names it in
+one trusted line.
 A run that gives up waiting for its desk lock raises its own event, not a failed-run one.
 
 --dry-run prints the argv as JSON and runs nothing. A real run needs the desk to be
@@ -292,15 +293,10 @@ def _own_task(conn, desk: str, owl: Optional[dict]) -> Optional[dict]:
 
 
 def pad_key(conn, task: dict) -> str:
-    """Whose pad a run writes: the task that holds TASK.md up the chain from the run's task, else the task
-    itself. Every round of a review on one ticket shares a pad, and runs for different tickets never do."""
-    from fleet import verify  # verify imports this module
-
-    try:
-        holder, _ = verify.task_md(conn, task["id"])
-    except FleetError:
-        return task["id"]
-    return holder
+    """Whose pad a run writes: the run's own task, except that a review round's reviewer task writes its
+    author task's pad, so every round of one review shares a pad and no other task ever does."""
+    author = capacity.round_author(conn, task["id"])
+    return task["id"] if author is None else author
 
 
 def pad_path(desk: str, key: str) -> str:

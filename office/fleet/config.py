@@ -64,8 +64,8 @@ CODEX_OUTBOX_WRITERS = ("harry",)
 LINKABLE_DEPS = ("node_modules",)
 # Desks that build in a worktree. The Owl Post starts them only once their task has one.
 WORKTREE_DESKS = ("harry",)
-# Desks that keep one pad per task, castle desks/<desk>/pads/<key>.md, as their Checkpoint for a run. Only a
-# Claude desk can write its own folder. Harry's per-task memory is the CHECKPOINT in his handoff, and Moody's
+# Desks that keep one pad per task, castle desks/<desk>/pads/<key>.md, as their Checkpoint for a run. Every
+# review round of one author task shares that task's pad. Only a Claude desk can write its own folder. Harry's per-task memory is the CHECKPOINT in his handoff, and Moody's
 # is review-latest.md in the task folder.
 TASK_PAD_DESKS = ("hermione", "ron")
 PADS_DIR = "pads"

@@ -48,6 +48,9 @@ MODEL_TRIAL_ENDS = ("passed", "pinned", "held", "revert_blocked", "reverted")
 # Desks that may hold many active tasks at once. V7 grants them on a store that already has them; a fresh
 # install grants them with castle desk many-tasks after adding the desks.
 MANY_TASK_DESKS_SEED = ("harry", "hermione", "moody", "ron", "ryan-claude-1")
+# Desks that always hold one active task at a time: McGonagall, Snape, Dumbledore, Ryan and the scripts.
+SINGLE_TASK_DESKS = ("mcgonagall", "snape", "portrait")
+SINGLE_TASK_FAMILIES = ("human", "script")
 
 PathLike = Union[str, Path]
 
@@ -656,8 +659,10 @@ V6 = (
 )
 
 # Many tasks per desk: a desk listed in many_task_desks may hold any number of active tasks, and every other
-# desk still holds at most one. The grant is one way. The one-per-desk index becomes a trigger that reads the
-# grant, so a raw write on a single desk is still refused. A run launch names the task it ran for, if any.
+# desk still holds at most one. The grant is one way, and never reaches McGonagall, Snape, Dumbledore, Ryan or a
+# script. The one-per-desk index becomes a trigger that reads the
+# grant, so a raw write on a single desk is still refused, and a task keeps its desk, so no write moves an active
+# task onto a single desk either. A run launch names the task it ran for, if any.
 V7 = (
     _table(
         """CREATE TABLE IF NOT EXISTS many_task_desks (
@@ -667,6 +672,12 @@ V7 = (
     ),
     _guard("many_task_desks_immutable", "BEFORE UPDATE ON many_task_desks", "desk task modes are fixed"),
     _guard("many_task_desks_no_delete", "BEFORE DELETE ON many_task_desks", "desk task modes are never deleted"),
+    _guard(
+        "many_task_desks_not_single",
+        "BEFORE INSERT ON many_task_desks WHEN NEW.desk IN " + _choices(SINGLE_TASK_DESKS)
+        + " OR EXISTS (SELECT 1 FROM desks WHERE name = NEW.desk AND family IN " + _choices(SINGLE_TASK_FAMILIES) + ")",
+        "this desk keeps one active task at a time",
+    ),
     "INSERT OR IGNORE INTO many_task_desks(desk, granted_at) SELECT name, CAST(strftime('%s', 'now') AS INTEGER)"
     " FROM desks WHERE name IN " + _choices(MANY_TASK_DESKS_SEED),
     "DROP INDEX IF EXISTS tasks_one_active_per_desk",
@@ -677,6 +688,7 @@ V7 = (
         " AND EXISTS (SELECT 1 FROM tasks WHERE desk = NEW.desk AND status = 'active' AND id <> NEW.id)",
         "desk already has an active task",
     ),
+    _guard("tasks_desk_fixed", "BEFORE UPDATE OF desk ON tasks WHEN OLD.desk IS NOT NEW.desk", "a task keeps its desk"),
     ("run_launches", "task_id", "ALTER TABLE run_launches ADD COLUMN task_id TEXT REFERENCES tasks(id)"),
     _guard(
         "run_launches_task_fixed",

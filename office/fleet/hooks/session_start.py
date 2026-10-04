@@ -5,8 +5,8 @@ count of the rest), then memory pointers. The whole digest stays under 40 lines.
 fork it prints one line.
 
 In flight reads capacity.in_flight: one summary line per desk, then at most INFLIGHT_CAP task
-lines, what needs Ryan first (awaiting close, HEADMASTER, round cap, CHANGES), then the rest
-(review queued, in review, running, working), oldest first within each. A reviewer's round task
+lines, what needs Ryan first (awaiting close, HEADMASTER, round cap, CHANGES, review died), then the
+rest (review queued, in review, running, working), oldest first within each. A reviewer's round task
 is folded into its author task, so it never shows alone, in flight or queued. Running comes from
 launch rows, never from probing a lock, so the digest never makes a review queue.
 
@@ -62,6 +62,8 @@ def _action(conn, task: dict) -> str:
         return "read review-latest.md"
     if state == "review queued":
         return "its reviewer was busy; run the review again"
+    if state == "review died":
+        return "its review run ended with no verdict; run the review again"
     if state in ("in review", "running"):
         return "a run is going"
     if task["request_id"] is not None:

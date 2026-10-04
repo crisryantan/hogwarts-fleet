@@ -314,6 +314,19 @@ def _unused_allowances(conn: Conn, task_id: str, holding: list) -> list[int]:
     return [row["id"] for row in rows if row["id"] not in used]
 
 
+def _needs_allowance(conn: Conn, task_id: str, holding: list, max_rounds: int) -> bool:
+    return len(holding) >= max_rounds and not _unused_allowances(conn, task_id, holding)
+
+
+def needs_allowance(conn: Conn, task_id: str, max_rounds: int = 3) -> bool:
+    """Whether the task's next review round waits for Ryan: max_rounds rounds count, and none of his
+    allowances for the task is unused."""
+    task_id = pensieve.get_task(conn, ids.check("task", task_id))["id"]
+    max_rounds = ids.check_int(max_rounds, "max rounds", minimum=1, maximum=MAX_ROUNDS_LIMIT)
+    holding = [row for row in _round_rows(conn, task_id) if _holds_round(row)]
+    return _needs_allowance(conn, task_id, holding, max_rounds)
+
+
 def review_rounds(conn: Conn, task_id: str) -> list[dict]:
     """Every review round of an author task. counts says whether it uses up a round: a recorded verdict
     does, and so does a round whose run started and has not ended yet; a run that ended without one does
@@ -466,9 +479,9 @@ def record_round_verdict(conn: Conn, request_id: str, repo: str, verdict: str, r
 
 
 # The order Ryan reads tasks in: what needs him first, oldest first within a state.
-FLIGHT_STATES = ("awaiting close", "HEADMASTER", "round cap", "CHANGES", "review queued", "in review", "running",
-                 "working")
-NEEDS_RYAN = ("awaiting close", "HEADMASTER", "round cap", "CHANGES")
+FLIGHT_STATES = ("awaiting close", "HEADMASTER", "round cap", "CHANGES", "review died", "review queued", "in review",
+                 "running", "working")
+NEEDS_RYAN = ("awaiting close", "HEADMASTER", "round cap", "CHANGES", "review died")
 
 
 def review_task_ids(conn: Conn) -> set:
@@ -476,6 +489,14 @@ def review_task_ids(conn: Conn) -> set:
     rows = db.fetch_all(conn, "SELECT requests.task_id FROM review_rounds JOIN requests"
                               " ON requests.id = review_rounds.request_id WHERE requests.task_id IS NOT NULL")
     return {row["task_id"] for row in rows}
+
+
+def round_author(conn: Conn, reviewer_task_id: str) -> Optional[str]:
+    """The author task whose review round opened this reviewer task, or None for any other task."""
+    row = db.fetch_one(conn, "SELECT review_rounds.task_id FROM review_rounds JOIN requests"
+                             " ON requests.id = review_rounds.request_id WHERE requests.task_id = ?",
+                       (ids.check("task", reviewer_task_id),))
+    return None if row is None else row["task_id"]
 
 
 # A launch with no usage yet, recent enough to still be running, for the task or one of its rounds' reviewers.
@@ -494,7 +515,8 @@ def _flight_state(task: dict, latest: Optional[dict], running: bool, needs_allow
     if latest is not None and latest["waiting"]:
         return "review queued"
     if latest is not None and not latest["has_verdict"]:
-        return "in review"
+        # A round with no verdict and no run going was left by a review that died before closing its round.
+        return "in review" if running else "review died"
     if latest is not None and latest["verdict"] == "HEADMASTER":
         return "HEADMASTER"
     if latest is not None and latest["verdict"] == "CHANGES" and not running:
@@ -508,7 +530,7 @@ def _flight_row(conn: Conn, task: dict, since: int, max_rounds: int) -> dict:
     live = [row for row in rows if row["superseded_by"] is None and (row["counts"] or row["waiting"])]
     latest = live[-1] if live else None
     holding = [row for row in rows if row["counts"]]
-    needs_allowance = len(holding) >= max_rounds and not _unused_allowances(conn, task["id"], holding)
+    needs_allowance = _needs_allowance(conn, task["id"], holding, max_rounds)
     running = _running(conn, task["id"], since)
     return {
         "id": task["id"], "desk": task["desk"], "title": task["title"], "status": task["status"],
@@ -528,6 +550,7 @@ def in_flight(conn: Conn, now: Optional[int] = None, running_window: int = 3600,
     A reviewer's round task is folded into its author task and never listed alone. running means a launch
     for the task, or for one of its rounds' reviewer tasks, has no usage yet and started within
     running_window: a run killed before it recorded usage stops counting as running once the window passes.
+    A latest round with no verdict reads "in review" while a run is going and "review died" once none is.
     Read from launch rows only, never by probing a lock, so reading it never makes a review queue.
     """
     ts = ids.stamp(now)
