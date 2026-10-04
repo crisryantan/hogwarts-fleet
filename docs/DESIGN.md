@@ -90,8 +90,9 @@ A desk asks for what its job needs, never for a model by name. Its role card, `d
 - He never picks a model that is retiring within 30 days, one the catalog calls older or legacy, or one your organization blocks.
 - A Claude alias is judged by every full model id a run on it has reported, helper calls included, and a labelled form like `opus[1m]` shares the plain alias's record. Once an alias has run as a blocked model, no switch, pin, approval, revert or launch puts a desk back on it while that model stays blocked.
 - A move to the same tier or a cheaper one applies by itself with a note. A costlier one waits for you, because spend is your call. It waits only while each pass still makes it, and approving it checks it again against the latest catalog the store keeps.
-- The first two runs after a switch are a trial. Two failures send the desk back to its previous model. A desk's own model always replaces the one a Codex profile in its `codex.toml` names, and a run reads its model together with the switch it came from, so a trial only ever counts the model that ran. Your own switch or pin always stands, even one made mid-trial.
+- The first two runs after a switch are a trial. Two failures send the desk back to its previous model. A desk's own model always replaces the one a Codex profile in its `codex.toml` names, and a run reads its model together with the switch it came from, so a trial only ever counts the model that ran. Your own switch or pin always stands, even one made mid-trial. A revert pins the desk, so it only lands on a model a pass could still give it: never one you filed as ignore, or one the latest catalog no longer lists, hides or retires soon.
 - While any model is blocked, a Codex desk with no model of its own doesn't launch, and no trial reverts onto one, because the Codex CLI default is a model the fleet can't name, so it can't be checked.
+- A pass reads the store, records the catalogs it saw and writes its moves in one transaction. A pin or approval you make meanwhile either lands first, and the pass plans around it, or waits for the pass, and then gets checked against the new catalog.
 
 **Why family never changes.** The store counts a review pass only when the reviewer's family differs from the author's. If Ollivander could move Harry from Codex to Claude, Claude would end up reviewing Claude, and the rule that makes the fleet safe to trust would quietly stop holding. So the card's family has to match the registry, a Claude desk only ever holds a Claude model and a Codex desk a Codex one, and the registry never lets a desk's family change.
 
@@ -134,7 +135,7 @@ Standard-library Python that runs on the Mac's built-in Python 3.9, with a CLI c
 | Review passes | A pass counts only for that exact commit, only when it is registered on the author's task, and only when the reviewer's family differs from the author's. |
 | Facts | One current fact per subject. Volatile facts need a live lookup or a short expiry. Nightly changes arrive as typed operations applied all or nothing. |
 
-The full contract is in `office/README.md`. 483 store tests and 374 fleet tests pass on the system Python. They include checks that no code reads environment variables and that hostile ids and paths are refused at every entry point.
+The full contract is in `office/README.md`. 486 store tests and 377 fleet tests pass on the system Python. They include checks that no code reads environment variables and that hostile ids and paths are refused at every entry point.
 
 ## Spending fewer tokens
 
