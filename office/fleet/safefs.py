@@ -20,7 +20,8 @@ DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 READ_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
 NEW_FLAGS = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
 APPEND_FLAGS = os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
-LOCK_FLAGS = os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC
+# Read-only, since a run hands its lock fds to the desk process it starts (see run_desk._launch).
+LOCK_FLAGS = os.O_RDONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC
 
 _COMPONENT = re.compile(r"[A-Za-z0-9._-]{1,255}")
 
@@ -247,8 +248,9 @@ def _take_lock(fd: int, blocking: bool, timeout: Optional[float]) -> None:
 
 
 @contextlib.contextmanager
-def held_lock(dir_fd: int, name: str, blocking: bool, timeout: Optional[float] = None) -> Iterator[None]:
-    """An exclusive lock. blocking with a timeout waits at most that long, then raises Busy."""
+def held_lock(dir_fd: int, name: str, blocking: bool, timeout: Optional[float] = None) -> Iterator[int]:
+    """An exclusive lock, yielding its fd. blocking with a timeout waits at most that long, then raises Busy.
+    A process that inherits the fd keeps the lock held after this one dies without unlocking it."""
     check_component(name)
     fd = os.open(name, LOCK_FLAGS, 0o600, dir_fd=dir_fd)
     try:
@@ -258,7 +260,7 @@ def held_lock(dir_fd: int, name: str, blocking: bool, timeout: Optional[float] =
         _check_owned(st, "lock")
         _take_lock(fd, blocking, timeout)
         try:
-            yield
+            yield fd
         finally:
             fcntl.flock(fd, fcntl.LOCK_UN)
     finally:

@@ -3,6 +3,7 @@ review is superseded by the next commit, and a fourth round waits for Ryan's all
 are faked at run_desk.run, or at subprocess.run under the real run_desk.run; no reviewer ever runs."""
 from __future__ import annotations
 
+import fcntl
 import os
 import signal
 import subprocess
@@ -92,7 +93,7 @@ class ReviewRoundTests(LoopCase):
 
     def failed_run(self, task_id: str, cap_source=None, error=FleetError) -> None:
         """A reviewer run that started and ended without a verdict: a crash, or a vendor's own limit."""
-        def run(conn, desk, owl_id, mcp_job=None, now=None, on_start=None, lock_held=False):
+        def run(conn, desk, owl_id, mcp_job=None, now=None, on_start=None, lock_held=False, keep_fds=()):
             on_start()
             return {"desk": desk, "run_id": "run-" + "c" * 16, "exit_code": 1, "cap_source": cap_source}
         with mock.patch.object(run_desk, "run", side_effect=run):
@@ -124,7 +125,7 @@ class ReviewRoundTests(LoopCase):
 
     def test_a_vendor_limit_on_the_reviewer_is_named_and_never_offered_a_bump(self):
         self.commit("my fix")
-        def limited(conn, desk, owl_id, mcp_job=None, now=None, on_start=None, lock_held=False):
+        def limited(conn, desk, owl_id, mcp_job=None, now=None, on_start=None, lock_held=False, keep_fds=()):
             on_start()
             return {"desk": desk, "run_id": "run-" + "b" * 16, "exit_code": 1, "cap_source": "codex_plan"}
         with mock.patch.object(run_desk, "run", side_effect=limited):
@@ -231,7 +232,7 @@ class ReviewRoundTests(LoopCase):
         # The fleet command turns SIGTERM and SIGHUP into SystemExit, which the review cleans up after.
         self.commit("first try")
 
-        def killed(conn, desk, owl_id, mcp_job=None, now=None, on_start=None, lock_held=False):
+        def killed(conn, desk, owl_id, mcp_job=None, now=None, on_start=None, lock_held=False, keep_fds=()):
             on_start()
             raise SystemExit(143)
         with mock.patch.object(run_desk, "run", side_effect=killed):
@@ -253,7 +254,7 @@ class ReviewRoundTests(LoopCase):
         first_sha = self.commit("first try")
         running, release, seen, results, errors = threading.Event(), threading.Event(), {}, {}, {}
 
-        def slow_reviewer(conn, desk, owl_id, mcp_job=None, now=None, on_start=None, lock_held=False):
+        def slow_reviewer(conn, desk, owl_id, mcp_job=None, now=None, on_start=None, lock_held=False, keep_fds=()):
             on_start()
             running.set()
             self.assertTrue(release.wait(30), "the test never let the first review finish")
@@ -369,7 +370,7 @@ class ReviewRoundTests(LoopCase):
         self.assertEqual([launch["metric_id"] for launch in capacity.list_launches(self.conn, "moody")], [None, None])
         self.assertEqual(run_desk.cap_status(self.conn, "moody")["runs_used"], 2)
         rounds = capacity.review_rounds(self.conn, task_id)
-        self.assertEqual([(row["counts"], row["waiting"]) for row in rounds], [(False, False), (False, False), (True, True)])
+        self.assertEqual([(row["counts"], row["waiting"]) for row in rounds], [(False, False), (False, False), (False, True)])
 
     def test_a_stranded_reviewer_task_is_recovered_only_when_the_desk_lock_is_free(self):
         self.commit("first try")
@@ -392,3 +393,71 @@ class ReviewRoundTests(LoopCase):
         self.assertEqual((event["desk"], event["verdict"]), ("moody", "routine"))
         self.assertIn("its round does not count", event["summary"])
         self.assertEqual([row["counts"] for row in capacity.review_rounds(self.conn, task["id"])], [False, False, True])
+
+    def test_a_round_left_by_a_killed_review_is_not_counted_while_the_reviewer_is_busy(self):
+        # Round three was killed before its cleanup, so moody's task is still active with no verdict. A review
+        # that finds moody busy cannot close it, but holds the task's lock, so that round is over: the new
+        # review queues as round three, with no round-cap event.
+        first = self.own_review()
+        task_id = first["task_id"]
+        self.commit("round two")
+        self.own_review(task_id)
+        self.commit("round three")
+        with mock.patch.object(review, "_finish_reviewer_task"):
+            self.failed_run(task_id)
+        [stranded] = self.moody_active()
+        self.commit("round three again")
+        with run_desk.desk_lock("moody", wait=False), \
+                mock.patch.object(run_desk, "run", side_effect=AssertionError("ran under a held desk lock")):
+            queued = review.review_own(self.conn, str(self.repo), task_id=task_id, fetch=False)
+        self.assertEqual((queued["round"], queued["queued"]), (3, "queued: moody is busy; run fleet review again later"))
+        self.assertEqual((self.round_cap_events(), self.moody_active()), ([], [stranded]))
+        result = self.own_review(task_id)
+        self.assertEqual((result["round"], result["verdict"], result["superseded"]), (3, "CHANGES", [queued["request_id"]]))
+        self.assertEqual(pensieve.get_task(self.conn, stranded)["close_reason"], "superseded")
+        self.commit("round four")
+        with self.assertRaisesRegex(FleetError, "review round 4"):
+            self.own_review(task_id)
+
+    def test_allow_round_twice_with_a_queued_round_allows_one_more_round(self):
+        first = self.own_review()
+        task_id = first["task_id"]
+        for text in ("round two", "round three"):
+            self.commit(text)
+            self.own_review(task_id)
+        allowance = capacity.allow_round(self.conn, task_id)
+        self.commit("round four")
+        with run_desk.desk_lock("moody", wait=False):
+            queued = review.review_own(self.conn, str(self.repo), task_id=task_id, fetch=False)
+        self.assertEqual((queued["round"], queued["queued"] is not None), (4, True))
+        again = capacity.allow_round(self.conn, task_id)
+        self.assertEqual((again["id"], again["created"], again["rounds"]), (allowance["id"], False, 3))
+        fourth = self.own_review(task_id)
+        self.assertEqual((fourth["round"], fourth["superseded"]), (4, [queued["request_id"]]))
+        self.commit("round five")
+        with self.assertRaisesRegex(FleetError, "review round 5"):
+            self.own_review(task_id)
+
+    def test_the_reviewers_process_inherits_the_task_and_desk_locks(self):
+        # A review killed mid-run leaves its reviewer running. That process holds both locks, so no review of
+        # the task can move its worktree or evidence, and no review can close its reviewer task, until it ends.
+        self.commit("first try")
+        real_run, seen = subprocess.run, {}
+
+        def reviewer(argv, *args, **kwargs):
+            if argv[0] != config.CODEX_BIN:
+                return real_run(argv, *args, **kwargs)
+            [task] = pensieve.list_tasks(self.conn, desk="ryan-claude-1")
+            locks = {os.stat(self.office / "locks" / name).st_ino: name
+                     for name in (f"review-{task['id']}.lock", "desk-moody.lock")}
+            seen["inherited"] = sorted(locks.get(os.fstat(fd).st_ino) for fd in kwargs["pass_fds"])
+            seen["read_only"] = [fcntl.fcntl(fd, fcntl.F_GETFL) & os.O_ACCMODE == os.O_RDONLY
+                                 for fd in kwargs["pass_fds"]]
+            return subprocess.CompletedProcess(argv, 1)
+
+        with mock.patch.object(subprocess, "run", side_effect=reviewer):
+            with self.assertRaisesRegex(FleetError, "did not finish cleanly"):
+                review.review_own(self.conn, str(self.repo), title="my own fix", fetch=False)
+        [task] = pensieve.list_tasks(self.conn, desk="ryan-claude-1")
+        self.assertEqual(seen, {"inherited": ["desk-moody.lock", f"review-{task['id']}.lock"],
+                                "read_only": [True, True]})

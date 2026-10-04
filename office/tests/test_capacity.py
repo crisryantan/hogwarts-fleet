@@ -396,6 +396,41 @@ class RoundCapTests(RoundCase):
         self.assertEqual([item["request_id"] for item in newer["superseded"]], [waiting["request"]["id"]])
         self.assertEqual(self.live()[-1], (SHAS[4], 4))
 
+    def test_a_waiting_round_holds_no_allowance_so_a_second_allow_round_adds_none(self):
+        # Round four waits because the reviewer is busy. It took the allowance, but the next review supersedes
+        # it and takes that allowance again, so a second allow-round must not grant a second extra round.
+        self.three_rounds()
+        allowance = capacity.allow_round(self.conn, self.author, now=NOW)
+        waiting = self.round(SHAS[3])
+        self.assertEqual(waiting["allowance_id"], allowance["id"])
+        row = self.row(waiting)
+        self.assertEqual((row["waiting"], row["counts"]), (True, False))
+        again = capacity.allow_round(self.conn, self.author, now=NOW + 1)
+        self.assertEqual((again["id"], again["created"], again["rounds"]), (allowance["id"], False, 3))
+        fourth = self.round(SHAS[4])
+        self.assertEqual((fourth["round"], fourth["allowance_id"]), (4, allowance["id"]))
+        self.run_reviewer(fourth)
+        with self.assertRaises(capacity.RoundCapReached) as refused:
+            self.round(SHAS[5])
+        self.assertEqual(refused.exception.round, 5)
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM round_allowances").fetchone()[0], 1)
+
+    def test_under_the_review_lock_a_round_left_active_without_a_verdict_does_not_count(self):
+        # The reviewer task of round three is still active with no verdict. Only a caller holding the task's
+        # review lock knows that run is over; anyone else must treat it as still running.
+        for sha in SHAS[:2]:
+            self.run_reviewer(self.round(sha))
+        left = self.round(SHAS[2])
+        pensieve.start_task(self.conn, left["task"]["id"], now=NOW)
+        with self.assertRaises(capacity.RoundCapReached):
+            self.round(SHAS[3])
+        opened = self.round(SHAS[3], review_locked=True)
+        self.assertEqual((opened["round"], opened["allowance_id"], opened["superseded"]), (3, None, []))
+        self.record_verdict(left)  # a verdict recorded before the review died still counts
+        self.assertEqual(self.row(left)["counts"], True)
+        with self.assertRaises(capacity.RoundCapReached):
+            self.round(SHAS[4], review_locked=True)
+
     def test_a_closed_task_takes_no_allowance(self):
         pensieve.close_task(self.conn, self.author, "abandoned", now=NOW)
         with self.assertRaises(ConflictError):

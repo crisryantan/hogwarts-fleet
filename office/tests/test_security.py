@@ -373,7 +373,7 @@ class InputSecurityTests(StoreCase):
         "subject_key": "web-app.comments", "valid_from": None, "lookup": None, "include_history": False, "t": NOW,
         "limit_per_fact": 3, "ops": [{"op": "archive", "fact_id": 1}],
         "amount": 1, "run_cap": 3, "spend_cap": None, "reset_offset": 0, "cap": "runs", "cap_source": "fleet",
-        "max_rounds": 3,
+        "max_rounds": 3, "review_locked": False,
     }
     OVERRIDES = {
         ("record_review", "verdict"): "CHANGES", ("record_round_verdict", "verdict"): "CHANGES",

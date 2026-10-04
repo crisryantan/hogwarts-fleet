@@ -465,7 +465,8 @@ def cap_status(conn, desk: str, now: Optional[int] = None) -> dict:
 
 
 def over_daily_cap(conn, desk: str, now: Optional[int] = None) -> Optional[str]:
-    """Why this desk may not start another run this cap day, read from the store's metrics, or None."""
+    """Why this desk may not start another run this cap day, or None. Runs are read from the store's launch
+    rows, so a killed run counts, and spend from the cost its runs recorded."""
     reached = cap_status(conn, desk, now)["reached"]
     return None if reached is None else CAP_REASONS[reached]
 
@@ -735,22 +736,24 @@ def require_castle_dir(path: str) -> None:
 
 
 @contextlib.contextmanager
-def desk_lock(desk: str, wait: bool = True) -> Iterator[None]:
-    """The per-desk lock a run holds from its cap check until its usage is recorded. wait=False raises
-    safefs.Busy at once when someone else holds it, instead of waiting for them."""
+def desk_lock(desk: str, wait: bool = True) -> Iterator[int]:
+    """The per-desk lock a run holds from its cap check until its usage is recorded, yielding its fd. The
+    desk's process inherits that fd, so the lock stays held while it runs even if this process is killed.
+    wait=False raises safefs.Busy at once when someone else holds it, instead of waiting for them."""
     desk = ids.check("desk", desk)
     with safefs.opened_dir(config.OFFICE_ROOT, "locks", create=True) as locks_fd, \
             safefs.held_lock(locks_fd, f"desk-{desk}.lock", blocking=wait,
-                             timeout=config.DESK_LOCK_WAIT_SECONDS if wait else None):
-        yield
+                             timeout=config.DESK_LOCK_WAIT_SECONDS if wait else None) as lock_fd:
+        yield lock_fd
 
 
 def run(conn, desk: str, owl_id: str, mcp_job: Optional[str] = None, now: Optional[int] = None,
-        on_start: Optional[Callable[[], None]] = None, lock_held: bool = False) -> dict:
+        on_start: Optional[Callable[[], None]] = None, lock_held: bool = False, keep_fds: tuple = ()) -> dict:
     """Run one desk on one owl. on_start is called under the desk lock once the caps allow the run,
     just before it launches, so a caller's own bookkeeping never runs for a refused run. lock_held
     means the caller already holds this desk's lock (the review script does, from before its round
-    opens until its reviewer task closes)."""
+    opens until its reviewer task closes) and passes its fd in keep_fds. The desk's process inherits
+    every fd in keep_fds, so the locks they hold outlive this process if it is killed mid-run."""
     if not is_enabled(desk):
         raise FleetError(f"{desk} is not enabled; Ryan enables a headless desk by hand")
     plan = build_plan(conn, desk, owl_id, mcp_job)
@@ -760,14 +763,14 @@ def run(conn, desk: str, owl_id: str, mcp_job: Optional[str] = None, now: Option
     require_castle_dir(plan["cwd"])
     with contextlib.ExitStack() as held:
         if not lock_held:
-            held.enter_context(desk_lock(plan["desk"]))
+            keep_fds = (*keep_fds, held.enter_context(desk_lock(plan["desk"])))
         cap = over_daily_cap(conn, plan["desk"], now)
         if cap is not None:
             report_cap(conn, plan["desk"], now)
             raise Capped(cap)
         if on_start is not None:
             on_start()
-        result = _launch(conn, plan, now)
+        result = _launch(conn, plan, now, keep_fds)
     warn_near_cap(conn, plan["desk"], now)
     if result["cap_source"] is not None:
         report_plan_limit(conn, plan["desk"], result["cap_source"], run_id=result["run_id"], now=now)
@@ -776,7 +779,7 @@ def run(conn, desk: str, owl_id: str, mcp_job: Optional[str] = None, now: Option
     return result
 
 
-def _launch(conn, plan: dict, now: Optional[int]) -> dict:
+def _launch(conn, plan: dict, now: Optional[int], keep_fds: tuple = ()) -> dict:
     desk, run_id = plan["desk"], plan["run_id"]
     # Counted from here, before the process starts: a run killed or interrupted below still uses a run.
     capacity.record_launch(conn, desk, run_id, plan["model"], now=now)
@@ -789,7 +792,7 @@ def _launch(conn, plan: dict, now: Optional[int]) -> dict:
         try:
             completed = subprocess.run(plan["argv"], cwd=plan["cwd"], env=plan.get("env") or child_env(), stdin=subprocess.DEVNULL,
                                        stdout=out_fd, stderr=err_fd, timeout=config.RUN_TIMEOUT_SECONDS,
-                                       check=False)
+                                       check=False, pass_fds=tuple(keep_fds))
             exit_code = completed.returncode
         except subprocess.TimeoutExpired:
             exit_code = -1

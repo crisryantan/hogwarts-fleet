@@ -69,8 +69,9 @@ REVIEWER_FOR_FAMILY = {"codex": "hermione", "claude": "moody"}
 CODEX_WORK_DIR = "work"
 # Castle folders each Claude desk may read through --add-dir. Writes there are denied by its settings.
 CLAUDE_READ_DIRS = {"hermione": ("tasks", "worktrees"), "ron": ("tasks",), "portrait": ()}
-# Runs per desk in one cap day, and spend for the Claude desks, read from the store's metrics. Sized for
-# a busy day of 12 to 14 PRs plus side work. Ryan lifts one for the rest of the day with castle desk cap.
+# Runs per desk in one cap day, counted from launch rows so a killed run counts, and spend for the Claude
+# desks, from the cost runs recorded. Sized for a busy day of 12 to 14 PRs plus side work. Ryan lifts one
+# for the rest of the day with castle desk cap.
 DAILY_RUN_CAP = {"hermione": 80, "ron": 120, "portrait": 3, "harry": 40, "moody": 80}
 DAILY_SPEND_CAP_USD = {"hermione": 60.0, "ron": 10.0, "portrait": 4.0}
 DAY_SECONDS = 86400

@@ -9,7 +9,8 @@ that is killed, crashes or is interrupted before it records usage still counts. 
 a metrics row tied to that launch when it ends, and the spend cap reads the recorded cost.
 
 A newer commit supersedes a review that is still waiting, and a round past the cap waits for Ryan's
-castle task allow-round. Only a reviewer run that recorded a verdict uses up a round, and the proof is
+castle task allow-round. A waiting round holds nothing, not even an allowance it took, since the next
+review of the task supersedes it. Only a reviewer run that recorded a verdict uses up a round, and the proof is
 the verdict itself: record_round_verdict stores the review and ties it to its round in one transaction,
 so a review recorded before a later step failed still counts. A result owl or a request phase alone is
 not proof, since the reviewer desk can post a result owl itself. The daily run caps bound the retries
@@ -286,8 +287,15 @@ def _ended_without_verdict(row: dict) -> bool:
 
 
 def _holds_round(row: dict) -> bool:
-    """A live round that counts toward the cap: it recorded a verdict, or its run has not ended yet."""
-    return row["superseded_by"] is None and not _ended_without_verdict(row)
+    """A live round that counts toward the cap: it recorded a verdict, or its run started and has not ended
+    yet. A waiting round holds nothing, and neither does the allowance it took: the next review supersedes it."""
+    return row["superseded_by"] is None and not _is_waiting(row) and not _ended_without_verdict(row)
+
+
+def _left_by_dead_review(row: dict) -> bool:
+    # Its reviewer task is still active with no verdict. Under the task's review lock, which every live review
+    # and its reviewer's own process hold, that run is over: the review died before closing the task.
+    return not row["has_verdict"] and row["reviewer_task_status"] == "active"
 
 
 def _unused_allowances(conn: Conn, task_id: str, holding: list) -> list[int]:
@@ -298,7 +306,8 @@ def _unused_allowances(conn: Conn, task_id: str, holding: list) -> list[int]:
 
 def review_rounds(conn: Conn, task_id: str) -> list[dict]:
     """Every review round of an author task. counts says whether it uses up a round: a recorded verdict
-    does, and so does a round whose run has not ended yet; a run that ended without one does not."""
+    does, and so does a round whose run started and has not ended yet; a run that ended without one does
+    not, and neither does a round still waiting for its reviewer's run."""
     task_id = pensieve.get_task(conn, ids.check("task", task_id))["id"]
     return [{**row, "has_verdict": bool(row["has_verdict"]), "waiting": _is_waiting(row),
              "counts": _holds_round(row)} for row in _round_rows(conn, task_id)]
@@ -323,7 +332,8 @@ def stranded_rounds(conn: Conn, reviewer_desk: str) -> list[dict]:
 
 
 def allow_round(conn: Conn, task_id: str, now: Optional[int] = None) -> dict:
-    """Ryan's allowance for exactly one more review round. A second call before it is used changes nothing."""
+    """Ryan's allowance for exactly one more review round. A second call before it is used changes nothing,
+    and a round still waiting does not use it: the review that supersedes that round takes it instead."""
     task_id = ids.check("task", task_id)
     ts = ids.stamp(now)
     with db.transaction(conn):
@@ -351,7 +361,7 @@ def _ack_request_owl(conn: Conn, request_id: str, reviewer: str, ts: int) -> Non
 
 def open_review_round(conn: Conn, task_id: str, reviewer_desk: str, sha: str, title: str,
                       body: Optional[str] = None, max_rounds: int = 3, idempotency_key: Optional[str] = None,
-                      now: Optional[int] = None) -> dict:
+                      review_locked: bool = False, now: Optional[int] = None) -> dict:
     """Open the review request for one commit of an author task, as its next round.
 
     A review of this task still waiting for its reviewer's run is superseded by this one: its request
@@ -360,6 +370,11 @@ def open_review_round(conn: Conn, task_id: str, reviewer_desk: str, sha: str, ti
     run has not ended yet holds its place until it does. Superseded rounds, and runs that crashed,
     timed out, were refused by a cap or stopped at a vendor limit, do not count, and give back any
     allowance they took. A round past max_rounds takes one of Ryan's allowances, or is refused.
+
+    review_locked means the caller holds this task's review lock, which every live review of the task
+    and its reviewer's own process hold. A round whose reviewer task is still active with no verdict was
+    then left by a review that died, so it does not count, even before the next review that can take the
+    reviewer's desk lock closes that task.
     """
     task_id = ids.check("task", task_id)
     reviewer_desk = ids.check("desk", reviewer_desk, "reviewer desk")
@@ -371,7 +386,7 @@ def open_review_round(conn: Conn, task_id: str, reviewer_desk: str, sha: str, ti
         task = pensieve.get_task(conn, task_id)
         live = [row for row in _round_rows(conn, task_id) if row["superseded_by"] is None]
         waiting = {row["request_id"]: row for row in live if _is_waiting(row) and row["reviewer"] == reviewer_desk}
-        counted = [row for row in live if row["request_id"] not in waiting and _holds_round(row)]
+        counted = [row for row in live if _holds_round(row) and not (review_locked and _left_by_dead_review(row))]
         round_no = len(counted) + 1
         allowance_id = None
         if round_no > max_rounds:

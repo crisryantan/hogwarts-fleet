@@ -4,7 +4,10 @@ import contextlib
 import io
 import json
 import os
+import signal
 import subprocess
+import time
+from pathlib import Path
 from unittest import mock
 
 from hogwarts import capacity, ids, owlery, pensieve
@@ -363,6 +366,41 @@ class GuardTests(RunDeskCase):
                 run_desk.build_plan(self.conn, "harry")
 
 
+class LockInheritanceTests(FleetCase):
+    """A killed run_desk or review leaves its desk process running. That process inherited the lock fds, so the
+    lock stays held until it ends too. Real processes: a Python holder and /bin/sleep, never a desk CLI."""
+
+    def test_a_desk_lock_handed_to_the_desk_process_outlives_a_killed_holder(self):
+        holder = ("import os, subprocess, sys\n"
+                  "sys.path.insert(0, sys.argv[1])\n"
+                  "from fleet import config, run_desk\n"
+                  "config.OFFICE_ROOT = sys.argv[2]\n"
+                  "with run_desk.desk_lock('ron', wait=False) as lock_fd:\n"
+                  "    child = subprocess.Popen(['/bin/sleep', '60'], pass_fds=(lock_fd,),\n"
+                  "                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\n"
+                  "    print(child.pid, flush=True)\n"
+                  "    os.kill(os.getpid(), 9)\n")
+        root = str(Path(__file__).resolve().parents[1])
+        done = subprocess.run(["/usr/bin/env", "-i", "/usr/bin/python3", "-I", "-B", "-X", "pycache_prefix=/var/empty",
+                               "-c", holder, root, config.OFFICE_ROOT], capture_output=True, timeout=60, check=False)
+        self.assertEqual(done.returncode, -signal.SIGKILL, done.stderr)
+        orphan = int(done.stdout.decode().strip())
+        try:
+            with self.assertRaises(safefs.Busy):
+                with run_desk.desk_lock("ron", wait=False):
+                    pass
+        finally:
+            os.kill(orphan, signal.SIGKILL)
+        deadline = time.monotonic() + 30
+        while True:
+            try:
+                with run_desk.desk_lock("ron", wait=False):
+                    break
+            except safefs.Busy:
+                self.assertLess(time.monotonic(), deadline, "the lock was never freed after its holder ended")
+                time.sleep(0.1)
+
+
 class RealRunTests(RunDeskCase):
     def real_run(self, desk: str, owl_id: str, returncode: int) -> tuple:
         done = subprocess.CompletedProcess(args=[], returncode=returncode)
@@ -384,6 +422,7 @@ class RealRunTests(RunDeskCase):
         code, _, err, started = self.real_run("hermione", owl_id, 0)
         self.assertEqual(code, 0, err)
         self.assertEqual(started.call_args.kwargs["cwd"], f"{self.castle}/desks/hermione")
+        self.assertEqual(len(started.call_args.kwargs["pass_fds"]), 1)  # its desk lock, held while it runs
         self.assertEqual(owlery.inbox(self.conn, "hermione"), [])
         self.assertEqual([row["runs"] for row in pensieve.summary(self.conn)], [1])
         [launch] = capacity.list_launches(self.conn, "hermione")

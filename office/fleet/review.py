@@ -13,7 +13,9 @@ Ryan runs it from his terminal.
 One review of an author task runs at a time. Before anything changes, the review takes that task's
 review lock without waiting; if another review of the task holds it, this one is refused at once and
 changes nothing. Under the lock the checkout, the evidence, the round, the reviewer's run and the
-verdict all belong to the one sha this review asked for. Then, for either:
+verdict all belong to the one sha this review asked for. The reviewer's own process inherits this lock
+and the reviewer's desk lock, so a review killed mid-run (SIGKILL, a crash) still holds both until its
+reviewer's process ends too. Then, for either:
 1. verify runs the acceptance checks and writes evidence for this sha;
 2. the commit is recorded on the author's task;
 3. a review request goes from the author's task to the reviewer of the other family
@@ -35,10 +37,13 @@ verdict all belong to the one sha this review asked for. Then, for either:
 
 The verdict is recorded on its round in the same transaction that stores it, so the round counts even
 if publishing the review afterwards fails. A review holds the reviewer's desk lock from before its round
-opens until its reviewer task is closed as superseded, once its verdict is recorded or its run fails. So a
-reviewer task still active while that lock is free was left by a review that died (killed, or its cleanup
-failed): the next review that takes the lock closes it, and a round with no verdict stops counting. A
-reviewer task is never closed while its desk lock is held. Only Ryan closes a task as complete.
+opens until its reviewer task is closed as superseded, once its verdict is recorded or its run fails, and
+the reviewer's process holds it too while it runs. So a reviewer task still active while that lock is free
+was left by a review that died (killed, or its cleanup failed) and whose reviewer is gone: the next review
+that takes the lock closes it, and a round with no verdict stops counting. A reviewer task is never closed
+while its desk lock is held. A review that finds its reviewer busy does not count such a round of its own
+task either, since it holds the task's review lock, but leaves closing it to a review that can take the
+desk lock. Only Ryan closes a task as complete.
 """
 from __future__ import annotations
 
@@ -199,23 +204,24 @@ def _finish_reviewer_task(conn, request_id: str, reviewer_task_id: str) -> None:
 
 
 @contextlib.contextmanager
-def task_review_lock(task_id: str) -> Iterator[None]:
+def task_review_lock(task_id: str) -> Iterator[int]:
     """One review of an author task at a time, taken without waiting before anything changes and held
-    until the review ends. A second review of the task is refused at once."""
+    until the review ends, yielding its fd for the reviewer's process to inherit. A second review of the
+    task is refused at once."""
     task_id = ids.check("task", task_id)
     with contextlib.ExitStack() as stack:
         locks_fd = stack.enter_context(safefs.opened_dir(config.OFFICE_ROOT, "locks", create=True))
         try:
-            stack.enter_context(safefs.held_lock(locks_fd, f"review-{task_id}.lock", blocking=False))
+            lock_fd = stack.enter_context(safefs.held_lock(locks_fd, f"review-{task_id}.lock", blocking=False))
         except safefs.Busy:
             raise FleetError(REVIEW_RUNNING) from None
-        yield
+        yield lock_fd
 
 
 def _recover_stranded(conn, reviewer: str, now: Optional[int]) -> None:
     """Close the reviewer tasks a review left active when it died (killed, or its cleanup failed), so the
     desk is free and a round with no verdict stops counting. Only called under the reviewer's desk lock,
-    which every live review holds until its reviewer task is closed."""
+    which every live review holds until its reviewer task is closed, and its reviewer's process while it runs."""
     for row in capacity.stranded_rounds(conn, reviewer):
         _finish_reviewer_task(conn, row["request_id"], row["reviewer_task_id"])
         counted = ("its recorded verdict still counts" if row["has_verdict"]
@@ -232,7 +238,7 @@ def _open_round(conn, task: dict, reviewer: str, sha: str, body: str, now: Optio
         return capacity.open_review_round(
             conn, task["id"], reviewer, sha, f"review {task['id']} @ {sha[:12]}", body=body,
             max_rounds=config.REVIEW_ROUND_CAP,
-            idempotency_key=f"review:{task['id']}:{sha[:12]}:{secrets.token_hex(4)}", now=now)
+            idempotency_key=f"review:{task['id']}:{sha[:12]}:{secrets.token_hex(4)}", review_locked=True, now=now)
     except capacity.RoundCapReached as exc:
         pensieve.add_event(conn, task["desk"], "review.round-cap", "headmaster",
                            f"task {task['id']} asked for review round {exc.round}, past the cap of"
@@ -258,9 +264,9 @@ def _queued(conn, task: dict, reviewer: str, sha: str, body: str, now: Optional[
 
 
 def _review_and_record(conn, task: dict, record: dict, sha: str, holder_id: str, reviewer: str,
-                       request_id: str, reviewer_task_id: str, owl_id: str, start) -> tuple:
+                       request_id: str, reviewer_task_id: str, owl_id: str, start, keep_fds: tuple) -> tuple:
     """Run the reviewer and record its verdict on the round, then publish the review. (verdict, castle path)"""
-    result = run_desk.run(conn, reviewer, owl_id, on_start=start, lock_held=True)
+    result = run_desk.run(conn, reviewer, owl_id, on_start=start, lock_held=True, keep_fds=keep_fds)
     if result.get("cap_source") is not None:
         raise FleetError(f"the {reviewer} run stopped at the vendor's own usage limit (cap_source"
                          f" {result['cap_source']}); a fleet cap bump does not lift it")
@@ -285,9 +291,10 @@ def _review_and_record(conn, task: dict, record: dict, sha: str, holder_id: str,
     return verdict, castle_review
 
 
-def run_review(conn, task: dict, record: dict, sha: str, holder_id: str, handoff: bool,
+def run_review(conn, task: dict, record: dict, sha: str, holder_id: str, handoff: bool, task_lock_fd: int,
                now: Optional[int] = None) -> dict:
-    """The review of one sha, called under the author task's review lock once the worktree is at that sha."""
+    """The review of one sha, called under the author task's review lock (task_lock_fd) once the worktree is
+    at that sha."""
     author = pensieve.get_desk(conn, task["desk"])
     reviewer = config.REVIEWER_FOR_FAMILY.get(author["family"])
     if reviewer is None:
@@ -303,7 +310,7 @@ def run_review(conn, task: dict, record: dict, sha: str, holder_id: str, handoff
               "evidence": evidence["evidence"]["castle"], "failed_checks": evidence["failed"]}
     with contextlib.ExitStack() as held:
         try:
-            held.enter_context(run_desk.desk_lock(reviewer, wait=False))
+            desk_lock_fd = held.enter_context(run_desk.desk_lock(reviewer, wait=False))
         except safefs.Busy:
             return _queued(conn, task, reviewer, sha, body, now, result)
         _recover_stranded(conn, reviewer, now)
@@ -326,8 +333,8 @@ def run_review(conn, task: dict, record: dict, sha: str, holder_id: str, handoff
             owlery.advance(conn, request_id, "running", detail="review script")
 
         try:
-            verdict, castle_review = _review_and_record(conn, task, record, sha, holder_id, reviewer,
-                                                        request_id, reviewer_task_id, owl_id, start)
+            verdict, castle_review = _review_and_record(conn, task, record, sha, holder_id, reviewer, request_id,
+                                                        reviewer_task_id, owl_id, start, (task_lock_fd, desk_lock_fd))
         except BaseException:
             if started:
                 # A cleanup that fails here must not hide why the review failed; the next review that takes
@@ -348,11 +355,11 @@ def run_review(conn, task: dict, record: dict, sha: str, holder_id: str, handoff
 
 def review_build(conn, task_id: str) -> dict:
     """A build desk's task: commit its work from the handoff, then review HEAD."""
-    with task_review_lock(task_id):
-        return _review_build(conn, ids.check("task", task_id))
+    with task_review_lock(task_id) as lock_fd:
+        return _review_build(conn, ids.check("task", task_id), lock_fd)
 
 
-def _review_build(conn, task_id: str) -> dict:
+def _review_build(conn, task_id: str, lock_fd: int) -> dict:
     task = pensieve.get_task(conn, task_id)
     if task["desk"] not in config.WORKTREE_DESKS:
         raise FleetError("use 'fleet review own' for your own sessions; this is for a build desk's task")
@@ -375,7 +382,7 @@ def _review_build(conn, task_id: str) -> dict:
     sha = gitops.rev(record)
     if sha == gitops.rev(record, record["base"]):
         raise FleetError("there is nothing to review: HEAD is still the base")
-    return run_review(conn, task, record, sha, holder_id, handoff is not None)
+    return run_review(conn, task, record, sha, holder_id, handoff is not None, lock_fd)
 
 
 def _write_own_task_md(task_id: str, title: str, intent: str) -> str:
@@ -395,12 +402,12 @@ def review_own(conn, repo_dir: str, title: Optional[str] = None, intent: Optiona
                task_id: Optional[str] = None, base: str = config.DEFAULT_BASE, fetch: bool = True) -> dict:
     """A commit from one of Ryan's own Claude sessions, reviewed by Moody in a detached worktree."""
     target = ids.new_id("task") if task_id is None else ids.check("task", task_id)
-    with task_review_lock(target):
-        return _review_own(conn, repo_dir, title, intent, task_id, target, base, fetch)
+    with task_review_lock(target) as lock_fd:
+        return _review_own(conn, repo_dir, title, intent, task_id, target, base, fetch, lock_fd)
 
 
 def _review_own(conn, repo_dir: str, title: Optional[str], intent: Optional[str], task_id: Optional[str],
-                target: str, base: str, fetch: bool) -> dict:
+                target: str, base: str, fetch: bool, lock_fd: int) -> dict:
     reviewer = config.REVIEWER_FOR_FAMILY["claude"]
     if not run_desk.is_enabled(reviewer):
         raise FleetError(f"{reviewer} is not enabled, so no review can run")
@@ -435,4 +442,4 @@ def _review_own(conn, repo_dir: str, title: Optional[str], intent: Optional[str]
         raise FleetError("the review worktree is not at your checkout's HEAD")
     with safefs.opened_dir(config.CASTLE_ROOT, "tasks", task["id"]) as fd:
         has_handoff = safefs.is_safe_regular(fd, "handoff.md")
-    return run_review(conn, task, record, sha, task["id"], handoff=has_handoff)
+    return run_review(conn, task, record, sha, task["id"], has_handoff, lock_fd)
