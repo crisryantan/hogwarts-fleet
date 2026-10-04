@@ -265,10 +265,27 @@ class CommandTests(CliCase):
 
 
 class WrapperTests(unittest.TestCase):
+    def test_installed_wrapper_checks_mode_even_when_home_is_a_git_checkout(self):
+        wrapper = temp_dir(self) / "castle"
+        wrapper.write_text(CASTLE.read_text())
+        with mock.patch(__name__ + ".ROOT", Path(INSTALLED)), \
+                mock.patch(__name__ + ".CASTLE", wrapper), \
+                mock.patch.object(Path, "exists", return_value=True):
+            os.chmod(wrapper, 0o700)
+            try:
+                self.test_wrapper_script_is_exact_and_mode_0700()
+            except unittest.SkipTest as exc:
+                self.fail(f"Installed wrapper permissions must be checked: {exc}")
+            os.chmod(wrapper, 0o755)
+            with self.assertRaises(AssertionError):
+                self.test_wrapper_script_is_exact_and_mode_0700()
+
     def test_wrapper_script_is_exact_and_mode_0700(self):
         lines = CASTLE.read_text().splitlines()
         self.assertEqual(lines[0], "#!/bin/sh")
         self.assertEqual(lines[1:], [WRAPPER])
+        if str(ROOT) != INSTALLED:
+            self.skipTest("Source copies cannot preserve mode 0700 through Git; install.sh sets it on installed wrappers")
         self.assertEqual(stat.S_IMODE(os.stat(CASTLE).st_mode), 0o700)
 
     def test_wrapper_clears_the_environment_and_ignores_cached_bytecode(self):
