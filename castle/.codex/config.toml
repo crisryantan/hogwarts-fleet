@@ -1,0 +1,7 @@
+# The castle is McGonagall's room, and she runs on Claude with settings that keep her inside her own desk
+# folder. A Codex session opened here has no such limits: with write access it could put an owl in any
+# desk's outbox, and the Owl Post would deliver it as that desk. So Codex sessions here are read-only.
+# Open Codex in a repo folder instead. Codex's "import from Claude Code" sync may rewrite this file and
+# re-add a Codex McGonagall and the castle's Claude hooks; if it does, put this file back and turn the
+# sync off in Codex's settings.
+sandbox_mode = "read-only"

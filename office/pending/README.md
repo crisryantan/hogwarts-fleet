@@ -50,7 +50,7 @@ File: `c-codex-approval.txt`.
 
 Every headless desk starts disabled. The Owl Post delivers to a disabled desk's inbox but never launches it, and `castle audit` escalates an owl that sits unacked for two hours. Hermione, Ron and the portrait stay disabled until you run `claude auth login`. To enable a desk you make a plain file named `enabled` in its office folder. Read the desk's `--dry-run` command first.
 
-Harry and Moody stay disabled until your organization approves Codex for its source code. Their read boundary is closed: run_desk runs them under a fleet permission profile, an allowlist that denies the office and every folder it does not name, with no network. `scripts/codex-boundary-test.sh` in the kit proves that kind of profile on your Mac. Confirm it once under a real `codex exec` run before enabling Harry.
+Harry and Moody stay disabled until your organization approves Codex for its source code. Their read boundary is closed: run_desk runs them under a fleet permission profile, an allowlist that denies the office and every folder it does not name, with no network. Neither may touch `/private/tmp` or your per-user temp folder: Harry gets a private temp folder of his own as `TMPDIR`, emptied before each run, and both may only read xcrun's lookup cache. `scripts/codex-boundary-test.sh` in the kit proves that kind of profile on your Mac, and `scripts/codex-exec-boundary-test.py` proves it again under real `codex exec` runs. Run both before enabling Harry, and after every Codex upgrade.
 
 ## (d) Registering and closing a task
 
@@ -87,7 +87,7 @@ Undo: restore the backup, or remove the entry.
 
 The desk settings for Hermione, Ron and the portrait ship with the push gate as a top-level `hooks` object. `a4-desk-settings-push-gate.merge.json` shows that block on its own.
 
-This is defence in depth: those desks have no network, so a push fails anyway. Whether hooks in a `--settings` file run under `--restricted` is still an open check. If the hook cannot load, it exits 1, which Claude Code treats as a non-blocking error, so it changes nothing else.
+This is defence in depth. Hermione and the portrait have no network, and Ron's sandbox reaches only api.github.com, which takes no `git push`, so a push fails anyway. Hooks in a `--settings` file do run under `--restricted`: a headless test run with such a hook saw it block the command. If the hook cannot load, it exits 1, which Claude Code treats as a non-blocking error, so it changes nothing else.
 
 Undo: remove the `hooks` object from each desk's settings.
 

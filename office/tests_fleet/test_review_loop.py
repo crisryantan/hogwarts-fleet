@@ -265,7 +265,7 @@ class VerifyTests(LoopCase):
             verify.verify(self.conn, task["id"])
         self.assertTrue((wt / "run-000.log").exists())
 
-    def test_a_nested_repository_stops_verify_before_anything_is_removed(self):
+    def test_a_nested_repository_stop_verify_before_anything_is_removed(self):
         _, task, wt = self.ignored_worktree("vendor/\n*.log\n")
         (wt / "vendor" / "lib").mkdir(parents=True)
         self.git("init", "-q", cwd=wt / "vendor" / "lib")
@@ -385,6 +385,19 @@ class ReviewTests(LoopCase):
         self.assertEqual([(t["status"], t["close_reason"]) for t in reviewer_tasks], [("closed", "superseded")])
         mcgonagall_owls = owlery.inbox(self.conn, "mcgonagall")
         self.assertTrue(all(owl["read_at"] is None for owl in mcgonagall_owls))
+
+    def test_fleet_words_in_a_commit_message_pass_only_in_the_kit_repo(self):
+        _, task, _, created, _ = self.build()
+        wt = Path(created["worktree"])
+        self.write_file(wt / "widget.txt", "widget\n")
+        self.handoff(task, HANDOFF.format(task_id=task["id"]).replace("Add the widget file", "Add Harry's widget file"))
+        self.enable("hermione")
+        with self.assertRaisesRegex(FleetError, "fleet word"):
+            review.review_build(self.conn, task["id"])
+        self.assertEqual(self.git("rev-parse", "HEAD", cwd=wt), self.git("rev-parse", "origin/main"))
+        with mock.patch.object(config, "FLEET_WORDS_ALLOWED_REPOS", (REPO_ID,)), self.fake_reviewer("PASS"):
+            result = review.review_build(self.conn, task["id"])
+        self.assertEqual(self.git("log", "-1", "--format=%s", result["sha"], cwd=wt), "Add Harry's widget file")
 
     def test_changes_leaves_the_task_active_and_no_pass(self):
         _, task, _, created, _ = self.build()

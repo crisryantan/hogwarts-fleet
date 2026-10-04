@@ -269,6 +269,11 @@ class CodexDeskTests(RunDeskCase):
         run_desk.fresh_temp(str(path))
         self.assertEqual(os.listdir(path), [])
         self.assertEqual(path.stat().st_mode & 0o777, 0o700)
+        os.rmdir(path)
+        self.write_file(path, "a plain file where the folder goes\n")
+        run_desk.fresh_temp(str(path))
+        self.assertTrue(path.is_dir())
+        self.assertEqual(os.listdir(path), [])
 
     def test_the_repo_git_folder_is_readable_only_from_the_office_record(self):
         owl_id, task_id = self.request("harry", worktree="tk-demo")
