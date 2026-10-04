@@ -448,8 +448,13 @@ def is_enabled(desk: str) -> bool:
 
 
 def child_env(path_prefix: list = (), extra: Optional[dict] = None) -> dict:
+    # USER and LOGNAME carry only the account name, taken from the home path. Claude Code finds its
+    # macOS Keychain login under it, so without them a headless desk reports "Not logged in".
+    account = os.path.basename(config.USER_HOME_DIR)
     return {
         "HOME": config.USER_HOME_DIR,
+        "USER": account,
+        "LOGNAME": account,
         "PATH": ":".join([*path_prefix, config.CHILD_PATH]),
         "LANG": "en_US.UTF-8",
         "SHELL": "/bin/bash",
