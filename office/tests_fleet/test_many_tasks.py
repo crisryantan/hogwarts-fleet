@@ -714,9 +714,9 @@ class OwnLineageAncestryTests(ManyCase):
         self.assertEqual(self.own_tasks(), [capped])
         common = str(other / ".git")
         head = self.git("rev-parse", "HEAD", cwd=other)
+        self.assertTrue(gitops.is_shallow(common))
         self.assertIsNone(gitops.is_ancestor(common, last, head))
         self.assertTrue(gitops.is_ancestor(common, head, head))
-
 
     def test_an_origin_url_in_another_letter_case_is_still_that_repository(self):
         # GitHub takes a slug in any letter case, so an origin respelled in capitals is the same repository.
@@ -770,9 +770,15 @@ class OwnLineageAncestryTests(ManyCase):
         self.git("commit", "-q", "-m", "other work", cwd=other)
         head = self.git("rev-parse", "HEAD", cwd=other)
         self.assertIsNone(gitops.is_ancestor(str(other / ".git"), last, head))
-        with self.not_made(), self.assertRaisesRegex(FleetError, re.escape(
-                f"cannot tell whether HEAD builds on commit {last[:12]} of task {capped}")):
+        self.assertFalse(gitops.is_shallow(str(other / ".git")))
+        with self.not_made(), self.assertRaises(FleetError) as caught:
             self.review_in(other)
+        # Git refuses --unshallow on a full clone, so this one is not told to run it.
+        text = str(caught.exception)
+        self.assertIn(f"cannot tell whether HEAD builds on commit {last[:12]} of task {capped}", text)
+        self.assertIn("this checkout's history is incomplete or unreadable", text)
+        self.assertIn("git fetch origin", text)
+        self.assertNotIn("unshallow", text)
         self.assertEqual(self.own_tasks(), [capped])
 
     def test_a_new_tasks_commit_is_its_lineage_before_its_checks_run(self):

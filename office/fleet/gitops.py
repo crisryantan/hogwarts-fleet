@@ -222,6 +222,12 @@ def is_ancestor(git_dir: str, ancestor: str, sha: str) -> Optional[bool]:
     return False if code == 1 and shallow == "false" else None
 
 
+def is_shallow(git_dir: str) -> bool:
+    """Whether this checkout says it is shallow. Only a shallow checkout can be cured with git fetch --unshallow;
+    git refuses that on a full clone. False when git says it is full or cannot answer."""
+    return git(["rev-parse", "--is-shallow-repository"], git_dir, check=False).strip() == "true"
+
+
 def git_in(folder: str, args: list, check: bool = True, timeout: int = 10) -> str:
     """git in a folder Ryan's own session works in, found the normal way, with the hardening flags.
 
