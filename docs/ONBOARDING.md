@@ -277,7 +277,7 @@ These checks prove the store, the Owl Post and the task flow work before any des
 
 ## Stage 5: Switch on the later stages, one at a time
 
-The fleet grows in the same order as its published rollout. Each later stage needs scripts that are not built yet. The launchd templates for them already sit in `~/.hogwarts/launchd/`, but the modules they call (`fleet.map`, `fleet.morning`, `fleet.keeper`, `fleet.portrait` and `fleet.gringotts`) do not exist, so don't load those plists until each stage ships its code and tests.
+The fleet grows in the same order as its published rollout. Each later stage needs scripts that are not built yet. The launchd templates for them already sit in `~/.hogwarts/launchd/`, but the modules they call (`fleet.map`, `fleet.morning`, `fleet.keeper` and `fleet.gringotts`) do not exist, so don't load those plists until each stage ships its code and tests. The portrait's module, `fleet.portrait`, is built, and 5.3 loads its job.
 
 5.5 and 5.6 are the exception: Ollivander and the live view are built, and you can switch them on any time after stage 4.
 
@@ -314,8 +314,8 @@ Prove the cheap jobs are right before they can interrupt you.
 
 Close the memory loop, with you approving every change.
 
-- Needs, not built yet: the nightly export of the day's extracts and fact candidates into the portrait's inbox.
-- Then: enable the portrait and load its plist. It runs in proposals-only mode with read-only chat. You apply its patches yourself with `castle fact apply --file <patch> --sha256 <hash>`. Run `rtk discover --all --since 30` for a real savings number, with no hook yet.
+- Built: the nightly export of the day's extracts and fact candidates into the portrait's inbox, his proposals-only run on it at 22:30 on weekdays, and `castle portrait` to read and apply his patches. Not built yet: the weekly scoreboard.
+- Then: run `sh scripts/portrait-setup.sh` yourself. It reads Dumbledore's dry run, exports today once by hand, enables his desk and loads his job, printing OK or FAILED after each step. His chat stays off until you give him a read-only MCP job ([CUSTOMISE.md](CUSTOMISE.md#change-budgets-and-limits)). Each morning after a run, `castle portrait show <date>` lists his patch and prints the exact `castle portrait apply <date> --sha256 <hash>` command. Add `--only <ids>` to apply just the operations you accept. Run `rtk discover --all --since 30` for a real savings number, with no hook yet.
 
 **You're done when** you have reviewed two nightly patches, the first weekly scoreboard shows the budgets held, and you have a go or no-go on RTK.
 

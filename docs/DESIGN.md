@@ -51,7 +51,7 @@ The Bash sandbox covers shell commands and everything they start. Each desk's sa
 | Moody - Security Reviewer | Codex, frontier tier, read-only | Reviews Claude-written diffs, including yours, security first | Writes anything, accepts a summary instead of the diff |
 | Ron - Release Engineer | Claude, fast tier, headless | Sorts PR and CI changes as routine or for you, calls reds real, flaky, infra or unsure, writes the morning lineup and weekly scoreboard from script numbers | Retries or unblocks a build, computes a number himself |
 | Snape - Data Analyst | Claude, workhorse tier, subagent | Read-only warehouse and observability reads with provenance on every number | Writes anywhere, prints raw rows or PII |
-| Dumbledore - Knowledge Manager | Claude, frontier tier, headless | Reviews the day each weeknight and proposes memory and brief changes as typed operations | Applies his own patch, deletes memory |
+| Dumbledore - Knowledge Manager | Claude, frontier tier, headless | Reviews the day each weeknight and proposes fact and memory changes as a dated patch of typed operations, each with its reason and source, plus a ten-line morning note | Applies his own patch, touches the store, deletes memory |
 
 The tier is each desk's role card, and Ollivander turns it into a model, as in [Models by role](#models-by-role).
 
@@ -80,7 +80,7 @@ Four scripts use no model. The **Owl Post - Message Router** moves owls between 
 | The Pensieve review | The portrait | Weekdays 22:30 | Frontier tier |
 | Gringotts | Script | Daily 23:30 | None |
 
-The launchd templates for all seven sit in `office/launchd/`. Only the Owl Post's and Ollivander's modules exist today.
+The launchd templates for all seven sit in `office/launchd/`. Only the Owl Post's, Ollivander's and the Pensieve review's modules exist today. The Pensieve review's job runs the nightly export first, which uses no model, and then the portrait.
 
 ## Models by role
 
@@ -121,6 +121,7 @@ The herdr spaces follow from risk 1. Any herdr pane can type into any other pane
 - **The castle, `~/hogwarts`.** The charter (`CLAUDE.md`), `PLAN.md`, `standing-orders.md`, a folder per desk with `scratchpad.md`, `inbox/` and `outbox/` (Hermione and Ron also keep one pad per task in `pads/`), `tasks/<id>/` and `worktrees/`. It is a local git repo with no remote. Its `.gitignore` keeps `worktrees/` and the per-task pads out of git: a pad is a throwaway Checkpoint for one task, and the durable memory is the scratchpads and the Pensieve.
 - **The Pensieve.** One SQLite file with full-text search. A SessionEnd hook stores a capped extract of each castle session at zero tokens: your prompts and the final replies, never tool output, scrubbed of emails, IPs, tokens and long hashes.
 - **Facts know when they change.** Each fact can carry a subject key, and only one fact per key is current. Replacing a fact closes the old one and keeps its dates. You can ask what was true, or what the fleet believed, on any past date. A fact that looks like PR status, build colour or a rollout percentage is refused unless it carries the command that fetches the live value, or expires within a week.
+- **The nightly review.** At 22:30 on weekdays a script exports the day's extracts, the fact candidates and the current facts into the portrait's inbox, then runs him. He writes a dated patch of typed operations (fact add, retire and edit, memory note add, and archive moves for you to make by hand), each with a reason and a source, and a morning note of at most ten lines. Nothing changes until you run `castle portrait apply`. It checks every operation against a strict schema, needs the hash of the patch you read, applies the operations you accept through the store's own fact and Pensieve calls in one transaction, and records each one so it never applies twice.
 - **Budgets.** The charter at about 600 tokens, the fleet memory index at 4KB, scratchpads at 6KB, and the startup digest under 40 lines. Nothing is deleted. Stale facts are closed or archived. Only raw extracts (after 90 days) and owl bodies (after 30) are purged.
 
 ## The store
@@ -173,7 +174,7 @@ The only pre-approvals are the ones you write in `standing-orders.md`.
 | 4 Memory loop | The nightly export and the portrait in proposals-only mode, the weekly scoreboard, an RTK number | Two nightly patches reviewed and an RTK go or no-go |
 | 5 After that | The RTK hook and standing orders, if the numbers say so | A normal week where you only answered what needed you |
 
-Stages 0 and 1 are built and installed by this repo. Stages 2 to 5 need code that is not written yet. [ONBOARDING.md](ONBOARDING.md) stage 5 says what each one needs.
+Stages 0 and 1 are built and installed by this repo. Stage 2's scripts are built, and so are stage 4's nightly export and the portrait in proposals-only mode. The rest of stages 3 to 5 needs code that is not written yet. [ONBOARDING.md](ONBOARDING.md) stage 5 says what each one needs.
 
 ## Known limits
 
@@ -182,7 +183,8 @@ These are honest gaps in what ships today.
 - **Codex desks rely on a beta feature for their read boundary.** On Codex 0.160.0 the `--sandbox` modes let commands read the whole disk. So `run_desk` never passes `--sandbox` to Harry or Moody. It passes a fleet permission profile instead: an allowlist with the desk's working folder, its own castle folder, the castle tasks and its repo's `.git` folder, a private temp folder for a desk that writes, no network, and `~/.hogwarts` and `/private/tmp` denied by name. `scripts/codex-boundary-test.sh` proves that kind of profile through `codex sandbox`, with no model and no tokens. Permission profiles are marked beta, so rerun that test after every Codex upgrade, and confirm it once under a real `codex exec` run before enabling Harry.
 - **No hook field says a person typed the prompt.** Claude Code's hook input does not separate an interactive session from `claude -p`. So the close hook also checks the session transcript: every entry must name the `cli` or `claude-desktop` entrypoint, and the prompt's own entry must be a typed human prompt from the last 30 seconds. If it can't confirm that, it refuses and prints the `castle` commands to close the task from your terminal.
 - **McGonagall asks you each time.** Her outbox writes and TASK.md edits are on the castle's ask list, so Claude asks you before every owl she posts and every TASK.md she writes. That is deliberate friction, and you can't pre-approve it from inside a session.
-- **The review loop has only run on this kit so far.** Its first real tasks were this repo's own changes: Harry built and Hermione reviewed two, and Moody reviewed the rest, which came from Claude sessions. `office/pending/README.md` (g) walks through a task. The Marauder's Map, Ron's jobs, the portrait's nightly export and Gringotts do not exist yet, and their launchd templates are placeholders for those stages.
+- **The review loop has only run on this kit so far.** Its first real tasks were this repo's own changes: Harry built and Hermione reviewed two, and Moody reviewed the rest, which came from Claude sessions. `office/pending/README.md` (g) walks through a task. The Marauder's Map, Ron's jobs and Gringotts do not exist yet, and their launchd templates are placeholders for those stages.
+- **The nightly review has only run on temp stores.** The export, the run and the patch checks are tested, but not yet on a real day. It reviews the local day its job runs in, so when the Mac sleeps through 22:30 and launchd only runs the job on waking after midnight, the new day is reviewed and the missed one never is. The export stops at 512KB of extracts and says how many it left out. Archive moves are notes you carry out by hand, and the export carries no copy of a memory index, so he proposes them only from what the day shows him. His chat is off until you give him a read-only MCP job ([CUSTOMISE.md](CUSTOMISE.md#change-budgets-and-limits)).
 - **The push gate is a guardrail, not a wall.** It reads the Bash command as text, so a git alias or a push through the GitHub API gets past it. It stops an agent pushing by habit or mistake. Desks get their real boundary from a sandbox with no network.
 - **Harry never commits.** A commit in a git worktree writes into the main repo's `.git` folder, and write access there would let a desk plant a hook or config that later runs outside any sandbox. So his profile only reads `.git`, and the review script commits his work for him, pointing git at the repo the office recorded and running no hooks.
 - **Deny rules for Bash match the usual command form only.** They are not a wall around a program. The sandbox stays the real boundary for desks.

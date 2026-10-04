@@ -15,7 +15,7 @@ A Harry Potter themed fleet of single-purpose AI agents for Claude Code and Code
   </tr>
 </table>
 
-**What ships today:** the store and its `castle` CLI, the castle, McGonagall, Snape, the Owl Post and the session hooks, and the review loop: the `fleet` command's worktree, verify, review and push scripts and the push gate. Also built: busy-day caps on runs and spend, review rounds that stop at three, Ollivander - Model Keeper, and a read-only live view of every desk. The store and fleet test suites cover it. The review loop is tested on temp repos but not yet on real tasks. The PR patrol and the nightly memory review are designed, and their desks, briefs, settings and launchd templates are here, but the scripts that drive them come in later stages. [DESIGN.md](docs/DESIGN.md#known-limits) lists the gaps.
+**What ships today:** the store and its `castle` CLI, the castle, McGonagall, Snape, the Owl Post and the session hooks, and the review loop: the `fleet` command's worktree, verify, review and push scripts and the push gate. Also built: busy-day caps on runs and spend, review rounds that stop at three, Ollivander - Model Keeper, and a read-only live view of every desk. The store and fleet test suites cover it. The review loop is tested on temp repos but not yet on real tasks. Dumbledore's nightly memory review is built as well: a weekday job exports the day from the store into his inbox and runs him in proposals-only mode, and `castle portrait` lets you read his dated patch and apply only the operations you accept. The PR patrol is designed, and its desks, briefs, settings and launchd templates are here, but the scripts that drive it come in a later stage. [DESIGN.md](docs/DESIGN.md#known-limits) lists the gaps.
 
 ## Start here
 
@@ -61,6 +61,7 @@ A Harry Potter themed fleet of single-purpose AI agents for Claude Code and Code
 | `claude-agents/snape.md` | Snape's user-level agent file | `~/.claude/agents/snape.md`, only if absent |
 | `install.sh` | Installs the two homes, creates the database, registers the desks and runs the tests | |
 | `scripts/owlpost-setup.sh` | Your one command to switch on the Owl Post and send a test owl (onboarding stage 3) | |
+| `scripts/portrait-setup.sh` | Your one command to switch on Dumbledore: it checks his dry run and the export, enables his desk and loads his weekday job (onboarding stage 5.3) | |
 | `scripts/codex-boundary-test.sh` | Proves the Codex desks' permission profile on your Mac: no office, no folder it isn't given, no network. Run it before enabling Harry or Moody, and after every Codex upgrade | |
 | `scripts/codex-exec-boundary-test.py` | Proves the boundary again under real `codex exec` runs for Harry and Moody, launched exactly the way the desk launcher does: the folders, temp folders and network above, a borrowed folder, quiet Xcode tools, and none of your own Codex hooks or MCP servers. Sends a short prompt to OpenAI and costs a few cents | |
 | `scripts/installed-office-check.sh` | Installs the kit into a throwaway home, fills the GitHub account, watched repos, blocked models and MCP names with made-up values, and runs both suites there. A test that leans on your own private values fails. Never touches your real `~/.hogwarts` or `~/hogwarts` | |

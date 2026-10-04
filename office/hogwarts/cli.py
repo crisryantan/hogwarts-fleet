@@ -294,6 +294,14 @@ def _ollivander_clear(path: Path, args: argparse.Namespace) -> dict:
     return wands.clear_stop(path)
 
 
+def _portrait():
+    # Dumbledore's patches are castle files. The fleet's patch module next to this package reads them through
+    # safefs, checks them against its schema and applies accepted ops through this package's own APIs.
+    from fleet import portrait_patch
+
+    return portrait_patch
+
+
 HANDLERS: dict[str, Callable] = {
     "desk add": lambda c, a: pensieve.add_desk(c, a.name, a.family, a.role, a.model),
     "desk list": lambda c, a: pensieve.list_desks(c),
@@ -359,6 +367,9 @@ HANDLERS: dict[str, Callable] = {
     "fact history": lambda c, a: facts.history(c, a.scope, a.subject_key),
     "fact candidates": lambda c, a: facts.contradiction_candidates(c, a.since, a.limit_per_fact),
     "fact apply": lambda c, a: facts.apply_ops(c, _ops(a)),
+    "portrait patches": lambda c, a: _portrait().patches(c),
+    "portrait show": lambda c, a: _portrait().show(c, a.date),
+    "portrait apply": lambda c, a: _portrait().apply(c, a.date, a.sha256, a.only),
     "metric add": lambda c, a: pensieve.add_metric(
         c, a.desk, a.run_id, a.model, a.input_tokens, a.output_tokens, a.cache_read_tokens,
         a.cost_usd, a.duration_ms, a.ts),
@@ -620,6 +631,16 @@ def _temporal_fact_parsers(group: argparse._SubParsersAction) -> None:
     apply.add_argument("--sha256")
 
 
+def _portrait_parsers(commands: argparse._SubParsersAction) -> None:
+    group = _group(commands, "portrait")
+    _sub(group, "patches", "portrait patches")
+    _sub(group, "show", "portrait show").add_argument("date")
+    apply = _sub(group, "apply", "portrait apply")
+    apply.add_argument("date")
+    apply.add_argument("--sha256", required=True, help="the hash castle portrait show printed")
+    apply.add_argument("--only", nargs="+", help="op ids to apply, the rest left out")
+
+
 def _metric_parsers(commands: argparse._SubParsersAction) -> None:
     group = _group(commands, "metric")
     add = _sub(group, "add", "metric add")
@@ -640,7 +661,7 @@ def build_parser() -> argparse.ArgumentParser:
         _sub(commands, name, name)
     for build in (_desk_parsers, _task_parsers, _token_parsers, _owl_parsers, _request_parsers,
                   _review_parsers, _event_parsers, _pensieve_parsers, _fact_parsers, _metric_parsers,
-                  _model_parsers):
+                  _model_parsers, _portrait_parsers):
         build(commands)
     purge = _sub(commands, "purge", "purge")
     purge.add_argument("--body-days", type=_whole, default=30)

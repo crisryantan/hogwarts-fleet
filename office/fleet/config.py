@@ -184,6 +184,17 @@ CLOSE_PROMPT_MAX_AGE = 30
 DOORBELL_KIND = "owl.doorbell"
 DOORBELL_SUMMARY = "An owl is waiting in your inbox."
 
+# Dumbledore's nightly review (fleet/portrait.py). No desk wrote the export, so its owl comes from the Owl
+# Post's own desk, the fleet's message router.
+PORTRAIT_EXPORT_SENDER = "owl-post"
+# The export's size: extracts up to this many bytes, and at most this many current facts.
+PORTRAIT_EXPORT_MAX_BYTES = 512 * 1024
+PORTRAIT_EXPORT_MAX_FACTS = 300
+# The MCP job (office desks/portrait/mcp-<name>.json) that gives Dumbledore chat, or None for no MCP server at
+# all. Set it to "chat" once that file names your chat server. Chat stays read-only: his settings allow only
+# that server's list and search tools, deny send_message, and his runs refuse every tool not allowed.
+PORTRAIT_MCP_JOB = None
+
 # Ollivander, the model keeper. Desks pick a model by role (office desks/<desk>/role.json), never by
 # model line, and a desk's family never changes.
 OLLIVANDER_DESK = "ollivander"

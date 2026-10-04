@@ -183,6 +183,8 @@ All in `~/.hogwarts/fleet/config.py`:
 | `TASK_PAD_DESKS` | The desks that get one pad per task, `desks/<desk>/pads/<key>.md`: Hermione and Ron |
 | `RUNNING_WINDOW_SECONDS` | How long a launch with no usage yet counts as running in the digest and `castle task board` |
 | `DIGEST_MAX_LINES` | The length of McGonagall's startup digest |
+| `PORTRAIT_EXPORT_MAX_BYTES`, `PORTRAIT_EXPORT_MAX_FACTS` | How much of the day the nightly export hands Dumbledore: 512KB of extracts and 300 current facts |
+| `PORTRAIT_MCP_JOB` | `None` in the kit, so Dumbledore runs with no MCP server. For read-only chat, put an MCP job file naming your chat server at `~/.hogwarts/desks/portrait/mcp-chat.json` and set it to `"chat"`. His settings allow only that server's list and search tools and deny `send_message`, and his runs refuse every tool they don't allow |
 
 The caps guard against runaway loops, so keep them well above a normal day. A cap day resets all at once, so a desk that is busy on both sides of the reset can use up to two days' cap within hours.
 

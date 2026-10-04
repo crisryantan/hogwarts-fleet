@@ -53,6 +53,8 @@ KNOWN_FLAGS = {
     "-A", "-P", "--no-tags", "-U0",
     # Ollivander: claude --effort, the CLI version and help probes, and brew upgrade --cask codex
     "--effort", "--version", "--help", "--cask",
+    # Dumbledore's nightly job: the export alone, with no owl and no run
+    "--export-only",
 }
 # Modules whose flag-shaped constants describe commands they read and refuse, never ones they run.
 FLAG_TABLE_MODULES = {"push_gate.py"}

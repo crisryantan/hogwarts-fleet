@@ -67,6 +67,20 @@ class EventTests(StoreCase):
         self.assertEqual(again["id"], first["id"])
         self.assertEqual(self.count("events"), 1)
 
+    def test_events_with_key_prefix_match_plain_text_only(self):
+        first = self.event("one", dedupe_key="portrait:applied:2027-01-15:f1")
+        second = self.event("two", dedupe_key="portrait:applied:2027-01-15:f10")
+        self.event("three", dedupe_key="portrait:applied:2027-01-16:f1")
+        self.event("four", dedupe_key="portraitXapplied")
+        self.event("five")
+        found = pensieve.events_with_key_prefix(self.conn, "portrait:applied:2027-01-15:")
+        self.assertEqual([event["id"] for event in found], [first["id"], second["id"]])
+        self.assertEqual(pensieve.events_with_key_prefix(self.conn, "portrait_"), [])
+        for bad in ("", "a b", "x%", None):
+            with self.subTest(bad=bad):
+                with self.assertRaises(ValidationError):
+                    pensieve.events_with_key_prefix(self.conn, bad)
+
     def test_event_inputs_are_validated(self):
         with self.assertRaises(ValidationError):
             pensieve.add_event(self.conn, "alpha", "Bad Kind", "routine", "x")
@@ -175,6 +189,23 @@ class SessionTests(StoreCase):
         self.assertTrue(all(hit["session_id"] == "session-0001" for hit in found))
         self.assertTrue(all("**" in hit["snippet"] for hit in found))
         self.assertEqual(len(pensieve.find(self.conn, "launcher", limit=1)), 1)
+
+    def test_extracts_between_reads_one_window_with_its_sessions(self):
+        pensieve.record_session(self.conn, "session-0002", "other-app", started_at=NOW)
+        before = pensieve.add_extract(self.conn, "session-0001", "user", "yesterday", now=NOW - DAY)
+        first = pensieve.add_extract(self.conn, "session-0002", "assistant", "today one", now=NOW)
+        second = pensieve.add_extract(self.conn, "session-0001", "user", "today two", now=NOW + 5)
+        pensieve.add_extract(self.conn, "session-0001", "user", "tomorrow", now=NOW + DAY)
+        found = pensieve.extracts_between(self.conn, NOW, NOW + DAY)
+        self.assertEqual([row["id"] for row in found], [first["id"], second["id"]])
+        self.assertEqual((found[0]["desk"], found[0]["project"], found[0]["role"]), (None, "other-app", "assistant"))
+        self.assertEqual((found[1]["desk"], found[1]["text"], found[1]["seq"]), ("alpha", "today two", 2))
+        self.assertEqual([row["id"] for row in pensieve.extracts_between(self.conn, 0, NOW + DAY, limit=1)],
+                         [before["id"]])
+        for bad in ({"since": -1}, {"until": "now"}, {"limit": 0}):
+            with self.subTest(bad=bad):
+                with self.assertRaises(ValidationError):
+                    pensieve.extracts_between(self.conn, **{"since": NOW, "until": NOW + DAY, **bad})
 
     def test_fts_rows_follow_extract_delete(self):
         extract = pensieve.add_extract(self.conn, "session-0001", "user", "ephemeral words")

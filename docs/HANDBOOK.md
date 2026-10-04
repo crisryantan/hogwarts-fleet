@@ -160,7 +160,7 @@ What each piece looks like once onboarding is done, and what switches on next.
 | Hermione - Staff Engineer | Installed, off | `claude auth login` (stage 2), then the review stage's scripts (5.1). |
 | Harry - Senior Engineer and Moody - Security Reviewer | Installed, off | Codex approved for your organization's source code, then the review stage (5.1). |
 | Ron - Release Engineer and the Marauder's Map | Ron installed and off. The Map is not built yet | `claude auth login`, then the shadow stage (5.2). |
-| Dumbledore - Knowledge Manager | Installed, off | `claude auth login`, then the memory stage (5.3). |
+| Dumbledore - Knowledge Manager | Installed, off | `claude auth login`, then `sh scripts/portrait-setup.sh` from the memory stage (5.3). |
 | Gringotts - Backup | Not built yet | The shadow stage (5.2). |
 | Ollivander - Model Keeper | Installed, off | Load his daily job (5.5). Until then every desk runs the model it was registered with. |
 | The live view: `fleet feed` and the herdr spaces | Installed, off | Run `hogwarts-spaces` (5.6). `fleet feed` itself works any time. |
@@ -176,6 +176,7 @@ A desk switches on when you create its `enabled` file after reading its dry run,
 - **When a session gets long.** If you see the Tempus warning (past about 200k tokens), ask for a Checkpoint and start a fresh session. Long sessions are the single biggest cost.
 - **Reviews.** They happen before anything is pushed, by the other model family. You'll see the verdict in your rows.
 - **Model notes.** Ollivander's notes arrive with your other rows. A move to a cheaper or equal model has already happened. A costlier one waits for `castle desk model <desk> --approve`.
+- **Dumbledore's patch.** After his weeknight review a row says his patch is ready, and it changes nothing until you apply it. `castle portrait show <date>` lists each operation with its reason, its source and whether the store would take it, then prints the exact apply command with the patch's hash. Run it as printed, or with `--only` naming just the operations you accept. Archive moves are yours to make by hand.
 - **Cap warnings.** A desk at 80% of a daily cap sends one note. At the cap its next run waits for the reset or a bump, as in [Busy days and caps](#busy-days-and-caps).
 - **Wrapping up.** Merge what's ready yourself, then type `Mischief managed <task-id>` for each finished task.
 
@@ -307,6 +308,9 @@ Everything `castle` prints is JSON. If you added the shortcut in one-time setup,
 | `castle request list --open` | See requests between desks still in flight |
 | `castle audit` | Find stuck requests and unanswered owls |
 | `castle fact current` | See what the fleet currently believes |
+| `castle portrait patches` | See Dumbledore's dated patches and which operations you applied |
+| `castle portrait show <date>` | Read one patch, and get the command that applies it |
+| `castle portrait apply <date> --sha256 <hash> [--only <ids>]` | Apply the operations you accept from that patch |
 | `castle desk list` | See every desk, its job and whether it takes many tasks |
 | `castle desk caps` | See today's runs and spend against each desk's caps |
 | `castle desk cap <desk> --runs +N` | Lift a desk's run cap until the next reset |
