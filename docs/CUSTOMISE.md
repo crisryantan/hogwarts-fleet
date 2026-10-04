@@ -59,7 +59,7 @@ What ships in the kit:
 | Harry - Senior Engineer | workhorse | high | Everyday coding |
 | Ron - Release Engineer | fast | low | Sorts lots of PR and CI updates |
 
-Edit the card, then run `~/.hogwarts/bin/fleet ollivander --dry-run` to read the new pick. His daily job applies it, or run `~/.hogwarts/bin/fleet ollivander` yourself. A move to the same tier or a cheaper one applies with a note. A costlier one waits for `castle desk model <desk> --approve`.
+Edit the card, then run `~/.hogwarts/bin/fleet ollivander --dry-run` to read the new pick. His daily job applies it, or run `~/.hogwarts/bin/fleet ollivander` yourself. A move to the same tier or a cheaper one applies with a note. A costlier one waits for `castle desk model <desk> --approve`. If a later pass no longer makes that pick, for any reason, it's dropped and you get a quiet note. `--approve` also checks the pick against the latest catalog first, and refuses one that's gone, hidden, filed under another tier or retiring within 30 days.
 
 How he picks:
 
@@ -78,7 +78,7 @@ To fix a desk on one model, pin it. Ollivander then leaves it alone until you un
 
 A Claude desk pins to an alias or a full `claude-` model id. A Codex desk pins to a slug from the last Codex catalog. The registry model and a `model =` line in a Codex desk's `codex.toml` are only what a desk runs before Ollivander has made his first pick. The same goes for a profile the `codex.toml` selects: once the desk has a model, it replaces that profile's model and reasoning effort too.
 
-After any switch, the first two runs are a trial. If both fail, the desk goes back to its previous model, pinned, and you get a note. A run that Claude's or Codex's own usage limit stopped never counts, and a switch you made yourself is never reverted.
+After any switch, the first two runs are a trial. If both fail, the desk goes back to its previous model, pinned, and you get a note. A run that Claude's or Codex's own usage limit stopped never counts, and a switch you made yourself is never reverted. Pinning the model a desk is on during its trial ends the trial, so two failures after that never move it.
 
 ## Block models your organization forbids
 
@@ -88,7 +88,7 @@ After any switch, the first two runs are a trial. If both fail, the desk goes ba
 BLOCKED_MODEL_PREFIXES = ("<model-alias>", "claude-<model-alias>-")
 ```
 
-To forbid a whole Claude line, list its alias and its full id prefix, as above. A blocked model is never picked, pinned, filed or launched. Ollivander skips it without a note. If every model of a tier is blocked, the desk keeps the one it has and you get one note. If its current model is blocked, `run_desk` won't launch the desk until you pin an allowed one. A trial that fails never reverts a desk onto a blocked model.
+To forbid a whole Claude line, list its alias and its full id prefix, as above. A blocked model is never picked, pinned, filed or launched. Ollivander skips it without a note. If every model of a tier is blocked, the desk keeps the one it has and you get one note. If its current model is blocked, `run_desk` won't launch the desk until you pin an allowed one. A trial that fails never reverts a desk onto a blocked model. While anything is blocked, a Codex desk with no model of its own isn't launched either, because the Codex CLI default can't be checked against the list. Ollivander's first pass gives each Codex desk its pick, so run `~/.hogwarts/bin/fleet ollivander` once after you fill the list, or pin a model. A failed trial never reverts a Codex desk onto that default while anything is blocked.
 
 An alias counts as blocked once it has run as a blocked full id, even for a helper call that did little of the work. The office remembers every full id each alias has run as, and `opus[1m]` shares the record of `opus`, so switching a desk away and back doesn't make it forget. A later run on an allowed id doesn't lift it, since that run must have started before the block was known. That alias stays refused until you change the list, so pin an allowed alias or full id instead.
 

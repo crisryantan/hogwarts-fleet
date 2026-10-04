@@ -80,8 +80,8 @@ command -v git jq gh rg shellcheck claude codex
 **You're done when** the installer ends with lines like these, and then lists the placeholder files for stage 2:
 
 ```
-tests: Ran 475 tests in ... OK
-tests_fleet: Ran 366 tests in ... OK
+tests: Ran 483 tests in ... OK
+tests_fleet: Ran 374 tests in ... OK
 castle doctor: ok
 ```
 
@@ -333,7 +333,7 @@ Ollivander - Model Keeper keeps each desk on the model its job needs, and never 
    cat ~/.hogwarts/desks/*/role.json
    ```
 
-2. If your organization forbids some models, list them in `BLOCKED_MODEL_PREFIXES` in `~/.hogwarts/fleet/config.py` before his first pass. [CUSTOMISE.md](CUSTOMISE.md#block-models-your-organization-forbids) shows how. Skip this if nothing is forbidden.
+2. If your organization forbids some models, list them in `BLOCKED_MODEL_PREFIXES` in `~/.hogwarts/fleet/config.py` before his first pass. While anything is listed, a Codex desk doesn't launch until that first pass has given it a model, or you've pinned one. [CUSTOMISE.md](CUSTOMISE.md#block-models-your-organization-forbids) shows how. Skip this if nothing is forbidden.
 
 3. Read his plan. A dry run asks both CLIs what models they offer and prints each desk's pick as JSON. It changes nothing and runs no update.
 
