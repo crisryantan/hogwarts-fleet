@@ -5,7 +5,7 @@ from unittest import mock
 
 from hogwarts import capacity, cli, db, owlery, pensieve
 from hogwarts.errors import ConflictError, IntegrityError, NotFoundError, ValidationError
-from tests.support import DAY, NOW, StoreCase, temp_dir
+from tests.support import DAY, NOW, REPO, StoreCase, temp_dir
 from tests.test_cli import CliCase
 
 DAY_START = NOW - NOW % DAY
@@ -116,18 +116,30 @@ class RoundCase(StoreCase):
         return capacity.open_review_round(self.conn, self.author, "beta", sha, f"review {sha[:12]}",
                                           body="read the diff", now=now, **kwargs)
 
-    def run_reviewer(self, opened: dict, verdict: bool = True) -> None:
-        """What the review script does once the reviewer's run starts and finishes: with a verdict it posts
-        the review result on the request; a run that crashed or hit a limit only frees the reviewer."""
+    def run_reviewer(self, opened: dict, verdict: bool = True, published: bool = True) -> None:
+        """What the review script does once the reviewer's run starts and finishes: with a verdict it records
+        it on the round, then posts the review result on the request; a run that crashed or hit a limit only
+        frees the reviewer. published=False is a verdict recorded before publishing the review failed."""
         request_id, task_id = opened["request"]["id"], opened["task"]["id"]
         pensieve.start_task(self.conn, task_id, now=NOW)
         owlery.advance(self.conn, request_id, "claimed", now=NOW)
         owlery.advance(self.conn, request_id, "running", now=NOW)
         if verdict:
+            self.record_verdict(opened)
+        if verdict and published:
             owlery.send(self.conn, "beta", "alpha", "result", "review CHANGES", body="REVIEW", task_id=task_id,
                         request_id=request_id, now=NOW)
             owlery.advance(self.conn, request_id, "result_posted", detail="CHANGES", now=NOW)
         pensieve.close_task(self.conn, task_id, "superseded", now=NOW)
+
+    def record_verdict(self, opened: dict, verdict: str = "CHANGES") -> dict:
+        sha = self.row(opened)["sha"]
+        pensieve.record_commit(self.conn, self.author, REPO, sha, now=NOW)
+        return capacity.record_round_verdict(self.conn, opened["request"]["id"], REPO, verdict, now=NOW)
+
+    def row(self, opened: dict) -> dict:
+        rows = {row["request_id"]: row for row in capacity.review_rounds(self.conn, self.author)}
+        return rows[opened["request"]["id"]]
 
     def live(self) -> list:
         return [(row["sha"], row["round"]) for row in capacity.review_rounds(self.conn, self.author)
@@ -192,7 +204,7 @@ class RoundCapTests(RoundCase):
                          (False, False))
 
     def test_a_result_owl_from_a_run_that_then_crashed_does_not_use_up_a_round(self):
-        # The reviewer desk can post a result owl itself; only the review script's result_posted counts.
+        # The reviewer desk can post a result owl itself; only a verdict recorded on the round counts.
         crashed = self.round(SHAS[0])
         request_id, task_id = crashed["request"]["id"], crashed["task"]["id"]
         pensieve.start_task(self.conn, task_id, now=NOW)
@@ -204,6 +216,36 @@ class RoundCapTests(RoundCase):
         rows = {row["request_id"]: row for row in capacity.review_rounds(self.conn, self.author)}
         self.assertEqual((rows[request_id]["counts"], rows[request_id]["has_verdict"]), (False, False))
         self.assertEqual(self.round(SHAS[1])["round"], 1)
+
+    def test_a_result_posted_phase_without_a_recorded_verdict_does_not_use_up_a_round(self):
+        crashed = self.round(SHAS[0])
+        request_id, task_id = crashed["request"]["id"], crashed["task"]["id"]
+        pensieve.start_task(self.conn, task_id, now=NOW)
+        for phase in ("claimed", "running"):
+            owlery.advance(self.conn, request_id, phase, now=NOW)
+        owlery.send(self.conn, "beta", "alpha", "result", "my review", body="REVIEW", task_id=task_id,
+                    request_id=request_id, now=NOW)
+        owlery.advance(self.conn, request_id, "result_posted", now=NOW)
+        pensieve.close_task(self.conn, task_id, "superseded", now=NOW)
+        self.assertEqual((self.row(crashed)["counts"], self.row(crashed)["has_verdict"]), (False, False))
+        self.assertEqual(self.round(SHAS[1])["round"], 1)
+
+    def test_a_verdict_whose_publication_failed_still_uses_up_its_round_and_allowance(self):
+        self.three_rounds()
+        allowance = capacity.allow_round(self.conn, self.author, now=NOW)
+        fourth = self.round(SHAS[3])
+        self.assertEqual(fourth["allowance_id"], allowance["id"])
+        self.run_reviewer(fourth, published=False)
+        row = self.row(fourth)
+        self.assertEqual((row["counts"], row["has_verdict"], row["verdict"], row["request_phase"]),
+                         (True, True, "CHANGES", "running"))
+        self.assertEqual(row["reviewer_task_status"], "closed")
+        with self.assertRaises(capacity.RoundCapReached) as refused:
+            self.round(SHAS[4])
+        self.assertEqual(refused.exception.round, 5)
+        again = capacity.allow_round(self.conn, self.author, now=NOW + 1)
+        self.assertEqual((again["created"], again["rounds"]), (True, 4))
+        self.assertNotEqual(again["id"], allowance["id"])
 
     def test_three_verdict_rounds_then_a_fourth_is_refused_whatever_crashed_between(self):
         for index, sha in enumerate(SHAS[:3]):
@@ -288,6 +330,61 @@ class RoundCapTests(RoundCase):
         self.assertEqual(self.conn.total_changes, before)
 
 
+class RoundVerdictTests(RoundCase):
+    def test_the_verdict_is_stored_and_tied_to_its_round_in_one_step(self):
+        opened = self.round(SHAS[0])
+        review = self.record_verdict(opened, "HEADMASTER")
+        self.assertEqual((review["sha"], review["task_id"], review["reviewer_desk"], review["verdict"]),
+                         (SHAS[0], self.author, "beta", "HEADMASTER"))
+        self.assertEqual((self.row(opened)["review_id"], self.row(opened)["verdict"]), (review["id"], "HEADMASTER"))
+        with self.assertRaisesRegex(ConflictError, "already has a verdict"):
+            capacity.record_round_verdict(self.conn, opened["request"]["id"], REPO, "CHANGES", now=NOW)
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM review_passes").fetchone()[0], 1)
+
+    def test_a_failed_review_record_leaves_the_round_without_a_verdict(self):
+        opened = self.round(SHAS[0])
+        before = self.conn.total_changes
+        with self.assertRaises(IntegrityError):  # the commit was never recorded on the author task
+            capacity.record_round_verdict(self.conn, opened["request"]["id"], REPO, "CHANGES", now=NOW)
+        self.assertEqual(self.conn.total_changes, before)
+        self.assertIsNone(self.row(opened)["review_id"])
+
+    def test_superseded_withdrawn_and_unknown_rounds_take_no_verdict(self):
+        first = self.round(SHAS[0])
+        second = self.round(SHAS[1])
+        pensieve.record_commit(self.conn, self.author, REPO, SHAS[0], now=NOW)
+        with self.assertRaisesRegex(ConflictError, "superseded"):
+            capacity.record_round_verdict(self.conn, first["request"]["id"], REPO, "CHANGES", now=NOW)
+        owlery.decline(self.conn, second["request"]["id"], "safety", now=NOW)
+        pensieve.record_commit(self.conn, self.author, REPO, SHAS[1], now=NOW)
+        with self.assertRaisesRegex(ConflictError, "outcome"):
+            capacity.record_round_verdict(self.conn, second["request"]["id"], REPO, "CHANGES", now=NOW)
+        plain = owlery.open_request(self.conn, "alpha", "beta", "not a round", body="x", now=NOW)
+        with self.assertRaisesRegex(ConflictError, "not opened as a review round"):
+            capacity.record_round_verdict(self.conn, plain["request"]["id"], REPO, "CHANGES", now=NOW)
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM review_passes").fetchone()[0], 0)
+
+    def test_the_store_binds_a_round_verdict_to_that_round_and_sets_it_once(self):
+        first, other = self.round(SHAS[0]), self.round(SHAS[1])
+        self.run_reviewer(other)
+        other_review = self.row(other)["review_id"]
+        update = "UPDATE review_rounds SET review_id = ? WHERE request_id = ?"
+        with self.assertRaises(sqlite3.IntegrityError):  # first was superseded by other
+            self.conn.execute(update, (other_review, first["request"]["id"]))
+        third = self.round(SHAS[2])
+        with self.assertRaises(sqlite3.IntegrityError):  # a review of a different commit
+            self.conn.execute(update, (other_review, third["request"]["id"]))
+        with self.assertRaises(sqlite3.IntegrityError):  # a verdict is final
+            self.conn.execute(update, (None, other["request"]["id"]))
+        with self.assertRaises(sqlite3.IntegrityError):  # a round with a verdict is never superseded
+            self.conn.execute("UPDATE review_rounds SET superseded_by = ?, superseded_at = 1 WHERE request_id = ?",
+                              (third["request"]["id"], other["request"]["id"]))
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.conn.execute("INSERT INTO review_rounds(request_id, task_id, reviewer, sha, round, created_at,"
+                              " review_id) VALUES ('rq_0000000000000000', ?, 'beta', ?, 1, 1, ?)",
+                              (self.author, SHAS[1], other_review))
+
+
 class MigrationV4Tests(StoreCase):
     def test_a_v3_database_gains_the_capacity_tables(self):
         path = temp_dir(self) / "state" / "pensieve.db"
@@ -300,6 +397,8 @@ class MigrationV4Tests(StoreCase):
         self.assertEqual(db.schema_version(conn), 4)
         names = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
         self.assertTrue({"cap_bumps", "cap_hits", "round_allowances", "review_rounds"} <= names)
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(review_rounds)")}
+        self.assertIn("review_id", columns)
         self.assertEqual(capacity.add_bump(conn, "alpha", "runs", 1, RESET, now=NOW)["amount"], 1)
         changes = conn.total_changes
         self.assertEqual(db.migrate(conn), 4)

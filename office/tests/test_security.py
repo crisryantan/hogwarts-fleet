@@ -376,7 +376,8 @@ class InputSecurityTests(StoreCase):
         "max_rounds": 3,
     }
     OVERRIDES = {
-        ("record_review", "verdict"): "CHANGES", ("defer", "reason"): "conflict", ("decline", "reason"): "safety",
+        ("record_review", "verdict"): "CHANGES", ("record_round_verdict", "verdict"): "CHANGES",
+        ("defer", "reason"): "conflict", ("decline", "reason"): "safety",
         ("consume", "token"): "x" * 43, ("add_extract", "role"): "user",
         ("set_worktree", "worktree"): f"{ids.WORKTREES_ROOT}/wt",
         ("add_bump", "kind"): "runs", ("add_bump", "expires_at"): NOW + DAY,
@@ -625,7 +626,8 @@ class TransactionCoverageTests(unittest.TestCase):
         task = pensieve.start_task(conn, pensieve.create_task(conn, "alpha", "build", now=NOW)["id"], now=NOW)["id"]
         pensieve.record_commit(conn, task, REPO, SHA, now=NOW)
         capacity.open_review_round(conn, task, "beta", SHA, "review one", now=NOW)
-        capacity.open_review_round(conn, task, "beta", SHA, "review two", now=NOW)
+        two = capacity.open_review_round(conn, task, "beta", SHA, "review two", now=NOW)
+        capacity.record_round_verdict(conn, two["request"]["id"], REPO, "CHANGES", now=NOW)
         capacity.allow_round(conn, task, now=NOW)
         capacity.add_bump(conn, "alpha", "runs", 5, NOW + DAY, now=NOW)
         capacity.record_cap_hit(conn, "alpha", "plan", "claude_plan", run_id="run-1", now=NOW)

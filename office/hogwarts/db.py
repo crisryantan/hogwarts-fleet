@@ -461,8 +461,10 @@ V4 = (
         created_at INTEGER NOT NULL,
         superseded_by TEXT REFERENCES requests(id),
         superseded_at INTEGER,
+        review_id TEXT UNIQUE REFERENCES review_passes(id),
         CHECK ((superseded_by IS NULL) = (superseded_at IS NULL)),
-        CHECK (superseded_by IS NULL OR superseded_by <> request_id)
+        CHECK (superseded_by IS NULL OR superseded_by <> request_id),
+        CHECK (superseded_by IS NULL OR review_id IS NULL)
     )"""
     ),
     "CREATE INDEX IF NOT EXISTS review_rounds_task ON review_rounds(task_id)",
@@ -481,6 +483,23 @@ V4 = (
         "review_rounds_superseded_once",
         "BEFORE UPDATE ON review_rounds WHEN OLD.superseded_by IS NOT NULL",
         "a superseded review round is final",
+    ),
+    # A round's verdict is the review_passes row recorded with it, set once and only for that round's commit.
+    _guard(
+        "review_rounds_open_without_verdict",
+        "BEFORE INSERT ON review_rounds WHEN NEW.review_id IS NOT NULL",
+        "a review round opens without a verdict",
+    ),
+    _guard(
+        "review_rounds_verdict_once",
+        "BEFORE UPDATE OF review_id ON review_rounds WHEN OLD.review_id IS NOT NULL",
+        "a review round verdict is final",
+    ),
+    _guard(
+        "review_rounds_verdict_matches",
+        "BEFORE UPDATE OF review_id ON review_rounds WHEN NOT EXISTS (SELECT 1 FROM review_passes"
+        " WHERE id = NEW.review_id AND task_id = OLD.task_id AND sha = OLD.sha AND reviewer_desk = OLD.reviewer)",
+        "a round verdict must be the review of its commit by its reviewer",
     ),
     _guard("review_rounds_no_delete", "BEFORE DELETE ON review_rounds", "review rounds are never deleted"),
 )

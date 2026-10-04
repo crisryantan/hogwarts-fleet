@@ -4,9 +4,10 @@ The cap numbers live in the fleet's config. The store keeps what changes during 
 Ryan makes with castle desk cap, one row each time a cap refuses a run or a vendor limit stops one,
 and one row per review request, so a newer commit supersedes a review that is still waiting and a
 round past the cap waits for Ryan's castle task allow-round. Only a reviewer run that recorded a
-verdict uses up a round, and the proof is the request reaching result_posted, which the review script
-does right after it records the review. A result owl alone is not proof, since the reviewer desk can post
-one itself. The daily run caps still bound the retries of runs that did not record one.
+verdict uses up a round, and the proof is the verdict itself: record_round_verdict stores the review and
+ties it to its round in one transaction, so a review recorded before a later step failed still counts.
+A result owl or a request phase alone is not proof, since the reviewer desk can post a result owl itself.
+The daily run caps still bound the retries of runs that did not record one.
 """
 from __future__ import annotations
 
@@ -25,11 +26,11 @@ RUN_CAP_MAX = 100000
 MAX_ROUNDS_LIMIT = 100
 
 _ROUND_ROWS = """SELECT review_rounds.*, requests.phase AS request_phase, requests.outcome AS request_outcome,
-       tasks.status AS reviewer_task_status,
-       EXISTS (SELECT 1 FROM request_phases WHERE request_phases.request_id = review_rounds.request_id
-               AND request_phases.phase = 'result_posted') AS has_verdict
+       tasks.status AS reviewer_task_status, review_rounds.review_id IS NOT NULL AS has_verdict,
+       review_passes.verdict AS verdict
    FROM review_rounds JOIN requests ON requests.id = review_rounds.request_id
    LEFT JOIN tasks ON tasks.id = requests.task_id
+   LEFT JOIN review_passes ON review_passes.id = review_rounds.review_id
    WHERE review_rounds.task_id = ? ORDER BY review_rounds.created_at, review_rounds.rowid"""
 
 Conn = sqlite3.Connection
@@ -337,3 +338,32 @@ def open_review_round(conn: Conn, task_id: str, reviewer_desk: str, sha: str, ti
         )
     return {**opened, "round": round_no, "max_rounds": max_rounds, "allowance_id": allowance_id,
             "superseded": superseded}
+
+
+def record_round_verdict(conn: Conn, request_id: str, repo: str, verdict: str, review_path: Optional[str] = None,
+                         now: Optional[int] = None) -> dict:
+    """Record the reviewer's verdict for one review round and tie it to that round, in one transaction.
+
+    The round counts from this moment, whatever happens after: a failure to publish the review or to
+    post its result owl cannot give the round, or the allowance it took, back.
+    """
+    request_id = ids.check("request", request_id)
+    repo = ids.check("repo", repo)
+    verdict = ids.check_enum(verdict, db.REVIEW_VERDICTS, "review verdict")
+    review_path = ids.optional_path(review_path, "review path", ids.REVIEWS_ROOT)
+    ts = ids.stamp(now)
+    with db.transaction(conn):
+        row = db.fetch_one(conn, "SELECT * FROM review_rounds WHERE request_id = ?", (request_id,))
+        if row is None:
+            raise ConflictError("that request was not opened as a review round")
+        if row["superseded_by"] is not None:
+            raise ConflictError("that review round was superseded by a newer commit")
+        if row["review_id"] is not None:
+            raise ConflictError("that review round already has a verdict")
+        if owlery.get_request(conn, request_id)["outcome"] is not None:
+            raise ConflictError("that review request already has an outcome")
+        review = owlery.record_review(conn, repo, row["sha"], row["task_id"], row["reviewer"], verdict,
+                                      review_path=review_path, now=ts)
+        conn.execute("UPDATE review_rounds SET review_id = ? WHERE request_id = ? AND review_id IS NULL",
+                     (review["id"], request_id))
+    return review

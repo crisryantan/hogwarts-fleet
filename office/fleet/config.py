@@ -99,6 +99,8 @@ CODEX_PLAN_LIMIT_PATTERNS = (
 # A run waits this long for another run of the same desk to finish.
 DESK_LOCK_WAIT_SECONDS = 1860
 RUN_TIMEOUT_SECONDS = 1800
+# A review waits this long for an earlier review by the same reviewer to record its verdict and close its task.
+REVIEW_LOCK_WAIT_SECONDS = DESK_LOCK_WAIT_SECONDS + RUN_TIMEOUT_SECONDS + 120
 ENABLED_MARKER = "enabled"
 CLAUDE_SETTINGS_FILE = "settings.json"
 CODEX_PROFILE_FILE = "codex.toml"
