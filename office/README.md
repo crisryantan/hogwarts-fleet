@@ -110,7 +110,7 @@ All tables are STRICT when SQLite supports it. Timestamps are integer unix secon
 | `keypoints` | Scrubbed key points with tags, with an FTS5 index. |
 | `facts` | Curated facts. Tier `pinned`, `aging` or `perishable`. Each row has an optional `subject_key`, a world validity window (`valid_from`, `valid_to`), a belief window (`recorded_at`, `closed_at`), an `end_reason` (`superseded`, `withdrawn`, `expired`), `superseded_by`, `restores` (the earlier row a restored fact continues) and an optional `lookup`. A partial unique index (`facts_one_current`) allows one current fact per scope and subject key. Facts are archived, never deleted. |
 | `facts_fts` | FTS5 index over fact text, kept in sync by triggers. |
-| `metrics` | Per run token counts, cost and duration. |
+| `metrics` | Per run token counts, cost and duration. A headless run's row is tied to its launch. |
 | `owls` | Messages between desks. Kind `request`, `question`, `answer`, `result`, `fyi`. One answer per question. |
 | `requests` | Peer requests with a forward only phase and an outcome. |
 | `request_phases` | Phase history for each request. |
@@ -119,6 +119,7 @@ All tables are STRICT when SQLite supports it. Timestamps are integer unix secon
 | `cap_bumps` | One row each time you lift a desk's runs or spend cap with `castle desk cap`. It lasts until the next cap reset. Immutable. |
 | `cap_hits` | One row each time a fleet cap refuses a run, or a vendor's own limit stops one. `cap_source` says which: `fleet`, `claude_plan` or `codex_plan`. Immutable. |
 | `review_rounds` | One row per review request of an author task, with its round number, whether a newer commit superseded it, and the review it recorded. That review is stored and tied to its round in one step and never changes, so a round with a verdict counts even if publishing the review afterwards failed. |
+| `run_launches` | One row per headless run, written before its process starts, so the run counts toward the daily run cap even if it is killed before it records usage. Its usage is the `metrics` row tied to it once it ends, set once. Never deleted. |
 | `round_allowances` | One row each time you allow another review round with `castle task allow-round`. Immutable. |
 | `model_lines` | How you filed a model name: `frontier`, `workhorse`, `fast` or `ignore`. The latest row per name wins. Immutable. |
 | `model_catalog` | The model names each family offered at Ollivander's last look. |
@@ -151,7 +152,7 @@ Every function takes a connection from `db.connect(path)` as its first argument.
   - Writes: `add_fact`, `supersede(scope, subject_key, text, source, tier="aging", valid_from=None, lookup=None, expires_at=None)`, `withdraw(fact_id, desk=None)`, `expire()`, `set_key(fact_id, subject_key)`, `apply_ops(ops)`.
   - Reads: `current_facts(scope=None)`, `find_facts(query, scope=None, include_history=False, limit=10)`, `as_of_world(t, scope=None)`, `as_of_belief(t, scope=None)`, `history(scope, subject_key)`, `contradiction_candidates(since, limit_per_fact=3)`.
   - Lint: `VOLATILE_PATTERNS`, `volatile_match(text)`, `LOOKUP_COMMAND`.
-- `hogwarts.capacity`: `day_bounds(now, reset_offset)`, `add_bump`, `active_bumps`, `list_bumps`, `cap_status`, `record_cap_hit`, `list_cap_hits`, `waiting_requests`, `open_review_round`, `record_round_verdict`, `review_rounds`, `allow_round`.
+- `hogwarts.capacity`: `day_bounds(now, reset_offset)`, `add_bump`, `active_bumps`, `list_bumps`, `cap_status`, `record_cap_hit`, `list_cap_hits`, `waiting_requests`, `record_launch`, `record_launch_usage`, `list_launches`, `open_review_round`, `record_round_verdict`, `review_rounds`, `stranded_rounds`, `allow_round`.
 - `hogwarts.wands`: `classify`, `ryan_lines`, `record_catalog`, `last_catalog`, `get_desk_model`, `list_desk_models`, `set_need`, `apply_model`, `set_pending`, `clear_pending`, `approve`, `pin`, `unpin`, `record_outcome`, `changes`, `clear_stop`. The calls that file, pin, approve or apply a model take the fleet's `BLOCKED_MODEL_PREFIXES` and refuse a name one of them matches.
 - `hogwarts.watch` (read only, for a connection from `db.connect_readonly`): `marks`, `owls_after`, `headmaster_events_after`, `metrics_after`, `run_recorded`.
 - `hogwarts.owlery`

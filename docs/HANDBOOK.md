@@ -240,13 +240,13 @@ Every headless desk has a daily cap on runs, and the Claude desks have a cap on 
 | Harry - Senior Engineer | 40 | none |
 | Moody - Security Reviewer | 80 | none |
 
-The day resets at local midnight on your Mac, daylight saving included. The counts come from the store's own run records.
+The day resets at local midnight on your Mac, daylight saving included. A run counts the moment it starts, so one that gets killed or crashes still counts. Spend comes from the cost each run records.
 
 - **The warning.** A desk that reaches 80% of a cap sends one note for that cap that day.
 - **The cap event.** At the cap, the desk's next run doesn't start and its request keeps waiting. You get one note that names the cap, how much was used, how many requests are waiting, when it resets and the command that lifts it.
 - **Look and lift.** `castle desk caps` shows today's numbers for every headless desk. McGonagall, Snape and the scripts have no cap, so they don't appear. `castle desk cap <desk> --runs +N` or `--spend +X` raises one cap until the next reset, then it falls back. A bump is at most +500 runs or +$500. `--spend` works only for Hermione, Ron and Dumbledore, because Harry and Moody have no spend cap.
-- **Reviews wait, too.** If the reviewer is at its cap, the review request waits. After the reset or a bump, run `fleet review <task-id>` again. For a task from your own Claude sessions, run `fleet review own --repo-dir <checkout> --task <task-id>` instead. The new review replaces the waiting one, so only the newest commit of a task gets reviewed.
-- **Three rounds per task.** A task gets three review rounds. Only a round where the reviewer recorded a verdict counts. A crash, a timeout, a cap refusal or a vendor limit doesn't use one up. If a review gets killed partway, the next review by that reviewer cleans up after it and gives the round back. The next round waits for you: `castle task allow-round <task-id>` allows exactly one more, and `castle task rounds <task-id>` lists every round and whether it counts.
+- **Reviews never wait.** One review of a task runs at a time. Start a second while the first is going and it stops at once with "a review of this task is already running; run it again when it ends", without touching anything. If the reviewer is busy with another task, or at its cap, the review request is queued and the command says so. Run `fleet review <task-id>` again later, after the reset or a bump if it was the cap. For a task from your own Claude sessions, run `fleet review own --repo-dir <checkout> --task <task-id>` instead. The new review replaces the queued one, so only the newest commit of a task gets reviewed.
+- **Three rounds per task.** A task gets three review rounds. Only a round where the reviewer recorded a verdict counts. A crash, a timeout, a cap refusal or a vendor limit doesn't use one up. If a review gets killed partway, the next review that finds that reviewer free cleans up after it and gives the round back. The next round waits for you: `castle task allow-round <task-id>` allows exactly one more, and `castle task rounds <task-id>` lists every round and whether it counts.
 - **Which limit hit.** The note says whether it was the fleet's cap or the vendor's own limit: `cap_source fleet`, or `claude_plan` or `codex_plan` when your Claude or Codex plan's own usage or rate limit stopped the run. A bump can't lift a plan limit. It clears on the vendor's own reset.
 
 ## Watch live, run short
@@ -326,7 +326,7 @@ Everything `castle` prints is JSON. If you added the shortcut in one-time setup,
 | `fleet feed --desk <name>` | Watch one desk, read-only |
 | `fleet feed --all` | Watch every desk, read-only |
 | `fleet ollivander --dry-run` | See Ollivander's plan without changing anything |
-| `fleet review <task-id>` | Review a build desk's newest commit, or run a waiting review again |
+| `fleet review <task-id>` | Review a build desk's newest commit, or run a queued review again |
 | `fleet review own --repo-dir <checkout> --task <task-id>` | The same for a task from your own Claude sessions |
 | `~/.hogwarts/bin/hogwarts-spaces` | Open one herdr space per desk |
 
