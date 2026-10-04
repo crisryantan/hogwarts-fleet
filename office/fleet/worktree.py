@@ -3,7 +3,9 @@
 Ryan runs it from his terminal, after the Owl Post says a build task is waiting for its worktree:
   fleet worktree <task-id> --repo-dir <main checkout> --branch <name> [--base origin/main] [--no-fetch]
 It refuses rather than guesses:
-- the task must be a queued task of a build desk (Harry) with no worktree yet;
+- the task must be a queued task of a build desk (Harry) with no worktree yet, and the desk must be free
+  to start it: Harry takes many tasks, but no two of his open tasks may share one TASK.md, since the
+  evidence, handoff and reviews are written next to it;
 - the repo must be a main checkout in Ryan's home, outside the office and the castle, with a GitHub origin;
 - the branch must be new, plain and free of fleet words.
 Then it fetches the base (unless --no-fetch), adds ~/hogwarts/worktrees/<task-id> on a new branch,
@@ -22,7 +24,7 @@ from typing import Optional
 
 from hogwarts import ids, owlery, pensieve
 
-from fleet import config, gitops, run_desk, toolchain
+from fleet import config, gitops, run_desk, toolchain, verify
 from fleet.safefs import FleetError
 
 
@@ -86,6 +88,27 @@ def _branch_exists(common_dir: str, branch: str) -> bool:
     return bool(out.strip())
 
 
+def _holder(conn, task_id: str) -> str:
+    try:
+        holder, _ = verify.task_md(conn, task_id)
+    except FleetError:
+        return task_id
+    return holder
+
+
+def _check_startable(conn, task: dict) -> None:
+    """Refuse, before any worktree is added, a task its desk cannot start, or one whose TASK.md another open
+    task of the desk already works under."""
+    busy = pensieve.blocking_task(conn, task["desk"])
+    if busy is not None:
+        raise FleetError(f"{task['desk']} already has an active task {busy['id']}")
+    holder = _holder(conn, task["id"])
+    for other in pensieve.list_tasks(conn, desk=task["desk"], open_only=True):
+        if other["id"] != task["id"] and other["status"] != "queued" and _holder(conn, other["id"]) == holder:
+            raise FleetError(f"task {other['id']} of {task['desk']} is still open under the same TASK.md"
+                             f" ({holder}); finish or close it first")
+
+
 def start_desk(conn, task: dict) -> str:
     """Start the desk's run on its request owl, when Ryan has enabled the desk. Returns what happened."""
     owl_id = _request_owl(conn, task)
@@ -106,6 +129,7 @@ def create(conn, task_id: str, repo_dir: str, branch: str, base: str = config.DE
     if task["status"] != "queued" or task["worktree"] is not None:
         raise FleetError("the task must be queued and have no worktree yet")
     branch = gitops.check_branch(branch)
+    _check_startable(conn, task)
     record = add_worktree(conn, task["id"], repo_dir, base, branch, fetch)
     pensieve.set_worktree(conn, task["id"], _real_worktree(task["id"]))
     task = pensieve.start_task(conn, task["id"])

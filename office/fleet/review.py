@@ -25,11 +25,13 @@ reviewer's process ends too. Then, for either:
    one that crashed, timed out, was refused by a cap or hit a vendor limit does not, and the daily
    run caps bound those retries. A request of this task still queued for its reviewer is superseded,
    so only the newest commit is reviewed;
-4. nothing waits in line. A reviewer busy with another task (its desk lock is held, or it has an
-   active task) leaves the request queued, and the review returns "queued"; a reviewer at its daily
-   cap leaves it queued too, and Ryan hears which cap and when it resets. Running the review again
-   later supersedes the queued request. Otherwise run_desk runs the reviewer, which needs Ryan's
-   enabled file for that desk;
+4. nothing waits in line. A busy reviewer leaves the request queued, and the review returns "queued".
+   Busy means another run holds the reviewer's desk lock, since a desk runs one process at a time. A
+   reviewer takes many tasks, so its other active tasks never make it busy; only a reviewer desk that
+   takes one task at a time and has an active one is busy too. A reviewer at its daily cap leaves the
+   request queued as well, and Ryan hears which cap and when it resets. Running the review again later
+   supersedes the queued request of that task only. Otherwise run_desk runs the reviewer, which needs
+   Ryan's enabled file for that desk;
 5. the last REVIEW block in the reviewer's own output must name this task and this sha. Its verdict
    is recorded with the review file in the office, where no desk can change it;
 6. on PASS the author's task moves to awaiting_close, which is what the push gate checks.
@@ -40,10 +42,16 @@ if publishing the review afterwards fails. A review holds the reviewer's desk lo
 opens until its reviewer task is closed as superseded, once its verdict is recorded or its run fails, and
 the reviewer's process holds it too while it runs. So a reviewer task still active while that lock is free
 was left by a review that died (killed, or its cleanup failed) and whose reviewer is gone: the next review
-that takes the lock closes it, and a round with no verdict stops counting. A reviewer task is never closed
-while its desk lock is held. A review that finds its reviewer busy does not count such a round of its own
-task either, since it holds the task's review lock, but leaves closing it to a review that can take the
-desk lock. Only Ryan closes a task as complete.
+that takes the lock closes it, and a round with no verdict stops counting. Only review-round tasks are
+closed this way, never the reviewer's other active tasks, and only the start() in run_review starts a
+review-round task, so under the lock every active one was left by a dead review. A reviewer task is never
+closed while its desk lock is held. A review that finds its reviewer busy does not count such a round of
+its own task either, since it holds the task's review lock, but leaves closing it to a review that can take
+the desk lock. Only Ryan closes a task as complete.
+
+Author tasks run side by side: Harry, Hermione, Moody, Ron and Ryan's own sessions may each hold many active
+tasks, so a task waiting for a fix round blocks nothing. Ryan's own sessions start a new review whatever else
+of theirs is in review or waiting for fixes.
 """
 from __future__ import annotations
 
@@ -250,7 +258,8 @@ def _open_and_deliver(conn, task: dict, reviewer: str, sha: str, body: str, now:
 
 
 def _queued(conn, task: dict, reviewer: str, sha: str, body: str, now: Optional[int], result: dict) -> dict:
-    """The reviewer is busy with another task: the request is queued, no round is used, and nothing waits."""
+    """The reviewer is busy (its desk lock is held, or a single-task reviewer has an active task): the request
+    is queued, no round is used, and nothing waits."""
     opened = _open_and_deliver(conn, task, reviewer, sha, body, now)
     return {**result, "verdict": None, "round": opened["round"], "request_id": opened["request"]["id"],
             "superseded": [item["request_id"] for item in opened["superseded"]], "review": None,
@@ -308,7 +317,7 @@ def run_review(conn, task: dict, record: dict, sha: str, holder_id: str, handoff
         except safefs.Busy:
             return _queued(conn, task, reviewer, sha, body, now, result)
         _recover_stranded(conn, reviewer, now)
-        if pensieve.list_tasks(conn, desk=reviewer, status="active"):
+        if pensieve.blocking_task(conn, reviewer) is not None:
             return _queued(conn, task, reviewer, sha, body, now, result)
         opened = _open_and_deliver(conn, task, reviewer, sha, body, now)
         request_id, reviewer_task_id, owl_id = opened["request"]["id"], opened["task"]["id"], opened["owl"]["id"]
@@ -418,10 +427,11 @@ def _review_own(conn, repo_dir: str, title: Optional[str], intent: Optional[str]
         task = pensieve.create_task(conn, OWN_DESK, title, intent_path=intent_path, task_id=target)
         try:
             pensieve.start_task(conn, task["id"])
-        except ConflictError:
+        except ConflictError as exc:
+            # Only a store where ryan-claude-1 still takes one task at a time refuses here.
             pensieve.close_task(conn, task["id"], "abandoned")
-            raise FleetError("your own sessions already have a task in review; pass --task <id> "
-                             "for a fix round on it") from None
+            raise FleetError(f"{OWN_DESK} could not start a new task: {exc}; castle desk many-tasks {OWN_DESK}"
+                             " lets it hold many") from None
         record = worktree.add_worktree(conn, task["id"], repo_dir, base, None, fetch, detach_at=sha)
         task = pensieve.set_worktree(conn, task["id"], f"{ids.WORKTREES_ROOT}/{task['id']}")
     else:

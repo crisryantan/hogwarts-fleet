@@ -36,4 +36,4 @@ To reach another desk, write one JSON file to your own outbox: ~/hogwarts/desks/
 - A task closes only when Ryan types "Mischief managed <task-id>". Silence, a pass and a green build don't count.
 - Never run any git stash command.
 - Character names never leave the fleet. Keep them out of branches, commits, code, PR text, chat and anything a teammate sees.
-- Your scratchpad is ~/hogwarts/desks/<your desk>/scratchpad.md. At startup read only its last Checkpoint block. Before a trim or the end of a run, add a Checkpoint block at the end.
+- Your scratchpad is ~/hogwarts/desks/<your desk>/scratchpad.md, for desk-wide notes. If your run names a task pad, that pad is your Checkpoint for this run: read only its last Checkpoint, add yours at the end. Otherwise read only the scratchpad's last Checkpoint at startup, and add one at its end before a trim or the end of a run.

@@ -49,7 +49,7 @@ class SessionStartTests(HookCase):
         heads = [next(i for i, line in enumerate(lines) if line.startswith(prefix))
                  for prefix in ("In flight", "Headmaster events", "Queued work", "Memory pointers")]
         self.assertEqual(heads, sorted(heads))
-        self.assertIn("fix the push gate | gate: working", out)
+        self.assertIn("fix the push gate | working", out)
         self.assertIn("morning lineup", out)
 
     def test_digest_stays_under_40_lines_and_caps_the_queue(self):
@@ -78,7 +78,7 @@ class SessionStartTests(HookCase):
         task = self.started_task("harry", "ship it")
         pensieve.mark_awaiting_close(self.conn, task["id"], now=NOW)
         _, out, _ = self.run_hook(session_start, self.hook_input("SessionStart", source="startup"))
-        self.assertIn(f'gate: waiting for Ryan: "Mischief managed {task["id"]}"', out)
+        self.assertIn(f'{task["id"]} harry awaiting close: ship it | gate: "Mischief managed {task["id"]}"', out)
 
     def test_resume_prints_one_line(self):
         self.started_task("harry", "fix it")

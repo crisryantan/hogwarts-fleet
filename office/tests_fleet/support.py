@@ -37,6 +37,7 @@ REGISTRY = (
     ("ollivander", "script", "Ollivander - Model Keeper", None),
 )
 OFFICE_DESKS = ("harry", "hermione", "moody", "ron", "snape", "portrait")
+MANY_TASK_DESKS = ("harry", "hermione", "moody", "ron", "ryan-claude-1")
 SCRATCHPAD = "# Scratchpad\n\n## Now\n\n## Notes\n\n## Checkpoint\n"
 REAL_CASTLE = "/Users/crisryantan/hogwarts"
 REAL_OFFICE = "/Users/crisryantan/.hogwarts"
@@ -118,6 +119,9 @@ def fake_children(fake=None, returncode: int = 0):
 
 
 class FleetCase(unittest.TestCase):
+    # The desks granted many tasks at setUp. A test of a single-task desk passes a smaller set.
+    many_task_desks = MANY_TASK_DESKS
+
     def setUp(self) -> None:
         self.tmp = temp_dir(self)
         self.office = self.tmp / "office"
@@ -130,6 +134,9 @@ class FleetCase(unittest.TestCase):
         self.addCleanup(self.conn.close)
         for name, family, role, model in REGISTRY:
             pensieve.add_desk(self.conn, name, family, role=role, model=model, now=NOW)
+        # As install.sh does: these desks are added after the store migrated, so the V7 grant missed them.
+        for name in self.many_task_desks:
+            pensieve.allow_many_tasks(self.conn, name, now=NOW)
         self._build_castle()
         self._build_office()
         for name, value in (

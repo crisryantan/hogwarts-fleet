@@ -319,16 +319,12 @@ class ReviewRoundTests(LoopCase):
         [row] = capacity.review_rounds(self.conn, task_id)
         self.assertEqual((row["request_id"], row["waiting"], row["has_verdict"]), (queued["request_id"], True, False))
         self.assertEqual([item["id"] for item in capacity.waiting_requests(self.conn, "moody")], [queued["request_id"]])
-        other = pensieve.create_task(self.conn, "moody", "a task of moody's own")
-        pensieve.start_task(self.conn, other["id"])
         second_sha = self.commit("second try")
-        with not_run:  # moody's desk lock is free, but moody has an active task
+        with run_desk.desk_lock("moody", wait=False), not_run:  # still busy
             again = review.review_own(self.conn, str(self.repo), task_id=task_id, fetch=False)
         self.assertEqual((again["sha"], again["round"], again["superseded"], again["queued"]),
                          (second_sha, 1, [queued["request_id"]], queued["queued"]))
-        self.assertEqual(pensieve.get_task(self.conn, other["id"])["status"], "active")
         self.assertEqual(self.recovered_events(), [])
-        pensieve.close_task(self.conn, other["id"], "superseded")
         third_sha = self.commit("third try")
         done = self.own_review(task_id, verdict="PASS")
         self.assertEqual((done["sha"], done["round"], done["verdict"], done["superseded"], done["queued"]),
@@ -339,6 +335,17 @@ class ReviewRoundTests(LoopCase):
         self.assertEqual([(row["sha"], row["counts"]) for row in capacity.review_rounds(self.conn, task_id)],
                          [(first_sha, False), (second_sha, False), (third_sha, True)])
         self.assertEqual(capacity.waiting_requests(self.conn, "moody"), [])
+
+    def test_a_reviewer_with_its_own_active_task_and_a_free_lock_runs_the_review(self):
+        # Moody takes many tasks, so only a held desk lock makes it busy. Its other task is not stranded.
+        other = pensieve.create_task(self.conn, "moody", "a task of moody's own")
+        pensieve.start_task(self.conn, other["id"])
+        sha = self.commit("first try")
+        done = self.own_review(verdict="PASS")
+        self.assertEqual((done["sha"], done["round"], done["verdict"], done["queued"]), (sha, 1, "PASS", None))
+        self.assertEqual(pensieve.get_task(self.conn, other["id"])["status"], "active")
+        self.assertEqual(self.moody_active(), [other["id"]])
+        self.assertEqual(self.recovered_events(), [])
 
     def test_sigterm_during_the_run_keeps_the_launch_counted_and_the_cap_enforced(self):
         # The real run_desk.run, with only the reviewer's own process faked: SIGTERM arrives while it runs.
