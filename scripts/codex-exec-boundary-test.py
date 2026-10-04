@@ -51,12 +51,18 @@ def pick_code():
     """(office folder to load, a description, a mismatch note or None)."""
     if (CHECKOUT_OFFICE / "fleet/run_desk.py").is_file():
         home = _source_home((CHECKOUT_OFFICE / "fleet/config.py").read_text())
-        sha = subprocess.run(["/usr/bin/git", "-C", str(CHECKOUT), "rev-parse", "HEAD"], capture_output=True,
-                             text=True).stdout.strip()
-        changed = subprocess.run(["/usr/bin/git", "-C", str(CHECKOUT), "status", "--porcelain", "--", "office",
-                                  "scripts"], capture_output=True, text=True).stdout.strip()
+        head = subprocess.run(["/usr/bin/git", "-C", str(CHECKOUT), "rev-parse", "HEAD"], capture_output=True,
+                              text=True)
+        status = subprocess.run(["/usr/bin/git", "-C", str(CHECKOUT), "status", "--porcelain", "--", "office",
+                                 "scripts"], capture_output=True, text=True)
+        sha = head.stdout.strip() if head.returncode == 0 else ""
+        if head.returncode != 0 or status.returncode != 0 or not sha:
+            note = "git could not confirm the checkout's commit and cleanliness, so no commit can be credited"
+        elif status.stdout.strip():
+            note = "the checkout has uncommitted changes, so its commit can't be credited"
+        else:
+            note = None
         if home == HOME_DIR:
-            note = "the checkout has uncommitted changes, so its commit can't be credited" if changed else None
             return CHECKOUT_OFFICE, f"this kit checkout at {sha or 'an unknown commit'}", note
         for name in CODE_FILES:
             ours = (CHECKOUT_OFFICE / name).read_text().replace(home or "", HOME_DIR)
@@ -66,7 +72,7 @@ def pick_code():
                 theirs = None
             if ours != theirs:
                 return INSTALLED, "the installed office", f"the installed {name} differs from this checkout"
-        return INSTALLED, f"the installed office, which matches this checkout at {sha}", None
+        return INSTALLED, f"the installed office, which matches this checkout at {sha or 'an unknown commit'}", note
     return INSTALLED, "the installed office", None
 
 
