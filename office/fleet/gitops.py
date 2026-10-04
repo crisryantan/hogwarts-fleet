@@ -166,6 +166,15 @@ def child_env() -> dict:
 def git(args: list, git_dir: Optional[str], work_tree: Optional[str] = None, check: bool = True,
         timeout: Optional[int] = None, folder: Optional[str] = None) -> str:
     """Run one git command with the hardening flags. Returns stdout. Never uses a shell."""
+    code, out, err = _run(args, git_dir, work_tree, timeout, folder)
+    if check and code != 0:
+        raise FleetError(f"git {args[0]} failed: {common.one_line(err, 300)}")
+    return out
+
+
+def _run(args: list, git_dir: Optional[str], work_tree: Optional[str], timeout: Optional[int],
+         folder: Optional[str]) -> tuple:
+    """(exit code, stdout, stderr) of one hardened git command."""
     if git_dir is not None:
         argv = [config.GIT_BIN, "--git-dir", git_dir]
         if work_tree is not None:
@@ -181,11 +190,25 @@ def git(args: list, git_dir: Optional[str], work_tree: Optional[str] = None, che
                               capture_output=True, timeout=timeout or config.GIT_TIMEOUT_SECONDS, check=False)
     except subprocess.TimeoutExpired:
         raise FleetError(f"git {args[0]} timed out") from None
-    out = done.stdout.decode("utf-8", "replace")[:OUTPUT_MAX_CHARS]
-    if check and done.returncode != 0:
-        err = common.one_line(done.stderr.decode("utf-8", "replace"), 300)
-        raise FleetError(f"git {args[0]} failed: {err}")
-    return out
+    return (done.returncode, done.stdout.decode("utf-8", "replace")[:OUTPUT_MAX_CHARS],
+            done.stderr.decode("utf-8", "replace"))
+
+
+def is_ancestor(git_dir: str, ancestor: str, sha: str) -> Optional[bool]:
+    """Whether commit ancestor is sha or one of its ancestors, or None when this checkout cannot tell: it is
+    shallow, so its history may stop short of ancestor, or git failed. In a full clone a commit missing from
+    the object store is no ancestor, since git keeps every commit reachable from one it has."""
+    if SHA.fullmatch(ancestor) is None or SHA.fullmatch(sha) is None:
+        raise FleetError("an ancestry check needs two full commit shas")
+    shallow = git(["rev-parse", "--is-shallow-repository"], git_dir).strip()
+    if shallow not in ("true", "false"):
+        return None
+    if _run(["cat-file", "-e", f"{ancestor}^{{commit}}"], git_dir, None, None, None)[0] != 0:
+        return None if shallow == "true" else False
+    code = _run(["merge-base", "--is-ancestor", ancestor, sha], git_dir, None, None, None)[0]
+    if code == 0:
+        return True
+    return False if code == 1 and shallow == "false" else None
 
 
 def git_in(folder: str, args: list, check: bool = True, timeout: int = 10) -> str:
