@@ -163,8 +163,14 @@ def remote_slug(record: dict, remote: str = "origin") -> str:
     return repo_slug(url)
 
 
+def link_excludes(record: dict) -> list:
+    """Pathspecs that keep the worktree's read-only dependency links out of status and add."""
+    return [f":(exclude){name}" for name in record.get("links") or []]
+
+
 def dirty(record: dict) -> bool:
-    return bool(git(["status", "--porcelain", "--untracked-files=all"], record["git_dir"], record["path"]).strip())
+    return bool(git(["status", "--porcelain", "--untracked-files=all", "--", ".", *link_excludes(record)],
+                    record["git_dir"], record["path"]).strip())
 
 
 # Office records
@@ -191,6 +197,7 @@ def _check_record(data: object, name: str) -> dict:
         "branch": data.get("branch"),
         "base": data.get("base"),
         "repo": data.get("repo"),
+        "links": data.get("links") or [],
     }
     if record["name"] != name:
         raise FleetError("worktree record name does not match its file")
@@ -207,6 +214,8 @@ def _check_record(data: object, name: str) -> dict:
         check_branch(record["branch"])
     check_ref(record["base"], "worktree record base")
     ids.check("repo", record["repo"])
+    if not isinstance(record["links"], list) or any(name not in config.LINKABLE_DEPS for name in record["links"]):
+        raise FleetError("worktree record links name a folder that is not a linkable dependency")
     return record
 
 

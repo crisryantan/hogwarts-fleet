@@ -59,6 +59,8 @@ CODEX_ACCESS = {"harry": "write", "moody": "read"}
 CODEX_EXTRA_READS = ("/opt/homebrew", "/Applications/Xcode.app", "/Library/Developer")
 # Only these desks may write their own outbox.
 CODEX_OUTBOX_WRITERS = ("harry",)
+# Dependency folders a worktree may borrow, read-only, from the main checkout (see fleet/toolchain.py).
+LINKABLE_DEPS = ("node_modules",)
 # Desks that build in a worktree. The Owl Post starts them only once their task has one.
 WORKTREE_DESKS = ("harry",)
 # Reviewer for each author family. A pass needs the other family.

@@ -22,7 +22,7 @@ from typing import Optional
 
 from hogwarts import ids, owlery, pensieve
 
-from fleet import config, gitops, run_desk
+from fleet import config, gitops, run_desk, toolchain
 from fleet.safefs import FleetError
 
 
@@ -73,9 +73,11 @@ def add_worktree(conn, task_id: str, repo_dir: str, base: str, branch: Optional[
             raise FleetError("a detached worktree needs a full commit sha")
         gitops.git(["worktree", "add", "--detach", path, detach_at], common_dir)
     record = {"name": task_id, "task_id": task_id, "path": path, "repo_dir": repo_dir, "common_dir": common_dir,
-              "git_dir": f"{common_dir}/worktrees/{task_id}", "branch": branch, "base": base, "repo": slug}
+              "git_dir": f"{common_dir}/worktrees/{task_id}", "branch": branch, "base": base, "repo": slug,
+              "links": toolchain.linkable(repo_dir)}
     if not os.path.isdir(record["git_dir"]):
         raise FleetError("git named the worktree differently than expected; remove it by hand and retry")
+    toolchain.link_deps(record, record["links"])
     return gitops.write_record(record)
 
 

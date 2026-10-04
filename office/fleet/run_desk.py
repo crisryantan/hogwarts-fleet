@@ -48,7 +48,7 @@ if __name__ == "__main__" and "/Users/crisryantan/.hogwarts" not in sys.path:
 from hogwarts import ids, owlery, pensieve  # noqa: E402
 from hogwarts.errors import NotFoundError, StoreError  # noqa: E402
 
-from fleet import common, config, gitops, safefs  # noqa: E402
+from fleet import common, config, gitops, safefs, toolchain  # noqa: E402
 from fleet.safefs import FleetError  # noqa: E402
 
 FORBIDDEN_PARTS = (
@@ -259,6 +259,19 @@ def _claude_argv(desk: str, row: dict, brief: str, prompt: str, mcp_job: Optiona
     return argv, config.castle_desk_dir(desk), model
 
 
+ENV_VALUE = re.compile(r"[A-Za-z0-9._/=:+-]{1,400}")
+
+
+def _toml_env(env: dict) -> str:
+    """An inline TOML table of plain environment values, refusing anything that needs quoting."""
+    parts = []
+    for key, value in sorted(env.items()):
+        if re.fullmatch(r"[A-Z][A-Z0-9_]{0,40}", key) is None or ENV_VALUE.fullmatch(value) is None:
+            raise FleetError("a toolchain environment value has an unsafe character")
+        parts.append(f'{key}="{value}"')
+    return "{" + ", ".join(parts) + "}"
+
+
 DARWIN_USER_TEMP_DIR = 65537  # _CS_DARWIN_USER_TEMP_DIR in macOS unistd.h; os.confstr_names lacks it on 3.9
 
 
@@ -284,7 +297,7 @@ def _toml_path(path: str) -> str:
     return '"' + gitops.check_safe_path(path, "a codex profile path") + '"'
 
 
-def codex_permissions(desk: str, git_common_dir: Optional[str]) -> list:
+def codex_permissions(desk: str, git_common_dir: Optional[str], extra_reads: tuple = ()) -> list:
     """The -c overrides that define and select this desk's permission profile.
 
     Overlapping entries resolve deny, then write, then read. So the outbox stays writable inside the
@@ -312,6 +325,8 @@ def codex_permissions(desk: str, git_common_dir: Optional[str]) -> list:
         entries.append(f'{_toml_path(config.TMP_WRITE_ROOT)}="deny"')
     if git_common_dir is not None:
         entries.append(f'{_toml_path(git_common_dir)}="read"')
+    for path in extra_reads:
+        entries.append(f'{_toml_path(path)}="read"')
     entries.append(f'{_toml_path(config.OFFICE_ROOT)}="deny"')
     table = "{filesystem={" + ", ".join(entries) + "}, network={enabled=false}}"
     return ["-c", f"permissions.{name}={table}", "-c", f'default_permissions="{name}"']
@@ -323,10 +338,14 @@ def _codex_argv(desk: str, task: Optional[dict], brief: str, prompt: str, run_id
     worktree = None if task is None else task.get("worktree")
     cwd = _castle_path(worktree) if worktree else work_dir(desk)
     record = gitops.find_record(cwd) if worktree else None
+    tools = toolchain.for_record(record)
     argv = [config.CODEX_BIN, "exec", "--ignore-user-config", "--ignore-rules"]
     for override in parse_codex_profile(profile):
         argv += ["-c", override]
-    argv += codex_permissions(desk, None if record is None else record["common_dir"])
+    argv += codex_permissions(desk, None if record is None else record["common_dir"],
+                              tuple(tools["read"]) + tuple(tools["path"]))
+    if tools["env"]:
+        argv += ["-c", "shell_environment_policy.set=" + _toml_env(tools["env"])]
     argv += ["-C", cwd]
     argv += [
         "--ephemeral",
@@ -334,7 +353,7 @@ def _codex_argv(desk: str, task: Optional[dict], brief: str, prompt: str, run_id
         "--output-last-message", f"{config.runs_dir()}/{desk}/{run_id}-last-message.md",
         brief.rstrip("\n") + "\n\n" + prompt,
     ]
-    return argv, cwd, "codex-default"
+    return argv, cwd, "codex-default", tools
 
 
 def guard(argv: list) -> None:
@@ -372,13 +391,15 @@ def build_plan(conn, desk: str, owl_id: Optional[str] = None, mcp_job: Optional[
     run_id = "run-" + secrets.token_hex(8)
     if family == "claude":
         argv, cwd, model = _claude_argv(desk, row, brief, prompt, mcp_job)
+        env = child_env()
     else:
         if mcp_job is not None:
             raise FleetError("Codex desks take no MCP job")
-        argv, cwd, model = _codex_argv(desk, task, brief, prompt, run_id)
+        argv, cwd, model, tools = _codex_argv(desk, task, brief, prompt, run_id)
+        env = child_env(tools["path"], tools["env"])
     guard(argv)
     return {"desk": desk, "family": family, "owl_id": owl_id, "run_id": run_id, "model": model,
-            "cwd": cwd, "argv": argv}
+            "cwd": cwd, "argv": argv, "env": env}
 
 
 # Enabling, caps, launching and running
@@ -426,13 +447,14 @@ def is_enabled(desk: str) -> bool:
         return False
 
 
-def child_env() -> dict:
+def child_env(path_prefix: list = (), extra: Optional[dict] = None) -> dict:
     return {
         "HOME": config.USER_HOME_DIR,
-        "PATH": config.CHILD_PATH,
+        "PATH": ":".join([*path_prefix, config.CHILD_PATH]),
         "LANG": "en_US.UTF-8",
         "SHELL": "/bin/bash",
         "RTK_DISABLED": "1",
+        **(extra or {}),
     }
 
 
@@ -542,7 +564,7 @@ def _launch(conn, plan: dict, now: Optional[int]) -> dict:
         err_fd = safefs.create_new(run_fd, f"{run_id}.err")
         started = time.monotonic()
         try:
-            completed = subprocess.run(plan["argv"], cwd=plan["cwd"], env=child_env(), stdin=subprocess.DEVNULL,
+            completed = subprocess.run(plan["argv"], cwd=plan["cwd"], env=plan.get("env") or child_env(), stdin=subprocess.DEVNULL,
                                        stdout=out_fd, stderr=err_fd, timeout=config.RUN_TIMEOUT_SECONDS,
                                        check=False)
             exit_code = completed.returncode
