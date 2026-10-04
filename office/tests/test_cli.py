@@ -87,6 +87,20 @@ class InitTests(CliCase):
         self.assertEqual(target.read_bytes(), b"")
 
     def test_doctor_reports_health_and_fails_on_loose_permissions(self):
+        code_root = self.tmp / "code"
+        (code_root / "bin").mkdir(parents=True)
+        for name, module in (("castle", "hogwarts.cli"), ("fleet", "fleet.tools")):
+            wrapper = code_root / "bin" / name
+            wrapper.write_text(
+                "#!/bin/sh\n"
+                "exec /usr/bin/env -i /usr/bin/python3 -I -B -X pycache_prefix=/var/empty "
+                "-c 'import sys; sys.path.insert(0, \"/Users/crisryantan/.hogwarts\"); "
+                f"from {module} import main; sys.exit(main())' \"$@\"\n"
+            )
+            wrapper.chmod(0o700)
+        patcher = mock.patch.object(db, "CODE_ROOT", code_root)
+        patcher.start()
+        self.addCleanup(patcher.stop)
         self.ok("init")
         self.assertTrue(self.ok("doctor")["ok"])
         os.chmod(self.db_path.parent, 0o777)
