@@ -508,14 +508,14 @@ class MigrationV4Tests(StoreCase):
             conn.close()
         conn = db.connect(path)
         self.addCleanup(conn.close)
-        self.assertEqual(db.schema_version(conn), 4)
+        self.assertEqual(db.schema_version(conn), db.SCHEMA_VERSION)
         names = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
         self.assertTrue({"cap_bumps", "cap_hits", "round_allowances", "review_rounds", "run_launches"} <= names)
         columns = {row[1] for row in conn.execute("PRAGMA table_info(review_rounds)")}
         self.assertIn("review_id", columns)
         self.assertEqual(capacity.add_bump(conn, "alpha", "runs", 1, RESET, now=NOW)["amount"], 1)
         changes = conn.total_changes
-        self.assertEqual(db.migrate(conn), 4)
+        self.assertEqual(db.migrate(conn), db.SCHEMA_VERSION)
         self.assertEqual(conn.total_changes, changes)
 
 

@@ -14,7 +14,7 @@ from hogwarts import capacity, ids, owlery, pensieve
 from tests.support import NOW
 
 from fleet import config, owl_post, run_desk, safefs
-from tests_fleet.support import FleetCase, claude_settings
+from tests_fleet.support import FleetCase, claude_settings, fake_children
 
 BYPASS_WORDS = ("dangerously", "bypass", "skip-permissions", "danger-full-access", "approve-for-me", "yolo")
 
@@ -342,7 +342,8 @@ class CodexDeskTests(RunDeskCase):
 
 class GuardTests(RunDeskCase):
     def test_only_headless_desks_can_be_launched(self):
-        for desk in ("mcgonagall", "snape", "ryan", "ryan-claude-1", "owl-post", "map", "gringotts", "voldemort"):
+        for desk in ("mcgonagall", "snape", "ryan", "ryan-claude-1", "owl-post", "map", "gringotts", "ollivander",
+                     "voldemort"):
             with self.subTest(desk=desk):
                 code, _, err = self.main(desk, "--dry-run")
                 self.assertEqual(code, 1)
@@ -403,8 +404,7 @@ class LockInheritanceTests(FleetCase):
 
 class RealRunTests(RunDeskCase):
     def real_run(self, desk: str, owl_id: str, returncode: int) -> tuple:
-        done = subprocess.CompletedProcess(args=[], returncode=returncode)
-        with mock.patch.object(subprocess, "run", return_value=done) as started:
+        with fake_children(returncode=returncode) as started:
             code, out, err = self.main(desk, "--owl", owl_id)
         return code, out, err, started
 
@@ -422,7 +422,7 @@ class RealRunTests(RunDeskCase):
         code, _, err, started = self.real_run("hermione", owl_id, 0)
         self.assertEqual(code, 0, err)
         self.assertEqual(started.call_args.kwargs["cwd"], f"{self.castle}/desks/hermione")
-        self.assertEqual(len(started.call_args.kwargs["pass_fds"]), 1)  # its desk lock, held while it runs
+        self.assertEqual(len(started.call_args.kwargs["pass_fds"]), 2)  # its desk and update locks, held while it runs
         self.assertEqual(owlery.inbox(self.conn, "hermione"), [])
         self.assertEqual([row["runs"] for row in pensieve.summary(self.conn)], [1])
         [launch] = capacity.list_launches(self.conn, "hermione")

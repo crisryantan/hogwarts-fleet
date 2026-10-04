@@ -12,7 +12,7 @@ from .errors import ConflictError, IntegrityError, NotFoundError, StoreError, Va
 
 DEFAULT_DB = Path("/Users/crisryantan/.hogwarts/state/pensieve.db")
 CODE_ROOT = Path(os.path.abspath(__file__)).parent.parent
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 WAL_ATTEMPTS = 50
 BYTECODE_SUFFIXES = (".pyc", ".pyo", ".so")
 SIDECARS = ("-wal", "-shm")
@@ -35,6 +35,15 @@ TOKEN_MINTERS = ("hook", "cli")
 CAP_KINDS = ("runs", "spend")
 CAP_HIT_CAPS = CAP_KINDS + ("plan",)
 CAP_SOURCES = ("fleet", "claude_plan", "codex_plan")
+# Ollivander's vocabulary: what a role needs, how hard a model thinks, and how Ryan files a model name.
+MODEL_NEEDS = ("frontier", "workhorse", "fast")
+MODEL_EFFORTS = ("low", "medium", "high", "xhigh", "max")
+MODEL_LINES = MODEL_NEEDS + ("ignore",)
+MODEL_FAMILIES = ("claude", "codex")
+MODEL_CHANGE_REASONS = ("initial", "role", "approved", "pin", "revert")
+# How the trial after a switch ended: a run passed, Ryan pinned the model, two failures held Ryan's own
+# choice or could not revert onto a blocked or unchecked model, or two failures reverted it.
+MODEL_TRIAL_ENDS = ("passed", "pinned", "held", "revert_blocked", "reverted")
 
 PathLike = Union[str, Path]
 
@@ -64,6 +73,12 @@ _ENUMS = {
     "cap_kinds": _choices(CAP_KINDS),
     "cap_hit_caps": _choices(CAP_HIT_CAPS),
     "cap_sources": _choices(CAP_SOURCES),
+    "needs": _choices(MODEL_NEEDS),
+    "efforts": _choices(MODEL_EFFORTS),
+    "model_lines": _choices(MODEL_LINES),
+    "model_families": _choices(MODEL_FAMILIES),
+    "change_reasons": _choices(MODEL_CHANGE_REASONS),
+    "trial_ends": _choices(MODEL_TRIAL_ENDS),
 }
 
 
@@ -539,7 +554,89 @@ V4 = (
     _guard("run_launches_no_delete", "BEFORE DELETE ON run_launches", "run launches are never deleted"),
 )
 
-MIGRATIONS = ((1, V1), (2, V2), (3, V3), (4, V4))
+# Ollivander, the model keeper. model_lines is Ryan's filing of model names (latest row per name wins),
+# model_catalog the names each family offered at the last look (with whether the catalog listed each, the
+# line it was filed under then, and when it retires), desk_models each desk's current model
+# (the desks table is immutable), model_changes the history of every switch, and model_resolutions every
+# full Claude id a run on each alias reported (seq orders the sightings, so the latest is known).
+V5 = (
+    _table(
+        """CREATE TABLE IF NOT EXISTS model_lines (
+        id INTEGER PRIMARY KEY,
+        name TEXT NOT NULL,
+        line TEXT NOT NULL CHECK (line IN {model_lines}),
+        classified_at INTEGER NOT NULL
+    )"""
+    ),
+    "CREATE INDEX IF NOT EXISTS model_lines_name ON model_lines(name, id)",
+    _guard("model_lines_immutable", "BEFORE UPDATE ON model_lines", "model lines are immutable"),
+    _guard("model_lines_no_delete", "BEFORE DELETE ON model_lines", "model lines are never deleted"),
+    _table(
+        """CREATE TABLE IF NOT EXISTS model_catalog (
+        family TEXT NOT NULL CHECK (family IN {model_families}),
+        name TEXT NOT NULL,
+        seen_at INTEGER NOT NULL,
+        visible INTEGER NOT NULL DEFAULT 1 CHECK (visible IN (0, 1)),
+        line TEXT CHECK (line IN {needs}),
+        retires_at INTEGER CHECK (retires_at >= 0),
+        PRIMARY KEY (family, name)
+    )"""
+    ),
+    _table(
+        """CREATE TABLE IF NOT EXISTS desk_models (
+        desk TEXT PRIMARY KEY NOT NULL REFERENCES desks(name),
+        need TEXT CHECK (need IN {needs}),
+        model TEXT,
+        effort TEXT CHECK (effort IN {efforts}),
+        line TEXT CHECK (line IN {needs}),
+        pinned INTEGER NOT NULL DEFAULT 0 CHECK (pinned IN (0, 1)),
+        pending_model TEXT,
+        pending_effort TEXT CHECK (pending_effort IN {efforts}),
+        pending_line TEXT CHECK (pending_line IN {needs}),
+        previous_model TEXT,
+        previous_effort TEXT CHECK (previous_effort IN {efforts}),
+        previous_line TEXT CHECK (previous_line IN {needs}),
+        trial_failures INTEGER CHECK (trial_failures >= 0),
+        trial_end TEXT CHECK (trial_end IN {trial_ends}),
+        changed_at INTEGER,
+        updated_at INTEGER NOT NULL,
+        CHECK ((pending_model IS NULL) = (pending_line IS NULL))
+    )"""
+    ),
+    _guard("desk_models_no_delete", "BEFORE DELETE ON desk_models", "desk models are never deleted"),
+    _table(
+        """CREATE TABLE IF NOT EXISTS model_changes (
+        id INTEGER PRIMARY KEY,
+        desk TEXT NOT NULL REFERENCES desks(name),
+        ts INTEGER NOT NULL,
+        from_model TEXT,
+        to_model TEXT,
+        effort TEXT CHECK (effort IN {efforts}),
+        reason TEXT NOT NULL CHECK (reason IN {change_reasons})
+    )"""
+    ),
+    "CREATE INDEX IF NOT EXISTS model_changes_desk ON model_changes(desk, id)",
+    _guard("model_changes_immutable", "BEFORE UPDATE ON model_changes", "model changes are immutable"),
+    _guard("model_changes_no_delete", "BEFORE DELETE ON model_changes", "model changes are never deleted"),
+    _table(
+        """CREATE TABLE IF NOT EXISTS model_resolutions (
+        id INTEGER PRIMARY KEY,
+        alias TEXT NOT NULL,
+        full_id TEXT NOT NULL,
+        first_seen INTEGER NOT NULL,
+        last_seen INTEGER NOT NULL CHECK (last_seen >= first_seen),
+        seq INTEGER NOT NULL,
+        UNIQUE (alias, full_id)
+    )"""
+    ),
+    "CREATE INDEX IF NOT EXISTS model_resolutions_alias ON model_resolutions(alias, seq)",
+    _guard("model_resolutions_fixed", "BEFORE UPDATE OF id, alias, full_id, first_seen ON model_resolutions",
+           "a model resolution only moves its last sighting"),
+    _guard("model_resolutions_no_delete", "BEFORE DELETE ON model_resolutions", "model resolutions are never deleted"),
+    "CREATE INDEX IF NOT EXISTS metrics_desk ON metrics(desk, id)",
+)
+
+MIGRATIONS = ((1, V1), (2, V2), (3, V3), (4, V4), (5, V5))
 
 
 def _uid() -> int:
