@@ -92,6 +92,18 @@ def link_deps(record: dict, names: list) -> None:
         os.symlink(target, link)
 
 
+def unlink_deps(record: dict) -> None:
+    """Drop the links link_deps made, so git sees no untracked files when the worktree is removed.
+
+    A link counts only while it still points where link_deps aimed it. Anything else a desk left under
+    that name stays, and git refuses the removal.
+    """
+    for name in record.get("links") or []:
+        link = f"{record['path']}/{name}"
+        if os.path.islink(link) and os.readlink(link) == f"{record['repo_dir']}/{name}":
+            os.unlink(link)
+
+
 def for_record(record: Optional[dict]) -> dict:
     """{"path": [...], "read": [...], "env": {...}} that the worktree's tools need, or an empty plan."""
     plan = {"path": [], "read": [], "env": {}}

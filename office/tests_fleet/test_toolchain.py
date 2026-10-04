@@ -6,6 +6,8 @@ import os
 from pathlib import Path
 from unittest import mock
 
+from hogwarts import pensieve
+
 from fleet import config, gitops, review, run_desk, toolchain, verify, worktree
 from fleet.safefs import FleetError
 from tests_fleet.test_review_loop import HANDOFF, REAL_SANDBOX_ARGV, LoopCase
@@ -81,6 +83,33 @@ class DependencyLinkTests(ToolchainCase):
             result = review.review_build(self.conn, task["id"])
         files = self.git("show", "--name-only", "--format=", result["sha"], cwd=created["worktree"]).split()
         self.assertEqual(files, ["widget.txt"])
+
+    def test_removing_a_closed_task_drops_the_link_and_keeps_the_dependencies(self):
+        self.node_repo()
+        _, task, _, created, _ = self.build()
+        path = Path(created["worktree"])
+        self.assertIn("?? node_modules", self.git("status", "--porcelain", cwd=str(path)))
+        pensieve.close_task(self.conn, task["id"], "abandoned")
+        result = worktree.remove(self.conn, task["id"])
+        self.assertFalse(os.path.lexists(path))
+        self.assertEqual(result["branch_kept"], "fix/widget")
+        self.assertTrue((self.repo / "node_modules" / "left-pad" / "index.js").is_file())
+
+    def test_removal_leaves_a_dirty_tree_and_a_link_it_did_not_make(self):
+        self.node_repo()
+        _, task, _, created, _ = self.build()
+        path = Path(created["worktree"])
+        pensieve.close_task(self.conn, task["id"], "abandoned")
+        self.write_file(path / "widget.txt", "widget\n")
+        with self.assertRaisesRegex(FleetError, "uncommitted"):
+            worktree.remove(self.conn, task["id"])
+        self.assertTrue((path / "node_modules").is_symlink())
+        os.remove(path / "widget.txt")
+        os.unlink(path / "node_modules")
+        os.symlink(self.tmp, path / "node_modules")
+        with self.assertRaisesRegex(FleetError, "worktree failed"):
+            worktree.remove(self.conn, task["id"])
+        self.assertEqual(os.readlink(path / "node_modules"), str(self.tmp))
 
     def test_a_repo_without_package_json_or_ignore_rule_gets_no_link(self):
         (self.repo / "node_modules").mkdir()

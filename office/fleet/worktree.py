@@ -133,5 +133,8 @@ def remove(conn, task_id: str) -> dict:
     record = gitops.find_record(castle_path(task["worktree"]))
     if record is None:
         raise FleetError("this task has no worktree record")
+    if gitops.dirty(record):
+        raise FleetError("the worktree has uncommitted changes; git would refuse to remove it")
+    toolchain.unlink_deps(record)
     gitops.git(["worktree", "remove", record["path"]], record["common_dir"])
     return {"task_id": task["id"], "removed": record["path"], "branch_kept": record["branch"]}
