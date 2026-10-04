@@ -27,7 +27,29 @@ CLAUDE_BIN = "/Users/you/.local/bin/claude"
 CODEX_BIN = "/opt/homebrew/bin/codex"
 ```
 
-`install.sh` checks the default and the usual Homebrew places, and sets them when it finds one. If you install either tool somewhere else, find it with `command -v claude codex` and edit those two lines.
+`install.sh` checks the default and the usual Homebrew places, and sets them when it finds one. If you install either tool somewhere else, find it with `command -v claude codex` and edit those two lines. `hogwarts-spaces` reads `CLAUDE_BIN` from the same file, so McGonagall's and Snape's live sessions run the same `claude` as the headless desks.
+
+## Trust a tool in a live space
+
+McGonagall's and Snape's live herdr sessions only get tools you've trusted by name. Each has a trusted list in the office, which no desk or agent can write:
+
+```
+~/.hogwarts/desks/mcgonagall/live-tools.json
+~/.hogwarts/desks/snape/live-tools.json
+```
+
+Each file is a JSON object with one key, `tools`, listing every tool that live session may have, built-in and MCP, by its exact name. Before a live space opens, `hogwarts-spaces` refuses it if any definition of that agent lists a tool that isn't on the list. Names match exactly, so there are no wildcards or prefixes, and case counts. The list itself is refused if it names a built-in tool that can run commands, such as Bash, a subagent or a notebook, or any built-in that `fleet/agent_gate.py` doesn't know runs nothing.
+
+To add a tool:
+
+1. Check what it does. A live pane sits next to every other pane, so only add a tool that reads. Never add one that sends, writes, deletes, runs a command or types into another pane, even from a server whose other tools are already on the list.
+2. Add its exact name, as `/mcp` shows it in a Claude session, to the agent's `live-tools.json`.
+3. Add the same name to the agent's `tools:` line, in `~/.claude/agents/snape.md` or `~/hogwarts/.claude/agents/mcgonagall.md`.
+4. Run `~/.hogwarts/bin/hogwarts-spaces --dry-run` and check that space no longer says refused.
+
+A built-in tool also has to be in that agent's `--tools` list at the top of `hogwarts-spaces` before the live session gets it.
+
+The kit's lists use the same placeholders as the kit's agent files, `<warehouse-mcp>`, `<observability-mcp>` and `<chat-mcp>`, and onboarding stage 2 fills them in with everything else. If you keep a private overlay of the kit with your real server names, put the real names in its copies of these two files too, or the live spaces will be refused.
 
 ## Change a desk's model
 
@@ -130,7 +152,7 @@ Copy the nearest sibling at every step. A new Claude reviewer starts from Hermio
 7. **The Owl Post.** Add the new outbox to `WatchPaths` in `~/.hogwarts/launchd/com.hogwarts.owlpost.plist`, run `plutil -lint` on it, copy it to `~/Library/LaunchAgents/`, then reload it with `launchctl bootout` and `launchctl bootstrap` as in `pending/b-owlpost-launchctl.txt`.
 8. **Routing.** Tell McGonagall when to use the new desk: add a line to the Routing section of her agent file.
 9. **Avatar.** Draw an SVG that follows the style rules in `~/.hogwarts/assets/avatars/README.md`, and export transparent PNGs at 512, 128 and 64.
-10. **Live view.** Add a line for the desk to the `spaces()` list in `~/.hogwarts/bin/hogwarts-spaces`, labelled "Character - Job" and running `fleet feed --desk <name>`. Never give a desk that can run commands a live session there. McGonagall's and Snape's spaces only open while their `tools:` lines name nothing that runs commands, so keep any MCP tool you add to them read-only. Their built-in tools are also fixed by the `--tools` lists at the top of `hogwarts-spaces`, so a built-in tool you add to either definition only reaches the live session once you add it there too, and only if `fleet/agent_gate.py` already counts it as safe.
+10. **Live view.** Add a line for the desk to the `spaces()` list in `~/.hogwarts/bin/hogwarts-spaces`, labelled "Character - Job" and running `fleet feed --desk <name>`. Never give a desk that can run commands a live session there. McGonagall's and Snape's spaces only open while every tool on their `tools:` lines is on their trusted lists, so read [Trust a tool in a live space](#trust-a-tool-in-a-live-space) before you add one to either.
 11. **Test, then switch on.** Run both suites and `castle doctor`. Read the desk's `--dry-run` command (onboarding stage 5), then create its `enabled` file. Run `fleet ollivander --dry-run` to see its first model pick.
 
 ## Retire a desk

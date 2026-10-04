@@ -27,6 +27,7 @@ File modes (0700 directories, 0600 files) keep other users out. They do not stop
   bin/castle                            POSIX sh wrapper, mode 0700
   bin/fleet                             POSIX sh wrapper for the fleet command, mode 0700
   bin/hogwarts-spaces                   opens one herdr space per desk, after fleet/agent_gate.py checks the live ones
+  desks/<desk>/live-tools.json          for mcgonagall and snape: every tool their live herdr session may have, by exact name
   hogwarts/__init__.py                  version string
   hogwarts/errors.py                    error classes and exit codes
   hogwarts/ids.py                       id generation, strict validators, path roots

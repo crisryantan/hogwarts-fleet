@@ -81,7 +81,7 @@ command -v git jq gh rg shellcheck claude codex
 
 ```
 tests: Ran 486 tests in ... OK
-tests_fleet: Ran 415 tests in ... OK
+tests_fleet: Ran 430 tests in ... OK
 castle doctor: ok
 ```
 
@@ -114,9 +114,9 @@ If it printed a note that `CLAUDE_BIN` or `CODEX_BIN` was not found, fix that no
 
    | Placeholder | What to put there | Files |
    | --- | --- | --- |
-   | `<warehouse-mcp>` | The name of your SQL warehouse MCP server, exactly as `/mcp` lists it in a Claude session | `~/.claude/agents/snape.md`, `~/.hogwarts/desks/snape/settings.json`, `~/hogwarts/.claude/settings.json` |
-   | `<observability-mcp>` | The name of your metrics, logs and traces MCP server | the same three files |
-   | `<chat-mcp>` | The name of your team chat MCP server | `~/hogwarts/.claude/settings.json`, `~/hogwarts/.claude/agents/mcgonagall.md`, and the settings for Hermione, Ron, Snape and the portrait in `~/.hogwarts/desks/` |
+   | `<warehouse-mcp>` | The name of your SQL warehouse MCP server, exactly as `/mcp` lists it in a Claude session | `~/.claude/agents/snape.md`, `~/.hogwarts/desks/snape/settings.json`, `~/.hogwarts/desks/snape/live-tools.json`, `~/hogwarts/.claude/settings.json` |
+   | `<observability-mcp>` | The name of your metrics, logs and traces MCP server | the same four files |
+   | `<chat-mcp>` | The name of your team chat MCP server | `~/hogwarts/.claude/settings.json`, `~/hogwarts/.claude/agents/mcgonagall.md`, `~/.hogwarts/desks/mcgonagall/live-tools.json`, and the settings for Hermione, Ron, Snape and the portrait in `~/.hogwarts/desks/` |
    | `<github-account>` | The GitHub account the fleet's scripts should use | `~/.hogwarts/fleet/config.py` |
    | `<repos-to-watch>` | The repos the later-stage PR watcher should follow, as `owner/repo` | `~/.hogwarts/fleet/config.py` |
 
@@ -131,7 +131,7 @@ If it printed a note that `CLAUDE_BIN` or `CODEX_BIN` was not found, fix that no
      done
    ```
 
-   The tool names after each server name are a starting point. Snape's list names six warehouse tools and seven observability tools. Open a Claude session, run `/mcp`, and change any name that differs from what your servers offer. Keep Snape to read-only tools.
+   The tool names after each server name are a starting point. Snape's list names six warehouse tools and seven observability tools. Open a Claude session, run `/mcp`, and change any name that differs from what your servers offer. Keep Snape to read-only tools. Change a name in his agent file and in `~/.hogwarts/desks/snape/live-tools.json` together, since his live space only opens when every tool in the first is on the second. McGonagall's chat tools work the same way with `~/.hogwarts/desks/mcgonagall/live-tools.json`.
 
    Then open `~/.hogwarts/fleet/config.py` in a plain text editor such as `nano` and set the two GitHub lines, for example:
 
@@ -380,13 +380,13 @@ Desks run short, one owl at a time, so you watch them instead of sitting inside 
    ~/.hogwarts/bin/hogwarts-spaces --dry-run
    ```
 
-3. Open the spaces. McGonagall and Snape get live sessions, because neither has a shell tool. The script reads their agent files first and refuses either one whose `tools:` line is missing or names a tool that can run commands. Every other desk, the Owl Post and Ollivander get a read-only feed, since any herdr pane can type into any other. A space that already exists is left alone, so you can run it again.
+3. Open the spaces. McGonagall and Snape get live sessions, because neither has a shell tool. The script reads their agent files first and refuses either one whose `tools:` line is missing or names a tool that isn't on its trusted list in `~/.hogwarts/desks/<agent>/live-tools.json`. Every other desk, the Owl Post and Ollivander get a read-only feed, since any herdr pane can type into any other. A space that already exists is left alone, so you can run it again.
 
    ```
    ~/.hogwarts/bin/hogwarts-spaces
    ```
 
-   If it prints FAILED, herdr isn't running or isn't at `~/.local/bin/herdr`. Open it, or add `--herdr <path>`. If the line says refused, compare that agent's file with the repo copy and fix its `tools:` line.
+   If it prints FAILED, herdr isn't running or isn't at `~/.local/bin/herdr`. Open it, or add `--herdr <path>`. If the line says refused, compare that agent's file with the repo copy and fix its `tools:` line. If it says claude is not at a path, set `CLAUDE_BIN` as [CUSTOMISE.md](CUSTOMISE.md#point-the-fleet-at-claude-and-codex) shows.
 
 **You're done when** the first command prints "watching every desk, read-only", and the last one printed OK or SKIP for all nine spaces, which herdr's workspace list now shows.
 
