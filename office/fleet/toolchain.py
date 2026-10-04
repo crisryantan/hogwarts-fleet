@@ -9,7 +9,7 @@ have, read-only:
   main checkout are linked into the worktree. The main checkout's folder is readable, never writable,
   so a desk can use the packages but cannot change them. Git is told to ignore the links.
 - Go: a worktree with go.mod reads the module cache, gets GOPROXY=off so nothing is fetched, and keeps
-  its build cache under the temp folder the desk may write.
+  its build cache in the run's private temp folder.
 
 Nothing here reads an environment variable. Paths come from config and the office worktree record.
 """
@@ -102,8 +102,12 @@ def unlink_deps(record: dict) -> None:
             os.unlink(f"{record['path']}/{name}")
 
 
-def for_record(record: Optional[dict]) -> dict:
-    """{"path": [...], "read": [...], "env": {...}} that the worktree's tools need, or an empty plan."""
+def for_record(record: Optional[dict], temp: Optional[str] = None) -> dict:
+    """{"path": [...], "read": [...], "env": {...}} that the worktree's tools need, or an empty plan.
+
+    temp is the run's private temp folder. Go keeps its build cache there, so a Go worktree run
+    without one gets no build cache it may write.
+    """
     plan = {"path": [], "read": [], "env": {}}
     if record is None:
         return plan
@@ -117,8 +121,9 @@ def for_record(record: Optional[dict]) -> dict:
         cache = gitops.check_safe_path(f"{config.USER_HOME_DIR}/{GO_MOD_SUFFIX}", "the Go module cache")
         plan["read"].append(cache)
         plan["env"].update({"GOPROXY": "off", "GOFLAGS": "-mod=readonly", "GOMODCACHE": cache,
-                            "GOPATH": f"{config.USER_HOME_DIR}/go",
-                            "GOCACHE": f"{config.TMP_WRITE_ROOT}/{GO_BUILD_CACHE}"})
+                            "GOPATH": f"{config.USER_HOME_DIR}/go"})
+        if temp is not None:
+            plan["env"]["GOCACHE"] = f"{temp}/{GO_BUILD_CACHE}"
     return plan
 
 

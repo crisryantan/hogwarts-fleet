@@ -13,8 +13,9 @@
   sandbox, but still a fixed environment with a throwaway home and temp folder. The fleet's own file
   layer opens every folder from / down, which a Codex sandbox refuses, so its suites can only pass there.
 - Every other author's code runs with bash in the worktree under `codex sandbox` and a fleet permission profile:
-  the worktree writable, the repo's .git readable, a throwaway home and temp folder writable,
-  no network, the office denied, nothing else. codex sandbox runs no model and spends no tokens.
+  the worktree writable, the repo's .git readable, a throwaway home and temp folder writable in its
+  own <user temp>/hogwarts-verify-<random> folder, xcrun's cache readable, /private/tmp and the office
+  denied, no network, nothing else. codex sandbox runs no model and spends no tokens.
   Code a desk wrote therefore never runs with Ryan's own reach, even when he starts the check.
 - Writes evidence.md next to TASK.md in the castle (with a per-commit copy), and the same text in
   the office reviews folder, where no desk can change it.
@@ -39,7 +40,6 @@ AC_LINE = re.compile(r"AC-(\d{1,3})\s+(.+?)\s*\|\s*check:\s*(.+?)\s*")
 COMMAND = re.compile(r"`([^`\x00-\x1f]{1,1000})`")
 TASK_CHAIN_LIMIT = 16
 TASK_MD_MAX_BYTES = 65536
-SCRATCH_ROOT = "/private/tmp"
 PROFILE_NAME = "fleet-verify"
 
 
@@ -82,10 +82,10 @@ def sandbox_argv(record: dict, scratch: str, command: str) -> list:
     for path in tools["read"] + tools["path"]:
         entries.append(f'"{gitops.check_safe_path(path, "a toolchain folder")}"="read"')
     entries.append(f'"{gitops.check_safe_path(scratch, "the scratch folder")}"="write"')
-    entries.append(f'"{gitops.check_safe_path(config.TMP_WRITE_ROOT, "the temp folder")}"="write"')
-    temp = run_desk.user_temp_dir()
-    if temp is not None:
-        entries.append(f'"{temp}"="write"')
+    entries.append(f'"{gitops.check_safe_path(config.SHARED_TEMP_ROOT, "the shared temp folder")}"="deny"')
+    cache = run_desk.xcrun_cache()
+    if cache is not None:
+        entries.append(f'"{cache}"="read"')
     entries.append(f'"{gitops.check_safe_path(config.OFFICE_ROOT, "the office")}"="deny"')
     table = "{filesystem={" + ", ".join(entries) + "}, network={enabled=false}}"
     return [config.CODEX_BIN, "sandbox", "-c", f"permissions.{PROFILE_NAME}={table}", "-P", PROFILE_NAME,
@@ -93,7 +93,7 @@ def sandbox_argv(record: dict, scratch: str, command: str) -> list:
 
 
 def child_env(scratch: str, record: Optional[dict] = None) -> dict:
-    tools = toolchain.for_record(record)
+    tools = toolchain.for_record(record, f"{scratch}/tmp")
     return {"HOME": f"{scratch}/home", "TMPDIR": f"{scratch}/tmp", "PATH": ":".join([*tools["path"], config.CHILD_PATH]),
             "LANG": "en_US.UTF-8", "CI": "1", "RTK_DISABLED": "1", **tools["env"]}
 
@@ -128,8 +128,8 @@ def run_check(record: dict, scratch: str, command: str, sandboxed: bool = True) 
 
 
 def _make_scratch() -> str:
-    scratch = f"{SCRATCH_ROOT}/hogwarts-verify-{secrets.token_hex(8)}"
-    os.mkdir(scratch, 0o700)
+    """A private folder for one verify run, <user temp>/hogwarts-verify-<random>, with a home and a temp."""
+    scratch = run_desk.fresh_temp(run_desk.desk_temp_dir(f"verify-{secrets.token_hex(8)}"))
     os.mkdir(f"{scratch}/home", 0o700)
     os.mkdir(f"{scratch}/tmp", 0o700)
     return scratch

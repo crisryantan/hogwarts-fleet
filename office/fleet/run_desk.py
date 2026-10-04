@@ -37,6 +37,7 @@ import math
 import os
 import re
 import secrets
+import shutil
 import subprocess
 import sys
 import time
@@ -276,11 +277,8 @@ DARWIN_USER_TEMP_DIR = 65537  # _CS_DARWIN_USER_TEMP_DIR in macOS unistd.h; os.c
 
 
 def user_temp_dir() -> Optional[str]:
-    """The per-user temp folder macOS tools such as xcrun cache into, as a real path, or None.
-
-    Codex's own workspace-write mode allows it too. Without it /usr/bin/python3 prints an xcrun
-    cache error into every test that reads a child's stderr.
-    """
+    """The per-user temp folder (/var/folders/.../T), as a real path, or None. Every app keeps temp
+    files here, so no desk gets it whole: only its own subfolder and xcrun's cache file."""
     try:
         value = os.confstr(DARWIN_USER_TEMP_DIR)
     except (OSError, ValueError):
@@ -293,15 +291,44 @@ def user_temp_dir() -> Optional[str]:
         return None
 
 
+def xcrun_cache() -> Optional[str]:
+    """xcrun's lookup cache. /usr/bin/python3, /usr/bin/git and the other shims read it, and a lookup
+    already cached never writes it. Granted read-only, so shims stay quiet without the folder."""
+    base = user_temp_dir()
+    return None if base is None else gitops.check_safe_path(f"{base}/{config.XCRUN_CACHE}", "the xcrun cache")
+
+
+def desk_temp_dir(name: str) -> str:
+    """<user temp>/hogwarts-<name>: the private temp folder for one desk or verify run."""
+    if re.fullmatch(r"[a-z0-9][a-z0-9-]{0,63}", name) is None:
+        raise FleetError("invalid temp folder name")
+    base = user_temp_dir()
+    if base is None:
+        raise FleetError("macOS reported no per-user temp folder, so no private temp folder can be made")
+    return gitops.check_safe_path(f"{base}/{config.DESK_TEMP_PREFIX}{name}", "a private temp folder")
+
+
+def fresh_temp(path: str) -> str:
+    """Make path an empty folder only Ryan can open, so nothing carries over from an earlier run."""
+    if os.path.islink(path):
+        os.unlink(path)
+    elif os.path.lexists(path):
+        shutil.rmtree(path)
+    os.mkdir(path, 0o700)
+    return path
+
+
 def _toml_path(path: str) -> str:
     return '"' + gitops.check_safe_path(path, "a codex profile path") + '"'
 
 
-def codex_permissions(desk: str, git_common_dir: Optional[str], extra_reads: tuple = ()) -> list:
+def codex_permissions(desk: str, git_common_dir: Optional[str], extra_reads: tuple = (),
+                      temp: Optional[str] = None) -> list:
     """The -c overrides that define and select this desk's permission profile.
 
     Overlapping entries resolve deny, then write, then read. So the outbox stays writable inside the
-    readable desk folder, and the office stays denied whatever else is granted.
+    readable desk folder, and the office stays denied whatever else is granted. A desk that writes
+    must be given its own temp folder (desk_temp_dir), which becomes its only writable temp.
     """
     name = f"fleet-{desk}"
     access = config.CODEX_ACCESS[desk]
@@ -315,14 +342,15 @@ def codex_permissions(desk: str, git_common_dir: Optional[str], extra_reads: tup
     if desk in config.CODEX_OUTBOX_WRITERS:
         entries.append(f'{_toml_path(config.castle_desk_dir(desk) + "/outbox")}="write"')
     if access == "write":
-        entries.append(f'{_toml_path(config.TMP_WRITE_ROOT)}="write"')
-        temp = user_temp_dir()
-        if temp is not None:
-            entries.append(f'{_toml_path(temp)}="write"')
-    else:
-        # Codex's ":minimal" set makes /private/tmp writable. A read-only desk writes nothing, and only
-        # a deny outranks that write, so the folder is denied outright (reads included).
-        entries.append(f'{_toml_path(config.TMP_WRITE_ROOT)}="deny"')
+        if temp is None:
+            raise FleetError("a desk that writes needs its own temp folder")
+        entries.append(f'{_toml_path(temp)}="write"')
+    # Codex's ":minimal" set makes /private/tmp writable, and only a deny outranks that write, so the
+    # shared temp folder is denied outright for every desk, reads included.
+    entries.append(f'{_toml_path(config.SHARED_TEMP_ROOT)}="deny"')
+    cache = xcrun_cache()
+    if cache is not None:
+        entries.append(f'{_toml_path(cache)}="read"')
     if git_common_dir is not None:
         entries.append(f'{_toml_path(git_common_dir)}="read"')
     for path in extra_reads:
@@ -338,12 +366,15 @@ def _codex_argv(desk: str, task: Optional[dict], brief: str, prompt: str, run_id
     worktree = None if task is None else task.get("worktree")
     cwd = _castle_path(worktree) if worktree else work_dir(desk)
     record = gitops.find_record(cwd) if worktree else None
-    tools = toolchain.for_record(record)
+    temp = desk_temp_dir(desk) if config.CODEX_ACCESS[desk] == "write" else None
+    tools = toolchain.for_record(record, temp)
+    if temp is not None:
+        tools["env"]["TMPDIR"] = temp
     argv = [config.CODEX_BIN, "exec", "--ignore-user-config", "--ignore-rules"]
     for override in parse_codex_profile(profile):
         argv += ["-c", override]
     argv += codex_permissions(desk, None if record is None else record["common_dir"],
-                              tuple(tools["read"]) + tuple(tools["path"]))
+                              tuple(tools["read"]) + tuple(tools["path"]), temp)
     if tools["env"]:
         argv += ["-c", "shell_environment_policy.set=" + _toml_env(tools["env"])]
     argv += ["-C", cwd]
@@ -353,7 +384,7 @@ def _codex_argv(desk: str, task: Optional[dict], brief: str, prompt: str, run_id
         "--output-last-message", f"{config.runs_dir()}/{desk}/{run_id}-last-message.md",
         brief.rstrip("\n") + "\n\n" + prompt,
     ]
-    return argv, cwd, "codex-default", tools
+    return argv, cwd, "codex-default", {**tools, "temp": temp}
 
 
 def guard(argv: list) -> None:
@@ -389,6 +420,7 @@ def build_plan(conn, desk: str, owl_id: Optional[str] = None, mcp_job: Optional[
     task = _own_task(conn, desk, owl)
     brief = _text(_read_office(desk, config.BRIEF_FILE, config.BRIEF_MAX_BYTES, "brief"), "brief")
     run_id = "run-" + secrets.token_hex(8)
+    temp = None
     if family == "claude":
         argv, cwd, model = _claude_argv(desk, row, brief, prompt, mcp_job)
         env = child_env()
@@ -397,9 +429,10 @@ def build_plan(conn, desk: str, owl_id: Optional[str] = None, mcp_job: Optional[
             raise FleetError("Codex desks take no MCP job")
         argv, cwd, model, tools = _codex_argv(desk, task, brief, prompt, run_id)
         env = child_env(tools["path"], tools["env"])
+        temp = tools["temp"]
     guard(argv)
     return {"desk": desk, "family": family, "owl_id": owl_id, "run_id": run_id, "model": model,
-            "cwd": cwd, "argv": argv, "env": env}
+            "cwd": cwd, "argv": argv, "env": env, "temp": temp}
 
 
 # Enabling, caps, launching and running
@@ -564,6 +597,8 @@ def run(conn, desk: str, owl_id: str, mcp_job: Optional[str] = None, now: Option
 
 def _launch(conn, plan: dict, now: Optional[int]) -> dict:
     desk, run_id = plan["desk"], plan["run_id"]
+    if plan.get("temp"):
+        fresh_temp(plan["temp"])  # here, not in build_plan, so a dry run never empties a live run's folder
     with safefs.opened_dir(config.OFFICE_ROOT, "runs", desk, create=True) as run_fd:
         out_fd = safefs.create_new(run_fd, f"{run_id}.out")
         err_fd = safefs.create_new(run_fd, f"{run_id}.err")
