@@ -45,6 +45,7 @@ KNOWN_FLAGS = {
     "--no-ext-diff", "--no-textconv", "--detach", "-b", "-m", "-F", "--stdin", "--force", "-z",
     "--no-decorate", "--oneline", "--format", "--is-ancestor", "--quiet", "--name-only",
     "--is-shallow-repository", "-e",  # read-only probes: a shallow checkout, and git cat-file -e for a commit
+    "--count", "--no-replace-objects",  # git rev-list --count walks HEAD's history as its commits name it
     "-f", "-d", "-n", "--ignored",  # git clean -n/-f -d -X: ignored files only, never tracked or untracked ones
     # the review, worktree, verify and push scripts and the push gate
     "--task", "--repo-dir", "--branch", "--base", "--title", "--no-fetch", "--yes", "--mode",

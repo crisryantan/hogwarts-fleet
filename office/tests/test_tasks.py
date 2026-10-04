@@ -192,6 +192,13 @@ class TaskLifecycleTests(StoreCase):
         pensieve.record_commit(self.conn, first["id"], REPO, "e" * 40, now=NOW + 1)
         self.assertEqual([row["sha"] for row in pensieve.task_commits(self.conn, first["id"])], [SHA, "e" * 40])
         self.assertEqual(pensieve.task_commits(self.conn, second["id"]), [])
+        # A slug in another letter case is another row; commits_with_sha finds both, oldest first.
+        pensieve.record_commit(self.conn, second["id"], REPO.upper(), SHA, now=NOW + 2)
+        self.assertEqual([(row["repo"], row["task_id"]) for row in pensieve.commits_with_sha(self.conn, SHA)],
+                         [(REPO, first["id"]), (REPO.upper(), second["id"])])
+        self.assertEqual(pensieve.commits_with_sha(self.conn, "d" * 40), [])
+        with self.assertRaises(ValidationError):
+            pensieve.commits_with_sha(self.conn, "HEAD")
         with self.assertRaises(sqlite3.IntegrityError):
             self.conn.execute("UPDATE task_commits SET task_id = ?", (second["id"],))
         with self.assertRaises(sqlite3.IntegrityError):

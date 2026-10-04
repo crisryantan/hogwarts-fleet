@@ -22,7 +22,7 @@ from hogwarts import capacity, db, ids, owlery, pensieve
 from hogwarts.errors import ConflictError, ValidationError
 from tests.support import NOW
 
-from fleet import config, gitops, owl_post, push, review, run_desk, worktree
+from fleet import config, gitops, owl_post, push, review, run_desk, verify, worktree
 from fleet.hooks import pre_compact, session_start
 from fleet.safefs import FleetError
 from tests_fleet.support import IN_KIT, MANY_TASK_DESKS, ONLY_IN_KIT, fake_children
@@ -716,6 +716,85 @@ class OwnLineageAncestryTests(ManyCase):
         head = self.git("rev-parse", "HEAD", cwd=other)
         self.assertIsNone(gitops.is_ancestor(common, last, head))
         self.assertTrue(gitops.is_ancestor(common, head, head))
+
+
+    def test_an_origin_url_in_another_letter_case_is_still_that_repository(self):
+        # GitHub takes a slug in any letter case, so an origin respelled in capitals is the same repository.
+        capped = self.capped()
+        last = self.git("rev-parse", "HEAD")
+        self.git("config", "remote.origin.url", ORIGIN.replace("acme/web-app", "Acme/Web-App"))
+        self.stacked("fix/site-same")
+        with self.not_made(), self.assertRaisesRegex(FleetError, re.escape(
+                f"HEAD {last[:12]} is already task {capped}; run fleet review own --repo-dir <checkout> --task"
+                f" {capped} to review it again")):
+            self.own_review()
+        self.stacked("fix/site-retry")
+        self.commit("fix after the cap")
+        with self.not_made(), self.assertRaisesRegex(FleetError, self.lineage_text(capped, last)):
+            self.own_review()
+        self.assertEqual(self.own_tasks(), [capped])
+
+    def test_replace_refs_and_grafts_do_not_hide_a_tasks_commits(self):
+        # Ancestry is read from the parents the commits really name, which is what a push sends.
+        capped = self.capped()
+        last = self.git("rev-parse", "HEAD")
+        self.stacked("fix/site-retry")
+        head = self.commit("fix after the cap")
+        main = self.git("rev-parse", "origin/main")
+        common = str(self.repo / ".git")
+        self.git("replace", "--graft", head, main)
+        self.assertNotEqual(subprocess.run([config.GIT_BIN, "merge-base", "--is-ancestor", last, head],
+                                           cwd=self.repo).returncode, 0)
+        self.assertTrue(gitops.is_ancestor(common, last, head))
+        with self.not_made(), self.assertRaisesRegex(FleetError, self.lineage_text(capped, last)):
+            self.own_review()
+        self.git("replace", "-d", head)
+        self.write_file(self.repo / ".git" / "info" / "grafts", f"{head} {main}\n")
+        self.assertTrue(gitops.is_ancestor(common, last, head))
+        with self.not_made(), self.assertRaisesRegex(FleetError, self.lineage_text(capped, last)):
+            self.own_review()
+        self.assertEqual(self.own_tasks(), [capped])
+
+    def test_a_clone_cut_short_with_its_shallow_file_removed_is_refused(self):
+        # Without .git/shallow a cut clone says it is full, but HEAD's missing parents still give it away.
+        capped = self.capped()
+        last = self.git("rev-parse", "HEAD")
+        self.stacked("fix/site-again")
+        self.commit("built on the capped fix")
+        other = self.clone("cut", "--depth", "1", "--branch", "fix/site-again")
+        (other / ".git" / "shallow").unlink()
+        self.assertEqual(self.git("rev-parse", "--is-shallow-repository", cwd=other), "false")
+        self.git("checkout", "-q", "-b", "elsewhere", cwd=other)
+        self.write_file(other / "other.txt", "other work\n")
+        self.git("add", "other.txt", cwd=other)
+        self.git("commit", "-q", "-m", "other work", cwd=other)
+        head = self.git("rev-parse", "HEAD", cwd=other)
+        self.assertIsNone(gitops.is_ancestor(str(other / ".git"), last, head))
+        with self.not_made(), self.assertRaisesRegex(FleetError, re.escape(
+                f"cannot tell whether HEAD builds on commit {last[:12]} of task {capped}")):
+            self.review_in(other)
+        self.assertEqual(self.own_tasks(), [capped])
+
+    def test_a_new_tasks_commit_is_its_lineage_before_its_checks_run(self):
+        # A review on a branch stacked on a commit whose own review is still running its checks goes on that task.
+        self.on_branch("fix/a")
+        first = self.commit("a work")
+        real_verify, refused = verify.verify, []
+
+        def stacked_meanwhile(conn, task_id):
+            if not refused:
+                self.stacked("fix/a-more")
+                self.commit("more on a")
+                with self.assertRaises(FleetError) as caught:
+                    review.review_own(self.conn, str(self.repo), title="stacked", fetch=False)
+                refused.append(str(caught.exception))
+            return real_verify(conn, task_id)
+
+        with mock.patch.object(verify, "verify", side_effect=stacked_meanwhile):
+            task_id = self.own_review()["task_id"]
+        self.assertEqual(len(refused), 1)
+        self.assertRegex(refused[0], self.lineage_text(task_id, first))
+        self.assertEqual(self.own_tasks(), [task_id])
 
 
 class ParallelAuthorTests(ManyCase):

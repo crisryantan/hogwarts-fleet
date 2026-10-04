@@ -78,6 +78,7 @@ its first round opens is closed as abandoned, unless its commit was already reco
 from __future__ import annotations
 
 import contextlib
+import os
 import re
 import secrets
 from typing import Iterator, Optional
@@ -487,7 +488,8 @@ def _review_own(conn, repo_dir: str, title: Optional[str], intent: Optional[str]
         raise FleetError("that task's worktree is for a different checkout")
     with own_lineage_lock():
         task = _continue_own(conn, task, repo_dir, common_dir, record["repo"], sha, branch)
-    gitops.git(["checkout", "--detach", sha], record["git_dir"], record["path"])
+        # Inside the lock: from here a review on a branch stacked on sha sees it as this task's (see _lineage_shas).
+        gitops.git(["checkout", "--detach", sha], record["git_dir"], record["path"])
     return _review_own_at(conn, task, record, sha, lock_fd)
 
 
@@ -542,12 +544,41 @@ def _continue_text(task: dict) -> str:
     return f"fleet review own --repo-dir <checkout> --task {task['id']}"
 
 
+def _same_repo(first: str, second: str) -> bool:
+    """Whether two GitHub slugs name one repository. GitHub takes owner and name in any letter case, so an
+    origin URL spelled in another case is still that repository."""
+    return first.lower() == second.lower()
+
+
+def _holder(conn, repo: str, sha: str) -> Optional[dict]:
+    """The recorded commit sha of this repository, whatever letter case its slug was recorded in, or None."""
+    return next((row for row in pensieve.commits_with_sha(conn, sha) if _same_repo(row["repo"], repo)), None)
+
+
+def _worktree_head(record: dict) -> Optional[str]:
+    """The commit an own task's review worktree is detached at, or None when it is gone or git cannot say."""
+    if not os.path.isdir(record["git_dir"]):
+        return None
+    try:
+        out = gitops.git(["rev-parse", "--verify", "--end-of-options", "HEAD^{commit}"], record["git_dir"],
+                         check=False).strip()
+    except (FleetError, OSError):
+        return None
+    return out if gitops.SHA.fullmatch(out) else None
+
+
 def _lineage_shas(conn, task: dict, repo: str) -> list:
-    """The commits recorded on an own task for this repository, from its commits and its rounds, oldest first."""
-    shas = [row["sha"] for row in pensieve.task_commits(conn, task["id"]) if row["repo"] == repo]
+    """The commits on an own task for this repository, oldest first: its recorded commits, its rounds, and last
+    the commit its review worktree is at. That one is set under the lineage lock, so a review whose checks are
+    still running, before its commit is recorded, already claims the work stacked on it."""
+    shas = [row["sha"] for row in pensieve.task_commits(conn, task["id"]) if _same_repo(row["repo"], repo)]
     record = None if task["worktree"] is None else gitops.find_record(worktree.castle_path(task["worktree"]))
-    if shas or (record is not None and record["repo"] == repo):
+    mine = record is not None and _same_repo(record["repo"], repo)
+    if shas or mine:
         shas += [row["sha"] for row in capacity.review_rounds(conn, task["id"]) if row["sha"] not in shas]
+    pending = _worktree_head(record) if mine else None
+    if pending is not None and pending not in shas:
+        shas.append(pending)
     return shas
 
 
@@ -590,7 +621,7 @@ def _check_new_own(conn, repo_dir: str, common_dir: str, repo: str, sha: str, br
     was made on, and only work that builds on no open task's commits starts a new task with its own count.
     The checkout is matched as a folder, so another letter case of its path on a case-insensitive disk is
     still that checkout."""
-    held = pensieve.get_commit(conn, repo, sha)
+    held = _holder(conn, repo, sha)
     if held is not None:
         owner = pensieve.get_task(conn, held["task_id"])
         if owner["desk"] == OWN_DESK and owner["status"] == "active":

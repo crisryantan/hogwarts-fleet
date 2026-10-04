@@ -276,6 +276,11 @@ def get_commit(conn: Conn, repo: str, sha: str) -> Optional[dict]:
     )
 
 
+def commits_with_sha(conn: Conn, sha: str) -> list[dict]:
+    """Every recorded commit with this sha, in any repository, in the order they were recorded."""
+    return db.fetch_all(conn, "SELECT * FROM task_commits WHERE sha = ? ORDER BY rowid", (ids.check("sha", sha),))
+
+
 def task_commits(conn: Conn, task_id: str) -> list[dict]:
     """The commits recorded on a task, in the order they were recorded."""
     return db.fetch_all(conn, "SELECT * FROM task_commits WHERE task_id = ? ORDER BY rowid",

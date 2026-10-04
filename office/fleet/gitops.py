@@ -163,6 +163,12 @@ def child_env() -> dict:
     }
 
 
+# Ancestry is read from the commits as written: replace refs and an info/grafts file can hide a parent link
+# without changing any sha, and a commit-graph file can answer for a commit that is gone.
+TRUE_HISTORY_FLAGS = ("--no-replace-objects", "-c", "core.commitGraph=false")
+TRUE_HISTORY_ENV = {"GIT_NO_REPLACE_OBJECTS": "1", "GIT_GRAFT_FILE": "/dev/null/no-grafts"}
+
+
 def git(args: list, git_dir: Optional[str], work_tree: Optional[str] = None, check: bool = True,
         timeout: Optional[int] = None, folder: Optional[str] = None) -> str:
     """Run one git command with the hardening flags. Returns stdout. Never uses a shell."""
@@ -173,8 +179,8 @@ def git(args: list, git_dir: Optional[str], work_tree: Optional[str] = None, che
 
 
 def _run(args: list, git_dir: Optional[str], work_tree: Optional[str], timeout: Optional[int],
-         folder: Optional[str]) -> tuple:
-    """(exit code, stdout, stderr) of one hardened git command."""
+         folder: Optional[str], true_history: bool = False) -> tuple:
+    """(exit code, stdout, stderr) of one hardened git command. true_history reads commits as written."""
     if git_dir is not None:
         argv = [config.GIT_BIN, "--git-dir", git_dir]
         if work_tree is not None:
@@ -184,9 +190,10 @@ def _run(args: list, git_dir: Optional[str], work_tree: Optional[str], timeout: 
         argv, cwd = [config.GIT_BIN, "-C", folder], folder
     else:
         raise FleetError("git needs a git folder or a working folder")
-    argv += [*HARDENING, *args]
+    argv += [*HARDENING, *(TRUE_HISTORY_FLAGS if true_history else ()), *args]
+    env = {**child_env(), **(TRUE_HISTORY_ENV if true_history else {})}
     try:
-        done = subprocess.run(argv, cwd=cwd, env=child_env(), stdin=subprocess.DEVNULL,
+        done = subprocess.run(argv, cwd=cwd, env=env, stdin=subprocess.DEVNULL,
                               capture_output=True, timeout=timeout or config.GIT_TIMEOUT_SECONDS, check=False)
     except subprocess.TimeoutExpired:
         raise FleetError(f"git {args[0]} timed out") from None
@@ -195,17 +202,21 @@ def _run(args: list, git_dir: Optional[str], work_tree: Optional[str], timeout: 
 
 
 def is_ancestor(git_dir: str, ancestor: str, sha: str) -> Optional[bool]:
-    """Whether commit ancestor is sha or one of its ancestors, or None when this checkout cannot tell: it is
-    shallow, so its history may stop short of ancestor, or git failed. In a full clone a commit missing from
-    the object store is no ancestor, since git keeps every commit reachable from one it has."""
+    """Whether commit ancestor is sha or one of its ancestors, by the parents its commits really name (no
+    replace refs or grafts), or None when this checkout cannot tell: it is shallow, so its history may stop
+    short of ancestor, or git failed. A commit missing from the object store is no ancestor only when every
+    commit sha builds on is there, since a clone cut short with its shallow file removed says it is full."""
     if SHA.fullmatch(ancestor) is None or SHA.fullmatch(sha) is None:
         raise FleetError("an ancestry check needs two full commit shas")
     shallow = git(["rev-parse", "--is-shallow-repository"], git_dir).strip()
     if shallow not in ("true", "false"):
         return None
-    if _run(["cat-file", "-e", f"{ancestor}^{{commit}}"], git_dir, None, None, None)[0] != 0:
-        return None if shallow == "true" else False
-    code = _run(["merge-base", "--is-ancestor", ancestor, sha], git_dir, None, None, None)[0]
+    if _run(["cat-file", "-e", f"{ancestor}^{{commit}}"], git_dir, None, None, None, true_history=True)[0] != 0:
+        if shallow == "true":
+            return None
+        walked = _run(["rev-list", "--count", sha], git_dir, None, None, None, true_history=True)[0]
+        return False if walked == 0 else None
+    code = _run(["merge-base", "--is-ancestor", ancestor, sha], git_dir, None, None, None, true_history=True)[0]
     if code == 0:
         return True
     return False if code == 1 and shallow == "false" else None
