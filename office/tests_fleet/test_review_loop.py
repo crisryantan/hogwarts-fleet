@@ -233,6 +233,30 @@ class VerifyTests(LoopCase):
         self.assertTrue(table.endswith("network={enabled=false}}"))
         self.assertNotIn("--sandbox", argv)
 
+    def test_build_desk_checks_always_run_under_codex_sandbox(self):
+        parent, task, _, _, _ = self.build()
+        launched = []
+        real_run = subprocess.run
+
+        def fake_run(argv, **kwargs):
+            if argv[0] == config.GIT_BIN:
+                return real_run(argv, **kwargs)
+            launched.append(argv)
+            return subprocess.CompletedProcess(argv, 0)
+
+        with mock.patch.object(verify, "sandbox_argv", REAL_SANDBOX_ARGV), \
+                mock.patch.object(verify.subprocess, "run", side_effect=fake_run):
+            result = verify.verify(self.conn, task["id"])
+        self.assertEqual(result["checks"], 3)
+        self.assertEqual(len(launched), 2)
+        for argv in launched:
+            self.assertEqual(argv[:2], [config.CODEX_BIN, "sandbox"])
+            self.assertEqual(argv[argv.index("-P") + 1], "fleet-verify")
+            self.assertIn(f'"{config.OFFICE_ROOT}"="deny"', argv[argv.index("-c") + 1])
+        text = (self.castle / "tasks" / parent / "evidence.md").read_text()
+        self.assertIn("under codex sandbox: worktree write, repo .git read, no network, no office", text)
+        self.assertNotIn("without the Codex sandbox", text)
+
     def test_own_session_checks_run_without_the_codex_sandbox_and_say_so(self):
         self.write_file(self.repo / "fix.txt", "fix\n")
         self.git("add", "fix.txt")
