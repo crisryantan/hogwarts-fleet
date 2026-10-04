@@ -254,6 +254,35 @@ class OwnSessionGuardTests(ManyCase):
         counted = [row["round"] for row in capacity.review_rounds(self.conn, capped) if row["counts"]]
         self.assertEqual(counted, [1, 2, 3, 4])
 
+    def test_a_capped_checkout_named_in_other_letter_case_is_still_capped(self):
+        upper = self.home_dir / "REPO"
+        if not upper.is_dir():
+            self.skipTest("this disk tells letter case apart, so REPO is a different folder")
+        self.commit("round one")
+        capped = self.own_review()["task_id"]
+        for number in (2, 3):
+            self.commit(f"round {number}")
+            self.own_review(capped)
+        self.commit("try the other spelling")
+        self.enable("moody")
+        with mock.patch.object(pensieve, "create_task", side_effect=AssertionError("made a task")):
+            with self.assertRaisesRegex(FleetError, self.capped_text(capped)):
+                review.review_own(self.conn, str(upper), title="my own fix", fetch=False)
+        self.assertEqual(self.own_tasks(), [capped])
+        capacity.allow_round(self.conn, capped)
+        with self.fake_reviewer("CHANGES"):
+            allowed = review.review_own(self.conn, str(upper), task_id=capped, fetch=False)
+        self.assertEqual((allowed["task_id"], allowed["round"]), (capped, 4))
+
+    def test_a_task_on_another_checkout_does_not_take_this_ones_reviews(self):
+        self.commit("round one")
+        task_id = self.own_review()["task_id"]
+        other = self.home_dir / "other"
+        self.git("clone", "-q", str(self.repo), str(other))
+        self.enable("moody")
+        with self.assertRaisesRegex(FleetError, "that task's worktree is for a different checkout"):
+            review.review_own(self.conn, str(other), task_id=task_id, fetch=False)
+
     @staticmethod
     def capped_text(task_id: str) -> str:
         return re.escape(f"task {task_id} on this checkout has used its 3 review rounds, so this checkout's"

@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import stat
 import subprocess
 from typing import Optional
 
@@ -73,6 +74,16 @@ def check_repo_dir(path: object) -> str:
     if not os.path.isdir(path) or os.path.islink(path + "/.git") or not os.path.isdir(path + "/.git"):
         raise FleetError("the repo folder must be a main checkout with its own .git folder")
     return path
+
+
+def same_checkout(first: str, second: str) -> bool:
+    """Whether two checkout paths name one real folder, by device and inode rather than by spelling, since a
+    case-insensitive disk takes one checkout under paths that differ only in letter case."""
+    try:
+        one, two = os.lstat(first), os.lstat(second)
+    except OSError:
+        return False
+    return stat.S_ISDIR(one.st_mode) and stat.S_ISDIR(two.st_mode) and os.path.samestat(one, two)
 
 
 def check_branch(name: object) -> str:

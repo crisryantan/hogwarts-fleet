@@ -54,7 +54,9 @@ tasks, so a task waiting for a fix round blocks nothing. Ryan's own sessions sta
 of theirs is in review or waiting for fixes, with two refusals made before anything changes: a commit another
 task already holds (review it with --task), and a checkout whose open task has used its round cap: that
 checkout's reviews go on that task with --task until Ryan closes it, allowance or not, so leaving out --task
-never starts a fresh count. A new task that fails before its first round opens is closed as abandoned,
+never starts a fresh count. A checkout is matched as a folder (device and inode), not by how its path is spelled.
+The cap is per task: below it, a new review without --task is a new task with its own count, since one checkout
+carries several tasks in flight. A new task that fails before its first round opens is closed as abandoned,
 unless its commit was already recorded on it: then it stays active, --task <id> retries it, and a new review
 of that commit names it.
 """
@@ -462,7 +464,7 @@ def _review_own(conn, repo_dir: str, title: Optional[str], intent: Optional[str]
         if task["desk"] != OWN_DESK or task["status"] != "active":
             raise FleetError("--task must be an active task of your own sessions")
         record = gitops.find_record(worktree.castle_path(task["worktree"]))
-        if record is None or record["repo_dir"] != repo_dir:
+        if record is None or not gitops.same_checkout(record["repo_dir"], repo_dir):
             raise FleetError("that task's worktree is for a different checkout")
         gitops.git(["checkout", "--detach", sha], record["git_dir"], record["path"])
     return _review_own_at(conn, task, record, sha, lock_fd)
@@ -471,11 +473,12 @@ def _review_own(conn, repo_dir: str, title: Optional[str], intent: Optional[str]
 def _check_new_own(conn, repo_dir: str, common_dir: str, sha: str) -> None:
     """Refuse a new own task, before anything is made, for a commit another task already holds, or while an
     open task on the same checkout has used its round cap. That task's rounds go on with --task until Ryan
-    closes it, allowance or not, so leaving out --task never starts a fresh count."""
+    closes it, allowance or not, so leaving out --task never starts a fresh count. The checkout is matched as a
+    folder, so another letter case of its path on a case-insensitive disk is still that checkout."""
     cap = config.REVIEW_ROUND_CAP
     for other in pensieve.list_tasks(conn, desk=OWN_DESK, status="active"):
         record = None if other["worktree"] is None else gitops.find_record(worktree.castle_path(other["worktree"]))
-        if record is None or record["repo_dir"] != repo_dir:
+        if record is None or not gitops.same_checkout(record["repo_dir"], repo_dir):
             continue
         if sum(1 for row in capacity.review_rounds(conn, other["id"]) if row["counts"]) >= cap:
             raise FleetError(f"task {other['id']} on this checkout has used its {cap} review rounds, so this"
