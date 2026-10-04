@@ -26,7 +26,7 @@ from typing import Optional
 
 from hogwarts import ids, pensieve
 
-from fleet import common, config, gitops, safefs
+from fleet import common, config, gitops, run_desk, safefs
 from fleet.safefs import FleetError
 
 AC_LINE = re.compile(r"AC-(\d{1,3})\s+(.+?)\s*\|\s*check:\s*(.+?)\s*")
@@ -73,6 +73,10 @@ def sandbox_argv(record: dict, scratch: str, command: str) -> list:
     entries.append('":workspace_roots"={"."="write"}')
     entries.append(f'"{gitops.check_safe_path(record["common_dir"], "the repo .git folder")}"="read"')
     entries.append(f'"{gitops.check_safe_path(scratch, "the scratch folder")}"="write"')
+    entries.append(f'"{gitops.check_safe_path(config.TMP_WRITE_ROOT, "the temp folder")}"="write"')
+    temp = run_desk.user_temp_dir()
+    if temp is not None:
+        entries.append(f'"{temp}"="write"')
     entries.append(f'"{gitops.check_safe_path(config.OFFICE_ROOT, "the office")}"="deny"')
     table = "{filesystem={" + ", ".join(entries) + "}, network={enabled=false}}"
     return [config.CODEX_BIN, "sandbox", "-c", f"permissions.{PROFILE_NAME}={table}", "-P", PROFILE_NAME,

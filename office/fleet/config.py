@@ -55,7 +55,8 @@ MAX_BUDGET_USD = {"hermione": "2.00", "ron": "0.25", "portrait": "2.00"}
 # the platform paths tools need, the reads below, the desk's working folder with this access,
 # its own castle folder to read, the castle tasks to read, its repo's .git to read, and no network.
 CODEX_ACCESS = {"harry": "write", "moody": "read"}
-CODEX_EXTRA_READS = ("/opt/homebrew",)
+# Read-only tool folders: Homebrew, and Xcode and the Command Line Tools, where /usr/bin/python3 and git live.
+CODEX_EXTRA_READS = ("/opt/homebrew", "/Applications/Xcode.app", "/Library/Developer")
 # Only these desks may write their own outbox.
 CODEX_OUTBOX_WRITERS = ("harry",)
 # Desks that build in a worktree. The Owl Post starts them only once their task has one.
@@ -85,6 +86,11 @@ VERIFY_TIMEOUT_SECONDS = 900
 VERIFY_OUTPUT_MAX_BYTES = 262144
 EVIDENCE_EXCERPT_LINES = 40
 DEFAULT_BASE = "origin/main"
+# A Codex desk that writes, and the verify sandbox, may also write here, as Codex's own workspace-write
+# mode allows. Test suites keep their temp folders in it. Network stays off.
+TMP_WRITE_ROOT = "/private/tmp"
+# The castle charter files every desk follows. Codex desks may read them.
+CASTLE_CHARTERS = ("CLAUDE.md", "AGENTS.md")
 # Words that never leave the fleet: in branch names, commit messages and PR text.
 FLEET_WORDS = ("hogwarts", "mcgonagall", "harry", "hermione", "moody", "ron", "snape", "dumbledore",
                "marauder", "marauders", "gringotts", "owlpost", "headmaster", "pensieve")
