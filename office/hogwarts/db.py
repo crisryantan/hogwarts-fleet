@@ -13,7 +13,7 @@ from .errors import ConflictError, IntegrityError, NotFoundError, StoreError, Va
 
 DEFAULT_DB = Path("/Users/crisryantan/.hogwarts/state/pensieve.db")
 CODE_ROOT = Path(os.path.abspath(__file__)).parent.parent
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 WAL_ATTEMPTS = 50
 BYTECODE_SUFFIXES = (".pyc", ".pyo", ".so")
 SIDECARS = ("-wal", "-shm")
@@ -45,6 +45,9 @@ MODEL_CHANGE_REASONS = ("initial", "role", "approved", "pin", "revert")
 # How the trial after a switch ended: a run passed, Ryan pinned the model, two failures held Ryan's own
 # choice or could not revert onto a blocked or unchecked model, or two failures reverted it.
 MODEL_TRIAL_ENDS = ("passed", "pinned", "held", "revert_blocked", "reverted")
+# Desks that may hold many active tasks at once. V7 grants them on a store that already has them; a fresh
+# install grants them with castle desk many-tasks after adding the desks.
+MANY_TASK_DESKS_SEED = ("harry", "hermione", "moody", "ron", "ryan-claude-1")
 
 PathLike = Union[str, Path]
 
@@ -652,7 +655,44 @@ V6 = (
            "a catalog look number only moves forward"),
 )
 
-MIGRATIONS = ((1, V1), (2, V2), (3, V3), (4, V4), (5, V5), (6, V6))
+# Many tasks per desk: a desk listed in many_task_desks may hold any number of active tasks, and every other
+# desk still holds at most one. The grant is one way. The one-per-desk index becomes a trigger that reads the
+# grant, so a raw write on a single desk is still refused. A run launch names the task it ran for, if any.
+V7 = (
+    _table(
+        """CREATE TABLE IF NOT EXISTS many_task_desks (
+        desk TEXT PRIMARY KEY NOT NULL REFERENCES desks(name),
+        granted_at INTEGER NOT NULL
+    )"""
+    ),
+    _guard("many_task_desks_immutable", "BEFORE UPDATE ON many_task_desks", "desk task modes are fixed"),
+    _guard("many_task_desks_no_delete", "BEFORE DELETE ON many_task_desks", "desk task modes are never deleted"),
+    "INSERT OR IGNORE INTO many_task_desks(desk, granted_at) SELECT name, CAST(strftime('%s', 'now') AS INTEGER)"
+    " FROM desks WHERE name IN " + _choices(MANY_TASK_DESKS_SEED),
+    "DROP INDEX IF EXISTS tasks_one_active_per_desk",
+    _guard(
+        "tasks_one_active_per_single_desk",
+        "BEFORE UPDATE OF status ON tasks WHEN NEW.status = 'active' AND OLD.status <> 'active'"
+        " AND NOT EXISTS (SELECT 1 FROM many_task_desks WHERE desk = NEW.desk)"
+        " AND EXISTS (SELECT 1 FROM tasks WHERE desk = NEW.desk AND status = 'active' AND id <> NEW.id)",
+        "desk already has an active task",
+    ),
+    ("run_launches", "task_id", "ALTER TABLE run_launches ADD COLUMN task_id TEXT REFERENCES tasks(id)"),
+    _guard(
+        "run_launches_task_fixed",
+        "BEFORE UPDATE OF task_id ON run_launches WHEN OLD.task_id IS NOT NEW.task_id",
+        "a run launch keeps its task",
+    ),
+    _guard(
+        "run_launches_task_of_desk",
+        "BEFORE INSERT ON run_launches WHEN NEW.task_id IS NOT NULL"
+        " AND NOT EXISTS (SELECT 1 FROM tasks WHERE id = NEW.task_id AND desk = NEW.desk)",
+        "a run launch names a task of its own desk",
+    ),
+    "CREATE INDEX IF NOT EXISTS run_launches_task ON run_launches(task_id)",
+)
+
+MIGRATIONS = ((1, V1), (2, V2), (3, V3), (4, V4), (5, V5), (6, V6), (7, V7))
 
 
 def _uid() -> int:

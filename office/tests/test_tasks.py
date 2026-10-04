@@ -337,6 +337,74 @@ class CascadeTests(StoreCase):
         self.assertIsNone(self.conn.execute("SELECT consumed_at FROM close_tokens").fetchone()[0])
 
 
+class ManyTaskDeskTests(StoreCase):
+    def setUp(self):
+        super().setUp()
+        self.desks()
+        pensieve.allow_many_tasks(self.conn, "beta", now=NOW)
+
+    def test_a_many_task_desk_starts_three_tasks(self):
+        started = [self.started("beta")["id"] for _ in range(3)]
+        self.assertEqual([task["id"] for task in pensieve.list_tasks(self.conn, desk="beta", status="active")], started)
+        self.assertIsNone(pensieve.blocking_task(self.conn, "beta"))
+
+    def test_a_single_desk_still_refuses_through_the_api_and_a_raw_write(self):
+        first = self.started("alpha")
+        self.assertEqual(pensieve.blocking_task(self.conn, "alpha")["id"], first["id"])
+        second = self.task("alpha")
+        with self.assertRaisesRegex(ConflictError, f"desk already has an active task {first['id']}"):
+            pensieve.start_task(self.conn, second["id"])
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "desk already has an active task"):
+            self.conn.execute("UPDATE tasks SET status = 'active', started_at = 1 WHERE id = ?", (second["id"],))
+        self.assertEqual(pensieve.get_task(self.conn, second["id"])["status"], "queued")
+
+    def test_a_raw_write_on_a_many_task_desk_is_allowed(self):
+        self.started("beta")
+        second = self.task("beta")
+        self.conn.execute("UPDATE tasks SET status = 'active', started_at = 1 WHERE id = ?", (second["id"],))
+        self.assertEqual(len(pensieve.list_tasks(self.conn, desk="beta", status="active")), 2)
+
+    def test_the_session_rule_still_holds_on_a_many_task_desk(self):
+        self.started("beta", session_id="session-aaaa1")
+        same = self.task("beta", session_id="session-aaaa1")
+        with self.assertRaisesRegex(ConflictError, "session already has an active task"):
+            pensieve.start_task(self.conn, same["id"])
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.conn.execute("UPDATE tasks SET status = 'active', started_at = 1 WHERE id = ?", (same["id"],))
+        self.assertEqual(self.started("beta", session_id="session-bbbb2")["status"], "active")
+
+    def test_the_grant_is_one_way_and_idempotent(self):
+        again = pensieve.allow_many_tasks(self.conn, "beta", now=NOW + 5)
+        self.assertEqual((again["name"], again["many_tasks"], again["created"]), ("beta", 1, False))
+        self.assertEqual(self.conn.execute("SELECT granted_at FROM many_task_desks WHERE desk = 'beta'").fetchone()[0],
+                         NOW)
+        self.assertEqual({desk["name"]: desk["many_tasks"] for desk in pensieve.list_desks(self.conn)},
+                         {"alpha": 0, "beta": 1})
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "desk task modes are fixed"):
+            self.conn.execute("UPDATE many_task_desks SET desk = 'alpha'")
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "desk task modes are never deleted"):
+            self.conn.execute("DELETE FROM many_task_desks")
+        self.assertTrue(pensieve.takes_many_tasks(self.conn, "beta"))
+
+    def test_an_unknown_or_reserved_desk_is_refused(self):
+        with self.assertRaises(NotFoundError):
+            pensieve.allow_many_tasks(self.conn, "gamma")
+        with self.assertRaises(ValidationError):
+            pensieve.allow_many_tasks(self.conn, "fleet")
+        self.assertEqual(self.count("many_task_desks"), 1)
+
+    def test_list_tasks_open_filter(self):
+        queued = self.task("beta")
+        active = self.started("beta")
+        waiting = pensieve.mark_awaiting_close(self.conn, self.started("beta")["id"])
+        closed = self.task("beta")
+        pensieve.close_task(self.conn, closed["id"], "abandoned", now=NOW)
+        self.assertEqual([task["id"] for task in pensieve.list_tasks(self.conn, desk="beta", open_only=True)],
+                         [queued["id"], active["id"], waiting["id"]])
+        with self.assertRaises(ValidationError):
+            pensieve.list_tasks(self.conn, desk="beta", status="active", open_only=True)
+
+
 class StartRaceTests(StoreCase):
     def test_two_processes_racing_start_task_exactly_one_succeeds(self):
         context = multiprocessing.get_context("spawn")
@@ -361,6 +429,24 @@ class StartRaceTests(StoreCase):
             self.assertEqual(len(active), 1)
             winner = next(value for kind, value in outcomes if kind == "ok")
             self.assertEqual(active[0]["id"], winner)
+
+    def test_two_processes_racing_on_a_many_task_desk_both_succeed(self):
+        context = multiprocessing.get_context("spawn")
+        self.desk("racer", "codex")
+        pensieve.allow_many_tasks(self.conn, "racer", now=NOW)
+        first, second = self.task("racer")["id"], self.task("racer")["id"]
+        barrier = context.Barrier(2)
+        results = context.Queue()
+        workers = [context.Process(target=_race_worker, args=(str(self.db_path), task_id, barrier, results))
+                   for task_id in (first, second)]
+        for worker in workers:
+            worker.start()
+        outcomes = sorted(results.get(timeout=60) for _ in workers)
+        for worker in workers:
+            worker.join(timeout=60)
+            self.assertEqual(worker.exitcode, 0)
+        self.assertEqual(outcomes, sorted([("ok", first), ("ok", second)]))
+        self.assertEqual(len(pensieve.list_tasks(self.conn, desk="racer", status="active")), 2)
 
 
 if __name__ == "__main__":

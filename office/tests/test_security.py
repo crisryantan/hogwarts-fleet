@@ -376,6 +376,7 @@ class InputSecurityTests(StoreCase):
         "max_rounds": 3, "review_locked": False,
         "need": "workhorse", "line": "workhorse", "effort": None, "value": "model-x", "ok": True, "change_id": None,
         "claude_ids_only": False, "blocked": (), "default_model": None, "retiring_within": DAY,
+        "running_window": 3600,
     }
     OVERRIDES = {
         ("record_review", "verdict"): "CHANGES", ("record_round_verdict", "verdict"): "CHANGES",
@@ -626,6 +627,7 @@ class TransactionCoverageTests(unittest.TestCase):
     def run_every_write(self, conn) -> None:
         for name, family in (("alpha", "claude"), ("beta", "codex"), ("ryan", "human")):
             pensieve.add_desk(conn, name, family, now=NOW)
+        pensieve.allow_many_tasks(conn, "beta", now=NOW)
         task = pensieve.start_task(conn, pensieve.create_task(conn, "alpha", "build", now=NOW)["id"], now=NOW)["id"]
         pensieve.record_commit(conn, task, REPO, SHA, now=NOW)
         capacity.open_review_round(conn, task, "beta", SHA, "review one", now=NOW)

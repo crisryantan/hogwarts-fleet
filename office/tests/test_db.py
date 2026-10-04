@@ -184,6 +184,63 @@ class MigrationTests(StoreCase):
             self.conn.execute("INSERT INTO desks(name, family, created_at) VALUES ('alpha', 'claude', 'now')")
 
 
+class MigrationV7Tests(unittest.TestCase):
+    def v6_database(self):
+        path = temp_dir(self) / "state" / "pensieve.db"
+        with mock.patch.object(db, "MIGRATIONS", db.MIGRATIONS[:6]), mock.patch.object(db, "SCHEMA_VERSION", 6):
+            conn = db.connect(path)
+            # Raw rows: the task API reads the V7 grant table, which a V6 store does not have yet.
+            for index, (name, family) in enumerate((("harry", "codex"), ("mcgonagall", "claude"), ("moody", "codex"))):
+                conn.execute("INSERT INTO desks(name, family, created_at) VALUES (?, ?, ?)", (name, family, NOW))
+                conn.execute("INSERT INTO tasks(id, desk, title, status, created_at) VALUES (?, ?, 'work', 'queued', ?)",
+                             (f"tk_000000000000000{index}", name, NOW))
+                conn.execute("UPDATE tasks SET status = 'active', started_at = ? WHERE desk = ?", (NOW, name))
+            index_sql = conn.execute("SELECT name FROM sqlite_master WHERE name = 'tasks_one_active_per_desk'")
+            self.assertIsNotNone(index_sql.fetchone())
+            conn.close()
+        conn = db.connect(path)
+        self.addCleanup(conn.close)
+        return conn
+
+    def test_a_v6_database_migrates_to_7_and_grants_only_the_seed_desks_it_has(self):
+        conn = self.v6_database()
+        self.assertEqual((db.SCHEMA_VERSION, db.schema_version(conn)), (7, 7))
+        granted = [row[0] for row in conn.execute("SELECT desk FROM many_task_desks ORDER BY desk")]
+        self.assertEqual(granted, ["harry", "moody"])
+        self.assertTrue(set(granted) <= set(db.MANY_TASK_DESKS_SEED))
+        self.assertIsNone(conn.execute("SELECT name FROM sqlite_master WHERE name = 'tasks_one_active_per_desk'")
+                          .fetchone())
+        self.assertEqual([(row[0], row[1]) for row in conn.execute("SELECT desk, status FROM tasks ORDER BY id")],
+                         [("harry", "active"), ("mcgonagall", "active"), ("moody", "active")])
+        second = pensieve.create_task(conn, "harry", "more work", now=NOW)
+        self.assertEqual(pensieve.start_task(conn, second["id"], now=NOW)["status"], "active")
+        third = pensieve.create_task(conn, "mcgonagall", "more work", now=NOW)
+        with self.assertRaises(ConflictError):
+            pensieve.start_task(conn, third["id"], now=NOW)
+        changes = conn.total_changes
+        self.assertEqual(db.migrate(conn), 7)
+        self.assertEqual(conn.total_changes, changes)
+
+    def test_a_fresh_database_grants_no_desk(self):
+        conn = db.connect(temp_dir(self) / "state" / "pensieve.db")
+        self.addCleanup(conn.close)
+        self.assertEqual(conn.execute("SELECT COUNT(*) FROM many_task_desks").fetchone()[0], 0)
+
+    def test_a_launch_keeps_its_task(self):
+        conn = self.v6_database()
+        conn.execute("INSERT INTO run_launches(run_id, desk, model, launched_at, task_id)"
+                     " VALUES ('run-1', 'harry', 'm', 1, 'tk_0000000000000000')")
+        for value in ("tk_0000000000000002", None):
+            with self.subTest(value=value), self.assertRaisesRegex(sqlite3.IntegrityError, "keeps its task"):
+                conn.execute("UPDATE run_launches SET task_id = ? WHERE run_id = 'run-1'", (value,))
+        conn.execute("INSERT INTO run_launches(run_id, desk, model, launched_at) VALUES ('run-2', 'harry', 'm', 1)")
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "keeps its task"):
+            conn.execute("UPDATE run_launches SET task_id = 'tk_0000000000000000' WHERE run_id = 'run-2'")
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "a task of its own desk"):
+            conn.execute("INSERT INTO run_launches(run_id, desk, model, launched_at, task_id)"
+                         " VALUES ('run-3', 'harry', 'm', 1, 'tk_0000000000000002')")
+
+
 class TransactionTests(StoreCase):
     def test_transaction_rolls_back_on_error(self):
         with self.assertRaises(RuntimeError):

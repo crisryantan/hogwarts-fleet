@@ -5,7 +5,8 @@ Ryan makes with castle desk cap, one row each time a cap refuses a run or a vend
 one launch row per headless run, and one row per review request.
 
 A run counts toward the daily run cap from its launch row, written before its process starts, so a run
-that is killed, crashes or is interrupted before it records usage still counts. Its usage and cost go on
+that is killed, crashes or is interrupted before it records usage still counts. The row names the desk's own
+task the run is for, so in_flight can tell which of a desk's many tasks has a run going. Its usage and cost go on
 a metrics row tied to that launch when it ends, and the spend cap reads the recorded cost.
 
 A newer commit supersedes a review that is still waiting, and a round past the cap waits for Ryan's
@@ -33,7 +34,8 @@ RUN_CAP_MAX = 100000
 MAX_ROUNDS_LIMIT = 100
 
 _ROUND_ROWS = """SELECT review_rounds.*, requests.phase AS request_phase, requests.outcome AS request_outcome,
-       tasks.status AS reviewer_task_status, review_rounds.review_id IS NOT NULL AS has_verdict,
+       requests.task_id AS reviewer_task_id, tasks.status AS reviewer_task_status,
+       review_rounds.review_id IS NOT NULL AS has_verdict,
        review_passes.verdict AS verdict
    FROM review_rounds JOIN requests ON requests.id = review_rounds.request_id
    LEFT JOIN tasks ON tasks.id = requests.task_id
@@ -216,18 +218,23 @@ def list_cap_hits(conn: Conn, desk: Optional[str] = None, since: int = 0) -> lis
 # Run launches
 
 
-def record_launch(conn: Conn, desk: str, run_id: str, model: str, now: Optional[int] = None) -> dict:
-    """A headless run about to start. It counts toward the desk's daily run cap from now, however it ends."""
+def record_launch(conn: Conn, desk: str, run_id: str, model: str, task_id: Optional[str] = None,
+                  now: Optional[int] = None) -> dict:
+    """A headless run about to start. It counts toward the desk's daily run cap from now, however it ends.
+    task_id is the desk's own task the run is for, when it has one, and never changes."""
     desk = ids.check("desk", desk)
     run_id = ids.check("label", run_id, "run id")
     model = ids.check("label", model, "model")
+    task_id = ids.optional("task", task_id)
     ts = ids.stamp(now)
     with db.transaction(conn):
         pensieve.get_desk(conn, desk)
+        if task_id is not None and pensieve.get_task(conn, task_id)["desk"] != desk:
+            raise ConflictError("a run launch names a task of its own desk")
         if db.fetch_one(conn, "SELECT run_id FROM run_launches WHERE run_id = ?", (run_id,)) is not None:
             raise ConflictError("that run was already launched")
-        conn.execute("INSERT INTO run_launches(run_id, desk, model, launched_at) VALUES (?, ?, ?, ?)",
-                     (run_id, desk, model, ts))
+        conn.execute("INSERT INTO run_launches(run_id, desk, model, launched_at, task_id) VALUES (?, ?, ?, ?, ?)",
+                     (run_id, desk, model, ts, task_id))
     return db.fetch_one(conn, "SELECT * FROM run_launches WHERE run_id = ?", (run_id,))
 
 
@@ -319,7 +326,8 @@ def review_rounds(conn: Conn, task_id: str) -> list[dict]:
 def stranded_rounds(conn: Conn, reviewer_desk: str) -> list[dict]:
     """Review rounds addressed to reviewer_desk whose reviewer task is still active. A review holds the
     reviewer's desk lock until its reviewer task is closed, so whoever holds that lock and finds one here
-    has found a task left by a review that died."""
+    has found a task left by a review that died. Only review-round tasks are listed: the reviewer's other
+    active tasks are not stranded, since the desk may hold many."""
     reviewer_desk = pensieve.get_desk(conn, ids.check("desk", reviewer_desk, "reviewer desk"))["name"]
     rows = db.fetch_all(
         conn,
@@ -452,3 +460,98 @@ def record_round_verdict(conn: Conn, request_id: str, repo: str, verdict: str, r
         conn.execute("UPDATE review_rounds SET review_id = ? WHERE request_id = ? AND review_id IS NULL",
                      (review["id"], request_id))
     return review
+
+
+# What is in flight
+
+
+# The order Ryan reads tasks in: what needs him first, oldest first within a state.
+FLIGHT_STATES = ("awaiting close", "HEADMASTER", "round cap", "CHANGES", "review queued", "in review", "running",
+                 "working")
+NEEDS_RYAN = ("awaiting close", "HEADMASTER", "round cap", "CHANGES")
+
+
+def review_task_ids(conn: Conn) -> set:
+    """The ids of every reviewer task a review round opened."""
+    rows = db.fetch_all(conn, "SELECT requests.task_id FROM review_rounds JOIN requests"
+                              " ON requests.id = review_rounds.request_id WHERE requests.task_id IS NOT NULL")
+    return {row["task_id"] for row in rows}
+
+
+# A launch with no usage yet, recent enough to still be running, for the task or one of its rounds' reviewers.
+_RUNNING = """SELECT 1 AS found FROM run_launches WHERE metric_id IS NULL AND launched_at > ? AND (task_id = ?
+       OR task_id IN (SELECT requests.task_id FROM review_rounds JOIN requests ON requests.id = review_rounds.request_id
+                      WHERE review_rounds.task_id = ?))"""
+
+
+def _running(conn: Conn, task_id: str, since: int) -> bool:
+    return db.fetch_one(conn, _RUNNING, (since, task_id, task_id)) is not None
+
+
+def _flight_state(task: dict, latest: Optional[dict], running: bool, needs_allowance: bool) -> str:
+    if task["status"] == "awaiting_close":
+        return "awaiting close"
+    if latest is not None and latest["waiting"]:
+        return "review queued"
+    if latest is not None and not latest["has_verdict"]:
+        return "in review"
+    if latest is not None and latest["verdict"] == "HEADMASTER":
+        return "HEADMASTER"
+    if latest is not None and latest["verdict"] == "CHANGES" and not running:
+        return "round cap" if needs_allowance else "CHANGES"
+    return "running" if running else "working"
+
+
+def _flight_row(conn: Conn, task: dict, since: int, max_rounds: int) -> dict:
+    rows = review_rounds(conn, task["id"])
+    # A round whose run ended without a verdict neither counts nor says where the task stands.
+    live = [row for row in rows if row["superseded_by"] is None and (row["counts"] or row["waiting"])]
+    latest = live[-1] if live else None
+    holding = [row for row in rows if row["counts"]]
+    needs_allowance = len(holding) >= max_rounds and not _unused_allowances(conn, task["id"], holding)
+    running = _running(conn, task["id"], since)
+    return {
+        "id": task["id"], "desk": task["desk"], "title": task["title"], "status": task["status"],
+        "created_at": task["created_at"], "worktree": task["worktree"], "request_id": task["request_id"],
+        "round": None if latest is None else latest["round"],
+        "verdict": None if latest is None else latest["verdict"],
+        "waiting": bool(latest is not None and latest["waiting"]),
+        "rounds_used": len(holding), "max_rounds": max_rounds, "needs_allowance": needs_allowance,
+        "running": running, "state": _flight_state(task, latest, running, needs_allowance),
+    }
+
+
+def in_flight(conn: Conn, now: Optional[int] = None, running_window: int = 3600, desk: Optional[str] = None,
+              max_rounds: int = 3) -> dict:
+    """Every active or awaiting-close author task, grouped by desk, with where it stands.
+
+    A reviewer's round task is folded into its author task and never listed alone. running means a launch
+    for the task, or for one of its rounds' reviewer tasks, has no usage yet and started within
+    running_window: a run killed before it recorded usage stops counting as running once the window passes.
+    Read from launch rows only, never by probing a lock, so reading it never makes a review queue.
+    """
+    ts = ids.stamp(now)
+    running_window = ids.check_int(running_window, "running window", minimum=1, maximum=7 * DAY)
+    desk = ids.optional("desk", desk)
+    max_rounds = ids.check_int(max_rounds, "max rounds", minimum=1, maximum=MAX_ROUNDS_LIMIT)
+    with db.snapshot(conn):
+        if desk is not None:
+            pensieve.get_desk(conn, desk)
+        reviews = review_task_ids(conn)
+        tasks = [task for task in db.fetch_all(
+            conn, "SELECT * FROM tasks WHERE status IN ('active', 'awaiting_close') AND (? IS NULL OR desk = ?)"
+                  " ORDER BY created_at, rowid", (desk, desk)) if task["id"] not in reviews]
+        rows = [_flight_row(conn, task, ts - running_window, max_rounds) for task in tasks]
+    desks: dict = {}
+    for row in rows:
+        desks.setdefault(row["desk"], []).append(row)
+    grouped = []
+    for name in sorted(desks):
+        states: dict = {}
+        for row in desks[name]:
+            states[row["state"]] = states.get(row["state"], 0) + 1
+        grouped.append({"desk": name, "count": len(desks[name]),
+                        "running": sum(1 for row in desks[name] if row["running"]),
+                        "states": {state: states[state] for state in FLIGHT_STATES if state in states},
+                        "tasks": desks[name]})
+    return {"now": ts, "tasks": len(rows), "desks": grouped}

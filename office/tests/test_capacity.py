@@ -499,6 +499,101 @@ class RoundVerdictTests(RoundCase):
                               (self.author, SHAS[1], other_review))
 
 
+class ManyTaskCapacityTests(RoundCase):
+    WINDOW = 1800
+
+    def setUp(self):
+        super().setUp()
+        pensieve.allow_many_tasks(self.conn, "alpha", now=NOW)
+        pensieve.allow_many_tasks(self.conn, "beta", now=NOW)
+
+    def flight(self, now: int = NOW) -> dict:
+        found = capacity.in_flight(self.conn, now, self.WINDOW)
+        return {task["id"]: task for row in found["desks"] for task in row["tasks"]}
+
+    def test_a_launch_names_a_task_of_its_own_desk_only(self):
+        other = self.started("beta")["id"]
+        with self.assertRaisesRegex(ConflictError, "a task of its own desk"):
+            capacity.record_launch(self.conn, "alpha", "run-1", "model-x", task_id=other, now=NOW)
+        with self.assertRaises(NotFoundError):
+            capacity.record_launch(self.conn, "alpha", "run-1", "model-x", task_id="tk_00000000000000ff", now=NOW)
+        launch = capacity.record_launch(self.conn, "alpha", "run-1", "model-x", task_id=self.author, now=NOW)
+        self.assertEqual(launch["task_id"], self.author)
+        self.assertIsNone(capacity.record_launch(self.conn, "alpha", "run-2", "model-x", now=NOW)["task_id"])
+
+    def test_each_state_is_labelled(self):
+        states = {}
+        states["working"] = self.author
+        running = self.started("alpha")["id"]
+        capacity.record_launch(self.conn, "alpha", "run-going", "model-x", task_id=running, now=NOW - 60)
+        states["running"] = running
+        for index, name in enumerate(("review queued", "in review", "CHANGES", "HEADMASTER", "round cap",
+                                      "awaiting close")):
+            self.author = self.started("alpha")["id"]
+            states[name] = self.author
+            shas = [f"{index}{digit}".ljust(40, "a") for digit in range(3)]
+            if name == "awaiting close":
+                pensieve.mark_awaiting_close(self.conn, self.author, now=NOW)
+                continue
+            opened = self.round(shas[0])
+            if name == "review queued":
+                continue
+            if name == "in review":
+                pensieve.start_task(self.conn, opened["task"]["id"], now=NOW)
+                capacity.record_launch(self.conn, "beta", "run-review", "model-y", task_id=opened["task"]["id"],
+                                       now=NOW - 60)
+                continue
+            if name == "round cap":
+                self.run_reviewer(opened)
+                self.run_reviewer(self.round(shas[1]))
+                opened = self.round(shas[2])
+            pensieve.start_task(self.conn, opened["task"]["id"], now=NOW)
+            self.record_verdict(opened, "HEADMASTER" if name == "HEADMASTER" else "CHANGES")
+            pensieve.close_task(self.conn, opened["task"]["id"], "superseded", now=NOW)
+        flight = self.flight()
+        self.assertEqual({name: flight[task_id]["state"] for name, task_id in states.items()},
+                         {name: name for name in states})
+        self.assertEqual(set(states.values()), set(flight))
+        capped = flight[states["round cap"]]
+        self.assertEqual((capped["round"], capped["verdict"], capped["rounds_used"], capped["needs_allowance"]),
+                         (3, "CHANGES", 3, True))
+        self.assertEqual((flight[states["in review"]]["running"], flight[states["in review"]]["round"]), (True, 1))
+        self.assertTrue(flight[states["review queued"]]["waiting"])
+        capacity.allow_round(self.conn, states["round cap"], now=NOW)
+        self.assertEqual(self.flight()[states["round cap"]]["state"], "CHANGES")
+        [row] = capacity.in_flight(self.conn, NOW, self.WINDOW)["desks"]
+        self.assertEqual((row["desk"], row["count"], row["running"]), ("alpha", 8, 2))
+        self.assertEqual(list(row["states"]), [state for state in capacity.FLIGHT_STATES if state in row["states"]])
+
+    def test_a_killed_launch_older_than_the_window_is_not_running(self):
+        capacity.record_launch(self.conn, "alpha", "run-killed", "model-x", task_id=self.author,
+                               now=NOW - self.WINDOW - 1)
+        self.assertEqual((self.flight()[self.author]["running"], self.flight()[self.author]["state"]),
+                         (False, "working"))
+        capacity.record_launch(self.conn, "alpha", "run-ended", "model-x", task_id=self.author, now=NOW - 5)
+        self.assertTrue(self.flight()[self.author]["running"])
+        capacity.record_launch_usage(self.conn, "run-ended", 1, 1, 0, 0.1, 10, now=NOW)
+        self.assertFalse(self.flight()[self.author]["running"])
+
+    def test_review_round_tasks_fold_into_their_author_task(self):
+        opened = self.round(SHAS[0])
+        pensieve.start_task(self.conn, opened["task"]["id"], now=NOW)
+        found = capacity.in_flight(self.conn, NOW, self.WINDOW)
+        self.assertEqual([(row["desk"], [task["id"] for task in row["tasks"]]) for row in found["desks"]],
+                         [("alpha", [self.author])])
+        self.assertEqual(capacity.in_flight(self.conn, NOW, self.WINDOW, desk="beta")["tasks"], 0)
+        self.assertEqual(capacity.review_task_ids(self.conn), {opened["task"]["id"]})
+
+    def test_stranded_rounds_ignore_a_reviewers_other_active_tasks(self):
+        own = self.started("beta")["id"]
+        running = self.round(SHAS[0])
+        pensieve.start_task(self.conn, running["task"]["id"], now=NOW)
+        self.assertEqual([row["reviewer_task_id"] for row in capacity.stranded_rounds(self.conn, "beta")],
+                         [running["task"]["id"]])
+        self.assertEqual(len(pensieve.list_tasks(self.conn, desk="beta", status="active")), 2)
+        self.assertNotIn(own, [row["reviewer_task_id"] for row in capacity.stranded_rounds(self.conn, "beta")])
+
+
 class MigrationV4Tests(StoreCase):
     def test_a_v3_database_gains_the_capacity_tables(self):
         path = temp_dir(self) / "state" / "pensieve.db"

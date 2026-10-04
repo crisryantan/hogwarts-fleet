@@ -259,6 +259,12 @@ def _retiring_window() -> int:
     return fleet_config.RETIRING_SOON_SECONDS
 
 
+def _task_board(conn: sqlite3.Connection, args: argparse.Namespace) -> dict:
+    """Every active or awaiting-close author task by desk: its round, verdict and whether a run is going."""
+    caps = _fleet_caps()
+    return capacity.in_flight(conn, _clock(), caps.RUNNING_WINDOW_SECONDS, args.desk, caps.REVIEW_ROUND_CAP)
+
+
 def _desk_model(conn: sqlite3.Connection, args: argparse.Namespace) -> dict:
     if args.approve:
         return wands.approve(conn, args.desk, blocked=_blocked_models(), retiring_within=_retiring_window())
@@ -278,6 +284,7 @@ HANDLERS: dict[str, Callable] = {
     "desk caps": _desk_caps,
     "desk model": _desk_model,
     "desk models": lambda c, a: wands.list_desk_models(c),
+    "desk many-tasks": lambda c, a: pensieve.allow_many_tasks(c, a.desk),
     "model line": lambda c, a: wands.classify(c, a.name, a.line, blocked=_blocked_models()),
     "task create": lambda c, a: pensieve.create_task(
         c, a.desk, a.title, a.intent_path, a.parent, a.request, a.session, a.worktree, a.id),
@@ -287,7 +294,8 @@ HANDLERS: dict[str, Callable] = {
     "task worktree": lambda c, a: pensieve.set_worktree(c, a.task, a.path),
     "task close": lambda c, a: pensieve.close_task(c, a.task, a.reason, _token(a)),
     "task show": lambda c, a: pensieve.get_task(c, a.task),
-    "task list": lambda c, a: pensieve.list_tasks(c, a.desk, a.status),
+    "task list": lambda c, a: pensieve.list_tasks(c, a.desk, a.status, a.open),
+    "task board": _task_board,
     "task allow-round": lambda c, a: capacity.allow_round(c, a.task, _clock()),
     "task rounds": lambda c, a: capacity.review_rounds(c, a.task),
     "token mint": lambda c, a: owlery.mint(c, a.task, "cli", a.ttl),
@@ -385,6 +393,7 @@ def _desk_parsers(commands: argparse._SubParsersAction) -> None:
     amount.add_argument("--runs", type=_plus_whole)
     amount.add_argument("--spend", type=_plus_amount)
     _sub(group, "caps", "desk caps")
+    _sub(group, "many-tasks", "desk many-tasks").add_argument("desk")
     _desk_model_parsers(group)
 
 
@@ -435,7 +444,10 @@ def _task_parsers(commands: argparse._SubParsersAction) -> None:
     close.add_argument("--token-stdin", action="store_true")
     listing = _sub(group, "list", "task list")
     listing.add_argument("--desk")
-    listing.add_argument("--status")
+    which = listing.add_mutually_exclusive_group()
+    which.add_argument("--status")
+    which.add_argument("--open", action="store_true", help="queued, active or awaiting close")
+    _sub(group, "board", "task board").add_argument("--desk")
 
 
 def _token_parsers(commands: argparse._SubParsersAction) -> None:
