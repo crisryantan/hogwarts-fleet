@@ -23,7 +23,7 @@ From McGonagall to the whole fleet. Part 1 works as soon as onboarding stage 4 p
 2. **Code tab: open McGonagall.** Start a new session and pick the `hogwarts` folder in your home folder (no dot). Say yes when it asks whether you trust the folder. Then send: "What's in flight, and is anything waiting on me?" Done when she answers as McGonagall with a short digest. If she doesn't, type `/agents` and pick mcgonagall, or use the Terminal instead: `cd ~/hogwarts && claude --agent mcgonagall`.
 3. **Code tab: give her one real ask.** Ask for work that changes code, in your own words. Claude asks before she writes `tasks/<id>/TASK.md`; allow it, read it, fix anything wrong, then reply "go". She hands you one `castle task create` command. A data question is different. It gets no TASK.md and no command. She hands you a prompt for Snape instead, and you run it as in step 7.
 4. **Terminal: register the task.** Paste the command she gave you, then check it's there with `~/.hogwarts/bin/castle task list`.
-5. **Both: do the work.** Until Harry is switched on, you do the work in your usual Claude session in that repo. Mark the task started first:
+5. **Both: do the work.** Until Harry is switched on, you do the work in your usual Claude session in that repo. Mark the task started first. McGonagall keeps one active task at a time, so mark the last one ready to close before you start the next:
 
    ```
    ~/.hogwarts/bin/castle task start <task-id>
@@ -119,7 +119,7 @@ Four programs, and only one you need every day. Three of them live in the termin
 You don't need to remember which desk does what. Start every piece of work with McGonagall, and she writes it up and sends it to the right desk.
 
 1. **Open her session.** In the Claude desktop app, open the Code tab, start a new session and pick the `hogwarts` folder in your home folder. Or in Terminal, type `cd ~/hogwarts` and then `claude`. The folder's settings make McGonagall the default.
-2. **Read her digest.** Her first message lists what's in flight, anything waiting on you, and queued work. On a fresh install it's short.
+2. **Read her digest.** Her first message lists what's in flight, one line per desk and then the tasks that need you first, the notes waiting on you, and queued work. On a fresh install it's short.
 3. **Ask in your own words.** For example: "Add a unit test for the retry path when the cache is empty, in my web-app repo." Small questions she answers directly.
 4. **Check her ticket.** For real work she writes `tasks/<id>/TASK.md`: your words under Intent, numbered acceptance criteria with the check for each, and what's out of scope. Claude asks you before she writes it. Fix anything that's wrong, then reply "go". She hands you one `castle task create` command to register it. Run that in Terminal. A data question skips all of this: she hands you a prompt to run with Snape in another session.
 5. **Let it move.** She posts the work to the right desk through her outbox, and Claude asks you before each post. The Owl Post delivers it. You'll see rows for anything that needs you at the start of your next message to her.
@@ -245,13 +245,13 @@ The day resets at local midnight on your Mac, daylight saving included. A run co
 - **The warning.** A desk that reaches 80% of a cap sends one note for that cap that day.
 - **The cap event.** At the cap, the desk's next run doesn't start and its request keeps waiting. You get one note that names the cap, how much was used, how many requests are waiting, when it resets and the command that lifts it.
 - **Look and lift.** `castle desk caps` shows today's numbers for every headless desk. McGonagall, Snape and the scripts have no cap, so they don't appear. `castle desk cap <desk> --runs +N` or `--spend +X` raises one cap until the next reset, then it falls back. A bump is at most +500 runs or +$500. `--spend` works only for Hermione, Ron and Dumbledore, because Harry and Moody have no spend cap.
-- **Reviews never wait.** One review of a task runs at a time. Start a second while the first is going and it stops at once with "a review of this task is already running; run it again when it ends", without touching anything. If the reviewer is busy with another task, or at its cap, the review request is queued and the command says so. Run `fleet review <task-id>` again later, after the reset or a bump if it was the cap. For a task from your own Claude sessions, run `fleet review own --repo-dir <checkout> --task <task-id>` instead. The new review replaces the queued one, so only the newest commit of a task gets reviewed.
+- **Reviews never wait.** One review of a task runs at a time. Start a second while the first is going and it stops at once with "a review of this task is already running; run it again when it ends", without touching anything. If the reviewer is busy, meaning another run holds its desk, or at its cap, the review request is queued and the command says so. A reviewer's other tasks never make it busy. Run `fleet review <task-id>` again later, after the reset or a bump if it was the cap. For a task from your own Claude sessions, run `fleet review own --repo-dir <checkout> --task <task-id>` instead. The new review replaces that task's queued one, never another task's, so only the newest commit of a task gets reviewed.
 - **Three rounds per task.** A task gets three review rounds. Only a round where the reviewer recorded a verdict counts. A crash, a timeout, a cap refusal or a vendor limit doesn't use one up. If a review gets killed partway, its reviewer keeps going until it finishes, and until then that task can't be reviewed again and the reviewer counts as busy. After that the round doesn't count, and the next review that finds that reviewer free cleans up after it. The next round waits for you: `castle task allow-round <task-id>` allows exactly one more, and a queued round doesn't use it up. `castle task rounds <task-id>` lists every round and whether it counts.
 - **Which limit hit.** The note says whether it was the fleet's cap or the vendor's own limit: `cap_source fleet`, or `claude_plan` or `codex_plan` when your Claude or Codex plan's own usage or rate limit stopped the run. A bump can't lift a plan limit. It clears on the vendor's own reset.
 
 ## Watch live, run short
 
-Desks run short. A headless desk takes one owl, does the job and exits, one run at a time, so there's no long session to sit inside. You can still watch every desk work, without typing into anything.
+Desks run short. A headless desk takes one owl, does the job and exits, one run at a time, so there's no long session to sit inside. A desk can still have many tasks in flight. Harry, Hermione, Moody, Ron and your own sessions keep each task open until its review passes, and a task waiting for fixes blocks nothing. `castle task board` shows every open task by desk: its round, its verdict and whether a run is going. Hermione and Ron keep one pad per task in `~/hogwarts/desks/<desk>/pads/`, so two tasks never write over each other's notes. You can still watch every desk work, without typing into anything.
 
 - `fleet feed --desk <name>` follows one desk. Use the desk's registry name. Dumbledore's is `portrait`, and a name that matches no desk just shows nothing. `fleet feed --desk owl-post` follows every owl.
 - `fleet feed --all` follows every desk at once.
@@ -300,12 +300,14 @@ Everything `castle` prints is JSON. If you added the shortcut in one-time setup,
 | --- | --- |
 | `castle task list` | See every task and its status |
 | `castle task list --desk harry` | See one desk's tasks |
+| `castle task list --open` | See every task that is queued, active or awaiting close |
+| `castle task board` | See each desk's tasks in flight: round, verdict, and whether a run is going |
 | `castle event drain` | See what needs you |
 | `castle event ack <id>` | Clear a row once you've dealt with it |
 | `castle request list --open` | See requests between desks still in flight |
 | `castle audit` | Find stuck requests and unanswered owls |
 | `castle fact current` | See what the fleet currently believes |
-| `castle desk list` | See every desk and its job |
+| `castle desk list` | See every desk, its job and whether it takes many tasks |
 | `castle desk caps` | See today's runs and spend against each desk's caps |
 | `castle desk cap <desk> --runs +N` | Lift a desk's run cap until the next reset |
 | `castle desk cap <desk> --spend +X` | Lift a desk's spend cap until the next reset |
@@ -380,7 +382,7 @@ Six things only you do.
 | McGonagall doesn't introduce herself | Make sure the session's folder is `~/hogwarts`. Her settings only apply there. |
 | The Tempus warning appears | Ask for a Checkpoint, then start a fresh session. She picks up from the digest. |
 | "Mischief managed" says it could not confirm | Close the task from your terminal: `castle token mint <task-id>`, then `castle task close <task-id> --reason complete --token-stdin` and paste the token. |
-| `castle` exits with code 3 | The database was busy or a rule refused the change, such as a second active task for one desk. Read the JSON message. |
+| `castle` exits with code 3 | The database was busy or a rule refused the change, such as a second active task for McGonagall, who takes one at a time. Read the JSON message. |
 | `castle doctor` exits with code 5 | Something about permissions or the database looks unsafe. The JSON says what. Don't loosen permissions to make it pass. |
 
 ## Uninstall

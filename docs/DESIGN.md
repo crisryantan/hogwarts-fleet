@@ -4,7 +4,7 @@ Seven single-purpose agents, named after the Harry Potter characters who fit eac
 
 ## The short version
 
-- **One desk, one job.** Seven agents, each with one role and one task at a time. A single-threaded agent is easier to reason about than one juggling three conversations.
+- **One desk, one job.** Seven agents, each with one role. A desk runs one model process at a time, so each run is short and single-threaded. Harry, Hermione, Moody, Ron and your own sessions can each keep many tasks in flight between runs, so a task waiting for fixes never blocks another. McGonagall, Snape and Dumbledore keep one task at a time.
 - **No agent pushes without a review from the other model family.** When Codex writes code, Claude reviews it. When Claude writes code, including in your own sessions, Codex reviews it. The pass is tied to the exact commit, and a push gate checks for it.
 - **The controls sit where no agent can change them.** The store, review passes, close tokens, hooks and desk settings live in a folder no desk can write and Claude desks can't read. A desk can only post to its own outbox, so it can't pretend to be another desk.
 - **Scripts patrol and models only judge.** Plain scripts check PRs and CI and move messages at zero tokens. A fast model wakes only when something changed. A frontier model is kept for review and the nightly memory pass.
@@ -46,7 +46,7 @@ The Bash sandbox covers shell commands and everything they start. Each desk's sa
 | Desk | Model | Job | Never |
 | --- | --- | --- | --- |
 | McGonagall - Chief of Staff | Claude, frontier tier, interactive | Turns your ask into TASK.md (your words verbatim, numbered acceptance criteria, out of scope), keeps PLAN.md, routes work to one desk at a time, drafts chat replies | Writes or reviews code, sends anything, closes a task |
-| Harry - Senior Engineer | Codex, workhorse tier, workspace-write | One task in its own git worktree: code, a failing-first test for each bug fix, local commits, a handoff note and a PR body draft | Pushes, opens a PR, uses git stash, weakens a test, folds in a second fix |
+| Harry - Senior Engineer | Codex, workhorse tier, workspace-write | Each task in its own git worktree, one run at a time: code, a failing-first test for each bug fix, local commits, a handoff note and a PR body draft | Pushes, opens a PR, uses git stash, weakens a test, folds in a second fix |
 | Hermione - Staff Engineer | Claude, frontier tier, headless | Reviews Codex-written diffs against Intent and evidence. Triages PR review comments and drafts replies | Edits code, approves on GitHub, reviews Claude-written code |
 | Moody - Security Reviewer | Codex, frontier tier, read-only | Reviews Claude-written diffs, including yours, security first | Writes anything, accepts a summary instead of the diff |
 | Ron - Release Engineer | Claude, fast tier, headless | Sorts PR and CI changes as routine or for you, calls reds real, flaky, infra or unsure, writes the morning lineup and weekly scoreboard from script numbers | Retries or unblocks a build, computes a number himself |
@@ -106,7 +106,7 @@ Every headless desk has a daily cap on runs, and the Claude desks a cap on spend
 - A run counts toward the run cap the moment it starts, so one that gets killed or crashes still counts. Spend comes from the cost each run records, so a run killed before it finishes adds nothing to spend.
 - A desk at 80% of a cap sends one warning. At the cap its next run doesn't start, and its request keeps waiting for the reset or for your `castle desk cap`.
 - A cap day resets all at once, so a desk busy on both sides of the reset can use up to two days' cap within hours. If that matters, a rolling 24 hour guard on top would close it, and that's your call.
-- Nothing waits in line. A second review of a task that's already being reviewed stops at once and changes nothing. A review whose reviewer is busy with another task, or at its cap, is queued, and the next review of that task replaces it, so only a task's newest commit gets reviewed. A task gets three review rounds, and only a round where the reviewer recorded a verdict counts. A fourth waits for `castle task allow-round`.
+- Nothing waits in line. A second review of a task that's already being reviewed stops at once and changes nothing. A review whose reviewer is busy, meaning another run holds its desk, or at its cap, is queued, and the next review of that same task replaces it, so only a task's newest commit gets reviewed. Reviews of other tasks never replace it. A task gets three review rounds, and only a round where the reviewer recorded a verdict counts. A fourth waits for `castle task allow-round`.
 - Every stop says which limit it was. The fleet's cap is yours to lift. The Claude or Codex plan's own usage limit isn't, and no bump pretends to lift it.
 
 ## Watching without typing
@@ -118,7 +118,7 @@ The herdr spaces follow from risk 1. Any herdr pane can type into any other pane
 ## Two homes and the memory
 
 - **The office, `~/.hogwarts`.** The store package, `bin/castle`, the database at `state/pensieve.db`, the fleet scripts and hooks, each desk's brief and settings, launchd templates, pending settings snippets and the avatars. No desk can read or write it.
-- **The castle, `~/hogwarts`.** The charter (`CLAUDE.md`), `PLAN.md`, `standing-orders.md`, a folder per desk with `scratchpad.md`, `inbox/` and `outbox/`, `tasks/<id>/` and `worktrees/`. It is a local git repo with no remote.
+- **The castle, `~/hogwarts`.** The charter (`CLAUDE.md`), `PLAN.md`, `standing-orders.md`, a folder per desk with `scratchpad.md`, `inbox/` and `outbox/` (Hermione and Ron also keep one pad per task in `pads/`), `tasks/<id>/` and `worktrees/`. It is a local git repo with no remote.
 - **The Pensieve.** One SQLite file with full-text search. A SessionEnd hook stores a capped extract of each castle session at zero tokens: your prompts and the final replies, never tool output, scrubbed of emails, IPs, tokens and long hashes.
 - **Facts know when they change.** Each fact can carry a subject key, and only one fact per key is current. Replacing a fact closes the old one and keeps its dates. You can ask what was true, or what the fleet believed, on any past date. A fact that looks like PR status, build colour or a rollout percentage is refused unless it carries the command that fetches the live value, or expires within a week.
 - **Budgets.** The charter at about 600 tokens, the fleet memory index at 4KB, scratchpads at 6KB, and the startup digest under 40 lines. Nothing is deleted. Stale facts are closed or archived. Only raw extracts (after 90 days) and owl bodies (after 30) are purged.
@@ -129,7 +129,7 @@ Standard-library Python that runs on the Mac's built-in Python 3.9, with a CLI c
 
 | What it holds | What it guarantees |
 | --- | --- |
-| Desks and tasks | One active task per desk. A closed task never reopens. Closing as complete needs a hashed, single-use, expiring token only you can mint. |
+| Desks and tasks | One active task per desk, except the desks granted many tasks (Harry, Hermione, Moody, Ron and your own sessions), and one per session always. The grant is one way. A closed task never reopens. Closing as complete needs a hashed, single-use, expiring token only you can mint. |
 | Owls | A duplicate send collapses into one. Reading is separate from acknowledging. One answer per question, and a result only from the desk that was asked. |
 | Requests | Phases only move forward. A desk can defer or decline with a reason. |
 | Review passes | A pass counts only for that exact commit, only when it is registered on the author's task, and only when the reviewer's family differs from the author's. |
@@ -167,7 +167,7 @@ The only pre-approvals are the ones you write in `standing-orders.md`.
 | Stage | What | Done when |
 | --- | --- | --- |
 | 0 Clean up | Prerequisites, sign-ins, deny rules for your own sessions, idle connectors off | Your own settings reviewed and the office denied to your sessions |
-| 1 The front desk | The castle, the Owl Post, McGonagall, Snape and the hooks | An owl round trip works, a forged sender is refused, a second task for one desk is refused |
+| 1 The front desk | The castle, the Owl Post, McGonagall, Snape and the hooks | An owl round trip works, a forged sender is refused, a second active task for McGonagall is refused |
 | 2 Review loop | Worktree, verify, review and push scripts, the push gate, Harry, Hermione and Moody | Three PRs went out with passes tied to their commits, and the gate blocked a push with no pass |
 | 3 Shadow | The Map and Ron's jobs writing to files only, Hermione's bot pass in draft mode, Gringotts with a restore drill | The morning lineup matched `gh` three days running |
 | 4 Memory loop | The nightly export and the portrait in proposals-only mode, the weekly scoreboard, an RTK number | Two nightly patches reviewed and an RTK go or no-go |
@@ -187,6 +187,8 @@ These are honest gaps in what ships today.
 - **Harry never commits.** A commit in a git worktree writes into the main repo's `.git` folder, and write access there would let a desk plant a hook or config that later runs outside any sandbox. So his profile only reads `.git`, and the review script commits his work for him, pointing git at the repo the office recorded and running no hooks.
 - **Deny rules for Bash match the usual command form only.** They are not a wall around a program. The sandbox stays the real boundary for desks.
 - **The push gate only covers agent pushes.** Pushes you make by hand from a terminal stay yours.
+- **Many tasks still share one desk process.** Runs of one desk wait for each other on its desk lock, so a burst of more than about ten Harry runs can outlast the 31 minute wait, and the late ones give up with their own event. Each desk's Codex work folder and private temp folder are shared by its runs, which is safe only while one process runs per desk.
+- **Two open build tasks never share one TASK.md.** The evidence, the handoff and the reviews are written next to TASK.md, so `fleet worktree` refuses a second open Harry task under the same McGonagall task. The rest rests on the briefs: Hermione's and Ron's outbox body files start with the task id.
 
 ## Where the ideas came from
 
