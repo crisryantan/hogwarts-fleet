@@ -13,7 +13,7 @@ from unittest import mock
 from hogwarts import owlery, pensieve
 from hogwarts.errors import StoreError
 
-from fleet import common, push, review
+from fleet import common, config, push, review
 from fleet.hooks import push_gate
 from fleet.safefs import FleetError
 from tests_fleet.test_review_loop import HANDOFF, ORIGIN, REPO_ID, LoopCase
@@ -168,6 +168,21 @@ class PushScriptTests(GateCase):
         with self.assertRaises(FleetError) as caught:
             push.check(self.conn, task["id"])
         self.assertIn("notes.txt:1 (hermione)", str(caught.exception))
+
+    def test_the_kit_repo_may_carry_fleet_words(self):
+        task, created, _ = self.reviewed()
+        path = Path(created["worktree"])
+        self.write_file(path / "notes.txt", "Hermione said this is fine\n")
+        self.git("add", "notes.txt", cwd=path)
+        self.git("commit", "-q", "-m", "notes for harry", cwd=path)
+        sha = self.git("rev-parse", "HEAD", cwd=path)
+        pensieve.record_commit(self.conn, task["id"], REPO_ID, sha)
+        owlery.open_request(self.conn, "harry", "hermione", "review again", parent_task_id=task["id"])
+        owlery.record_review(self.conn, REPO_ID, sha, task["id"], "hermione", "PASS")
+        with self.assertRaises(FleetError):
+            push.check(self.conn, task["id"])
+        with mock.patch.object(config, "FLEET_WORDS_ALLOWED_REPOS", (REPO_ID,)):
+            self.assertEqual(push.check(self.conn, task["id"])["sha"], sha)
 
     def test_own_session_work_is_pushed_by_hand(self):
         self.enable("moody")

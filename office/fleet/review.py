@@ -85,7 +85,7 @@ def reviewer_output(desk: str, family: str, run_id: str) -> str:
     return result
 
 
-def commit_message(handoff: str) -> tuple:
+def commit_message(handoff: str, check_words: bool = True) -> tuple:
     """(subject, body) from the COMMIT MESSAGE section of a build desk's handoff."""
     lines = handoff.splitlines()
     try:
@@ -106,7 +106,7 @@ def commit_message(handoff: str) -> tuple:
         raise FleetError("the commit subject must be one printable line of at most 100 characters")
     if len(body) > COMMIT_MESSAGE_MAX or "\x00" in body:
         raise FleetError("the commit message body is too long")
-    word = gitops.fleet_words_in(subject + "\n" + body)
+    word = gitops.fleet_words_in(subject + "\n" + body) if check_words else None
     if word:
         raise FleetError(f"the commit message contains a fleet word ({word})")
     return subject, body
@@ -249,7 +249,7 @@ def review_build(conn, task_id: str) -> dict:
     if gitops.dirty(record):
         if handoff is None:
             raise FleetError("the worktree has changes but the desk posted no handoff with a commit message")
-        subject, body = commit_message(handoff)
+        subject, body = commit_message(handoff, check_words=record["repo"] not in config.FLEET_WORDS_ALLOWED_REPOS)
         gitops.git(["add", "-A", "--", ".", *gitops.link_excludes(record)], record["git_dir"], record["path"])
         message = ["-m", subject] + (["-m", body] if body else [])
         gitops.git(["commit", "--no-verify", *message], record["git_dir"], record["path"])
@@ -260,8 +260,12 @@ def review_build(conn, task_id: str) -> dict:
 
 
 def _write_own_task_md(task_id: str, title: str, intent: str) -> str:
-    text = (f"# {task_id} {title}\n\n## Intent\n{intent.strip()}\n\n## Acceptance criteria\n"
-            "None given. The reviewer judges the diff against the Intent.\n\n## Spec\n"
+    """TASK.md for an own-session review. Lines shaped like acceptance criteria go under that heading."""
+    lines = intent.strip().splitlines()
+    criteria = [line.strip() for line in lines if verify.AC_LINE.fullmatch(line.strip())]
+    words = "\n".join(line for line in lines if line.strip() not in criteria).strip() or title
+    checks = "\n".join(criteria) if criteria else "None given. The reviewer judges the diff against the Intent."
+    text = (f"# {task_id} {title}\n\n## Intent\n{words}\n\n## Acceptance criteria\n{checks}\n\n## Spec\n"
             "A commit from one of Ryan's own Claude sessions, reviewed by the other model family.\n")
     with safefs.opened_dir(config.CASTLE_ROOT, "tasks", task_id, create=True) as fd:
         safefs.write_new(fd, "TASK.md", text.encode("utf-8"))
@@ -304,4 +308,6 @@ def review_own(conn, repo_dir: str, title: Optional[str] = None, intent: Optiona
         gitops.git(["checkout", "--detach", sha], record["git_dir"], record["path"])
     if gitops.rev(record) != sha:
         raise FleetError("the review worktree is not at your checkout's HEAD")
-    return run_review(conn, task, record, sha, task["id"], handoff=False)
+    with safefs.opened_dir(config.CASTLE_ROOT, "tasks", task["id"]) as fd:
+        has_handoff = safefs.is_safe_regular(fd, "handoff.md")
+    return run_review(conn, task, record, sha, task["id"], handoff=has_handoff)

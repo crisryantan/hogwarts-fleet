@@ -6,7 +6,10 @@
 - Reads lines shaped "AC-<n> <what must be true> | check: <check>". A check wrapped in backticks is
   a command. Anything else is an observation for the reviewer to judge, recorded as not run.
 - Refuses to run on a worktree with uncommitted changes, so the evidence belongs to one commit.
-- Runs each command with bash in the worktree under `codex sandbox` and a fleet permission profile:
+- Code from Ryan's own sessions is checked the way he would check it himself: plain bash, no Codex
+  sandbox, but still a fixed environment with a throwaway home and temp folder. The fleet's own file
+  layer opens every folder from / down, which a Codex sandbox refuses, so its suites can only pass there.
+- Every other author's code runs with bash in the worktree under `codex sandbox` and a fleet permission profile:
   the worktree writable, the repo's .git readable, a throwaway home and temp folder writable,
   no network, the office denied, nothing else. codex sandbox runs no model and spends no tokens.
   Code a desk wrote therefore never runs with Ryan's own reach, even when he starts the check.
@@ -101,12 +104,14 @@ def _tail(path: str) -> tuple:
     return lines, size
 
 
-def run_check(record: dict, scratch: str, command: str) -> dict:
+def run_check(record: dict, scratch: str, command: str, sandboxed: bool = True) -> dict:
     out_path = f"{scratch}/out-{secrets.token_hex(4)}.log"
     fd = os.open(out_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
     started = time.monotonic()
     try:
-        done = subprocess.run(sandbox_argv(record, scratch, command), cwd=record["path"], env=child_env(scratch, record),
+        argv = sandbox_argv(record, scratch, command) if sandboxed else [
+            config.BASH_BIN, "--noprofile", "--norc", "-c", command]
+        done = subprocess.run(argv, cwd=record["path"], env=child_env(scratch, record),
                               stdin=subprocess.DEVNULL, stdout=fd, stderr=subprocess.STDOUT,
                               timeout=config.VERIFY_TIMEOUT_SECONDS, check=False)
         exit_code = done.returncode
@@ -127,7 +132,8 @@ def _make_scratch() -> str:
     return scratch
 
 
-def render(task_id: str, sha: str, record: dict, md_digest: str, checks: list, results: dict, now: int) -> str:
+def render(task_id: str, sha: str, record: dict, md_digest: str, checks: list, results: dict, now: int,
+           sandboxed: bool = True) -> str:
     when = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now))
     ran = sum(1 for check in checks if check["command"] is not None)
     passed = sum(1 for check in checks if check["command"] is not None and results[check["id"]]["exit_code"] == 0)
@@ -135,7 +141,8 @@ def render(task_id: str, sha: str, record: dict, md_digest: str, checks: list, r
         f"EVIDENCE {task_id} @ {sha}",
         f"TASK.md sha256 {md_digest}",
         f"WORKTREE {record['path']}",
-        f"RAN {when} under codex sandbox: worktree write, repo .git read, no network, no office",
+        (f"RAN {when} under codex sandbox: worktree write, repo .git read, no network, no office" if sandboxed else
+         f"RAN {when} without the Codex sandbox, because Ryan's own session wrote this code; throwaway HOME and TMPDIR"),
         f"SUMMARY {passed} of {ran} commands exited 0, {len(checks) - ran} observations for the reviewer",
         "",
     ]
@@ -184,17 +191,19 @@ def verify(conn, task_id: str, now: Optional[int] = None) -> dict:
     raw = read_task_md(holder_id)
     checks = parse_checks(raw.decode("utf-8", "replace"))
     results = {}
+    sandboxed = task["desk"] != config.OWN_SESSION_DESK
     if any(check["command"] is not None for check in checks):
         scratch = _make_scratch()
         try:
             for check in checks:
                 if check["command"] is not None:
-                    results[check["id"]] = run_check(record, scratch, check["command"])
+                    results[check["id"]] = run_check(record, scratch, check["command"], sandboxed)
         finally:
             shutil.rmtree(scratch, ignore_errors=True)
     if gitops.rev(record) != sha:
         raise FleetError("HEAD moved while the checks ran; run verify again")
-    text = render(task["id"], sha, record, hashlib.sha256(raw).hexdigest(), checks, results, common.now_stamp(now))
+    text = render(task["id"], sha, record, hashlib.sha256(raw).hexdigest(), checks, results, common.now_stamp(now),
+                  sandboxed)
     paths = write_evidence(task["id"], holder_id, sha, text)
     failed = [check["id"] for check in checks if check["command"] is not None and results[check["id"]]["exit_code"] != 0]
     return {"task_id": task["id"], "sha": sha, "checks": len(checks), "failed": failed,
