@@ -429,4 +429,7 @@ class RealRunTests(RunDeskCase):
                     run_desk.require_castle_dir(path)
 
     def test_the_child_environment_is_fixed(self):
-        self.assertEqual(sorted(run_desk.child_env()), ["HOME", "LANG", "PATH", "RTK_DISABLED", "SHELL"])
+        env = run_desk.child_env()
+        self.assertEqual(sorted(env), ["HOME", "LANG", "LOGNAME", "PATH", "RTK_DISABLED", "SHELL", "USER"])
+        self.assertEqual(env["USER"], env["LOGNAME"])
+        self.assertEqual(env["HOME"].rsplit("/", 1)[1], env["USER"])
