@@ -5,7 +5,10 @@ Ryan runs it from his terminal, after the Owl Post says a build task is waiting 
 It refuses rather than guesses:
 - the task must be a queued task of a build desk (Harry) with no worktree yet, and the desk must be free
   to start it: Harry takes many tasks, but no two of his open tasks may share one TASK.md, since the
-  evidence, handoff and reviews are written next to it;
+  evidence, handoff and reviews are written next to it. One worktree command per TASK.md runs at a time:
+  it takes that TASK.md's lock without waiting before it checks, and holds it until the task is active, so
+  a second command for a task under the same TASK.md is refused at once and changes nothing. The last
+  check and the start share one store transaction;
 - the repo must be a main checkout in Ryan's home, outside the office and the castle, with a GitHub origin;
 - the branch must be new, plain and free of fleet words.
 Then it fetches the base (unless --no-fetch), adds ~/hogwarts/worktrees/<task-id> on a new branch,
@@ -19,13 +22,16 @@ Git always runs through gitops, so no hook in the repo runs.
 """
 from __future__ import annotations
 
+import contextlib
 import os
-from typing import Optional
+from typing import Iterator, Optional
 
-from hogwarts import ids, owlery, pensieve
+from hogwarts import db, ids, owlery, pensieve
 
-from fleet import config, gitops, run_desk, toolchain, verify
+from fleet import config, gitops, run_desk, safefs, toolchain, verify
 from fleet.safefs import FleetError
+
+WORKTREE_RUNNING = "another worktree command for a task under this TASK.md is running; run it again when it ends"
 
 
 def _real_worktree(name: str) -> str:
@@ -109,6 +115,20 @@ def _check_startable(conn, task: dict) -> None:
                              f" ({holder}); finish or close it first")
 
 
+@contextlib.contextmanager
+def holder_lock(holder: str) -> Iterator[None]:
+    """One worktree command per TASK.md at a time, taken without waiting before the holder check and held
+    until the task is active. A second command under the same TASK.md is refused at once."""
+    holder = ids.check("task", holder)
+    with contextlib.ExitStack() as stack:
+        locks_fd = stack.enter_context(safefs.opened_dir(config.OFFICE_ROOT, "locks", create=True))
+        try:
+            stack.enter_context(safefs.held_lock(locks_fd, f"worktree-{holder}.lock", blocking=False))
+        except safefs.Busy:
+            raise FleetError(WORKTREE_RUNNING) from None
+        yield
+
+
 def start_desk(conn, task: dict) -> str:
     """Start the desk's run on its request owl, when Ryan has enabled the desk. Returns what happened."""
     owl_id = _request_owl(conn, task)
@@ -126,13 +146,18 @@ def create(conn, task_id: str, repo_dir: str, branch: str, base: str = config.DE
     task = pensieve.get_task(conn, ids.check("task", task_id))
     if task["desk"] not in config.WORKTREE_DESKS:
         raise FleetError("only a build desk's task gets a worktree from this script")
-    if task["status"] != "queued" or task["worktree"] is not None:
-        raise FleetError("the task must be queued and have no worktree yet")
     branch = gitops.check_branch(branch)
-    _check_startable(conn, task)
-    record = add_worktree(conn, task["id"], repo_dir, base, branch, fetch)
-    pensieve.set_worktree(conn, task["id"], _real_worktree(task["id"]))
-    task = pensieve.start_task(conn, task["id"])
+    with holder_lock(_holder(conn, task["id"])):
+        task = pensieve.get_task(conn, task["id"])  # read again under the lock
+        if task["status"] != "queued" or task["worktree"] is not None:
+            raise FleetError("the task must be queued and have no worktree yet")
+        _check_startable(conn, task)
+        record = add_worktree(conn, task["id"], repo_dir, base, branch, fetch)
+        with db.transaction(conn):
+            # BEGIN IMMEDIATE: the check sees every start committed before it, and no start lands in between.
+            _check_startable(conn, task)
+            pensieve.set_worktree(conn, task["id"], _real_worktree(task["id"]))
+            task = pensieve.start_task(conn, task["id"])
     if task["request_id"] is not None:
         owlery.advance(conn, task["request_id"], "claimed", detail="worktree attached")
         owlery.advance(conn, task["request_id"], "running", detail="build desk started")

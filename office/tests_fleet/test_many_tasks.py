@@ -8,8 +8,10 @@ from __future__ import annotations
 
 import json
 import os
+import contextlib
 import re
 import stat
+import threading
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -286,6 +288,72 @@ class BuildDeskTests(ManyCase):
         self.assertFalse(os.path.lexists(config.worktree_dir(second["id"])))
         self.assertEqual(pensieve.get_task(self.conn, second["id"])["status"], "queued")
         self.assertNotIn("fix/other", self.git("branch", "--list", "fix/other"))
+
+    def race(self, first: dict, second: dict) -> dict:
+        """Two worktree commands under one TASK.md, each on its own connection and thread. The first pauses
+        inside add_worktree, after its holder check, while the second runs start to finish. Each outcome is
+        the command's result or its FleetError."""
+        real_add, inside, release, outcomes = worktree.add_worktree, threading.Event(), threading.Event(), {}
+
+        def paused_add(conn, task_id, *args, **kwargs):
+            if task_id == first["id"]:
+                inside.set()
+                release.wait(10)
+            return real_add(conn, task_id, *args, **kwargs)
+
+        def run(task: dict, branch: str) -> None:
+            conn = db.connect(self.db_path)
+            try:
+                outcomes[task["id"]] = worktree.create(conn, task["id"], str(self.repo), branch, fetch=False)
+            except FleetError as exc:
+                outcomes[task["id"]] = exc
+            finally:
+                conn.close()
+
+        with mock.patch.object(worktree, "add_worktree", side_effect=paused_add), mock.patch.object(run_desk, "spawn"):
+            one = threading.Thread(target=run, args=(first, "fix/widget"))
+            one.start()
+            try:
+                self.assertTrue(inside.wait(10))
+                two = threading.Thread(target=run, args=(second, "fix/other"))
+                two.start()
+                two.join(10)
+            finally:
+                release.set()
+                one.join(10)
+        self.assertEqual(set(outcomes), {first["id"], second["id"]})
+        return outcomes
+
+    def harry_active(self) -> list:
+        return [task["id"] for task in pensieve.list_tasks(self.conn, desk="harry", status="active")]
+
+    def test_two_worktree_commands_under_one_task_md_race_and_exactly_one_starts(self):
+        parent = self.queued_parent()
+        first, _ = self.harry_request(parent)
+        second, _ = self.harry_request(parent, subject="build the other half")
+        outcomes = self.race(first, second)
+        self.assertEqual(outcomes[first["id"]]["task_id"], first["id"])
+        self.assertIsInstance(outcomes[second["id"]], FleetError)
+        self.assertEqual(str(outcomes[second["id"]]), worktree.WORKTREE_RUNNING)
+        self.assertEqual(self.harry_active(), [first["id"]])
+        self.assertEqual(pensieve.get_task(self.conn, second["id"])["status"], "queued")
+        self.assertFalse(os.path.lexists(config.worktree_dir(second["id"])))
+        # Run again once the first is active, the second is refused by the holder check instead.
+        with self.assertRaisesRegex(FleetError, f"task {first['id']} of harry is still open under the same TASK.md"):
+            worktree.create(self.conn, second["id"], str(self.repo), "fix/other", fetch=False)
+
+    def test_without_the_lock_the_start_transaction_still_lets_exactly_one_start(self):
+        parent = self.queued_parent()
+        first, _ = self.harry_request(parent)
+        second, _ = self.harry_request(parent, subject="build the other half")
+        with mock.patch.object(worktree, "holder_lock", side_effect=lambda holder: contextlib.nullcontext()):
+            outcomes = self.race(first, second)
+        # Both passed the first check; the second started, and the first's check inside the start refused it.
+        self.assertEqual(outcomes[second["id"]]["task_id"], second["id"])
+        self.assertRegex(str(outcomes[first["id"]]), f"task {second['id']} of harry is still open under the same")
+        self.assertEqual(self.harry_active(), [second["id"]])
+        self.assertEqual(pensieve.get_task(self.conn, first["id"])["status"], "queued")
+        self.assertIsNone(pensieve.get_task(self.conn, first["id"])["worktree"])
 
     def test_a_single_build_desk_refuses_before_any_worktree(self):
         first, _, _ = self.built("fix/widget")
