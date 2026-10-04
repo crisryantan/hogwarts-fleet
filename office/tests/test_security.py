@@ -17,7 +17,7 @@ from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest import mock
 
-from hogwarts import capacity, cli, db, facts, ids, owlery, pensieve
+from hogwarts import capacity, cli, db, facts, ids, owlery, pensieve, wands
 from hogwarts.errors import IntegrityError, ValidationError
 from tests.support import DAY, NOW, REPO, SHA, TEST_TMP_ROOT, StoreCase, temp_dir
 
@@ -374,6 +374,8 @@ class InputSecurityTests(StoreCase):
         "limit_per_fact": 3, "ops": [{"op": "archive", "fact_id": 1}],
         "amount": 1, "run_cap": 3, "spend_cap": None, "reset_offset": 0, "cap": "runs", "cap_source": "fleet",
         "max_rounds": 3, "review_locked": False,
+        "need": "workhorse", "line": "workhorse", "effort": None, "value": "model-x", "ok": True, "change_id": None,
+        "claude_ids_only": False, "blocked": (), "default_model": None, "retiring_within": DAY,
     }
     OVERRIDES = {
         ("record_review", "verdict"): "CHANGES", ("record_round_verdict", "verdict"): "CHANGES",
@@ -381,10 +383,11 @@ class InputSecurityTests(StoreCase):
         ("consume", "token"): "x" * 43, ("add_extract", "role"): "user",
         ("set_worktree", "worktree"): f"{ids.WORKTREES_ROOT}/wt",
         ("add_bump", "kind"): "runs", ("add_bump", "expires_at"): NOW + DAY,
+        ("apply_model", "reason"): "initial",
     }
 
     def targets(self) -> list:
-        found = [function for module in (pensieve, owlery, facts, capacity)
+        found = [function for module in (pensieve, owlery, facts, capacity, wands)
                  for _, function in public_functions(module)]
         found.append(owlery._cascade_task_closed)
         return [function for function in found if self.IDENTIFIERS & set(inspect.signature(function).parameters)]
@@ -633,6 +636,20 @@ class TransactionCoverageTests(unittest.TestCase):
         capacity.record_cap_hit(conn, "alpha", "plan", "claude_plan", run_id="run-1", now=NOW)
         capacity.record_launch(conn, "alpha", "run-launched", "model-x", now=NOW)
         capacity.record_launch_usage(conn, "run-launched", 1, 1, 0, 0.25, 10, now=NOW)
+        wands.classify(conn, "model-x", "workhorse", now=NOW)
+        wands.record_catalog(conn, "claude", [{"name": "sonnet", "visible": True, "line": "workhorse",
+                                               "retires_at": None}], now=NOW)
+        wands.set_need(conn, "alpha", "workhorse", now=NOW)
+        wands.record_agent_file(conn, "beta", "frontier", "gpt-6-astra", "high", now=NOW)
+        switch = wands.apply_model(conn, "alpha", "opus", "high", "frontier", "initial", now=NOW)["change_id"]
+        wands.record_outcome(conn, "alpha", False, switch, now=NOW)
+        wands.set_pending(conn, "alpha", "sonnet", "high", "workhorse", now=NOW)
+        wands.clear_pending(conn, "alpha", now=NOW)
+        wands.set_pending(conn, "alpha", "sonnet", "high", "workhorse", now=NOW)
+        wands.approve(conn, "alpha", now=NOW)
+        wands.pin(conn, "alpha", "claude-opus-5-5", now=NOW)
+        wands.unpin(conn, "alpha", now=NOW)
+        wands.record_resolution(conn, "opus", "claude-opus-5-5", now=NOW)
         pensieve.set_worktree(conn, pensieve.create_task(conn, "beta", "wt", now=NOW)["id"], f"{ids.WORKTREES_ROOT}/wt")
         pensieve.mark_awaiting_close(conn, task, now=NOW)
         owlery.open_request(conn, "alpha", "beta", "child", parent_task_id=task, now=NOW)
@@ -689,7 +706,7 @@ class TransactionCoverageTests(unittest.TestCase):
             self.addCleanup(conn.close)
             self.run_every_write(conn)
         self.assertEqual(outside, [])
-        writers = {(module.__name__.split(".")[-1], name) for module in (pensieve, owlery, facts, capacity)
+        writers = {(module.__name__.split(".")[-1], name) for module in (pensieve, owlery, facts, capacity, wands)
                    for name, function in public_functions(module) if "db.transaction" in inspect.getsource(function)}
         self.assertEqual(writers - called, set())
 

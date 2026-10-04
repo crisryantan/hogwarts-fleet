@@ -1,6 +1,6 @@
 """Review rounds through the review script: one review per task at a time, nothing waits in line, a queued
 review is superseded by the next commit, and a fourth round waits for Ryan's allow-round. Reviewer runs
-are faked at run_desk.run, or at subprocess.run under the real run_desk.run; no reviewer ever runs."""
+are faked at run_desk.run, or at run_desk.start_child under the real run_desk.run; no reviewer ever runs."""
 from __future__ import annotations
 
 import fcntl
@@ -17,6 +17,7 @@ from tests.support import NOW
 
 from fleet import config, review, run_desk, tools
 from fleet.safefs import FleetError
+from tests_fleet.support import fake_children
 from tests_fleet.test_review_loop import LoopCase, REPO_ID
 
 
@@ -354,7 +355,7 @@ class ReviewRoundTests(LoopCase):
 
         task_id = None
         with mock.patch.dict(config.DAILY_RUN_CAP, {"moody": 2}), \
-                mock.patch.object(subprocess, "run", side_effect=interrupted):
+                fake_children(interrupted):
             for _ in range(2):
                 with self.assertRaises(SystemExit) as caught, tools.ended_by_signals():
                     if task_id is None:
@@ -441,6 +442,7 @@ class ReviewRoundTests(LoopCase):
     def test_the_reviewers_process_inherits_the_task_and_desk_locks(self):
         # A review killed mid-run leaves its reviewer running. That process holds both locks, so no review of
         # the task can move its worktree or evidence, and no review can close its reviewer task, until it ends.
+        # It holds the update lock shared too, so no CLI update replaces its binary while it runs.
         self.commit("first try")
         real_run, seen = subprocess.run, {}
 
@@ -449,15 +451,15 @@ class ReviewRoundTests(LoopCase):
                 return real_run(argv, *args, **kwargs)
             [task] = pensieve.list_tasks(self.conn, desk="ryan-claude-1")
             locks = {os.stat(self.office / "locks" / name).st_ino: name
-                     for name in (f"review-{task['id']}.lock", "desk-moody.lock")}
+                     for name in (f"review-{task['id']}.lock", "desk-moody.lock", config.UPDATE_LOCK)}
             seen["inherited"] = sorted(locks.get(os.fstat(fd).st_ino) for fd in kwargs["pass_fds"])
             seen["read_only"] = [fcntl.fcntl(fd, fcntl.F_GETFL) & os.O_ACCMODE == os.O_RDONLY
                                  for fd in kwargs["pass_fds"]]
             return subprocess.CompletedProcess(argv, 1)
 
-        with mock.patch.object(subprocess, "run", side_effect=reviewer):
+        with fake_children(reviewer):
             with self.assertRaisesRegex(FleetError, "did not finish cleanly"):
                 review.review_own(self.conn, str(self.repo), title="my own fix", fetch=False)
         [task] = pensieve.list_tasks(self.conn, desk="ryan-claude-1")
-        self.assertEqual(seen, {"inherited": ["desk-moody.lock", f"review-{task['id']}.lock"],
-                                "read_only": [True, True]})
+        self.assertEqual(seen, {"inherited": sorted(["desk-moody.lock", f"review-{task['id']}.lock", config.UPDATE_LOCK]),
+                                "read_only": [True, True, True]})

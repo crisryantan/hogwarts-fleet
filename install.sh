@@ -205,7 +205,8 @@ add_desk ryan --family human --role "Headmaster"
 add_desk owl-post --family script --role "Owl Post - Message Router"
 add_desk map --family script --role "Marauder's Map - PR Watcher"
 add_desk gringotts --family script --role "Gringotts - Backup"
-say "Created the database and registered 12 desks."
+add_desk ollivander --family script --role "Ollivander - Model Keeper"
+say "Created the database and registered 13 desks."
 
 # --- Tests and health check -------------------------------------------------
 

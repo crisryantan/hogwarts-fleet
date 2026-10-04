@@ -124,7 +124,7 @@ class MigrationV3Tests(unittest.TestCase):
         self.assertEqual(conn.total_changes, changes)
         self.open(path)
         with db.transaction(conn):
-            for statement in db.pending_statements(conn, db.V3 + db.V4):
+            for statement in db.pending_statements(conn, db.V3 + db.V4 + db.V5):
                 conn.execute(statement)
         self.assertEqual(snapshot(conn), before)
         self.assertEqual([row[0] for row in conn.execute("SELECT version FROM schema_version ORDER BY version")],
