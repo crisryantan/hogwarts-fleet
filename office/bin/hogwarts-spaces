@@ -1,0 +1,235 @@
+#!/bin/sh
+# Open the fleet's herdr spaces: one live session each for McGonagall and Snape, and a
+# read-only feed (fleet feed) for every other desk and for the Owl Post.
+#
+# Why only McGonagall and Snape get live sessions: any herdr pane can type into any other
+# pane, so an agent that can run commands never lives in herdr. The other desks keep running
+# short, one owl per run, and their spaces only watch. Two checks hold that boundary:
+#   1. Before a live space opens, fleet/agent_gate.py reads every definition Claude could
+#      load for that agent (Snape's in ~/.claude/agents, McGonagall's in the castle, and any
+#      file in a user or project agents folder that names it or might) and checks the castle
+#      settings still name McGonagall. It refuses the space unless each one has an explicit
+#      tools: list in which every tool, built-in or MCP, is named exactly on the agent's
+#      trusted list (desks/<agent>/live-tools.json in this office, which no desk or agent can
+#      write), and only trusted frontmatter keys, so no hooks or MCP servers. install.sh
+#      keeps an edited ~/.claude/agents/snape.md, so this runs every time rather than
+#      trusting the repo copy.
+#   2. The session starts with --tools naming its few built-in tools, every command-running
+#      tool and Skill denied, and skills turned off, whatever its definition says. Its MCP
+#      tools and frontmatter rest on check 1.
+# A refused space prints FAILED and nothing is created for it. A live session runs the same
+# claude binary as the headless desks, CLAUDE_BIN in fleet/config.py, which install.sh sets.
+#
+# Idempotent: a space whose label already exists is left alone, and the script only ever
+# types into a pane it has just created. Prints OK, SKIP or FAILED per space, and exits 1
+# if any space failed.
+
+set -u
+set -f
+
+HERDR=/Users/crisryantan/.local/bin/herdr
+PYTHON="/usr/bin/env -i /usr/bin/python3 -I -B -X pycache_prefix=/var/empty"
+CASTLE=/Users/crisryantan/hogwarts
+DOCUMENTS=/Users/crisryantan/Documents
+FLEET=/Users/crisryantan/.hogwarts/bin/fleet
+USER_AGENTS=/Users/crisryantan/.claude/agents
+# The only built-in tools each live session gets, whatever its definition says.
+MCGONAGALL_TOOLS="--tools Read,Write,Edit,Glob,Grep,ToolSearch"
+SNAPE_TOOLS="--tools Read,Grep,Glob,ToolSearch"
+# Every live session also starts with these denied and skills off, since a skill can carry hooks.
+NO_SHELL="--disallowedTools Bash,BashOutput,KillShell,KillBash,PowerShell,TaskOutput,TaskStop,NotebookEdit,\
+Monitor,Task,Agent,SendMessage,CronCreate,RemoteTrigger,SlashCommand,Skill --disable-slash-commands"
+# Prints CLAUDE_BIN from fleet/config.py, only when it is a plain absolute path.
+# shellcheck disable=SC2016
+CLAUDE_BIN_OF='
+import re, sys
+sys.path.insert(0, "/Users/crisryantan/.hogwarts")
+from fleet.config import CLAUDE_BIN
+if not isinstance(CLAUDE_BIN, str) or re.fullmatch(r"/[A-Za-z0-9._/-]+", CLAUDE_BIN) is None:
+    sys.exit(1)
+print(CLAUDE_BIN)
+'
+# shellcheck disable=SC2016
+GATE='import sys; sys.path.insert(0, "/Users/crisryantan/.hogwarts"); from fleet.agent_gate import main; sys.exit(main())'
+
+# label|cwd|command|agent, one space per line. Labels never hold a "|". The agent is set only
+# for a live session, and names the definition the gate checks before that space opens.
+spaces() {
+	cat <<EOF
+McGonagall - Chief of Staff|$CASTLE|$CLAUDE --agent mcgonagall $MCGONAGALL_TOOLS $NO_SHELL|mcgonagall
+Snape - Data Analyst|$DOCUMENTS|$CLAUDE --agent snape $SNAPE_TOOLS $NO_SHELL|snape
+Harry - Senior Engineer|$CASTLE|$FLEET feed --desk harry|
+Hermione - Staff Engineer|$CASTLE|$FLEET feed --desk hermione|
+Moody - Security Reviewer|$CASTLE|$FLEET feed --desk moody|
+Ron - Release Engineer|$CASTLE|$FLEET feed --desk ron|
+Dumbledore - Knowledge Manager|$CASTLE|$FLEET feed --desk portrait|
+Owl Post - Message Router|$CASTLE|$FLEET feed --desk owl-post|
+Ollivander - Model Keeper|$CASTLE|$FLEET feed --desk ollivander|
+EOF
+}
+
+# Reads herdr JSON on stdin. "labels" prints each workspace label on its own line. "workspace"
+# and "pane" print the new workspace's id or its first pane's id, and only a plain id.
+# shellcheck disable=SC2016
+PARSE='
+import json, re, sys
+plain = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}")
+try:
+    data = json.load(sys.stdin)["result"]
+    if sys.argv[1] == "labels":
+        found = [" ".join(item["label"].split()) for item in data["workspaces"]
+                 if isinstance(item.get("label"), str)]
+    elif sys.argv[1] == "workspace":
+        found = [data["workspace"]["workspace_id"]]
+    else:
+        found = [data["panes"][0]["pane_id"]]
+except Exception:
+    sys.exit(1)
+if sys.argv[1] != "labels" and (not isinstance(found[0], str) or plain.fullmatch(found[0]) is None):
+    sys.exit(1)
+for value in found:
+    print(value)
+'
+
+usage() {
+	cat <<'EOF'
+Usage: hogwarts-spaces [--dry-run] [--only "<label>"] [--herdr <path>]
+  --dry-run   only list the workspaces and print what would be opened
+  --only      handle just the space with exactly this label
+  --herdr     the herdr binary to call, for tests
+EOF
+}
+
+DRY_RUN=0
+ONLY=""
+ONLY_SET=0
+while [ $# -gt 0 ]; do
+	case $1 in
+	--dry-run) DRY_RUN=1 ;;
+	--only)
+		[ $# -ge 2 ] || {
+			usage >&2
+			exit 2
+		}
+		ONLY=$2
+		ONLY_SET=1
+		shift
+		;;
+	--herdr)
+		[ $# -ge 2 ] || {
+			usage >&2
+			exit 2
+		}
+		HERDR=$2
+		shift
+		;;
+	-h | --help)
+		usage
+		exit 0
+		;;
+	*)
+		usage >&2
+		exit 2
+		;;
+	esac
+	shift
+done
+
+case $HERDR in
+/*) ;;
+*)
+	echo "hogwarts-spaces: --herdr must be an absolute path" >&2
+	exit 2
+	;;
+esac
+if [ ! -x "$HERDR" ]; then
+	echo "FAILED: herdr is not at $HERDR"
+	exit 1
+fi
+# The live sessions' claude, or empty when fleet/config.py does not give a plain one.
+# shellcheck disable=SC2086
+CLAUDE=$($PYTHON -c "$CLAUDE_BIN_OF" 2>/dev/null) || CLAUDE=""
+
+if [ "$ONLY_SET" = 1 ] && ! spaces | cut -d '|' -f 1 | grep -Fxq -- "$ONLY"; then
+	echo "hogwarts-spaces: no space is labelled \"$ONLY\"" >&2
+	exit 2
+fi
+
+# shellcheck disable=SC2086
+parse() { $PYTHON -c "$PARSE" "$1"; }
+
+# Prints nothing and succeeds when the agent may have a live session; otherwise prints why.
+# shellcheck disable=SC2086
+gate() {
+	case $1 in
+	mcgonagall)
+		$PYTHON -c "$GATE" mcgonagall "$CASTLE/.claude/agents/mcgonagall.md" "$CASTLE" "$USER_AGENTS" \
+			"$CASTLE/.claude/settings.json"
+		;;
+	snape) $PYTHON -c "$GATE" snape "$USER_AGENTS/snape.md" "$DOCUMENTS" "$USER_AGENTS" ;;
+	*)
+		echo "no agent check is defined for $1"
+		return 1
+		;;
+	esac
+}
+
+if ! listed=$("$HERDR" workspace list) || ! labels=$(printf '%s' "$listed" | parse labels); then
+	echo "FAILED: could not list the herdr workspaces"
+	exit 1
+fi
+
+# One space: create the workspace, find its pane, start the one fixed command there.
+open_space() {
+	label=$1
+	cwd=$2
+	command=$3
+	if ! made=$("$HERDR" workspace create --label "$label" --cwd "$cwd" --no-focus) ||
+		! workspace=$(printf '%s' "$made" | parse workspace); then
+		echo "FAILED $label: could not create the workspace"
+		return 1
+	fi
+	if ! panes=$("$HERDR" pane list --workspace "$workspace") ||
+		! pane=$(printf '%s' "$panes" | parse pane) ||
+		! "$HERDR" pane run "$pane" "$command" >/dev/null; then
+		echo "FAILED $label: the workspace was made but its command did not start. Close it in herdr and run this again."
+		return 1
+	fi
+	echo "OK $label"
+}
+
+failed=0
+newline='
+'
+default_ifs=$IFS
+IFS=$newline
+for entry in $(spaces); do
+	IFS=$default_ifs  # the list is split by line; everything inside splits as usual
+	label=${entry%%|*}
+	rest=${entry#*|}
+	cwd=${rest%%|*}
+	rest=${rest#*|}
+	command=${rest%%|*}
+	agent=${rest#*|}
+	if [ "$ONLY_SET" = 1 ] && [ "$label" != "$ONLY" ]; then
+		continue
+	fi
+	if printf '%s\n' "$labels" | grep -Fxq -- "$label"; then
+		echo "SKIP $label: already open"
+	elif [ -n "$agent" ] && ! why=$(gate "$agent"); then
+		echo "FAILED $label: refused, ${why:-the agent check did not run}"
+		failed=1
+	elif [ -n "$agent" ] && [ -z "$CLAUDE" ]; then
+		echo "FAILED $label: CLAUDE_BIN in fleet/config.py is not a plain absolute path"
+		failed=1
+	elif [ -n "$agent" ] && [ ! -x "$CLAUDE" ]; then
+		echo "FAILED $label: claude is not at $CLAUDE, the CLAUDE_BIN in fleet/config.py"
+		failed=1
+	elif [ "$DRY_RUN" = 1 ]; then
+		echo "WOULD OPEN $label: $command in $cwd"
+	else
+		open_space "$label" "$cwd" "$command" || failed=1
+	fi
+done
+
+exit "$failed"

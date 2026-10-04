@@ -7,6 +7,7 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator, Optional, Sequence, Union
+from urllib.parse import quote
 
 from .errors import ConflictError, IntegrityError, NotFoundError, StoreError, ValidationError
 
@@ -773,6 +774,32 @@ def connect(path: PathLike, create: bool = True) -> sqlite3.Connection:
     with _closed_on_error(conn, db_path):
         migrate(conn)
         tighten_sidecars(db_path)
+    return conn
+
+
+def connect_readonly(path: PathLike) -> sqlite3.Connection:
+    """Open an existing database for reading only: never created, migrated or chmodded.
+
+    SQLite opens the file with mode=ro and query_only refuses writes on top of that. It still
+    shares the WAL index (-shm) with the writers, which is how a reader sees their commits.
+    """
+    db_path = _absolute(path)
+    if not os.path.lexists(db_path.parent):
+        raise NotFoundError("database directory does not exist, run castle init")
+    _require_safe(db_path.parent, "database directory", want_dir=True)
+    if not os.path.lexists(db_path):
+        raise NotFoundError("database does not exist, run castle init")
+    _require_safe(db_path, "database file", want_dir=False)
+    unsafe = _unsafe_sidecar(db_path)
+    if unsafe is not None:
+        raise unsafe
+    uri = "file:" + quote(str(db_path), safe="/") + "?mode=ro"
+    conn = sqlite3.connect(uri, uri=True, timeout=5.0, isolation_level=None)
+    with _closed_on_error(conn, db_path):
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA busy_timeout=5000")
+        conn.execute("PRAGMA query_only=ON")
+        conn.execute("PRAGMA trusted_schema=OFF")
     return conn
 
 
