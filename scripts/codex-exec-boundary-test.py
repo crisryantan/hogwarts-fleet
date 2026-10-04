@@ -10,7 +10,9 @@ the installed office, and when a kit checkout sits next to it, it compares the t
 differ, the run counts as inconclusive. Either way it prints which code it used. and points it at a throwaway git folder
 holding one small script, probe.sh. Codex is asked only to run `sh probe.sh`. The probes inside it run
 under the sandbox whatever the model thinks of them, and each prints its own exit code and error,
-which this script reads from Codex's event stream.
+which this script reads from Codex's event stream. Results count only when Codex ran exactly one
+command, `sh probe.sh`, and the script is byte for byte unchanged afterwards. The office probe always
+targets the real office the profile denies (config.OFFICE_ROOT), wherever the launcher code came from.
 
 A probe that should be blocked passes only when the sandbox itself refused it ("Operation not
 permitted"). The network probe passes only when the same request succeeds outside the sandbox first,
@@ -20,8 +22,10 @@ inconclusive counts as failed. The script exits 1 unless every probe for both de
 This sends a short prompt and the probes' error messages to OpenAI, and costs a few cents per desk.
 No code, no office file and no secret is sent. The throwaway folders are deleted at the end.
 """
+import hashlib
 import json
 import os
+import shlex
 from pathlib import Path
 import shutil
 import subprocess
@@ -85,7 +89,7 @@ def probes(desk, work, other):
     """(name, label, command, expect) for one desk. expect is allow, refuse or offline."""
     writes = desk in config.CODEX_ACCESS and config.CODEX_ACCESS[desk] == "write"
     rows = [
-        ("office", "cannot list the office", f"ls {OFFICE}", "refuse"),
+        ("office", "cannot list the office", f"ls {config.OFFICE_ROOT}", "refuse"),
         ("other_read", "cannot read a folder it was not given", f"cat {other}/notes.txt", "refuse"),
         ("other_write", "cannot write outside its folders", f"touch {other}/new.txt", "refuse"),
         ("network", "has no network", "curl -sS -m 8 -o /dev/null https://example.com", "offline"),
@@ -96,7 +100,9 @@ def probes(desk, work, other):
         ("tmp_write", "can write /private/tmp" if writes else "cannot write /private/tmp",
          f"touch {TMP_PROBE}-{desk}", "allow" if writes else "refuse"),
     ]
-    if USER_TEMP:
+    if USER_TEMP is None:
+        rows.append(("user_temp", "can find the user temp folder", None, "missing"))
+    else:
         rows.append(("user_temp", "can write the user temp folder" if writes else "cannot write the user temp folder",
                      f"touch {USER_TEMP}/fleet-exec-probe-{PID}-{desk}", "allow" if writes else "refuse"))
     return rows
@@ -104,7 +110,9 @@ def probes(desk, work, other):
 
 def probe_script(rows):
     lines = ["#!/bin/sh"]
-    for name, _, command, _ in rows:
+    for name, _, command, expect in rows:
+        if expect == "missing":
+            continue
         lines.append(f"out=$({command} 2>&1 >/dev/null); printf 'PROBE {name} %s %s\\n' \"$?\" "
                      f"\"$(printf '%s' \"$out\" | head -c 160 | tr '\\n' ' ')\"")
     lines.append("echo PROBES DONE")
@@ -120,6 +128,19 @@ def report(ok, label, detail=""):
     failed += 1
     word = "FAILED      " if ok is False else "INCONCLUSIVE"
     print(f"   {word} {label}{(': ' + detail) if detail else ''}")
+
+
+def only_the_probe_ran(commands):
+    """True when Codex ran exactly one command and it was `sh probe.sh`, bare or inside a shell -c."""
+    if len(commands) != 1:
+        return False
+    try:
+        words = shlex.split(commands[0])
+        if len(words) == 3 and os.path.basename(words[0]) in ("bash", "zsh", "sh") and words[1] in ("-c", "-lc"):
+            words = shlex.split(words[2])
+    except ValueError:
+        return False
+    return words == ["sh", "probe.sh"]
 
 
 def judge(expect, code, err):
@@ -145,8 +166,9 @@ def run_desk_check(desk):
         os.makedirs(other, mode=0o700)
         with open(f"{other}/notes.txt", "w") as handle:
             handle.write("not for the desk\n")
+        script = probe_script(rows)
         with open(f"{work}/probe.sh", "w") as handle:
-            handle.write(probe_script(rows))
+            handle.write(script)
         subprocess.run([config.GIT_BIN, "init", "-q", work], check=True)
         profile = run_desk._text(open(f"{OFFICE}/desks/{desk}/codex.toml", "rb").read(), "codex profile")
         argv = [config.CODEX_BIN, "exec", "--ignore-user-config", "--ignore-rules"]
@@ -159,7 +181,7 @@ def run_desk_check(desk):
                               capture_output=True, timeout=600)
         if done.returncode != 0:
             report(False, "Codex finished cleanly", f"exit {done.returncode}")
-        results = {}
+        results, commands = {}, []
         for line in done.stdout.decode("utf-8", "replace").splitlines():
             try:
                 event = json.loads(line)
@@ -170,11 +192,22 @@ def run_desk_check(desk):
                 continue
             if item.get("type") != "command_execution":
                 continue
+            commands.append(str(item.get("command", "")))
             for out_line in str(item.get("aggregated_output", "")).splitlines():
                 parts = out_line.split(" ", 3)
                 if len(parts) >= 3 and parts[0] == "PROBE" and parts[2].isdigit():
                     results.setdefault(parts[1], (int(parts[2]), parts[3] if len(parts) > 3 else ""))
+        with open(f"{work}/probe.sh", "rb") as handle:
+            unchanged = hashlib.sha256(handle.read()).digest() == hashlib.sha256(script.encode()).digest()
+        trusted = unchanged and only_the_probe_ran(commands)
+        if not trusted:
+            why = "probe.sh was changed" if not unchanged else f"Codex ran {len(commands)} command(s), not just sh probe.sh"
+            print(f"   Results not trusted: {why}")
+            results = {}
         for name, label, _, expect in rows:
+            if expect == "missing":
+                report(None, label, "macOS did not report a per-user temp folder")
+                continue
             if name not in results:
                 report(None, label, "the probe printed nothing")
                 continue
