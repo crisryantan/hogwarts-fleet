@@ -1407,6 +1407,21 @@ class DigestTests(HookCase):
                       (self.castle / "desks" / "mcgonagall" / "scratchpad.md").read_text())
 
 
+class CastleGitTests(ManyCase):
+    @unittest.skipUnless(IN_KIT, ONLY_IN_KIT)
+    def test_the_castles_git_ignores_task_pads_but_not_scratchpads(self):
+        folder = self.tmp / "castle-git"
+        for desk in config.TASK_PAD_DESKS:
+            (folder / "desks" / desk / "pads").mkdir(parents=True)
+            self.write_file(folder / "desks" / desk / "pads" / "tk_0123456789abcdef.md", "# Pad\n")
+            self.write_file(folder / "desks" / desk / "scratchpad.md", "# Scratchpad\n")
+        self.write_file(folder / ".gitignore", (KIT / "castle" / ".gitignore").read_text())
+        self.git("init", "-q", "-b", "main", cwd=folder)
+        status = self.git("status", "--porcelain", "--untracked-files=all", cwd=folder).splitlines()
+        self.assertEqual(sorted(line[3:] for line in status),
+                         [".gitignore"] + sorted(f"desks/{desk}/scratchpad.md" for desk in config.TASK_PAD_DESKS))
+
+
 # The kit's briefs, settings, charter and install.sh; an installed office keeps its own desk files.
 @unittest.skipUnless(IN_KIT, ONLY_IN_KIT)
 class DeskTextTests(unittest.TestCase):
