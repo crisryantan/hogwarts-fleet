@@ -72,6 +72,14 @@ CLAUDE_TALK = {"type": "assistant", "message": {"content": [
     {"type": "text", "text": "The login form has a rate limit; too many requests get a 429. " * 40}]}}
 
 
+def claude_message(message_id: str, tokens_in: int, tokens_out: int, cache_read: int = 0, cache_create: int = 0) -> dict:
+    """One assistant event of a claude -p stream: a message with its usage, as the CLI prints it before its result."""
+    return {"type": "assistant", "message": {
+        "id": message_id, "content": [{"type": "text", "text": "reading the diff"}],
+        "usage": {"input_tokens": tokens_in, "cache_creation_input_tokens": cache_create,
+                  "cache_read_input_tokens": cache_read, "output_tokens": tokens_out}}}
+
+
 def claude_out(data: dict) -> bytes:
     return json.dumps(data).encode("utf-8")
 
@@ -357,6 +365,82 @@ class PlanLimitFalsePositiveTests(CapCase):
         cut = stream_out([CLAUDE_INIT, CLAUDE_TALK])[:-200]  # killed before any result event
         self.assertIsNone(run_desk.plan_limit("claude", cut, True))
         self.assertIsNone(run_desk.plan_limit("claude", stream_out([CLAUDE_INIT, CLAUDE_TALK]), True))
+
+
+class KilledRunSpendTests(CapCase):
+    """A Claude run killed before its result event reports no cost. It is charged its budget ceiling, so the spend
+    cap runs high when a run's cost is lost, never low."""
+    # The same message twice, as one message with two content blocks streams, then a second message.
+    STREAM = [CLAUDE_INIT, claude_message("msg_1", 10, 50, cache_read=900, cache_create=100),
+              claude_message("msg_1", 10, 50, cache_read=900, cache_create=100),
+              claude_message("msg_2", 20, 70, cache_read=1000)]
+
+    def killed(self, desk: str, raw: bytes, how) -> dict:
+        """A real run of desk whose process writes raw, then ends by how: an exit code, or "timeout"."""
+        self.enable(desk)
+        owl_id, _ = self.request(desk)
+
+        def run(argv, **kwargs):
+            os.write(kwargs["stdout"], raw)
+            if how == "timeout":
+                raise subprocess.TimeoutExpired(argv, 1)
+            return subprocess.CompletedProcess(args=argv, returncode=how)
+
+        with fake_children(run), mock.patch("time.time", return_value=NOW):
+            code, out, err = self.main(desk, "--owl", owl_id)
+        self.assertEqual(code, 1, err)
+        return json.loads(out)
+
+    def test_a_claude_run_killed_by_a_signal_is_charged_its_budget_ceiling(self):
+        result = self.killed("hermione", stream_out(self.STREAM), -9)
+        self.assertEqual((result["cost_usd"], result["spend_unknown"], result["timed_out"]), (2.0, True, False))
+        self.assertEqual((result["input_tokens"], result["output_tokens"], result["cache_read_tokens"]),
+                         (130, 120, 1900))
+        status = run_desk.cap_status(self.conn, "hermione", NOW)
+        self.assertEqual((status["runs_used"], status["spend_used_usd"]), (1, 2.0))
+        [launch] = capacity.list_launches(self.conn, "hermione")
+        self.assertIsNotNone(launch["metric_id"])
+        [metric] = self.conn.execute("SELECT * FROM metrics WHERE desk = 'hermione'").fetchall()
+        self.assertEqual((metric["cost_usd"], metric["input_tokens"], metric["output_tokens"]), (2.0, 130, 120))
+
+    def test_a_timed_out_run_is_charged_its_own_desks_ceiling(self):
+        result = self.killed("ron", stream_out(self.STREAM), "timeout")
+        self.assertEqual((result["timed_out"], result["cost_usd"], result["spend_unknown"]), (True, 0.25, True))
+        self.assertEqual(run_desk.cap_status(self.conn, "ron", NOW)["spend_used_usd"], 0.25)
+
+    def test_killed_runs_can_reach_the_spend_cap(self):
+        pensieve.add_metric(self.conn, "ron", "run-earlier", "haiku", 1, 1, 0, config.DAILY_SPEND_CAP_USD["ron"] - 0.2,
+                            10, ts=NOW - 60)
+        self.assertIsNone(run_desk.over_daily_cap(self.conn, "ron", NOW))
+        self.killed("ron", stream_out(self.STREAM), -9)
+        self.assertEqual(run_desk.over_daily_cap(self.conn, "ron", NOW), "daily spend cap reached")
+
+    def test_a_run_killed_after_its_result_event_keeps_its_real_cost(self):
+        result = self.killed("hermione", stream_out([CLAUDE_INIT, CLAUDE_OK]), -9)
+        self.assertEqual(result["cost_usd"], 0.5)
+        self.assertNotIn("spend_unknown", result)
+
+    def test_a_run_that_exits_on_its_own_is_not_charged_the_ceiling(self):
+        # Only a kill loses the cost: a run that ended itself without a result event reports what it reports.
+        result = self.killed("hermione", stream_out(self.STREAM), 1)
+        self.assertEqual(result["cost_usd"], 0.0)
+        self.assertNotIn("spend_unknown", result)
+
+    def test_a_killed_codex_run_has_no_spend_to_charge(self):
+        result = self.killed("moody", codex_out(CODEX_OK[:2]), -9)
+        self.assertEqual(result["cost_usd"], 0.0)
+        self.assertNotIn("spend_unknown", result)
+
+    def test_streamed_tokens_count_each_message_once(self):
+        self.assertEqual(run_desk.killed_claude_usage("hermione", stream_out(self.STREAM)),
+                         {"input_tokens": 130, "output_tokens": 120, "cache_read_tokens": 1900, "cost_usd": 2.0,
+                          "spend_unknown": True})
+        # A message with no id cannot repeat, so each one counts. Lines that are not messages count for nothing.
+        bare = {"type": "assistant", "message": {"usage": {"input_tokens": 3, "output_tokens": 4}}}
+        junk = b'not json "assistant"\n{"type": "assistant", "message": {"usage": 5}}\n'
+        counted = run_desk.killed_claude_usage("ron", stream_out([bare, bare]) + junk)
+        self.assertEqual((counted["input_tokens"], counted["output_tokens"], counted["cost_usd"]), (6, 8, 0.25))
+        self.assertEqual(run_desk.killed_claude_usage("ron", b"")["input_tokens"], 0)
 
 
 class LocalCapDayTests(CapCase):

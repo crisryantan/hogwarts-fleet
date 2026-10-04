@@ -171,7 +171,7 @@ All in `~/.hogwarts/fleet/config.py`:
 
 | Constant | What it limits |
 | --- | --- |
-| `MAX_BUDGET_USD` | The most one headless Claude run may spend, passed as `--max-budget-usd` |
+| `MAX_BUDGET_USD` | The most one headless Claude run may spend, passed as `--max-budget-usd`. A run killed before it reports its cost is charged this much |
 | `DAILY_RUN_CAP` | Runs per desk in one cap day. The kit sizes it for a busy day: Hermione 80, Ron 120, the portrait 3, Harry 40 and Moody 80 |
 | `DAILY_SPEND_CAP_USD` | Spend per Claude desk in one cap day, read from the store's metrics: Hermione $60, Ron $10 and the portrait $4. The Codex desks have no spend cap |
 | `CAP_RESET_UTC_SECONDS` | When the cap day starts. `None` is local midnight on your Mac, daylight saving included. A number fixes the reset that many seconds after UTC midnight instead |

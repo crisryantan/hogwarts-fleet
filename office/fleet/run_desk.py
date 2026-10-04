@@ -59,7 +59,10 @@ enabled (a plain file named "enabled" in its office folder, made by Ryan), stays
 the desk's daily run and spend caps plus any bump Ryan made today, and holds the per-desk
 lock (it waits for it, unless its caller already holds it). Under that lock, before the process
 starts, it records a launch that counts toward the daily run cap at once, so a run that is killed or
-interrupted still counts; when the process ends its usage and cost are recorded against that launch.
+interrupted still counts; when the process ends its usage and cost are recorded against that launch. A
+Claude run killed (a timeout or a signal) before its result event has no cost to record, so it is charged its
+per-run budget ceiling (MAX_BUDGET_USD), with the tokens its streamed messages counted: a spend cap may run
+high, never low.
 A refusal by a cap tells Ryan which cap, how
 many requests wait and when it resets, once per cap and effective limit a day; a desk at 80% of
 a cap gets one warning per effective limit a day. A run that exits 0 reads and acks its owl.
@@ -825,6 +828,48 @@ def parse_claude_usage(raw: bytes) -> dict:
     return {**usage, **_outcome(result)}
 
 
+def _streamed_counts(raw: bytes) -> tuple:
+    """Input, output and cache read tokens from the assistant messages a Claude run streamed, for a run killed
+    before its result event. A message streams as several events that repeat its id and its usage, so each id
+    counts once."""
+    seen: dict = {}
+    for number, line in enumerate(raw.split(b"\n")):
+        if b'"assistant"' not in line:
+            continue
+        try:
+            event = json.loads(line)
+        except (ValueError, RecursionError):
+            continue
+        message = event.get("message") if isinstance(event, dict) and event.get("type") == "assistant" else None
+        counts = message.get("usage") if isinstance(message, dict) else None
+        if isinstance(counts, dict):
+            key = message["id"] if isinstance(message.get("id"), str) else number
+            seen[key] = (_count(counts.get("input_tokens")) + _count(counts.get("cache_creation_input_tokens")),
+                         _count(counts.get("output_tokens")), _count(counts.get("cache_read_input_tokens")))
+    return tuple(sum(column) for column in zip(*seen.values())) if seen else (0, 0, 0)
+
+
+def killed_claude_usage(desk: str, raw: bytes) -> dict:
+    """Usage for a Claude run killed (a timeout or a signal) before its result event, the only place the CLI
+    reports a cost. Its tokens are what its streamed messages counted. Its cost is unknown, and a spend cap that
+    runs low is worse than one that runs high, so it is charged the most the run could have spent: the
+    --max-budget-usd its desk is launched with. spend_unknown marks it for whoever reads the run's result."""
+    tokens_in, tokens_out, cache_read = _streamed_counts(raw)
+    return {"input_tokens": tokens_in, "output_tokens": tokens_out, "cache_read_tokens": cache_read,
+            "cost_usd": float(config.MAX_BUDGET_USD[desk]), "spend_unknown": True}
+
+
+def run_usage(plan: dict, output: bytes, exit_code: int) -> dict:
+    """The usage a run's output reports. A Claude run killed before its result event (exit code below 0: a timeout,
+    or a signal) reports no cost, so it records killed_claude_usage instead of counting as free."""
+    if plan["family"] != "claude":
+        return parse_codex_usage(output)
+    usage = parse_claude_usage(output)
+    if exit_code < 0 and not claude_result(output):
+        return {**usage, **killed_claude_usage(plan["desk"], output)}
+    return usage
+
+
 def claude_outcome(raw: bytes) -> dict:
     """How Claude itself says the run ended: its is_error flag and result subtype, when present."""
     return _outcome(claude_result(raw))
@@ -1241,7 +1286,7 @@ def _launch(conn, plan: dict, now: Optional[int], keep_fds: tuple = ()) -> dict:
         except FleetError:
             errors = b""
     claude = plan["family"] == "claude"
-    usage = parse_claude_usage(output) if claude else parse_codex_usage(output)
+    usage = run_usage(plan, output, exit_code)
     # A Claude run names its full model ids in modelUsage. One that does not (a timeout or crash) records
     # the alias it was given, and is left out of the move check on both sides.
     used = claude_models(output) if claude else [plan["model"]]
