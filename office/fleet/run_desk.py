@@ -20,9 +20,12 @@ and the request's task is the desk's own. Any other owl runs in the desk's work 
 
 --dry-run prints the argv as JSON and runs nothing. A real run needs the desk to be
 enabled (a plain file named "enabled" in its office folder, made by Ryan), stays under
-the desk's daily run and spend caps, waits for the per-desk lock, and records usage to
-the store's metrics. A run that exits 0 reads and acks its owl. A run that fails raises a
-headmaster event. No bypass flag is ever built, and the guard refuses one if it appears.
+the desk's daily run and spend caps plus any bump Ryan made today, waits for the per-desk
+lock, and records usage to the store's metrics. A refusal by a cap tells Ryan which cap, how
+many requests wait and when it resets; a desk at 80% of a cap gets one warning a day. A run
+that exits 0 reads and acks its owl. A run that fails raises a headmaster event, labelled
+claude_plan or codex_plan when the vendor's own usage limit stopped it. No bypass flag is
+ever built, and the guard refuses one if it appears.
 
 This is the only fleet module that starts processes.
 
@@ -46,7 +49,7 @@ from typing import Optional
 if __name__ == "__main__" and "/Users/crisryantan/.hogwarts" not in sys.path:
     sys.path.insert(0, "/Users/crisryantan/.hogwarts")
 
-from hogwarts import ids, owlery, pensieve  # noqa: E402
+from hogwarts import capacity, ids, owlery, pensieve  # noqa: E402
 from hogwarts.errors import NotFoundError, StoreError  # noqa: E402
 
 from fleet import common, config, gitops, safefs, toolchain  # noqa: E402
@@ -81,7 +84,10 @@ SOCKET_KEYS = ("allowUnixSockets", "allowAllUnixSockets")
 CASTLE_DENY_WRITE = (".git", ".claude", "tasks", "worktrees", "CLAUDE.md", "PLAN.md", "standing-orders.md",
                      ".gitignore")
 FAILED_SUMMARY = "a headless run did not finish cleanly; its run log is in the office"
-CAP_SUMMARY = "a headless desk reached its daily cap, so the run was not started"
+CAP_REASONS = {"runs": "daily run cap reached", "spend": "daily spend cap reached"}
+CAP_FLAGS = {"runs": "--runs +N", "spend": "--spend +X"}
+PLAN_NAMES = {"claude_plan": "Claude plan", "codex_plan": "Codex plan"}
+ERROR_TEXT_MAX = 4096
 
 
 class Capped(FleetError):
@@ -447,24 +453,65 @@ def build_plan(conn, desk: str, owl_id: Optional[str] = None, mcp_job: Optional[
 # Enabling, caps, launching and running
 
 
+def cap_status(conn, desk: str, now: Optional[int] = None) -> dict:
+    """This cap day's runs and spend for one desk against its caps plus Ryan's bumps."""
+    return capacity.cap_status(conn, desk, config.DAILY_RUN_CAP[desk], config.DAILY_SPEND_CAP_USD.get(desk),
+                               common.now_stamp(now), config.CAP_RESET_UTC_SECONDS)
+
+
 def over_daily_cap(conn, desk: str, now: Optional[int] = None) -> Optional[str]:
-    """Why this desk may not start another run today, read from the store's metrics, or None."""
-    since = max(0, common.now_stamp(now) - config.DAY_SECONDS)
-    used = next((row for row in pensieve.summary(conn, since) if row["desk"] == desk), None)
-    if used is None:
-        return None
-    if used["runs"] >= config.DAILY_RUN_CAP[desk]:
-        return "daily run cap reached"
-    spend_cap = config.DAILY_SPEND_CAP_USD.get(desk)
-    if spend_cap is not None and (used["cost_usd"] or 0) >= spend_cap:
-        return "daily spend cap reached"
-    return None
+    """Why this desk may not start another run this cap day, read from the store's metrics, or None."""
+    reached = cap_status(conn, desk, now)["reached"]
+    return None if reached is None else CAP_REASONS[reached]
+
+
+def _used_text(status: dict, cap: str) -> str:
+    if cap == "runs":
+        return f"{status['runs_used']} of {status['runs_limit']} runs"
+    return f"${status['spend_used_usd']:.2f} of ${status['spend_limit_usd']:.2f}"
 
 
 def report_cap(conn, desk: str, now: Optional[int] = None) -> None:
-    day = common.now_stamp(now) // config.DAY_SECONDS
-    pensieve.add_event(conn, desk, "rundesk.cap", "headmaster", CAP_SUMMARY,
-                       dedupe_key=f"rundesk:cap:{desk}:{day}", now=now)
+    """Record a refusal by a fleet cap. Ryan hears once per desk, cap and day: which cap, what waits, when it resets."""
+    status = cap_status(conn, desk, now)
+    cap = status["reached"] or "runs"
+    capacity.record_cap_hit(conn, desk, cap, "fleet", now=now)
+    waiting = len(capacity.waiting_requests(conn, desk))
+    summary = (f"{desk} was not started: its fleet daily {cap} cap is reached ({_used_text(status, cap)}),"
+               f" cap_source fleet. {waiting} request(s) waiting for {desk}. The cap resets at"
+               f" {status['resets_at_utc']}; castle desk cap {desk} {CAP_FLAGS[cap]} lifts it until then")
+    pensieve.add_event(conn, desk, "rundesk.cap", "headmaster", summary,
+                       dedupe_key=f"rundesk:cap:{desk}:{cap}:{status['day_start']}", now=now)
+
+
+def warn_near_cap(conn, desk: str, now: Optional[int] = None) -> list:
+    """One headmaster event per desk, cap and day once today's runs or spend reach CAP_WARN_FRACTION of it."""
+    status = cap_status(conn, desk, now)
+    caps = [("runs", status["runs_used"], status["runs_limit"])]
+    if status["spend_limit_usd"] is not None:
+        caps.append(("spend", status["spend_used_usd"], status["spend_limit_usd"]))
+    warned = []
+    for cap, used, limit in caps:
+        if limit <= 0 or used < round(config.CAP_WARN_FRACTION * limit, 6):
+            continue
+        summary = (f"{desk} has used {_used_text(status, cap)} of its fleet daily {cap} cap today;"
+                   f" the cap resets at {status['resets_at_utc']}")
+        event = pensieve.add_event(conn, desk, "rundesk.cap-near", "headmaster", summary,
+                                   dedupe_key=f"rundesk:cap-near:{desk}:{cap}:{status['day_start']}", now=now)
+        if event["created"]:
+            warned.append(cap)
+    return warned
+
+
+def report_plan_limit(conn, desk: str, cap_source: str, run_id: str, now: Optional[int] = None) -> None:
+    """A run the vendor's own usage or rate limit stopped. No fleet bump lifts that, and the event says so."""
+    capacity.record_cap_hit(conn, desk, "plan", cap_source, run_id=run_id, now=now)
+    day_start, _ = capacity.day_bounds(common.now_stamp(now), config.CAP_RESET_UTC_SECONDS)
+    summary = (f"{desk} stopped at the {PLAN_NAMES[cap_source]}'s own usage or rate limit, cap_source"
+               f" {cap_source}. This is the vendor's limit, not a fleet cap: castle desk cap does not lift it,"
+               f" and it clears only on the vendor's own reset")
+    pensieve.add_event(conn, desk, "rundesk.plan-limit", "headmaster", summary,
+                       dedupe_key=f"rundesk:plan-limit:{desk}:{cap_source}:{day_start}", now=now)
 
 
 def report_failure(conn, desk: str, owl_id: Optional[str], now: Optional[int] = None) -> None:
@@ -563,6 +610,55 @@ def parse_codex_usage(raw: bytes) -> dict:
     return usage
 
 
+def _claude_error_texts(raw: bytes, failed: bool) -> list:
+    try:
+        data = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        # Output that is not the JSON result is read as plain text, but only from a failed run.
+        return [raw[:ERROR_TEXT_MAX].decode("utf-8", "replace")] if failed else []
+    if isinstance(data, list):
+        data = next((item for item in reversed(data) if isinstance(item, dict) and item.get("type") == "result"), {})
+    if not isinstance(data, dict):
+        return []
+    subtype = data.get("subtype") if isinstance(data.get("subtype"), str) else ""
+    if subtype.startswith("error_max"):
+        return []  # the fleet's own per-run turn or budget limit, never the plan's
+    if data.get("is_error") is not True and not subtype.startswith("error"):
+        return []
+    texts = [value[:ERROR_TEXT_MAX] for value in (data.get("result"), data.get("error")) if isinstance(value, str)]
+    if data.get("api_error_status") == 429:
+        texts.append("429")
+    return texts
+
+
+def _codex_error_texts(raw: bytes) -> list:
+    texts = []
+    for line in raw.split(b"\n"):
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(event, dict):
+            continue
+        error = event.get("error") if event.get("type") == "turn.failed" else event
+        if event.get("type") in ("error", "turn.failed") and isinstance(error, dict) \
+                and isinstance(error.get("message"), str):
+            texts.append(error["message"][:ERROR_TEXT_MAX])
+    return texts
+
+
+def plan_limit(family: str, raw: bytes, failed: bool) -> Optional[str]:
+    """claude_plan or codex_plan when the run's own output says the vendor's usage or rate limit stopped it."""
+    if family == "claude":
+        texts, patterns, source = _claude_error_texts(raw, failed), config.CLAUDE_PLAN_LIMIT_PATTERNS, "claude_plan"
+    else:
+        texts, patterns, source = _codex_error_texts(raw), config.CODEX_PLAN_LIMIT_PATTERNS, "codex_plan"
+    for text in texts:
+        if any(re.search(pattern, text, re.IGNORECASE) for pattern in patterns):
+            return source
+    return None
+
+
 def _ack_owl(conn, desk: str, owl_id: str, now: Optional[int]) -> None:
     try:
         owlery.read(conn, owl_id, desk, now=now)
@@ -599,7 +695,10 @@ def run(conn, desk: str, owl_id: str, mcp_job: Optional[str] = None, now: Option
             report_cap(conn, plan["desk"], now)
             raise Capped(cap)
         result = _launch(conn, plan, now)
-    if result["exit_code"] == 0:
+    warn_near_cap(conn, plan["desk"], now)
+    if result["cap_source"] is not None:
+        report_plan_limit(conn, plan["desk"], result["cap_source"], run_id=result["run_id"], now=now)
+    elif result["exit_code"] == 0:
         _ack_owl(conn, plan["desk"], plan["owl_id"], now)
     return result
 
@@ -630,7 +729,8 @@ def _launch(conn, plan: dict, now: Optional[int]) -> dict:
     usage = parse_claude_usage(output) if plan["family"] == "claude" else parse_codex_usage(output)
     pensieve.add_metric(conn, desk, run_id, plan["model"], usage["input_tokens"], usage["output_tokens"],
                         usage["cache_read_tokens"], usage["cost_usd"], duration_ms, ts=now)
-    return {"desk": desk, "run_id": run_id, "exit_code": exit_code, "timed_out": exit_code == -1, **usage}
+    return {"desk": desk, "run_id": run_id, "exit_code": exit_code, "timed_out": exit_code == -1,
+            "cap_source": plan_limit(plan["family"], output, exit_code != 0), **usage}
 
 
 def main(argv: Optional[list] = None) -> int:
@@ -655,10 +755,11 @@ def main(argv: Optional[list] = None) -> int:
             sys.stdout.write(json.dumps(result, ensure_ascii=True, indent=2) + "\n")
             return 0
         result = run(conn, args.desk, args.owl, args.mcp_job)
-        sys.stdout.write(json.dumps({"ok": result["exit_code"] == 0, **result}, ensure_ascii=True) + "\n")
-        if result["exit_code"] != 0:
+        clean = result["exit_code"] == 0 and result["cap_source"] is None
+        sys.stdout.write(json.dumps({"ok": clean, **result}, ensure_ascii=True) + "\n")
+        if not clean and result["cap_source"] is None:
             report_failure(conn, args.desk, args.owl)
-        return 0 if result["exit_code"] == 0 else 1
+        return 0 if clean else 1
     except (FleetError, StoreError) as exc:
         sys.stderr.write(json.dumps({"ok": False, "error": common.one_line(exc, 200)}, ensure_ascii=True) + "\n")
         if not args.dry_run and not isinstance(exc, Capped):

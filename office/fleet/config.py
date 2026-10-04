@@ -69,10 +69,29 @@ REVIEWER_FOR_FAMILY = {"codex": "hermione", "claude": "moody"}
 CODEX_WORK_DIR = "work"
 # Castle folders each Claude desk may read through --add-dir. Writes there are denied by its settings.
 CLAUDE_READ_DIRS = {"hermione": ("tasks", "worktrees"), "ron": ("tasks",), "portrait": ()}
-# Runs per desk in any 24 hours, and spend for the Claude desks, read from the store's metrics.
-DAILY_RUN_CAP = {"hermione": 20, "ron": 40, "portrait": 3, "harry": 10, "moody": 20}
-DAILY_SPEND_CAP_USD = {"hermione": 20.0, "ron": 5.0, "portrait": 4.0}
+# Runs per desk in one cap day, and spend for the Claude desks, read from the store's metrics. Sized for
+# a busy day of 12 to 14 PRs plus side work. Ryan lifts one for the rest of the day with castle desk cap.
+DAILY_RUN_CAP = {"hermione": 80, "ron": 120, "portrait": 3, "harry": 40, "moody": 80}
+DAILY_SPEND_CAP_USD = {"hermione": 60.0, "ron": 10.0, "portrait": 4.0}
 DAY_SECONDS = 86400
+# The cap day starts this many seconds after UTC midnight: caps, bumps and cap events all reset then.
+# 0 keeps UTC midnight, the day the cap event key has always used.
+CAP_RESET_UTC_SECONDS = 0
+# A desk at this share of a cap today gets one headmaster event per cap per day.
+CAP_WARN_FRACTION = 0.8
+# Review rounds per author task. The next one waits for Ryan's castle task allow-round.
+REVIEW_ROUND_CAP = 3
+# A failed run whose error text matches one of these hit the vendor's own usage or rate limit, not a
+# fleet cap. Matched without case against Claude's result text when is_error is set, and against the
+# message of Codex's error and turn.failed events.
+CLAUDE_PLAN_LIMIT_PATTERNS = (
+    r"usage limit", r"limit reached", r"hit your (?:usage )?limit", r"out of (?:extra )?usage",
+    r"rate[ _-]?limit", r"too many requests", r"\b429\b",
+)
+CODEX_PLAN_LIMIT_PATTERNS = (
+    r"usage[ _-]?limit", r"hit your (?:usage )?limit", r"rate[ _-]?limit", r"too many requests", r"\b429\b",
+    r"quota",
+)
 # A run waits this long for another run of the same desk to finish.
 DESK_LOCK_WAIT_SECONDS = 1860
 RUN_TIMEOUT_SECONDS = 1800

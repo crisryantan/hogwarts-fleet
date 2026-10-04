@@ -14,8 +14,12 @@ Then, for either:
 1. verify runs the acceptance checks and writes evidence for this sha;
 2. the commit is recorded on the author's task;
 3. a review request goes from the author's task to the reviewer of the other family
-   (Codex work to Hermione, Claude work to Moody), with an inbox copy for the reviewer;
-4. run_desk runs the reviewer, which needs Ryan's enabled file for that desk;
+   (Codex work to Hermione, Claude work to Moody), with an inbox copy for the reviewer. It is the
+   task's next round: rounds past REVIEW_ROUND_CAP are refused until Ryan runs
+   castle task allow-round <task-id>. A review of this task still waiting for its reviewer
+   (a cap refused it, or the reviewer was busy) is superseded, so only the newest commit is reviewed;
+4. run_desk runs the reviewer, which needs Ryan's enabled file for that desk. A reviewer at its
+   daily cap leaves the request waiting, and Ryan hears which cap and when it resets;
 5. the last REVIEW block in the reviewer's own output must name this task and this sha. Its verdict
    is recorded with the review file in the office, where no desk can change it;
 6. on PASS the author's task moves to awaiting_close, which is what the push gate checks.
@@ -31,7 +35,7 @@ import re
 import secrets
 from typing import Optional
 
-from hogwarts import ids, owlery, pensieve
+from hogwarts import capacity, ids, owlery, pensieve
 from hogwarts.errors import ConflictError
 
 from fleet import common, config, gitops, owl_post, run_desk, safefs, verify, worktree
@@ -180,7 +184,24 @@ def _finish_reviewer_task(conn, request_id: str, reviewer_task_id: str) -> None:
         owlery.advance(conn, request_id, "cleaned", detail="review recorded")
 
 
-def run_review(conn, task: dict, record: dict, sha: str, holder_id: str, handoff: bool) -> dict:
+def _open_round(conn, task: dict, reviewer: str, sha: str, body: str, now: Optional[int]) -> dict:
+    """The review request as the task's next round. A refused round tells Ryan the task and the count."""
+    try:
+        return capacity.open_review_round(
+            conn, task["id"], reviewer, sha, f"review {task['id']} @ {sha[:12]}", body=body,
+            max_rounds=config.REVIEW_ROUND_CAP,
+            idempotency_key=f"review:{task['id']}:{sha[:12]}:{secrets.token_hex(4)}", now=now)
+    except capacity.RoundCapReached as exc:
+        pensieve.add_event(conn, task["desk"], "review.round-cap", "headmaster",
+                           f"task {task['id']} asked for review round {exc.round}, past the cap of"
+                           f" {exc.max_rounds} rounds, so nothing went to {reviewer}. castle task allow-round"
+                           f" {task['id']} allows one more round",
+                           task_id=task["id"], dedupe_key=f"review:round-cap:{task['id']}:{exc.round}", now=now)
+        raise FleetError(str(exc)) from None
+
+
+def run_review(conn, task: dict, record: dict, sha: str, holder_id: str, handoff: bool,
+               now: Optional[int] = None) -> dict:
     author = pensieve.get_desk(conn, task["desk"])
     reviewer = config.REVIEWER_FOR_FAMILY.get(author["family"])
     if reviewer is None:
@@ -192,17 +213,23 @@ def run_review(conn, task: dict, record: dict, sha: str, holder_id: str, handoff
         raise FleetError("HEAD moved before the review started; run the review again")
     pensieve.record_commit(conn, task["id"], record["repo"], sha)
     body = _request_body(task, sha, record, holder_id, handoff)
-    opened = owlery.open_request(conn, task["desk"], reviewer, f"review {task['id']} @ {sha[:12]}", body=body,
-                                 parent_task_id=task["id"],
-                                 idempotency_key=f"review:{task['id']}:{sha[:12]}:{secrets.token_hex(4)}")
+    opened = _open_round(conn, task, reviewer, sha, body, now)
     request_id, reviewer_task, owl_id = opened["request"]["id"], opened["task"], opened["owl"]["id"]
     _deliver(conn, owl_id, reviewer, body)
     pensieve.set_worktree(conn, reviewer_task["id"], task["worktree"])
+    if run_desk.over_daily_cap(conn, reviewer, now) is not None:
+        run_desk.report_cap(conn, reviewer, now)
+        raise run_desk.Capped(f"{reviewer} is at its fleet daily cap, so round {opened['round']} of {task['id']}"
+                              f" @ {sha[:12]} waits as request {request_id}; run the review again after the reset"
+                              f" or a castle desk cap bump, and that review supersedes this one")
     pensieve.start_task(conn, reviewer_task["id"])
     owlery.advance(conn, request_id, "claimed", detail="review script")
     owlery.advance(conn, request_id, "running", detail="review script")
     try:
         result = run_desk.run(conn, reviewer, owl_id)
+        if result.get("cap_source") is not None:
+            raise FleetError(f"the {reviewer} run stopped at the vendor's own usage limit (cap_source"
+                             f" {result['cap_source']}); a fleet cap bump does not lift it")
         if result["exit_code"] != 0:
             raise FleetError(f"the {reviewer} run did not finish cleanly; its log is in the office runs folder")
         family = pensieve.get_desk(conn, reviewer)["family"]
@@ -229,6 +256,7 @@ def run_review(conn, task: dict, record: dict, sha: str, holder_id: str, handoff
                            "a reviewer handed a decision to you; read review-latest.md in the task folder",
                            task_id=task["id"], dedupe_key=f"review:headmaster:{task['id']}:{sha}")
     return {"task_id": task["id"], "sha": sha, "repo": record["repo"], "reviewer": reviewer, "verdict": verdict,
+            "round": opened["round"], "superseded": [item["request_id"] for item in opened["superseded"]],
             "review": castle_review, "evidence": evidence["evidence"]["castle"], "failed_checks": evidence["failed"]}
 
 

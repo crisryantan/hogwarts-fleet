@@ -17,7 +17,7 @@ from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest import mock
 
-from hogwarts import cli, db, facts, ids, owlery, pensieve
+from hogwarts import capacity, cli, db, facts, ids, owlery, pensieve
 from hogwarts.errors import IntegrityError, ValidationError
 from tests.support import DAY, NOW, REPO, SHA, TEST_TMP_ROOT, StoreCase, temp_dir
 
@@ -372,15 +372,19 @@ class InputSecurityTests(StoreCase):
         "first_turn_tokens": None, "total_input_tokens": None, "since": 0, "closed_by": "tk_0000000000000000",
         "subject_key": "web-app.comments", "valid_from": None, "lookup": None, "include_history": False, "t": NOW,
         "limit_per_fact": 3, "ops": [{"op": "archive", "fact_id": 1}],
+        "amount": 1, "run_cap": 3, "spend_cap": None, "reset_offset": 0, "cap": "runs", "cap_source": "fleet",
+        "max_rounds": 3,
     }
     OVERRIDES = {
         ("record_review", "verdict"): "CHANGES", ("defer", "reason"): "conflict", ("decline", "reason"): "safety",
         ("consume", "token"): "x" * 43, ("add_extract", "role"): "user",
         ("set_worktree", "worktree"): f"{ids.WORKTREES_ROOT}/wt",
+        ("add_bump", "kind"): "runs", ("add_bump", "expires_at"): NOW + DAY,
     }
 
     def targets(self) -> list:
-        found = [function for module in (pensieve, owlery, facts) for _, function in public_functions(module)]
+        found = [function for module in (pensieve, owlery, facts, capacity)
+                 for _, function in public_functions(module)]
         found.append(owlery._cascade_task_closed)
         return [function for function in found if self.IDENTIFIERS & set(inspect.signature(function).parameters)]
 
@@ -620,6 +624,11 @@ class TransactionCoverageTests(unittest.TestCase):
             pensieve.add_desk(conn, name, family, now=NOW)
         task = pensieve.start_task(conn, pensieve.create_task(conn, "alpha", "build", now=NOW)["id"], now=NOW)["id"]
         pensieve.record_commit(conn, task, REPO, SHA, now=NOW)
+        capacity.open_review_round(conn, task, "beta", SHA, "review one", now=NOW)
+        capacity.open_review_round(conn, task, "beta", SHA, "review two", now=NOW)
+        capacity.allow_round(conn, task, now=NOW)
+        capacity.add_bump(conn, "alpha", "runs", 5, NOW + DAY, now=NOW)
+        capacity.record_cap_hit(conn, "alpha", "plan", "claude_plan", run_id="run-1", now=NOW)
         pensieve.set_worktree(conn, pensieve.create_task(conn, "beta", "wt", now=NOW)["id"], f"{ids.WORKTREES_ROOT}/wt")
         pensieve.mark_awaiting_close(conn, task, now=NOW)
         owlery.open_request(conn, "alpha", "beta", "child", parent_task_id=task, now=NOW)
@@ -676,7 +685,7 @@ class TransactionCoverageTests(unittest.TestCase):
             self.addCleanup(conn.close)
             self.run_every_write(conn)
         self.assertEqual(outside, [])
-        writers = {(module.__name__.split(".")[-1], name) for module in (pensieve, owlery, facts)
+        writers = {(module.__name__.split(".")[-1], name) for module in (pensieve, owlery, facts, capacity)
                    for name, function in public_functions(module) if "db.transaction" in inspect.getsource(function)}
         self.assertEqual(writers - called, set())
 
