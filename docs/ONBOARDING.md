@@ -81,7 +81,7 @@ command -v git jq gh rg shellcheck claude codex
 
 ```
 tests: Ran 486 tests in ... OK
-tests_fleet: Ran 377 tests in ... OK
+tests_fleet: Ran 401 tests in ... OK
 castle doctor: ok
 ```
 
@@ -380,13 +380,13 @@ Desks run short, one owl at a time, so you watch them instead of sitting inside 
    ~/.hogwarts/bin/hogwarts-spaces --dry-run
    ```
 
-3. Open the spaces. McGonagall and Snape get live sessions, because neither has a shell tool. Every other desk, the Owl Post and Ollivander get a read-only feed, since any herdr pane can type into any other. A space that already exists is left alone, so you can run it again.
+3. Open the spaces. McGonagall and Snape get live sessions, because neither has a shell tool. The script reads their agent files first and refuses either one whose `tools:` line is missing or names a tool that can run commands. Every other desk, the Owl Post and Ollivander get a read-only feed, since any herdr pane can type into any other. A space that already exists is left alone, so you can run it again.
 
    ```
    ~/.hogwarts/bin/hogwarts-spaces
    ```
 
-   If it prints FAILED, herdr isn't running or isn't at `~/.local/bin/herdr`. Open it, or add `--herdr <path>`.
+   If it prints FAILED, herdr isn't running or isn't at `~/.local/bin/herdr`. Open it, or add `--herdr <path>`. If the line says refused, compare that agent's file with the repo copy and fix its `tools:` line.
 
 **You're done when** the first command prints "watching every desk, read-only", and the last one printed OK or SKIP for all nine spaces, which herdr's workspace list now shows.
 

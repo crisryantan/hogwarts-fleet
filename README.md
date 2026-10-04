@@ -15,7 +15,7 @@ A Harry Potter themed fleet of single-purpose AI agents for Claude Code and Code
   </tr>
 </table>
 
-**What ships today:** the store and its `castle` CLI, the castle, McGonagall, Snape, the Owl Post and the session hooks, and the review loop: the `fleet` command's worktree, verify, review and push scripts and the push gate. Also built: busy-day caps on runs and spend, review rounds that stop at three, Ollivander - Model Keeper, and a read-only live view of every desk. 486 store tests and 377 fleet tests cover it. The review loop is tested on temp repos but not yet on real tasks. The PR patrol and the nightly memory review are designed, and their desks, briefs, settings and launchd templates are here, but the scripts that drive them come in later stages. [DESIGN.md](docs/DESIGN.md#known-limits) lists the gaps.
+**What ships today:** the store and its `castle` CLI, the castle, McGonagall, Snape, the Owl Post and the session hooks, and the review loop: the `fleet` command's worktree, verify, review and push scripts and the push gate. Also built: busy-day caps on runs and spend, review rounds that stop at three, Ollivander - Model Keeper, and a read-only live view of every desk. 486 store tests and 401 fleet tests cover it. The review loop is tested on temp repos but not yet on real tasks. The PR patrol and the nightly memory review are designed, and their desks, briefs, settings and launchd templates are here, but the scripts that drive them come in later stages. [DESIGN.md](docs/DESIGN.md#known-limits) lists the gaps.
 
 ## Start here
 
@@ -44,7 +44,7 @@ A Harry Potter themed fleet of single-purpose AI agents for Claude Code and Code
 
 **Five risks it closes.**
 
-1. One terminal pane driving another. No desk that can run commands runs inside a terminal multiplexer. The only live sessions there are McGonagall and Snape, who have no shell tool, and every other desk gets a read-only feed.
+1. One terminal pane driving another. No desk that can run commands runs inside a terminal multiplexer. The only live sessions there are McGonagall and Snape, who have no shell tool, which is checked before each one opens, and every other desk gets a read-only feed.
 2. Desks inheriting your broad allow list. Every headless desk starts restricted, with its own settings.
 3. A watchdog typing into sessions. Nothing types into a session. Warnings only.
 4. Faked identity. A desk can only post to its own outbox, and the Owl Post stamps the sender from the folder.
