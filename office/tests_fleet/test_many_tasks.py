@@ -21,7 +21,7 @@ from tests.support import NOW
 from fleet import config, owl_post, push, review, run_desk, worktree
 from fleet.hooks import pre_compact, session_start
 from fleet.safefs import FleetError
-from tests_fleet.support import MANY_TASK_DESKS, fake_children
+from tests_fleet.support import IN_KIT, MANY_TASK_DESKS, ONLY_IN_KIT, fake_children
 from tests_fleet.test_hooks import HookCase
 from tests_fleet.test_push import GateCase
 from tests_fleet.test_review_loop import HANDOFF, TASK_MD, LoopCase
@@ -514,6 +514,8 @@ class DigestTests(HookCase):
                       (self.castle / "desks" / "mcgonagall" / "scratchpad.md").read_text())
 
 
+# The kit's briefs, settings, charter and install.sh; an installed office keeps its own desk files.
+@unittest.skipUnless(IN_KIT, ONLY_IN_KIT)
 class DeskTextTests(unittest.TestCase):
     def text(self, *parts: str) -> str:
         return (KIT.joinpath(*parts)).read_text()
@@ -546,4 +548,8 @@ class DeskTextTests(unittest.TestCase):
         loop = re.search(r"for desk in ([a-z0-9 -]+); do\n\t\"\$CASTLE_CLI\" desk many-tasks", self.text("install.sh"))
         self.assertIsNotNone(loop)
         self.assertEqual(tuple(loop.group(1).split()), db.MANY_TASK_DESKS_SEED)
+
+
+class SeedTests(unittest.TestCase):
+    def test_the_tests_grant_the_seed_desks(self):
         self.assertEqual(MANY_TASK_DESKS, db.MANY_TASK_DESKS_SEED)
