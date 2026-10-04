@@ -6,6 +6,8 @@
 - Reads lines shaped "AC-<n> <what must be true> | check: <check>". A check wrapped in backticks is
   a command. Anything else is an observation for the reviewer to judge, recorded as not run.
 - Refuses to run on a worktree with uncommitted changes, so the evidence belongs to one commit.
+  Then removes every git-ignored file except the dependency links, and the evidence names them, so
+  no check can lean on a file the commit doesn't hold.
 - Code from Ryan's own sessions is checked the way he would check it himself: plain bash, no Codex
   sandbox, but still a fixed environment with a throwaway home and temp folder. The fleet's own file
   layer opens every folder from / down, which a Codex sandbox refuses, so its suites can only pass there.
@@ -38,6 +40,7 @@ TASK_CHAIN_LIMIT = 16
 TASK_MD_MAX_BYTES = 65536
 SCRATCH_ROOT = "/private/tmp"
 PROFILE_NAME = "fleet-verify"
+CLEANED_SHOWN = 10
 
 
 def task_md(conn, task_id: str) -> tuple:
@@ -133,14 +136,18 @@ def _make_scratch() -> str:
 
 
 def render(task_id: str, sha: str, record: dict, md_digest: str, checks: list, results: dict, now: int,
-           sandboxed: bool = True) -> str:
+           sandboxed: bool = True, cleaned: tuple = ()) -> str:
     when = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now))
     ran = sum(1 for check in checks if check["command"] is not None)
     passed = sum(1 for check in checks if check["command"] is not None and results[check["id"]]["exit_code"] == 0)
+    shown = ", ".join(common.one_line(name, 120) for name in cleaned[:CLEANED_SHOWN])
+    more = f" and {len(cleaned) - CLEANED_SHOWN} more" if len(cleaned) > CLEANED_SHOWN else ""
     lines = [
         f"EVIDENCE {task_id} @ {sha}",
         f"TASK.md sha256 {md_digest}",
         f"WORKTREE {record['path']}",
+        (f"CLEANED {len(cleaned)} git-ignored paths before the checks: {shown}{more}" if cleaned else
+         "CLEANED nothing: the worktree held no git-ignored files besides its dependency links"),
         (f"RAN {when} under codex sandbox: worktree write, repo .git read, no network, no office" if sandboxed else
          f"RAN {when} without the Codex sandbox, because Ryan's own session wrote this code; throwaway HOME and TMPDIR"),
         f"SUMMARY {passed} of {ran} commands exited 0, {len(checks) - ran} observations for the reviewer",
@@ -186,6 +193,7 @@ def verify(conn, task_id: str, now: Optional[int] = None) -> dict:
         raise FleetError("this task has no worktree with an office record")
     if gitops.dirty(record):
         raise FleetError("the worktree has uncommitted changes; evidence must belong to one commit")
+    cleaned = gitops.clean_ignored(record)
     sha = gitops.rev(record)
     holder_id, _ = task_md(conn, task["id"])
     raw = read_task_md(holder_id)
@@ -203,7 +211,7 @@ def verify(conn, task_id: str, now: Optional[int] = None) -> dict:
     if gitops.rev(record) != sha:
         raise FleetError("HEAD moved while the checks ran; run verify again")
     text = render(task["id"], sha, record, hashlib.sha256(raw).hexdigest(), checks, results, common.now_stamp(now),
-                  sandboxed)
+                  sandboxed, cleaned)
     paths = write_evidence(task["id"], holder_id, sha, text)
     failed = [check["id"] for check in checks if check["command"] is not None and results[check["id"]]["exit_code"] != 0]
     return {"task_id": task["id"], "sha": sha, "checks": len(checks), "failed": failed,

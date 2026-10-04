@@ -183,6 +183,16 @@ def check_links(record: dict) -> None:
                              "so checks could use files no commit holds; delete it from the worktree first")
 
 
+def clean_ignored(record: dict) -> list:
+    """Remove every git-ignored file and folder in the worktree except the dependency links, and name them.
+
+    Status never shows ignored files, so a desk could leave one (a nested node_modules, a .env) that
+    checks would use although no commit holds it. Nested git repos are left alone.
+    """
+    out = git(["clean", "-f", "-d", "-X", "--", ".", *link_excludes(record)], record["git_dir"], record["path"])
+    return [line[len("Removing "):] for line in out.splitlines() if line.startswith("Removing ")]
+
+
 def dirty(record: dict) -> bool:
     """Whether the worktree has changes outside its dependency links. Refuses a replaced link."""
     check_links(record)

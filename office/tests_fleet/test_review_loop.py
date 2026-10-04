@@ -207,10 +207,29 @@ class VerifyTests(LoopCase):
         self.assertEqual((result["sha"], result["checks"], result["failed"]), (sha, 3, []))
         text = (self.castle / "tasks" / parent / "evidence.md").read_text()
         self.assertTrue(text.startswith(f"EVIDENCE {task['id']} @ {sha}\n"))
+        self.assertIn("\nCLEANED nothing: the worktree held no git-ignored files besides its dependency links\n", text)
         self.assertIn("AC-1 the readme is there\ncheck: `test -f README.md`\nexit: 0", text)
         self.assertIn("AC-3 the diff stays small\ncheck: one file changes\nnot run:", text)
         office = self.office / "reviews" / task["id"] / f"evidence-{sha}.md"
         self.assertEqual(office.read_text(), text)
+
+    def test_ignored_files_are_removed_before_the_checks(self):
+        parent, task, _, created, _ = self.build()
+        wt = Path(created["worktree"])
+        self.write_file(wt / ".gitignore", "widget.txt\nbuild/\n")
+        self.git("add", ".gitignore", cwd=wt)
+        self.git("commit", "-q", "-m", "ignore rules", cwd=wt)
+        self.write_file(wt / "widget.txt", "left behind, never committed\n")
+        (wt / "build").mkdir()
+        self.write_file(wt / "build" / "out.o", "object\n")
+        result = verify.verify(self.conn, task["id"])
+        self.assertEqual(result["failed"], ["AC-2"])
+        self.assertFalse((wt / "widget.txt").exists())
+        self.assertFalse((wt / "build").exists())
+        text = (self.castle / "tasks" / parent / "evidence.md").read_text()
+        self.assertIn("CLEANED 2 git-ignored paths before the checks: ", text)
+        self.assertIn("widget.txt", text.splitlines()[3])
+        self.assertIn("build/", text.splitlines()[3])
 
     def test_a_failing_check_is_recorded_not_hidden(self):
         _, task, _, created, _ = self.build()
