@@ -202,10 +202,10 @@ You don't pick models by name. Each desk has a role card at `~/.hogwarts/desks/<
 
 **What happens after a pick**
 
-- A desk's first pick applies by itself.
+- A headless desk's first pick applies by itself. That covers Hermione, Ron, Dumbledore, Harry and Moody.
 - After that, a move to the same tier or a cheaper one (fast, then workhorse, then frontier) applies by itself, with a note.
 - A costlier move waits as a pending pick. To say yes, run `castle desk model <desk> --approve`.
-- McGonagall and Snape take their model from the `model:` line in their agent files. Ollivander never edits those files. He tells you the one line to change.
+- McGonagall and Snape take their model from the `model:` line in their agent files. Ollivander never edits those files. For them he only sends a note with the one line to change, even for a first pick.
 
 **Look and steer**
 
@@ -244,8 +244,8 @@ The day resets at local midnight on your Mac, daylight saving included. The coun
 
 - **The warning.** A desk that reaches 80% of a cap sends one note for that cap that day.
 - **The cap event.** At the cap, the desk's next run doesn't start and its request keeps waiting. You get one note that names the cap, how much was used, how many requests are waiting, when it resets and the command that lifts it.
-- **Look and lift.** `castle desk caps` shows today's numbers for every desk. `castle desk cap <desk> --runs +N` or `--spend +X` raises one cap until the next reset, then it falls back.
-- **Reviews wait, too.** If the reviewer is at its cap, the review request waits. After the reset or a bump, run `fleet review <task-id>` again. The new review replaces the waiting one, so only the newest commit of a task gets reviewed.
+- **Look and lift.** `castle desk caps` shows today's numbers for every headless desk. McGonagall, Snape and the scripts have no cap, so they don't appear. `castle desk cap <desk> --runs +N` or `--spend +X` raises one cap until the next reset, then it falls back. A bump is at most +500 runs or +$500. `--spend` works only for Hermione, Ron and Dumbledore, because Harry and Moody have no spend cap.
+- **Reviews wait, too.** If the reviewer is at its cap, the review request waits. After the reset or a bump, run `fleet review <task-id>` again. For a task from your own Claude sessions, run `fleet review own --repo-dir <checkout> --task <task-id>` instead. The new review replaces the waiting one, so only the newest commit of a task gets reviewed.
 - **Three rounds per task.** A task gets three review rounds. Only a round where the reviewer recorded a verdict counts. A crash, a timeout, a cap refusal or a vendor limit doesn't use one up. The next round waits for you: `castle task allow-round <task-id>` allows exactly one more, and `castle task rounds <task-id>` lists every round and whether it counts.
 - **Which limit hit.** The note says whether it was the fleet's cap or the vendor's own limit: `cap_source fleet`, or `claude_plan` or `codex_plan` when your Claude or Codex plan's own usage or rate limit stopped the run. A bump can't lift a plan limit. It clears on the vendor's own reset.
 
@@ -253,7 +253,7 @@ The day resets at local midnight on your Mac, daylight saving included. The coun
 
 Desks run short. A headless desk takes one owl, does the job and exits, one run at a time, so there's no long session to sit inside. You can still watch every desk work, without typing into anything.
 
-- `fleet feed --desk <name>` follows one desk. `fleet feed --desk owl-post` follows every owl.
+- `fleet feed --desk <name>` follows one desk. Use the desk's registry name. Dumbledore's is `portrait`, and a name that matches no desk just shows nothing. `fleet feed --desk owl-post` follows every owl.
 - `fleet feed --all` follows every desk at once.
 
 A feed prints a line whenever something happens: owls to and from the desk (kind and subject, never the body), the start and end of each run with its model, time, tokens and cost, the desk's notes to you, and, while a run is going, what the desk says and which tools it calls. It is read-only. It opens the store read-only, only reads files, and strips every control sequence from what a desk wrote, so a desk can't steer your terminal through it. Ctrl+C stops it.
@@ -326,7 +326,8 @@ Everything `castle` prints is JSON. If you added the shortcut in one-time setup,
 | `fleet feed --desk <name>` | Watch one desk, read-only |
 | `fleet feed --all` | Watch every desk, read-only |
 | `fleet ollivander --dry-run` | See Ollivander's plan without changing anything |
-| `fleet review <task-id>` | Review a task's newest commit, or run a waiting review again |
+| `fleet review <task-id>` | Review a build desk's newest commit, or run a waiting review again |
+| `fleet review own --repo-dir <checkout> --task <task-id>` | The same for a task from your own Claude sessions |
 | `~/.hogwarts/bin/hogwarts-spaces` | Open one herdr space per desk |
 
 **Claude Code**

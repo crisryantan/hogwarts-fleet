@@ -350,7 +350,7 @@ Ollivander - Model Keeper keeps each desk on the model its job needs, and never 
    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.hogwarts.ollivander.plist
    ```
 
-5. Run his first pass by hand, so you don't wait for 06:00. Each desk's first pick applies by itself. Later moves to a cheaper or equal tier apply with a note, and a costlier one waits for you.
+5. Run his first pass by hand, so you don't wait for 06:00. Each headless desk's first pick applies by itself. Later moves to a cheaper or equal tier apply with a note, and a costlier one waits for you. McGonagall and Snape get a note telling you the one line to change in their agent files.
 
    ```
    ~/.hogwarts/bin/fleet ollivander
@@ -361,7 +361,7 @@ To take the job off again: `launchctl bootout gui/$(id -u)/com.hogwarts.ollivand
 **You're done when** all of these hold:
 
 - `launchctl print gui/$(id -u)/com.hogwarts.ollivander | head -5` shows the job.
-- `~/.hogwarts/bin/castle desk models` lists every Claude and Codex desk with a tier, and a model for each.
+- `~/.hogwarts/bin/castle desk models` lists every desk that has a role card (McGonagall, Hermione, Moody, Dumbledore, Snape, Harry and Ron) with a tier and a model. `ryan-claude-1` has no role card, so it shows no tier.
 - `ls ~/.hogwarts/state/` shows no `ollivander-stop` file.
 
 ### 5.6 The live view
@@ -412,5 +412,5 @@ From here on, the [handbook](HANDBOOK.md) is your guide: which desk to ask, the 
 - [ ] **5.2** Map, Ron and Gringotts in shadow for three days. Restore drill done.
 - [ ] **5.3** Portrait proposals reviewed twice. RTK go or no-go.
 - [ ] **5.4** RTK hook and standing orders, only if the numbers say so.
-- [ ] **5.5** Role cards read, any forbidden models listed, `fleet ollivander --dry-run` read, the daily job loaded, a first pass run, and `castle desk models` shows a tier for every desk.
+- [ ] **5.5** Role cards read, any forbidden models listed, `fleet ollivander --dry-run` read, the daily job loaded, a first pass run, and `castle desk models` shows a tier for every desk that has a role card.
 - [ ] **5.6** `fleet feed --all` prints its first line. `hogwarts-spaces` printed OK or SKIP for all nine spaces.

@@ -25,16 +25,21 @@ File modes (0700 directories, 0600 files) keep other users out. They do not stop
   README.md
   .gitignore                            ignores state/
   bin/castle                            POSIX sh wrapper, mode 0700
+  bin/fleet                             POSIX sh wrapper for the fleet command, mode 0700
+  bin/hogwarts-spaces                   opens one herdr space per desk
   hogwarts/__init__.py                  version string
   hogwarts/errors.py                    error classes and exit codes
   hogwarts/ids.py                       id generation, strict validators, path roots
-  hogwarts/db.py                        connect, schema, migrations, transactions, doctor
+  hogwarts/db.py                        connect, read-only connect, schema, migrations, transactions, doctor
   hogwarts/pensieve.py                  desks, tasks, commits, events, sessions, extracts, key points, facts, metrics, scrub
   hogwarts/facts.py                     fact validity windows, subject keys, volatility lint, as-of reads, approved patches
   hogwarts/owlery.py                    owls, requests, review passes, close tokens, purge, audit
   hogwarts/capacity.py                  the cap day, cap bumps, cap hits, review rounds and round allowances
   hogwarts/wands.py                     Ollivander's ledger: model filing, catalogs, each desk's model, trials, the stop file
+  hogwarts/watch.py                     read-only queries behind fleet feed
   hogwarts/cli.py                       argparse CLI, JSON output
+  fleet/                                the fleet scripts and hooks: run_desk.py, review.py, push.py, owl_post.py,
+                                        ollivander.py, feed.py, tools.py (the fleet command) and their helpers
   tests/                                unittest suite
   state/pensieve.db                     the real database, created by castle init
 ```
@@ -134,7 +139,7 @@ The volatility lint matches words, not meaning, so it also catches ordinary last
 
 Every function takes a connection from `db.connect(path)` as its first argument. Functions that depend on time take an optional `now`.
 
-- `hogwarts.db`: `connect(path, create=True)`, `migrate(conn)`, `pending_statements(conn, statements)`, `schema_version(conn)`, `transaction(conn)`, `snapshot(conn)`, `doctor(path, code_root=None)`, `stray_bytecode(root)`, `DEFAULT_DB`.
+- `hogwarts.db`: `connect(path, create=True)`, `connect_readonly(path)`, `migrate(conn)`, `pending_statements(conn, statements)`, `schema_version(conn)`, `transaction(conn)`, `snapshot(conn)`, `doctor(path, code_root=None)`, `stray_bytecode(root)`, `DEFAULT_DB`.
 - `hogwarts.pensieve`
   - Desks: `add_desk`, `get_desk`, `list_desks`.
   - Tasks: `create_task(desk, title, intent_path=None, parent_task_id=None, request_id=None, session_id=None, worktree=None, task_id=None)`, `start_task`, `mark_awaiting_close(task, repo=None, sha=None)`, `record_commit`, `get_commit`, `close_task`, `closed_ancestors`, `get_task`, `list_tasks`.
@@ -148,6 +153,7 @@ Every function takes a connection from `db.connect(path)` as its first argument.
   - Lint: `VOLATILE_PATTERNS`, `volatile_match(text)`, `LOOKUP_COMMAND`.
 - `hogwarts.capacity`: `day_bounds(now, reset_offset)`, `add_bump`, `active_bumps`, `list_bumps`, `cap_status`, `record_cap_hit`, `list_cap_hits`, `waiting_requests`, `open_review_round`, `review_rounds`, `allow_round`.
 - `hogwarts.wands`: `classify`, `ryan_lines`, `record_catalog`, `last_catalog`, `get_desk_model`, `list_desk_models`, `set_need`, `apply_model`, `set_pending`, `clear_pending`, `approve`, `pin`, `unpin`, `record_outcome`, `changes`, `clear_stop`. The calls that file, pin, approve or apply a model take the fleet's `BLOCKED_MODEL_PREFIXES` and refuse a name one of them matches.
+- `hogwarts.watch` (read only, for a connection from `db.connect_readonly`): `marks`, `owls_after`, `headmaster_events_after`, `metrics_after`, `run_recorded`.
 - `hogwarts.owlery`
   - Owls: `send`, `inbox`, `read`, `ack`, `mark_delivered`.
   - Requests: `REQUEST_PHASES`, `open_request`, `advance`, `defer`, `decline`, `get_request`, `list_requests`, `request_owls`.
