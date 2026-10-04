@@ -62,6 +62,8 @@ its work may be this same work under a new name: --task <id> goes on with it and
 or Ryan closes it. --task never moves a task off a branch the checkout still has, nor onto a branch another
 task follows. A checkout is matched as a folder (device and inode), not by how its path is spelled. These
 choices are made under one short lock, so two reviews started at once on one branch never both make a task.
+The count trusts a branch name on one checkout folder: a second clone, a moved folder, or work moved onto
+another branch name starts a fresh task, and the handbook asks Ryan not to route around his cap that way.
 A new task that fails before its first round opens is closed as abandoned, unless its commit was already
 recorded on it: then it stays active, --task <id> retries it, and a new review of that commit names it.
 """
