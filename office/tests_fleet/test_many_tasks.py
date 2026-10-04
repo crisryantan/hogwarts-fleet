@@ -9,8 +9,10 @@ from __future__ import annotations
 import json
 import os
 import contextlib
+import io
 import re
 import stat
+import subprocess
 import threading
 import unittest
 from pathlib import Path
@@ -889,6 +891,62 @@ class RunDeskPadTests(RunDeskCase):
         self.assertEqual(event["verdict"], "headmaster")
         self.assertIn(f"hermione waited 0 minutes for its desk lock behind its other runs and gave up, so owl {owl_id}",
                       event["summary"])
+
+
+class OwlPostBoardTests(RunDeskCase):
+    def setUp(self) -> None:
+        super().setUp()
+        clock = mock.patch("time.time", return_value=NOW)
+        clock.start()
+        self.addCleanup(clock.stop)
+
+    def board(self) -> list:
+        found = capacity.in_flight(self.conn, NOW, config.RUNNING_WINDOW_SECONDS, max_rounds=config.REVIEW_ROUND_CAP)
+        return [(task["id"], task["desk"], task["status"], task["state"], task["running"])
+                for row in found["desks"] for task in row["tasks"]]
+
+    def test_an_ordinary_request_run_shows_running_on_the_board_while_its_task_is_queued(self):
+        # Owl Post rings run_desk for an ordinary request without on_start, so the task stays queued all run.
+        for desk in ("ron", "hermione"):
+            with self.subTest(desk=desk):
+                self.enable(desk)
+                seen = {}
+
+                def during(argv, **kwargs):
+                    [task_id] = [task["id"] for task in pensieve.list_tasks(self.conn, desk=desk)]
+                    seen["task"] = task_id
+                    seen["board"] = self.board()
+                    seen["digest"] = session_start.digest(self.conn, "mcgonagall", now=NOW)
+                    return subprocess.CompletedProcess(args=argv, returncode=0)
+
+                def ring(recipient: str, owl_id: str) -> None:
+                    with fake_children(during) as started, contextlib.redirect_stdout(io.StringIO()):
+                        self.assertEqual(run_desk.main([recipient, "--owl", owl_id]), 0)
+                    started.assert_called_once()
+
+                self.write_owl("mcgonagall", f"{desk}-request.json", {"to": desk, "kind": "request",
+                                                                      "subject": f"triage for {desk}", "body": "go"})
+                with mock.patch.object(run_desk, "spawn", side_effect=ring) as spawn:
+                    owl_post.run_pass(self.conn, now=NOW)
+                spawn.assert_called_once()
+                task_id = seen["task"]
+                self.assertEqual(seen["board"], [(task_id, desk, "queued", "running", True)])
+                self.assertIn(f"- {task_id} {desk} running: triage for {desk} | a run is going", seen["digest"])
+                self.assertFalse(any(line.startswith(f"- task {task_id} ") for line in seen["digest"]))
+                [launch] = capacity.list_launches(self.conn, desk)
+                self.assertEqual(launch["task_id"], task_id)
+                # Once the run records its usage it is no longer going, and the queued task leaves the board.
+                self.assertEqual(pensieve.get_task(self.conn, task_id)["status"], "queued")
+                self.assertEqual(self.board(), [])
+
+    def test_a_queued_task_with_no_run_going_stays_off_the_board(self):
+        self.enable("ron")
+        owl_id, task_id = self.request("ron")
+        self.assertEqual(self.board(), [])
+        capacity.record_launch(self.conn, "ron", "run-" + "e" * 16, "sonnet", task_id=task_id, now=NOW - 7200)
+        self.assertEqual(self.board(), [])
+        capacity.record_launch(self.conn, "ron", "run-" + "f" * 16, "sonnet", task_id=task_id, now=NOW - 60)
+        self.assertEqual(self.board(), [(task_id, "ron", "queued", "running", True)])
 
 
 class DigestTests(HookCase):

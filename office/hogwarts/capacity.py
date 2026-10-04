@@ -499,6 +499,9 @@ def round_author(conn: Conn, reviewer_task_id: str) -> Optional[str]:
     return None if row is None else row["task_id"]
 
 
+# Tasks with a launch of their own that has no usage yet and is recent enough to still be running.
+_OPEN_LAUNCH_TASKS = """SELECT task_id FROM run_launches WHERE metric_id IS NULL AND launched_at > ?
+       AND task_id IS NOT NULL"""
 # A launch with no usage yet, recent enough to still be running, for the task or one of its rounds' reviewers.
 _RUNNING = """SELECT 1 AS found FROM run_launches WHERE metric_id IS NULL AND launched_at > ? AND (task_id = ?
        OR task_id IN (SELECT requests.task_id FROM review_rounds JOIN requests ON requests.id = review_rounds.request_id
@@ -547,7 +550,9 @@ def _flight_row(conn: Conn, task: dict, since: int, max_rounds: int) -> dict:
 
 def in_flight(conn: Conn, now: Optional[int] = None, running_window: int = 3600, desk: Optional[str] = None,
               max_rounds: int = 3) -> dict:
-    """Every active or awaiting-close author task, grouped by desk, with where it stands.
+    """Every active or awaiting-close author task, and every other task its desk has a run going for, grouped
+    by desk, with where it stands. Owl Post starts an ordinary request's run without starting its task, so a
+    queued task whose run is going is listed as running, and so is one closed while its run still goes.
 
     A reviewer's round task is folded into its author task and never listed alone. running means a launch
     for the task, or for one of its rounds' reviewer tasks, has no usage yet and started within
@@ -565,10 +570,12 @@ def in_flight(conn: Conn, now: Optional[int] = None, running_window: int = 3600,
         if desk is not None:
             pensieve.get_desk(conn, desk)
         reviews = review_task_ids(conn)
+        since = ts - running_window
         tasks = [task for task in db.fetch_all(
-            conn, "SELECT * FROM tasks WHERE status IN ('active', 'awaiting_close') AND (? IS NULL OR desk = ?)"
-                  " ORDER BY created_at, rowid", (desk, desk)) if task["id"] not in reviews]
-        rows = [_flight_row(conn, task, ts - running_window, max_rounds) for task in tasks]
+            conn, "SELECT * FROM tasks WHERE (status IN ('active', 'awaiting_close') OR id IN ("
+                  + _OPEN_LAUNCH_TASKS + ")) AND (? IS NULL OR desk = ?) ORDER BY created_at, rowid",
+            (since, desk, desk)) if task["id"] not in reviews]
+        rows = [_flight_row(conn, task, since, max_rounds) for task in tasks]
     desks: dict = {}
     for row in rows:
         desks.setdefault(row["desk"], []).append(row)

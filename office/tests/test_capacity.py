@@ -601,6 +601,24 @@ class ManyTaskCapacityTests(RoundCase):
         capacity.record_launch_usage(self.conn, "run-ended", 1, 1, 0, 0.1, 10, now=NOW)
         self.assertFalse(self.flight()[self.author]["running"])
 
+    def test_a_task_of_any_status_with_a_run_going_is_on_the_board_as_running(self):
+        # Owl Post starts an ordinary request's run without starting its task, so the task stays queued.
+        queued = self.task("alpha")["id"]
+        idle = self.task("alpha")["id"]
+        closed = self.task("alpha")["id"]
+        self.assertNotIn(queued, self.flight())
+        capacity.record_launch(self.conn, "alpha", "run-queued", "model-x", task_id=queued, now=NOW - 60)
+        capacity.record_launch(self.conn, "alpha", "run-idle", "model-x", task_id=idle, now=NOW - self.WINDOW - 1)
+        capacity.record_launch(self.conn, "alpha", "run-closed", "model-x", task_id=closed, now=NOW - 60)
+        pensieve.close_task(self.conn, closed, "abandoned", now=NOW)
+        flight = self.flight()
+        self.assertEqual({task_id: (row["status"], row["state"], row["running"]) for task_id, row in flight.items()
+                          if task_id != self.author},
+                         {queued: ("queued", "running", True), closed: ("closed", "running", True)})
+        self.assertEqual(capacity.in_flight(self.conn, NOW, self.WINDOW, desk="beta")["tasks"], 0)
+        capacity.record_launch_usage(self.conn, "run-queued", 1, 1, 0, 0.1, 10, now=NOW)
+        self.assertNotIn(queued, self.flight())
+
     def test_review_round_tasks_fold_into_their_author_task(self):
         opened = self.round(SHAS[0])
         pensieve.start_task(self.conn, opened["task"]["id"], now=NOW)

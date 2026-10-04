@@ -260,7 +260,8 @@ def _retiring_window() -> int:
 
 
 def _task_board(conn: sqlite3.Connection, args: argparse.Namespace) -> dict:
-    """Every active or awaiting-close author task by desk: its round, verdict and whether a run is going."""
+    """Every active or awaiting-close author task by desk, and any task with a run going for it: its round,
+    verdict and whether a run is going."""
     caps = _fleet_caps()
     return capacity.in_flight(conn, _clock(), caps.RUNNING_WINDOW_SECONDS, args.desk, caps.REVIEW_ROUND_CAP)
 
