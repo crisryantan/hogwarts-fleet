@@ -207,10 +207,69 @@ class VerifyTests(LoopCase):
         self.assertEqual((result["sha"], result["checks"], result["failed"]), (sha, 3, []))
         text = (self.castle / "tasks" / parent / "evidence.md").read_text()
         self.assertTrue(text.startswith(f"EVIDENCE {task['id']} @ {sha}\n"))
+        self.assertIn("\nCLEANED nothing: the worktree held no git-ignored files besides its dependency links\n", text)
         self.assertIn("AC-1 the readme is there\ncheck: `test -f README.md`\nexit: 0", text)
         self.assertIn("AC-3 the diff stays small\ncheck: one file changes\nnot run:", text)
         office = self.office / "reviews" / task["id"] / f"evidence-{sha}.md"
         self.assertEqual(office.read_text(), text)
+
+    def test_ignored_files_are_removed_before_the_checks(self):
+        parent, task, _, created, _ = self.build()
+        wt = Path(created["worktree"])
+        self.write_file(wt / ".gitignore", "widget.txt\nbuild/\n")
+        self.git("add", ".gitignore", cwd=wt)
+        self.git("commit", "-q", "-m", "ignore rules", cwd=wt)
+        self.write_file(wt / "widget.txt", "left behind, never committed\n")
+        (wt / "build").mkdir()
+        self.write_file(wt / "build" / "out.o", "object\n")
+        result = verify.verify(self.conn, task["id"])
+        self.assertEqual(result["failed"], ["AC-2"])
+        self.assertFalse((wt / "widget.txt").exists())
+        self.assertFalse((wt / "build").exists())
+        text = (self.castle / "tasks" / parent / "evidence.md").read_text()
+        self.assertIn("\nCLEANED 2 git-ignored paths before the checks, each as git names it:\n"
+                      "    build/\n    widget.txt\nRAN ", text)
+
+    def ignored_worktree(self, rules: str) -> tuple:
+        parent, task, _, created, _ = self.build()
+        wt = Path(created["worktree"])
+        self.write_file(wt / ".gitignore", rules)
+        self.git("add", ".gitignore", cwd=wt)
+        self.git("commit", "-q", "-m", "ignore rules", cwd=wt)
+        return parent, task, wt
+
+    def test_every_removed_path_is_named_in_full_and_escaped(self):
+        parent, task, wt = self.ignored_worktree("*.log\n")
+        long_name = "x" * 150 + ".log"
+        names = [f"run-{n:02d}.log" for n in range(12)] + [long_name, "two\nlines.log"]
+        for name in names:
+            self.write_file(wt / name, "log\n")
+        verify.verify(self.conn, task["id"])
+        self.assertEqual([name for name in names if (wt / name).exists()], [])
+        text = (self.castle / "tasks" / parent / "evidence.md").read_text()
+        self.assertIn("\nCLEANED 14 git-ignored paths before the checks, each as git names it:\n", text)
+        listed = text.split("each as git names it:\n", 1)[1].split("\nRAN ", 1)[0].splitlines()
+        self.assertEqual(sorted(line.strip() for line in listed),
+                         sorted([f"run-{n:02d}.log" for n in range(12)] + [long_name, '"two\\nlines.log"']))
+
+    def test_too_many_ignored_paths_stop_verify_before_anything_is_removed(self):
+        _, task, wt = self.ignored_worktree("*.log\n")
+        for n in range(gitops.CLEAN_MAX_PATHS + 1):
+            self.write_file(wt / f"run-{n:03d}.log", "log\n")
+        with self.assertRaisesRegex(FleetError, "more than the evidence can list"):
+            verify.verify(self.conn, task["id"])
+        self.assertTrue((wt / "run-000.log").exists())
+
+    def test_a_nested_repository_stops_verify_before_anything_is_removed(self):
+        _, task, wt = self.ignored_worktree("vendor/\n*.log\n")
+        (wt / "vendor" / "lib").mkdir(parents=True)
+        self.git("init", "-q", cwd=wt / "vendor" / "lib")
+        self.write_file(wt / "vendor" / "lib" / "index.js", "module.exports = 2\n")
+        self.write_file(wt / "stray.log", "log\n")
+        with self.assertRaisesRegex(FleetError, "nested git repository"):
+            verify.verify(self.conn, task["id"])
+        self.assertTrue((wt / "stray.log").exists())
+        self.assertTrue((wt / "vendor" / "lib" / "index.js").exists())
 
     def test_a_failing_check_is_recorded_not_hidden(self):
         _, task, _, created, _ = self.build()

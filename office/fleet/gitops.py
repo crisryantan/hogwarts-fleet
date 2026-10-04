@@ -43,8 +43,11 @@ HARDENING = (
     "-c", "core.pager=cat",
     "-c", "core.editor=true",
     "-c", "protocol.ext.allow=never",
+    "-c", "core.quotePath=true",  # unusual path names come back escaped, one per line
 )
 OUTPUT_MAX_CHARS = 200_000
+CLEAN_MAX_PATHS = 200
+CLEAN_MAX_CHARS = 50_000
 
 
 def check_safe_path(path: object, label: str) -> str:
@@ -181,6 +184,40 @@ def check_links(record: dict) -> None:
         if os.path.lexists(f"{record['path']}/{name}") and not borrowed_link(record, name):
             raise FleetError(f"{name} in the worktree is no longer the read-only link to the main checkout's copy, "
                              "so checks could use files no commit holds; delete it from the worktree first")
+
+
+def _clean(record: dict, mode: str) -> list:
+    out = git(["clean", mode, "-d", "-X", "--", ".", *link_excludes(record)], record["git_dir"], record["path"])
+    if len(out) >= OUTPUT_MAX_CHARS:
+        raise FleetError("git clean listed more than the fleet can record")
+    return out.splitlines()
+
+
+def clean_ignored(record: dict) -> list:
+    """Remove every git-ignored path in the worktree except the dependency links, and return each one as git
+    names it (escaped when unusual).
+
+    Status never shows ignored files, so a desk could leave one (a nested node_modules, a .env) that
+    checks would use although no commit holds it. A dry run comes first: content git clean would skip,
+    such as a nested git repository, or more paths than the evidence can list, is refused before anything
+    is removed. Anything ignored that is still there afterwards is refused too.
+    """
+    planned = _clean(record, "-n")
+    skipped = [line for line in planned if not line.startswith("Would remove ")]
+    if skipped:
+        raise FleetError("the worktree holds ignored content git clean would not remove, such as a nested git "
+                         f"repository ({common.one_line(skipped[0], 200)}); remove it by hand, then verify again")
+    names = [line[len("Would remove "):] for line in planned]
+    if len(names) > CLEAN_MAX_PATHS or sum(len(name) for name in names) > CLEAN_MAX_CHARS:
+        raise FleetError(f"the worktree holds {len(names)} git-ignored paths, more than the evidence can list; "
+                         "remove them by hand, then verify again")
+    removed = [line[len("Removing "):] for line in _clean(record, "-f") if line.startswith("Removing ")]
+    left = git(["status", "--porcelain", "--ignored", "--untracked-files=all", "--", ".", *link_excludes(record)],
+               record["git_dir"], record["path"]).strip()
+    if removed != names or left:
+        raise FleetError("git-ignored content is still in the worktree after the cleanup; remove it by hand, "
+                         "then verify again")
+    return removed
 
 
 def dirty(record: dict) -> bool:

@@ -133,6 +133,21 @@ class DependencyLinkTests(ToolchainCase):
             review.review_build(self.conn, task["id"])
         self.assertEqual(self.git("rev-parse", "HEAD", cwd=str(path)), self.git("rev-parse", "origin/main"))
 
+    def test_verify_cleans_a_nested_node_modules_but_keeps_the_link(self):
+        self.node_repo()
+        self.write_file(self.repo / ".gitignore", "node_modules\n")
+        self.git("add", ".gitignore")
+        self.git("commit", "-q", "-m", "ignore node_modules anywhere")
+        self.git("update-ref", "refs/remotes/origin/main", "HEAD")
+        _, task, _, created, _ = self.build()
+        path = Path(created["worktree"])
+        (path / "src" / "node_modules" / "left-pad").mkdir(parents=True)
+        self.write_file(path / "src" / "node_modules" / "left-pad" / "index.js", "module.exports = 2\n")
+        verify.verify(self.conn, task["id"])
+        self.assertFalse((path / "src" / "node_modules").exists())
+        self.assertTrue((path / "node_modules").is_symlink())
+        self.assertTrue((self.repo / "node_modules" / "left-pad" / "index.js").is_file())
+
     def test_a_deleted_link_is_not_a_change(self):
         self.node_repo()
         _, task, _, created, _ = self.build()
