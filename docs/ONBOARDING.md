@@ -80,8 +80,8 @@ command -v git jq gh rg shellcheck claude codex
 **You're done when** the installer ends with lines like these, and then lists the placeholder files for stage 2:
 
 ```
-tests: Ran 467 tests in ... OK
-tests_fleet: Ran 349 tests in ... OK
+tests: Ran 469 tests in ... OK
+tests_fleet: Ran 353 tests in ... OK
 castle doctor: ok
 ```
 

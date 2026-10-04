@@ -100,7 +100,7 @@ A desk asks for what its job needs, never for a model by name. Its role card, `d
 Every headless desk has a daily cap on runs, and the Claude desks a cap on spend. They exist so a loop can't burn a day's budget while you're away. They aren't a quota to spend. The numbers in `fleet/config.py` are sized for a busy day of a dozen or so PRs plus side work, so a normal day never reaches them.
 
 - The day resets at local midnight, so a bump you make lasts until then and no longer.
-- A run counts toward the run cap the moment it starts, so one that gets killed or crashes still counts. Spend comes from the cost each run records.
+- A run counts toward the run cap the moment it starts, so one that gets killed or crashes still counts. Spend comes from the cost each run records, so a run killed before it finishes adds nothing to spend.
 - A desk at 80% of a cap sends one warning. At the cap its next run doesn't start, and its request keeps waiting for the reset or for your `castle desk cap`.
 - A cap day resets all at once, so a desk busy on both sides of the reset can use up to two days' cap within hours. If that matters, a rolling 24 hour guard on top would close it, and that's your call.
 - Nothing waits in line. A second review of a task that's already being reviewed stops at once and changes nothing. A review whose reviewer is busy with another task, or at its cap, is queued, and the next review of that task replaces it, so only a task's newest commit gets reviewed. A task gets three review rounds, and only a round where the reviewer recorded a verdict counts. A fourth waits for `castle task allow-round`.
@@ -132,7 +132,7 @@ Standard-library Python that runs on the Mac's built-in Python 3.9, with a CLI c
 | Review passes | A pass counts only for that exact commit, only when it is registered on the author's task, and only when the reviewer's family differs from the author's. |
 | Facts | One current fact per subject. Volatile facts need a live lookup or a short expiry. Nightly changes arrive as typed operations applied all or nothing. |
 
-The full contract is in `office/README.md`. 467 store tests and 349 fleet tests pass on the system Python. They include checks that no code reads environment variables and that hostile ids and paths are refused at every entry point.
+The full contract is in `office/README.md`. 469 store tests and 353 fleet tests pass on the system Python. They include checks that no code reads environment variables and that hostile ids and paths are refused at every entry point.
 
 ## Spending fewer tokens
 
