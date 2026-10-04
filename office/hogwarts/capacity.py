@@ -1,13 +1,19 @@
-"""Busy-day capacity: cap bumps, which cap stopped a desk, and review rounds per author task.
+"""Busy-day capacity: cap bumps, which cap stopped a desk, run launches, and review rounds per author task.
 
 The cap numbers live in the fleet's config. The store keeps what changes during a day: the bumps
 Ryan makes with castle desk cap, one row each time a cap refuses a run or a vendor limit stops one,
-and one row per review request, so a newer commit supersedes a review that is still waiting and a
-round past the cap waits for Ryan's castle task allow-round. Only a reviewer run that recorded a
-verdict uses up a round, and the proof is the verdict itself: record_round_verdict stores the review and
-ties it to its round in one transaction, so a review recorded before a later step failed still counts.
-A result owl or a request phase alone is not proof, since the reviewer desk can post a result owl itself.
-The daily run caps still bound the retries of runs that did not record one.
+one launch row per headless run, and one row per review request.
+
+A run counts toward the daily run cap from its launch row, written before its process starts, so a run
+that is killed, crashes or is interrupted before it records usage still counts. Its usage and cost go on
+a metrics row tied to that launch when it ends, and the spend cap reads the recorded cost.
+
+A newer commit supersedes a review that is still waiting, and a round past the cap waits for Ryan's
+castle task allow-round. Only a reviewer run that recorded a verdict uses up a round, and the proof is
+the verdict itself: record_round_verdict stores the review and ties it to its round in one transaction,
+so a review recorded before a later step failed still counts. A result owl or a request phase alone is
+not proof, since the reviewer desk can post a result owl itself. The daily run caps bound the retries
+of runs that did not record one.
 """
 from __future__ import annotations
 
@@ -16,7 +22,7 @@ import time
 from typing import Optional
 
 from . import db, ids, owlery, pensieve
-from .errors import ConflictError, ValidationError
+from .errors import ConflictError, NotFoundError, ValidationError
 
 DAY = 86400
 RUNS_BUMP_MAX = 500
@@ -32,6 +38,13 @@ _ROUND_ROWS = """SELECT review_rounds.*, requests.phase AS request_phase, reques
    LEFT JOIN tasks ON tasks.id = requests.task_id
    LEFT JOIN review_passes ON review_passes.id = review_rounds.review_id
    WHERE review_rounds.task_id = ? ORDER BY review_rounds.created_at, review_rounds.rowid"""
+
+# Runs this cap day: every launch, plus usage recorded without one (castle metric add). Spend is recorded cost.
+_USED_TODAY = """SELECT
+       (SELECT COUNT(*) FROM run_launches WHERE desk = ? AND launched_at >= ? AND launched_at < ?)
+     + (SELECT COUNT(*) FROM metrics WHERE desk = ? AND ts >= ? AND ts < ?
+          AND NOT EXISTS (SELECT 1 FROM run_launches WHERE run_launches.metric_id = metrics.id)) AS runs,
+       (SELECT COALESCE(SUM(cost_usd), 0) FROM metrics WHERE desk = ? AND ts >= ? AND ts < ?) AS cost_usd"""
 
 Conn = sqlite3.Connection
 
@@ -152,12 +165,7 @@ def cap_status(conn: Conn, desk: str, run_cap: int, spend_cap: Optional[float] =
     start, end = day_bounds(ts, reset_offset)
     with db.snapshot(conn):
         pensieve.get_desk(conn, desk)
-        used = db.fetch_one(
-            conn,
-            "SELECT COUNT(*) AS runs, COALESCE(SUM(cost_usd), 0) AS cost_usd FROM metrics"
-            " WHERE desk = ? AND ts >= ? AND ts < ?",
-            (desk, start, end),
-        )
+        used = db.fetch_one(conn, _USED_TODAY, (desk, start, end) * 3)
         bumps = active_bumps(conn, desk, ts)
     runs_limit = run_cap + bumps["runs"]
     spend_limit = None if spend_cap is None else round(spend_cap + bumps["spend"], 6)
@@ -202,6 +210,47 @@ def list_cap_hits(conn: Conn, desk: Optional[str] = None, since: int = 0) -> lis
     return db.fetch_all(
         conn, "SELECT * FROM cap_hits WHERE (? IS NULL OR desk = ?) AND ts >= ? ORDER BY id", (desk, desk, since)
     )
+
+
+# Run launches
+
+
+def record_launch(conn: Conn, desk: str, run_id: str, model: str, now: Optional[int] = None) -> dict:
+    """A headless run about to start. It counts toward the desk's daily run cap from now, however it ends."""
+    desk = ids.check("desk", desk)
+    run_id = ids.check("label", run_id, "run id")
+    model = ids.check("label", model, "model")
+    ts = ids.stamp(now)
+    with db.transaction(conn):
+        pensieve.get_desk(conn, desk)
+        if db.fetch_one(conn, "SELECT run_id FROM run_launches WHERE run_id = ?", (run_id,)) is not None:
+            raise ConflictError("that run was already launched")
+        conn.execute("INSERT INTO run_launches(run_id, desk, model, launched_at) VALUES (?, ?, ?, ?)",
+                     (run_id, desk, model, ts))
+    return db.fetch_one(conn, "SELECT * FROM run_launches WHERE run_id = ?", (run_id,))
+
+
+def record_launch_usage(conn: Conn, run_id: str, input_tokens: int, output_tokens: int, cache_read_tokens: int,
+                        cost_usd: float, duration_ms: int, now: Optional[int] = None) -> dict:
+    """The usage of a launched run that ended: its metrics row, tied to the launch in one transaction."""
+    run_id = ids.check("label", run_id, "run id")
+    with db.transaction(conn):
+        launch = db.fetch_one(conn, "SELECT * FROM run_launches WHERE run_id = ?", (run_id,))
+        if launch is None:
+            raise NotFoundError("run launch not found")
+        if launch["metric_id"] is not None:
+            raise ConflictError("that run's usage is already recorded")
+        metric = pensieve.add_metric(conn, launch["desk"], run_id, launch["model"], input_tokens, output_tokens,
+                                     cache_read_tokens, cost_usd, duration_ms, ts=now)
+        conn.execute("UPDATE run_launches SET metric_id = ? WHERE run_id = ? AND metric_id IS NULL",
+                     (metric["id"], run_id))
+    return metric
+
+
+def list_launches(conn: Conn, desk: Optional[str] = None) -> list[dict]:
+    desk = ids.optional("desk", desk)
+    return db.fetch_all(conn, "SELECT * FROM run_launches WHERE (? IS NULL OR desk = ?) ORDER BY launched_at, rowid",
+                        (desk, desk))
 
 
 def waiting_requests(conn: Conn, desk: str) -> list[dict]:
@@ -256,8 +305,9 @@ def review_rounds(conn: Conn, task_id: str) -> list[dict]:
 
 
 def stranded_rounds(conn: Conn, reviewer_desk: str) -> list[dict]:
-    """Review rounds addressed to reviewer_desk whose reviewer task is still active. Under that reviewer's
-    review lock no review of theirs is running, so these were left by a review that died."""
+    """Review rounds addressed to reviewer_desk whose reviewer task is still active. A review holds the
+    reviewer's desk lock until its reviewer task is closed, so whoever holds that lock and finds one here
+    has found a task left by a review that died."""
     reviewer_desk = pensieve.get_desk(conn, ids.check("desk", reviewer_desk, "reviewer desk"))["name"]
     rows = db.fetch_all(
         conn,

@@ -7,7 +7,7 @@ import os
 import subprocess
 from unittest import mock
 
-from hogwarts import ids, owlery, pensieve
+from hogwarts import capacity, ids, owlery, pensieve
 from tests.support import NOW
 
 from fleet import config, owl_post, run_desk, safefs
@@ -386,6 +386,9 @@ class RealRunTests(RunDeskCase):
         self.assertEqual(started.call_args.kwargs["cwd"], f"{self.castle}/desks/hermione")
         self.assertEqual(owlery.inbox(self.conn, "hermione"), [])
         self.assertEqual([row["runs"] for row in pensieve.summary(self.conn)], [1])
+        [launch] = capacity.list_launches(self.conn, "hermione")
+        [metric] = self.conn.execute("SELECT id, run_id FROM metrics").fetchall()
+        self.assertEqual((launch["metric_id"], launch["run_id"]), (metric["id"], metric["run_id"]))
         self.assertEqual(self.events_of("rundesk.failed"), [])
 
     def test_a_failed_run_leaves_its_owl_and_raises_an_event(self):

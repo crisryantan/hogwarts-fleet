@@ -96,11 +96,9 @@ CODEX_PLAN_LIMIT_PATTERNS = (
     r"usage[ _-]?limit", r"hit your (?:usage )?limit", r"rate[ _-]?limit", r"too many requests", r"\b429\b",
     r"quota",
 )
-# A run waits this long for another run of the same desk to finish.
+# A run the Owl Post starts waits this long for another run of the same desk to finish. A review never waits.
 DESK_LOCK_WAIT_SECONDS = 1860
 RUN_TIMEOUT_SECONDS = 1800
-# A review waits this long for an earlier review by the same reviewer to record its verdict and close its task.
-REVIEW_LOCK_WAIT_SECONDS = DESK_LOCK_WAIT_SECONDS + RUN_TIMEOUT_SECONDS + 120
 ENABLED_MARKER = "enabled"
 CLAUDE_SETTINGS_FILE = "settings.json"
 CODEX_PROFILE_FILE = "codex.toml"

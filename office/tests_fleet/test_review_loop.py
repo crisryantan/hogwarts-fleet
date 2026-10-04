@@ -118,7 +118,7 @@ class LoopCase(FleetCase):
 
     def fake_reviewer(self, verdict: str = "PASS", task_id: str = None, sha: str = None):
         """run_desk.run that writes the reviewer's output the way each family does."""
-        def run(conn, desk, owl_id, mcp_job=None, now=None, on_start=None):
+        def run(conn, desk, owl_id, mcp_job=None, now=None, on_start=None, lock_held=False):
             if on_start is not None:
                 on_start()
             owl = next(item for item in owlery.inbox(conn, desk, include_acked=True) if item["id"] == owl_id)

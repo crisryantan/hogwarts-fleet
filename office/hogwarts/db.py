@@ -416,7 +416,8 @@ V3 = (
     ),
 )
 
-# Busy-day capacity: Ryan's temporary cap bumps, which cap stopped a desk, and review rounds per author task.
+# Busy-day capacity: Ryan's temporary cap bumps, which cap stopped a desk, review rounds per author task,
+# and a launch record per headless run.
 V4 = (
     _table(
         """CREATE TABLE IF NOT EXISTS cap_bumps (
@@ -502,6 +503,40 @@ V4 = (
         "a round verdict must be the review of its commit by its reviewer",
     ),
     _guard("review_rounds_no_delete", "BEFORE DELETE ON review_rounds", "review rounds are never deleted"),
+    # One row per headless run, written before its process starts, so a run counts toward the daily run cap
+    # even when it is killed before it records usage. Its usage is the metrics row tied to it once it ends.
+    _table(
+        """CREATE TABLE IF NOT EXISTS run_launches (
+        run_id TEXT PRIMARY KEY NOT NULL,
+        desk TEXT NOT NULL REFERENCES desks(name),
+        model TEXT NOT NULL,
+        launched_at INTEGER NOT NULL,
+        metric_id INTEGER UNIQUE REFERENCES metrics(id)
+    )"""
+    ),
+    "CREATE INDEX IF NOT EXISTS run_launches_desk ON run_launches(desk, launched_at)",
+    _guard(
+        "run_launches_fixed",
+        "BEFORE UPDATE OF run_id, desk, model, launched_at ON run_launches",
+        "run launch fields are fixed",
+    ),
+    _guard(
+        "run_launches_open_without_usage",
+        "BEFORE INSERT ON run_launches WHEN NEW.metric_id IS NOT NULL",
+        "a run launch opens without usage",
+    ),
+    _guard(
+        "run_launches_usage_once",
+        "BEFORE UPDATE OF metric_id ON run_launches WHEN OLD.metric_id IS NOT NULL",
+        "a run launch usage is final",
+    ),
+    _guard(
+        "run_launches_usage_matches",
+        "BEFORE UPDATE OF metric_id ON run_launches WHEN NOT EXISTS (SELECT 1 FROM metrics"
+        " WHERE id = NEW.metric_id AND desk = OLD.desk AND run_id = OLD.run_id)",
+        "a run launch usage must be the metrics row of that run",
+    ),
+    _guard("run_launches_no_delete", "BEFORE DELETE ON run_launches", "run launches are never deleted"),
 )
 
 MIGRATIONS = ((1, V1), (2, V2), (3, V3), (4, V4))

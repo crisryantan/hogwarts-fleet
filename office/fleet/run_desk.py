@@ -20,8 +20,11 @@ and the request's task is the desk's own. Any other owl runs in the desk's work 
 
 --dry-run prints the argv as JSON and runs nothing. A real run needs the desk to be
 enabled (a plain file named "enabled" in its office folder, made by Ryan), stays under
-the desk's daily run and spend caps plus any bump Ryan made today, waits for the per-desk
-lock, and records usage to the store's metrics. A refusal by a cap tells Ryan which cap, how
+the desk's daily run and spend caps plus any bump Ryan made today, and holds the per-desk
+lock (it waits for it, unless its caller already holds it). Under that lock, before the process
+starts, it records a launch that counts toward the daily run cap at once, so a run that is killed or
+interrupted still counts; when the process ends its usage and cost are recorded against that launch.
+A refusal by a cap tells Ryan which cap, how
 many requests wait and when it resets, once per cap and effective limit a day; a desk at 80% of
 a cap gets one warning per effective limit a day. A run that exits 0 reads and acks its owl.
 A run that fails raises a headmaster event, labelled claude_plan or codex_plan when the
@@ -36,6 +39,7 @@ Run it with the wrapper line:
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import math
 import os
@@ -45,7 +49,7 @@ import shutil
 import subprocess
 import sys
 import time
-from typing import Callable, Optional
+from typing import Callable, Iterator, Optional
 
 if __name__ == "__main__" and "/Users/crisryantan/.hogwarts" not in sys.path:
     sys.path.insert(0, "/Users/crisryantan/.hogwarts")
@@ -730,10 +734,23 @@ def require_castle_dir(path: str) -> None:
         pass
 
 
+@contextlib.contextmanager
+def desk_lock(desk: str, wait: bool = True) -> Iterator[None]:
+    """The per-desk lock a run holds from its cap check until its usage is recorded. wait=False raises
+    safefs.Busy at once when someone else holds it, instead of waiting for them."""
+    desk = ids.check("desk", desk)
+    with safefs.opened_dir(config.OFFICE_ROOT, "locks", create=True) as locks_fd, \
+            safefs.held_lock(locks_fd, f"desk-{desk}.lock", blocking=wait,
+                             timeout=config.DESK_LOCK_WAIT_SECONDS if wait else None):
+        yield
+
+
 def run(conn, desk: str, owl_id: str, mcp_job: Optional[str] = None, now: Optional[int] = None,
-        on_start: Optional[Callable[[], None]] = None) -> dict:
+        on_start: Optional[Callable[[], None]] = None, lock_held: bool = False) -> dict:
     """Run one desk on one owl. on_start is called under the desk lock once the caps allow the run,
-    just before it launches, so a caller's own bookkeeping never runs for a refused run."""
+    just before it launches, so a caller's own bookkeeping never runs for a refused run. lock_held
+    means the caller already holds this desk's lock (the review script does, from before its round
+    opens until its reviewer task closes)."""
     if not is_enabled(desk):
         raise FleetError(f"{desk} is not enabled; Ryan enables a headless desk by hand")
     plan = build_plan(conn, desk, owl_id, mcp_job)
@@ -741,9 +758,9 @@ def run(conn, desk: str, owl_id: str, mcp_job: Optional[str] = None, now: Option
         with safefs.opened_dir(config.CASTLE_ROOT, "desks", plan["desk"], config.CODEX_WORK_DIR, create=True):
             pass
     require_castle_dir(plan["cwd"])
-    with safefs.opened_dir(config.OFFICE_ROOT, "locks", create=True) as locks_fd, \
-            safefs.held_lock(locks_fd, f"desk-{plan['desk']}.lock", blocking=True,
-                             timeout=config.DESK_LOCK_WAIT_SECONDS):
+    with contextlib.ExitStack() as held:
+        if not lock_held:
+            held.enter_context(desk_lock(plan["desk"]))
         cap = over_daily_cap(conn, plan["desk"], now)
         if cap is not None:
             report_cap(conn, plan["desk"], now)
@@ -761,6 +778,8 @@ def run(conn, desk: str, owl_id: str, mcp_job: Optional[str] = None, now: Option
 
 def _launch(conn, plan: dict, now: Optional[int]) -> dict:
     desk, run_id = plan["desk"], plan["run_id"]
+    # Counted from here, before the process starts: a run killed or interrupted below still uses a run.
+    capacity.record_launch(conn, desk, run_id, plan["model"], now=now)
     if plan.get("temp"):
         fresh_temp(plan["temp"])  # here, not in build_plan, so a dry run never empties a live run's folder
     with safefs.opened_dir(config.OFFICE_ROOT, "runs", desk, create=True) as run_fd:
@@ -783,8 +802,8 @@ def _launch(conn, plan: dict, now: Optional[int]) -> dict:
         except FleetError:
             output = b""  # usage then records as zero; the run log keeps the full output
     usage = parse_claude_usage(output) if plan["family"] == "claude" else parse_codex_usage(output)
-    pensieve.add_metric(conn, desk, run_id, plan["model"], usage["input_tokens"], usage["output_tokens"],
-                        usage["cache_read_tokens"], usage["cost_usd"], duration_ms, ts=now)
+    capacity.record_launch_usage(conn, run_id, usage["input_tokens"], usage["output_tokens"],
+                                 usage["cache_read_tokens"], usage["cost_usd"], duration_ms, now=now)
     return {"desk": desk, "run_id": run_id, "exit_code": exit_code, "timed_out": exit_code == -1,
             "cap_source": plan_limit(plan["family"], output, exit_code != 0), **usage}
 

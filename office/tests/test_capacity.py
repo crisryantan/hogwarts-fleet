@@ -106,6 +106,71 @@ class CapHitTests(StoreCase):
                          [("alpha", "runs", "fleet"), ("alpha", "plan", "claude_plan"), ("beta", "plan", "codex_plan")])
 
 
+class LaunchTests(StoreCase):
+    def setUp(self):
+        super().setUp()
+        self.desks()
+
+    def test_a_launch_counts_at_once_and_a_killed_run_stays_counted(self):
+        capacity.record_launch(self.conn, "alpha", "run-1", "model-x", now=NOW)
+        status = capacity.cap_status(self.conn, "alpha", 2, 3.0, NOW)
+        self.assertEqual((status["runs_used"], status["spend_used_usd"], status["reached"]), (1, 0.0, None))
+        metric = capacity.record_launch_usage(self.conn, "run-1", 10, 5, 0, 1.25, 900, now=NOW + 5)
+        self.assertEqual((metric["desk"], metric["run_id"], metric["model"], metric["cost_usd"]),
+                         ("alpha", "run-1", "model-x", 1.25))
+        status = capacity.cap_status(self.conn, "alpha", 2, 3.0, NOW + 5)
+        self.assertEqual((status["runs_used"], status["spend_used_usd"]), (1, 1.25))
+        capacity.record_launch(self.conn, "alpha", "run-2", "model-x", now=NOW + 6)  # killed: no usage, ever
+        pensieve.add_metric(self.conn, "alpha", "run-by-hand", "model-x", 1, 1, 0, 0.5, 10, ts=NOW + 7)
+        status = capacity.cap_status(self.conn, "alpha", 2, 3.0, NOW + 8)
+        self.assertEqual((status["runs_used"], status["spend_used_usd"], status["reached"]), (3, 1.75, "runs"))
+        self.assertEqual([(row["run_id"], row["metric_id"]) for row in capacity.list_launches(self.conn, "alpha")],
+                         [("run-1", metric["id"]), ("run-2", None)])
+        self.assertEqual(capacity.list_launches(self.conn, "beta"), [])
+
+    def test_a_run_counts_on_the_cap_day_it_launched(self):
+        capacity.record_launch(self.conn, "alpha", "run-late", "model-x", now=RESET - 1)
+        capacity.record_launch_usage(self.conn, "run-late", 1, 1, 0, 0.5, 10, now=RESET + 60)
+        self.assertEqual(capacity.cap_status(self.conn, "alpha", 2, 3.0, RESET - 1)["runs_used"], 1)
+        after = capacity.cap_status(self.conn, "alpha", 2, 3.0, RESET + 61)
+        self.assertEqual((after["runs_used"], after["spend_used_usd"]), (0, 0.5))
+
+    def test_a_launch_is_recorded_once_and_its_usage_once(self):
+        capacity.record_launch(self.conn, "alpha", "run-1", "model-x", now=NOW)
+        with self.assertRaises(ConflictError):
+            capacity.record_launch(self.conn, "alpha", "run-1", "model-x", now=NOW)
+        capacity.record_launch_usage(self.conn, "run-1", 1, 1, 0, 0.1, 10, now=NOW)
+        with self.assertRaises(ConflictError):
+            capacity.record_launch_usage(self.conn, "run-1", 1, 1, 0, 0.1, 10, now=NOW)
+        with self.assertRaises(NotFoundError):
+            capacity.record_launch_usage(self.conn, "run-unknown", 1, 1, 0, 0.1, 10, now=NOW)
+        with self.assertRaises(NotFoundError):
+            capacity.record_launch(self.conn, "gamma", "run-2", "model-x", now=NOW)
+        capacity.record_launch(self.conn, "alpha", "run-3", "model-x", now=NOW)
+        with self.assertRaises(ValidationError):
+            capacity.record_launch_usage(self.conn, "run-3", -1, 1, 0, 0.1, 10, now=NOW)
+        self.assertEqual(capacity.list_launches(self.conn, "alpha")[-1]["metric_id"], None)
+
+    def test_the_store_keeps_launches_fixed_and_their_usage_their_own(self):
+        capacity.record_launch(self.conn, "alpha", "run-1", "model-x", now=NOW)
+        capacity.record_launch(self.conn, "alpha", "run-2", "model-x", now=NOW)
+        other = capacity.record_launch_usage(self.conn, "run-2", 1, 1, 0, 0.1, 10, now=NOW)
+        stray = pensieve.add_metric(self.conn, "beta", "run-1", "model-x", 1, 1, 0, 0.1, 10, ts=NOW)
+        update = "UPDATE run_launches SET metric_id = ? WHERE run_id = ?"
+        for metric_id in (other["id"], stray["id"]):  # another run's usage, or another desk's
+            with self.subTest(metric=metric_id), self.assertRaises(sqlite3.IntegrityError):
+                self.conn.execute(update, (metric_id, "run-1"))
+        with self.assertRaises(sqlite3.IntegrityError):  # usage is final
+            self.conn.execute(update, (None, "run-2"))
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.conn.execute("UPDATE run_launches SET launched_at = 1 WHERE run_id = 'run-1'")
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.conn.execute("DELETE FROM run_launches")
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.conn.execute("INSERT INTO run_launches(run_id, desk, model, launched_at, metric_id)"
+                              " VALUES ('run-3', 'alpha', 'model-x', 1, ?)", (other["id"],))
+
+
 class RoundCase(StoreCase):
     def setUp(self):
         super().setUp()
@@ -410,7 +475,7 @@ class MigrationV4Tests(StoreCase):
         self.addCleanup(conn.close)
         self.assertEqual(db.schema_version(conn), 4)
         names = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
-        self.assertTrue({"cap_bumps", "cap_hits", "round_allowances", "review_rounds"} <= names)
+        self.assertTrue({"cap_bumps", "cap_hits", "round_allowances", "review_rounds", "run_launches"} <= names)
         columns = {row[1] for row in conn.execute("PRAGMA table_info(review_rounds)")}
         self.assertIn("review_id", columns)
         self.assertEqual(capacity.add_bump(conn, "alpha", "runs", 1, RESET, now=NOW)["amount"], 1)

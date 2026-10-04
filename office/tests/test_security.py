@@ -631,6 +631,8 @@ class TransactionCoverageTests(unittest.TestCase):
         capacity.allow_round(conn, task, now=NOW)
         capacity.add_bump(conn, "alpha", "runs", 5, NOW + DAY, now=NOW)
         capacity.record_cap_hit(conn, "alpha", "plan", "claude_plan", run_id="run-1", now=NOW)
+        capacity.record_launch(conn, "alpha", "run-launched", "model-x", now=NOW)
+        capacity.record_launch_usage(conn, "run-launched", 1, 1, 0, 0.25, 10, now=NOW)
         pensieve.set_worktree(conn, pensieve.create_task(conn, "beta", "wt", now=NOW)["id"], f"{ids.WORKTREES_ROOT}/wt")
         pensieve.mark_awaiting_close(conn, task, now=NOW)
         owlery.open_request(conn, "alpha", "beta", "child", parent_task_id=task, now=NOW)
