@@ -38,7 +38,7 @@ McGonagall's and Snape's live herdr sessions only get tools you've trusted by na
 ~/.hogwarts/desks/snape/live-tools.json
 ```
 
-Each file is a JSON object with one key, `tools`, listing every tool that live session may have, built-in and MCP, by its exact name. Before a live space opens, `hogwarts-spaces` refuses it if any definition of that agent lists a tool that isn't on the list. Names match exactly, so there are no wildcards or prefixes, and case counts. The list itself is refused if it names a built-in tool that can run commands, such as Bash, a subagent or a notebook, or any built-in that `fleet/agent_gate.py` doesn't know runs nothing.
+Each file is a JSON object with one key, `tools`, listing every tool that live session may have, built-in and MCP, by its exact name. Before a live space opens, `hogwarts-spaces` refuses it if any definition of that agent lists a tool that isn't on the list. Names match exactly, so there are no wildcards or prefixes, and case counts. The list itself is refused if it names a built-in tool that can run commands, such as Bash, a subagent or a notebook, or any built-in that `fleet/agent_gate.py` doesn't know runs nothing. It's also refused unless it's a plain file you own, with one hard link and nobody else able to write it, in a plain folder you own, so edit it in place. A symlink to a copy elsewhere, or a list or folder others can write, keeps the space shut.
 
 To add a tool:
 
