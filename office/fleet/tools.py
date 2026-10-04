@@ -7,10 +7,12 @@
   fleet review <task-id>
   fleet review own --repo-dir <checkout> --title "<what it does>" [--intent-file <file>] [--base ...] [--no-fetch]
   fleet review own --repo-dir <checkout> --task <task-id>
+  fleet feed --desk <name> | --all
   fleet push <task-id> [--yes]
   fleet ollivander [--dry-run]
 
-Output is one JSON object, like castle. Exit 0 on success, 1 on a refusal or error.
+Output is one JSON object, like castle. Exit 0 on success, 1 on a refusal or error. fleet feed
+is the exception: it prints a live, read-only text feed until Ctrl+C (see fleet/feed.py).
 Run it through ~/.hogwarts/bin/fleet, which clears the environment first. No desk can run it:
 desks cannot read the office, and Ryan's own sessions are denied it by his settings.
 """
@@ -28,11 +30,13 @@ from typing import Iterator, Optional
 if __name__ == "__main__" and "/Users/crisryantan/.hogwarts" not in sys.path:
     sys.path.insert(0, "/Users/crisryantan/.hogwarts")
 
+from hogwarts import ids  # noqa: E402
 from hogwarts.errors import StoreError  # noqa: E402
 
 from fleet import common, config, gitops, push, review, verify, worktree  # noqa: E402
 from fleet import ollivander  # noqa: E402
 from fleet.safefs import FleetError  # noqa: E402
+from fleet import feed  # noqa: E402
 
 INTENT_MAX_BYTES = 16384
 
@@ -76,6 +80,10 @@ def build_parser() -> argparse.ArgumentParser:
     reviewed.add_argument("--task")
     reviewed.add_argument("--base", default=config.DEFAULT_BASE)
     reviewed.add_argument("--no-fetch", action="store_true")
+    watched = commands.add_parser("feed", allow_abbrev=False)
+    which = watched.add_mutually_exclusive_group(required=True)
+    which.add_argument("--desk", help="one desk; owl-post shows every owl")
+    which.add_argument("--all", action="store_true", help="every desk")
     pushed = commands.add_parser("push", allow_abbrev=False)
     pushed.add_argument("task")
     pushed.add_argument("--yes", action="store_true")
@@ -129,8 +137,20 @@ def ended_by_signals() -> Iterator[None]:
             signal.signal(number, signal.SIG_DFL if handler is None else handler)
 
 
+def run_feed(desk: Optional[str]) -> int:
+    """The live feed opens the store read-only itself, so it never takes the read-write connection."""
+    if desk is not None and ids.PATTERNS["desk"].fullmatch(desk) is None:
+        sys.stdout.write("fleet feed: invalid desk name\n")
+        return 1
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(errors="replace")
+    return feed.follow(desk)
+
+
 def main(argv: Optional[list] = None) -> int:
     args = build_parser().parse_args(sys.argv[1:] if argv is None else argv)
+    if args.command == "feed":
+        return run_feed(None if args.all else args.desk)
     try:
         conn = common.connect()
     except StoreError as exc:

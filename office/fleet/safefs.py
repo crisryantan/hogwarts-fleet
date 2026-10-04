@@ -158,6 +158,31 @@ def read_regular(dir_fd: int, name: str, max_bytes: int, label: str = "file") ->
         os.close(fd)
 
 
+def read_range(dir_fd: int, name: str, offset: Optional[int], max_bytes: int, label: str = "file") -> tuple:
+    """Up to max_bytes from offset of a plain file, and its size. An offset of None reads the tail."""
+    try:
+        fd = os.open(name, READ_FLAGS, dir_fd=dir_fd)
+    except FileNotFoundError:
+        raise Missing(f"{label} does not exist") from None
+    except OSError as exc:
+        raise Unsafe(f"{label} is a symlink or cannot be opened") from exc
+    try:
+        st = os.fstat(fd)
+        _check_regular(st, label)
+        start = max(0, st.st_size - max_bytes) if offset is None else min(offset, st.st_size)
+        os.lseek(fd, start, os.SEEK_SET)
+        chunks, total = [], 0
+        while total < max_bytes:
+            chunk = os.read(fd, min(65536, max_bytes - total))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+        return b"".join(chunks), st.st_size
+    finally:
+        os.close(fd)
+
+
 def is_safe_regular(dir_fd: int, name: str) -> bool:
     st = lstat(dir_fd, name)
     if st is None:

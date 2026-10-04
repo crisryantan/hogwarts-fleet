@@ -48,7 +48,6 @@ desk lock. Only Ryan closes a task as complete.
 from __future__ import annotations
 
 import contextlib
-import json
 import re
 import secrets
 from typing import Iterator, Optional
@@ -89,20 +88,15 @@ def review_block(text: str, task_id: str, sha: str) -> tuple:
 
 
 def reviewer_output(desk: str, family: str, run_id: str) -> str:
-    """The reviewer's final text: Claude's JSON result, or Codex's last message file."""
+    """The reviewer's final text: the result event of Claude's stream-json output, or Codex's last message file."""
     run_id = safefs.check_component(run_id)
     with safefs.opened_dir(config.OFFICE_ROOT, "runs", desk) as fd:
         if family == "codex":
             raw = safefs.read_regular(fd, f"{run_id}-last-message.md", REVIEW_MAX_BYTES, "review output")
             return raw.decode("utf-8", "replace")
-        raw = safefs.read_regular(fd, f"{run_id}.out", run_desk.RUN_OUTPUT_MAX_BYTES, "review output")
-    try:
-        data = json.loads(raw.decode("utf-8"))
-    except (UnicodeDecodeError, ValueError):
-        raise FleetError("the reviewer's run output is not JSON") from None
-    if isinstance(data, list):
-        data = next((item for item in reversed(data) if isinstance(item, dict) and item.get("type") == "result"), {})
-    result = data.get("result") if isinstance(data, dict) else None
+        # The tail, like run_desk: stream-json keeps every tool result, and the result event comes last.
+        raw, _ = safefs.read_range(fd, f"{run_id}.out", None, run_desk.RUN_OUTPUT_MAX_BYTES, "review output")
+    result = run_desk.claude_result(raw).get("result")
     if not isinstance(result, str):
         raise FleetError("the reviewer's run output has no result text")
     return result

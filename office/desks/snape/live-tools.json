@@ -1,0 +1,22 @@
+{
+  "tools": [
+    "Read",
+    "Grep",
+    "Glob",
+    "Skill",
+    "ToolSearch",
+    "mcp__<warehouse-mcp>__list_catalogs",
+    "mcp__<warehouse-mcp>__list_schemas",
+    "mcp__<warehouse-mcp>__list_tables",
+    "mcp__<warehouse-mcp>__get_table_schema",
+    "mcp__<warehouse-mcp>__explain_query",
+    "mcp__<warehouse-mcp>__execute_query",
+    "mcp__<observability-mcp>__search_logs",
+    "mcp__<observability-mcp>__search_metrics",
+    "mcp__<observability-mcp>__get_metric",
+    "mcp__<observability-mcp>__search_spans",
+    "mcp__<observability-mcp>__get_trace",
+    "mcp__<observability-mcp>__search_monitors",
+    "mcp__<observability-mcp>__get_dashboard"
+  ]
+}

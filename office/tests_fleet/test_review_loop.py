@@ -134,9 +134,21 @@ class LoopCase(FleetCase):
             if desk in config.HEADLESS_CODEX:
                 self.write_file(folder / f"{run_id}-last-message.md", block)
             else:
-                self.write_file(folder / f"{run_id}.out", json.dumps({"type": "result", "result": block}))
+                self.write_file(folder / f"{run_id}.out", claude_stream(block))
             return {"desk": desk, "run_id": run_id, "exit_code": 0}
         return mock.patch.object(run_desk, "run", side_effect=run)
+
+
+def claude_stream(result: str, filler: str = "") -> str:
+    """A Claude reviewer's .out the way run_desk's stream-json argv writes it: one event per line."""
+    events = [
+        {"type": "system", "subtype": "init", "session_id": "s1", "tools": ["Read", "Grep"]},
+        {"type": "assistant", "message": {"content": [{"type": "text", "text": "Reading the diff."}]}},
+        {"type": "user", "message": {"content": [{"type": "tool_result", "content": filler}]}},
+        {"type": "assistant", "message": {"content": [{"type": "text", "text": result}]}},
+        {"type": "result", "subtype": "success", "is_error": False, "result": result, "total_cost_usd": 0.1},
+    ]
+    return "".join(json.dumps(event) + "\n" for event in events)
 
 
 class WorktreeTests(LoopCase):
@@ -477,6 +489,25 @@ class ParsingTests(LoopCase):
         for bad in ("no block here", f"REVIEW {task} @ {sha}\nno verdict\n", f"REVIEW {task} @ {'c' * 40}\nVERDICT: PASS\n"):
             with self.subTest(bad=bad[:20]), self.assertRaises(FleetError):
                 review.review_block(bad, task, sha)
+
+    def write_reviewer_out(self, text: str) -> None:
+        folder = self.office / "runs" / "hermione"
+        folder.mkdir(parents=True, exist_ok=True, mode=0o700)
+        self.write_file(folder / ("run-" + "b" * 16 + ".out"), text)
+
+    def test_reviewer_output_reads_the_claude_result_event_from_the_stream(self):
+        self.write_reviewer_out("not json, a stray warning\n" + claude_stream("REVIEW text"))
+        self.assertEqual(review.reviewer_output("hermione", "claude", "run-" + "b" * 16), "REVIEW text")
+
+    def test_reviewer_output_reads_only_the_tail_of_a_long_stream(self):
+        self.write_reviewer_out(claude_stream("REVIEW text", filler="x" * 5000))
+        with mock.patch.object(run_desk, "RUN_OUTPUT_MAX_BYTES", 1024):
+            self.assertEqual(review.reviewer_output("hermione", "claude", "run-" + "b" * 16), "REVIEW text")
+
+    def test_reviewer_output_without_a_result_event_is_refused(self):
+        self.write_reviewer_out(claude_stream("x").rsplit("\n", 2)[0] + "\n")
+        with self.assertRaises(FleetError):
+            review.reviewer_output("hermione", "claude", "run-" + "b" * 16)
 
     def test_commit_message(self):
         self.assertEqual(review.commit_message(HANDOFF.format(task_id="tk_x")),

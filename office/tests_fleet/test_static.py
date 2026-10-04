@@ -38,6 +38,8 @@ KNOWN_FLAGS = {
     "--ignore-rules",
     "-c", "--sandbox", "-C", "--add-dir", "--ephemeral", "--json", "--output-last-message", "--owl", "--dry-run",
     "--mcp-job", "--desk", "-i", "-I", "-B", "-X",
+    # Claude's stream-json output, which print mode only writes with --verbose, and fleet feed --all
+    "--verbose", "--all",
     # git, run only through gitops with the hardening flags
     "--git-dir", "--work-tree", "--verify", "--end-of-options", "--get", "--porcelain", "--no-verify",
     "--no-ext-diff", "--no-textconv", "--detach", "-b", "-m", "-F", "--stdin", "--force", "-z",

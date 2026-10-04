@@ -87,7 +87,8 @@ class ClaudeDeskTests(RunDeskCase):
                 self.assertEqual(argv[argv.index("--tools") + 1], config.CLAUDE_TOOLS[desk])
                 self.assertEqual(argv[argv.index("--permission-mode") + 1], "dontAsk")
                 self.assertEqual(argv[argv.index("--model") + 1], model)
-                self.assertEqual(argv[argv.index("--output-format") + 1], "json")
+                self.assertEqual(argv[argv.index("--output-format") + 1:argv.index("--output-format") + 3],
+                                 ["stream-json", "--verbose"])
                 self.assertEqual(argv[argv.index("--max-budget-usd") + 1], config.MAX_BUDGET_USD[desk])
                 self.assertIn(f"# {desk} brief", argv[argv.index("--append-system-prompt") + 1])
                 self.assertEqual(argv[-1], run_desk.DRY_RUN_PROMPT)
@@ -508,7 +509,8 @@ class RealRunTests(RunDeskCase):
             "input_tokens": 100, "cache_creation_input_tokens": 50, "cache_read_input_tokens": 9000,
             "output_tokens": 700}}).encode()
         self.assertEqual(run_desk.parse_claude_usage(claude),
-                         {"input_tokens": 150, "output_tokens": 700, "cache_read_tokens": 9000, "cost_usd": 0.42})
+                         {"input_tokens": 150, "output_tokens": 700, "cache_read_tokens": 9000, "cost_usd": 0.42,
+                          "is_error": False, "subtype": None})
         self.assertEqual(run_desk.parse_claude_usage(b"not json")["input_tokens"], 0)
         codex = b"\n".join(json.dumps(event).encode() for event in (
             {"type": "thread.started"},
