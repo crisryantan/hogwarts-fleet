@@ -35,7 +35,7 @@ File modes (0700 directories, 0600 files) keep other users out. They do not stop
   hogwarts/facts.py                     fact validity windows, subject keys, volatility lint, as-of reads, approved patches
   hogwarts/owlery.py                    owls, requests, review passes, close tokens, purge, audit
   hogwarts/capacity.py                  the cap day, cap bumps, cap hits, review rounds and round allowances
-  hogwarts/wands.py                     Ollivander's ledger: model filing, catalogs, each desk's model, trials, the stop file
+  hogwarts/wands.py                     Ollivander's ledger: model filing, catalogs, each desk's model, trials, alias resolutions, the stop file
   hogwarts/watch.py                     read-only queries behind fleet feed
   hogwarts/cli.py                       argparse CLI, JSON output
   fleet/                                the fleet scripts and hooks: run_desk.py, review.py, push.py, owl_post.py,
@@ -125,6 +125,7 @@ All tables are STRICT when SQLite supports it. Timestamps are integer unix secon
 | `model_catalog` | The model names each family offered at Ollivander's last look. |
 | `desk_models` | Each Claude and Codex desk's role need, current model and effort, pin, pending pick and trial state. The `desks` table itself stays immutable. |
 | `model_changes` | Every model switch, with its reason: `initial`, `role`, `pin`, `approved` or `revert`. Immutable. |
+| `model_resolutions` | Every full Claude id each alias was seen to run as, with its first and last sighting. Only the last sighting moves, and rows are never deleted. |
 
 Triggers also block deletes on desks, tasks, task commits, requests, events, facts, owls and review passes. Fact triggers require `valid_from` and `recorded_at` on every row, and keep `valid_to`, `closed_at` and `end_reason` set or unset together, with `valid_to` no earlier than `valid_from` and `closed_at` no earlier than `recorded_at`. `superseded_by` is only set on a superseded row. `restores` never changes once written.
 
@@ -153,7 +154,7 @@ Every function takes a connection from `db.connect(path)` as its first argument.
   - Reads: `current_facts(scope=None)`, `find_facts(query, scope=None, include_history=False, limit=10)`, `as_of_world(t, scope=None)`, `as_of_belief(t, scope=None)`, `history(scope, subject_key)`, `contradiction_candidates(since, limit_per_fact=3)`.
   - Lint: `VOLATILE_PATTERNS`, `volatile_match(text)`, `LOOKUP_COMMAND`.
 - `hogwarts.capacity`: `day_bounds(now, reset_offset)`, `add_bump`, `active_bumps`, `list_bumps`, `cap_status`, `record_cap_hit`, `list_cap_hits`, `waiting_requests`, `record_launch`, `record_launch_usage`, `list_launches`, `open_review_round`, `record_round_verdict`, `review_rounds`, `stranded_rounds`, `allow_round`.
-- `hogwarts.wands`: `classify`, `ryan_lines`, `record_catalog`, `last_catalog`, `get_desk_model`, `list_desk_models`, `set_need`, `apply_model`, `set_pending`, `clear_pending`, `approve`, `pin`, `unpin`, `record_outcome`, `changes`, `clear_stop`. The calls that file, pin, approve or apply a model take the fleet's `BLOCKED_MODEL_PREFIXES` and refuse a name one of them matches.
+- `hogwarts.wands`: `classify`, `ryan_lines`, `record_catalog`, `last_catalog`, `get_desk_model`, `list_desk_models`, `set_need`, `apply_model`, `set_pending`, `clear_pending`, `approve`, `pin`, `unpin`, `record_outcome`, `changes`, `record_resolution`, `resolutions`, `resolved_id`, `blocked_resolution`, `blocked_resolutions`, `clear_stop`. The calls that file, pin, approve or apply a model take the fleet's `BLOCKED_MODEL_PREFIXES` and refuse a name one of them matches. Pin, approve, apply, a pending pick and a trial's revert also refuse an alias whose latest full id one of them matches.
 - `hogwarts.watch` (read only, for a connection from `db.connect_readonly`): `marks`, `owls_after`, `headmaster_events_after`, `metrics_after`, `run_recorded`.
 - `hogwarts.owlery`
   - Owls: `send`, `inbox`, `read`, `ack`, `mark_delivered`.

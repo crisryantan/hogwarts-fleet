@@ -76,7 +76,7 @@ To fix a desk on one model, pin it. Ollivander then leaves it alone until you un
 ~/.hogwarts/bin/castle desk models
 ```
 
-A Claude desk pins to an alias or a full `claude-` model id. A Codex desk pins to a slug from the last Codex catalog. The registry model and a `model =` line in a Codex desk's `codex.toml` are only what a desk runs before Ollivander has made his first pick.
+A Claude desk pins to an alias or a full `claude-` model id. A Codex desk pins to a slug from the last Codex catalog. The registry model and a `model =` line in a Codex desk's `codex.toml` are only what a desk runs before Ollivander has made his first pick. The same goes for a profile the `codex.toml` selects: once the desk has a model, it replaces that profile's model and reasoning effort too.
 
 After any switch, the first two runs are a trial. If both fail, the desk goes back to its previous model, pinned, and you get a note. A run that Claude's or Codex's own usage limit stopped never counts, and a switch you made yourself is never reverted.
 
@@ -90,11 +90,13 @@ BLOCKED_MODEL_PREFIXES = ("<model-alias>", "claude-<model-alias>-")
 
 To forbid a whole Claude line, list its alias and its full id prefix, as above. A blocked model is never picked, pinned, filed or launched. Ollivander skips it without a note. If every model of a tier is blocked, the desk keeps the one it has and you get one note. If its current model is blocked, `run_desk` won't launch the desk until you pin an allowed one. A trial that fails never reverts a desk onto a blocked model.
 
+An alias counts as blocked once it has run as a blocked full id. The office remembers every full id each alias has run as, so switching a desk away and back doesn't make it forget. That alias stays refused until a later run sees it on an allowed id or you change the list; pin an allowed alias or full id meanwhile.
+
 ## Update the CLIs automatically
 
 Off by default. Make the plain file `~/.hogwarts/desks/ollivander/update-clis` and each of Ollivander's passes first runs `claude update` and `brew upgrade --cask codex`, with the output in `~/.hogwarts/logs/ollivander-update.log`. Then he checks both `--version` commands and every enabled desk's dry run. Any failure stops every headless desk. So does a new Codex version, because the Codex permission boundary is proven per version: run `scripts/codex-boundary-test.sh` on it first. A new Claude Code version is only a note.
 
-While the stop file `~/.hogwarts/state/ollivander-stop` exists, or an update is running, no headless desk launches. Run `~/.hogwarts/bin/castle ollivander clear` once you've looked. Remove `update-clis` to switch updates off again.
+While the stop file `~/.hogwarts/state/ollivander-stop` exists, or an update is running, no headless desk launches. A launch that has passed its last check also holds off an update until its process has started, so an update never swaps a CLI under a desk that's about to run. If launches keep an update waiting for two minutes, that pass skips the update and the next one tries again. Run `~/.hogwarts/bin/castle ollivander clear` once you've looked. Remove `update-clis` to switch updates off again.
 
 ## Change a display name or a character
 
