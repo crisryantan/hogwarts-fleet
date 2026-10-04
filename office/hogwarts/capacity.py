@@ -3,7 +3,8 @@
 The cap numbers live in the fleet's config. The store keeps what changes during a day: the bumps
 Ryan makes with castle desk cap, one row each time a cap refuses a run or a vendor limit stops one,
 and one row per review request, so a newer commit supersedes a review that is still waiting and a
-round past the cap waits for Ryan's castle task allow-round.
+round past the cap waits for Ryan's castle task allow-round. Only a reviewer run that recorded a
+verdict uses up a round; the daily run caps still bound the retries of runs that did not.
 """
 from __future__ import annotations
 
@@ -22,7 +23,9 @@ RUN_CAP_MAX = 100000
 MAX_ROUNDS_LIMIT = 100
 
 _ROUND_ROWS = """SELECT review_rounds.*, requests.phase AS request_phase, requests.outcome AS request_outcome,
-       tasks.status AS reviewer_task_status
+       tasks.status AS reviewer_task_status,
+       EXISTS (SELECT 1 FROM owls WHERE owls.request_id = review_rounds.request_id AND owls.kind = 'result')
+           AS has_verdict
    FROM review_rounds JOIN requests ON requests.id = review_rounds.request_id
    LEFT JOIN tasks ON tasks.id = requests.task_id
    WHERE review_rounds.task_id = ? ORDER BY review_rounds.created_at, review_rounds.rowid"""
@@ -222,6 +225,19 @@ def _is_waiting(row: dict) -> bool:
             and row["reviewer_task_status"] == "queued")
 
 
+def _ended_without_verdict(row: dict) -> bool:
+    # The reviewer's run is over (crashed, timed out, refused or stopped at a vendor limit) and no review
+    # result was posted, or the request was deferred or declined: the round is not used up.
+    if row["has_verdict"]:
+        return False
+    return row["request_outcome"] in ("deferred", "declined") or row["reviewer_task_status"] == "closed"
+
+
+def _holds_round(row: dict) -> bool:
+    """A live round that counts toward the cap: it recorded a verdict, or its run has not ended yet."""
+    return row["superseded_by"] is None and not _ended_without_verdict(row)
+
+
 def _unused_allowances(conn: Conn, task_id: str, holding: list) -> list[int]:
     used = {row["allowance_id"] for row in holding if row["allowance_id"] is not None}
     rows = db.fetch_all(conn, "SELECT id FROM round_allowances WHERE task_id = ? ORDER BY id", (task_id,))
@@ -229,8 +245,11 @@ def _unused_allowances(conn: Conn, task_id: str, holding: list) -> list[int]:
 
 
 def review_rounds(conn: Conn, task_id: str) -> list[dict]:
+    """Every review round of an author task. counts says whether it uses up a round: a recorded verdict
+    does, and so does a round whose run has not ended yet; a run that ended without one does not."""
     task_id = pensieve.get_task(conn, ids.check("task", task_id))["id"]
-    return [{**row, "waiting": _is_waiting(row)} for row in _round_rows(conn, task_id)]
+    return [{**row, "has_verdict": bool(row["has_verdict"]), "waiting": _is_waiting(row),
+             "counts": _holds_round(row)} for row in _round_rows(conn, task_id)]
 
 
 def allow_round(conn: Conn, task_id: str, now: Optional[int] = None) -> dict:
@@ -240,8 +259,8 @@ def allow_round(conn: Conn, task_id: str, now: Optional[int] = None) -> dict:
     with db.transaction(conn):
         if pensieve.get_task(conn, task_id)["status"] == "closed":
             raise ConflictError("task is closed")
-        live = [row for row in _round_rows(conn, task_id) if row["superseded_by"] is None]
-        unused = _unused_allowances(conn, task_id, live)
+        holding = [row for row in _round_rows(conn, task_id) if _holds_round(row)]
+        unused = _unused_allowances(conn, task_id, holding)
         created = not unused
         if created:
             allowance_id = conn.execute(
@@ -250,7 +269,7 @@ def allow_round(conn: Conn, task_id: str, now: Optional[int] = None) -> dict:
         else:
             allowance_id = unused[0]
         row = db.fetch_one(conn, "SELECT * FROM round_allowances WHERE id = ?", (allowance_id,))
-    return {**row, "created": created, "rounds": len(live)}
+    return {**row, "created": created, "rounds": len(holding)}
 
 
 def _ack_request_owl(conn: Conn, request_id: str, reviewer: str, ts: int) -> None:
@@ -266,8 +285,11 @@ def open_review_round(conn: Conn, task_id: str, reviewer_desk: str, sha: str, ti
     """Open the review request for one commit of an author task, as its next round.
 
     A review of this task still waiting for its reviewer's run is superseded by this one: its request
-    is deferred (reason conflict), its owl acked, and its row names this request. Superseded rounds
-    do not count. A round past max_rounds takes one of Ryan's allowances, or is refused.
+    is deferred (reason conflict), its owl acked, and its row names this request. Only a round whose
+    reviewer run recorded a verdict (PASS, CHANGES or HEADMASTER) uses up a round, and a round whose
+    run has not ended yet holds its place until it does. Superseded rounds, and runs that crashed,
+    timed out, were refused by a cap or stopped at a vendor limit, do not count, and give back any
+    allowance they took. A round past max_rounds takes one of Ryan's allowances, or is refused.
     """
     task_id = ids.check("task", task_id)
     reviewer_desk = ids.check("desk", reviewer_desk, "reviewer desk")
@@ -279,7 +301,7 @@ def open_review_round(conn: Conn, task_id: str, reviewer_desk: str, sha: str, ti
         task = pensieve.get_task(conn, task_id)
         live = [row for row in _round_rows(conn, task_id) if row["superseded_by"] is None]
         waiting = {row["request_id"]: row for row in live if _is_waiting(row) and row["reviewer"] == reviewer_desk}
-        counted = [row for row in live if row["request_id"] not in waiting]
+        counted = [row for row in live if row["request_id"] not in waiting and _holds_round(row)]
         round_no = len(counted) + 1
         allowance_id = None
         if round_no > max_rounds:

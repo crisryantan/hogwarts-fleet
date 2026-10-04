@@ -81,7 +81,8 @@ DAY_SECONDS = 86400
 CAP_RESET_UTC_SECONDS = None
 # A desk at this share of a cap today gets one headmaster event per cap per day.
 CAP_WARN_FRACTION = 0.8
-# Review rounds per author task. The next one waits for Ryan's castle task allow-round.
+# Review rounds per author task. The next one waits for Ryan's castle task allow-round. Only a reviewer
+# run that recorded a verdict uses up a round; the daily run caps bound retries of runs that did not.
 REVIEW_ROUND_CAP = 3
 # A failed run whose error text matches one of these hit the vendor's own usage or rate limit, not a
 # fleet cap. Matched without case against Claude's result text when is_error is set, and against the

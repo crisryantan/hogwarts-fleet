@@ -116,10 +116,18 @@ class RoundCase(StoreCase):
         return capacity.open_review_round(self.conn, self.author, "beta", sha, f"review {sha[:12]}",
                                           body="read the diff", now=now, **kwargs)
 
-    def run_reviewer(self, opened: dict) -> None:
-        """What the review script does once the reviewer's run starts and finishes."""
-        pensieve.start_task(self.conn, opened["task"]["id"], now=NOW)
-        pensieve.close_task(self.conn, opened["task"]["id"], "superseded", now=NOW)
+    def run_reviewer(self, opened: dict, verdict: bool = True) -> None:
+        """What the review script does once the reviewer's run starts and finishes: with a verdict it posts
+        the review result on the request; a run that crashed or hit a limit only frees the reviewer."""
+        request_id, task_id = opened["request"]["id"], opened["task"]["id"]
+        pensieve.start_task(self.conn, task_id, now=NOW)
+        owlery.advance(self.conn, request_id, "claimed", now=NOW)
+        owlery.advance(self.conn, request_id, "running", now=NOW)
+        if verdict:
+            owlery.send(self.conn, "beta", "alpha", "result", "review CHANGES", body="REVIEW", task_id=task_id,
+                        request_id=request_id, now=NOW)
+            owlery.advance(self.conn, request_id, "result_posted", detail="CHANGES", now=NOW)
+        pensieve.close_task(self.conn, task_id, "superseded", now=NOW)
 
     def live(self) -> list:
         return [(row["sha"], row["round"]) for row in capacity.review_rounds(self.conn, self.author)
@@ -174,6 +182,48 @@ class RoundCapTests(RoundCase):
     def three_rounds(self) -> None:
         for sha in SHAS[:3]:
             self.run_reviewer(self.round(sha))
+
+    def test_a_run_without_a_verdict_does_not_use_up_a_round(self):
+        crashed = self.round(SHAS[0])
+        self.run_reviewer(crashed, verdict=False)
+        self.assertEqual(self.round(SHAS[1])["round"], 1)
+        rows = {row["request_id"]: row for row in capacity.review_rounds(self.conn, self.author)}
+        self.assertEqual((rows[crashed["request"]["id"]]["counts"], rows[crashed["request"]["id"]]["has_verdict"]),
+                         (False, False))
+
+    def test_three_verdict_rounds_then_a_fourth_is_refused_whatever_crashed_between(self):
+        for index, sha in enumerate(SHAS[:3]):
+            self.run_reviewer(self.round(sha, now=NOW + index), verdict=False)
+            opened = self.round(sha, now=NOW + index, idempotency_key=f"retry-{index}-key")
+            self.assertEqual(opened["round"], index + 1)
+            self.run_reviewer(opened)
+        rounds = capacity.review_rounds(self.conn, self.author)
+        self.assertEqual([row["counts"] for row in rounds], [False, True] * 3)
+        with self.assertRaises(capacity.RoundCapReached) as refused:
+            self.round(SHAS[3])
+        self.assertEqual(refused.exception.round, 4)
+
+    def test_a_run_still_in_progress_holds_its_round(self):
+        for sha in SHAS[:2]:
+            self.run_reviewer(self.round(sha))
+        running = self.round(SHAS[2])
+        pensieve.start_task(self.conn, running["task"]["id"], now=NOW)
+        with self.assertRaises(capacity.RoundCapReached):
+            self.round(SHAS[3])
+
+    def test_an_allowance_taken_by_a_run_without_a_verdict_is_given_back(self):
+        self.three_rounds()
+        allowance = capacity.allow_round(self.conn, self.author, now=NOW)
+        crashed = self.round(SHAS[3])
+        self.assertEqual(crashed["allowance_id"], allowance["id"])
+        self.run_reviewer(crashed, verdict=False)
+        again = capacity.allow_round(self.conn, self.author, now=NOW + 1)
+        self.assertEqual((again["id"], again["created"], again["rounds"]), (allowance["id"], False, 3))
+        retry = self.round(SHAS[3], idempotency_key="retry-key-1")
+        self.assertEqual((retry["round"], retry["allowance_id"]), (4, allowance["id"]))
+        self.run_reviewer(retry)
+        with self.assertRaises(capacity.RoundCapReached):
+            self.round(SHAS[4])
 
     def test_round_four_is_refused_then_allowed_once_then_refused_again(self):
         self.three_rounds()

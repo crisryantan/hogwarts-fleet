@@ -83,6 +83,38 @@ class ReviewRoundTests(LoopCase):
         self.assertEqual([event["summary"].split(",")[0] for event in self.round_cap_events()],
                          [f"task {task_id} asked for review round 4", f"task {task_id} asked for review round 5"])
 
+    def failed_run(self, task_id: str, cap_source=None, error=FleetError) -> None:
+        """A reviewer run that started and ended without a verdict: a crash, or a vendor's own limit."""
+        def run(conn, desk, owl_id, mcp_job=None, now=None, on_start=None):
+            on_start()
+            return {"desk": desk, "run_id": "run-" + "c" * 16, "exit_code": 1, "cap_source": cap_source}
+        with mock.patch.object(run_desk, "run", side_effect=run):
+            with self.assertRaises(error):
+                if task_id is None:
+                    review.review_own(self.conn, str(self.repo), title="my own fix", fetch=False)
+                else:
+                    review.review_own(self.conn, str(self.repo), task_id=task_id, fetch=False)
+
+    def test_crashed_and_vendor_limited_rounds_do_not_count(self):
+        self.commit("first try")
+        self.failed_run(None)
+        [task] = pensieve.list_tasks(self.conn, desk="ryan-claude-1")
+        task_id = task["id"]
+        self.failed_run(task_id, cap_source="claude_plan")
+        self.assertEqual([row["counts"] for row in capacity.review_rounds(self.conn, task_id)], [False, False])
+        first = self.own_review(task_id)
+        self.assertEqual(first["round"], 1)
+        for number, text in ((2, "round two"), (3, "round three")):
+            self.commit(text)
+            self.failed_run(task_id)
+            self.assertEqual(self.own_review(task_id)["round"], number)
+        self.commit("round four")
+        with mock.patch.object(run_desk, "run", side_effect=AssertionError("round four ran")):
+            with self.assertRaisesRegex(FleetError, "review round 4"):
+                self.own_review(task_id)
+        self.assertEqual([row["counts"] for row in capacity.review_rounds(self.conn, task_id)],
+                         [False, False, True, False, True, False, True])
+
     def test_a_vendor_limit_on_the_reviewer_is_named_and_never_offered_a_bump(self):
         self.commit("my fix")
         def limited(conn, desk, owl_id, mcp_job=None, now=None, on_start=None):

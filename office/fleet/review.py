@@ -16,7 +16,9 @@ Then, for either:
 3. a review request goes from the author's task to the reviewer of the other family
    (Codex work to Hermione, Claude work to Moody), with an inbox copy for the reviewer. It is the
    task's next round: rounds past REVIEW_ROUND_CAP are refused until Ryan runs
-   castle task allow-round <task-id>. A review of this task still waiting for its reviewer
+   castle task allow-round <task-id>. Only a reviewer run that recorded a verdict uses up a round;
+   one that crashed, timed out, was refused by a cap or hit a vendor limit does not, and the daily
+   run caps bound those retries. A review of this task still waiting for its reviewer
    (a cap refused it, or the reviewer was busy) is superseded, so only the newest commit is reviewed;
 4. run_desk runs the reviewer, which needs Ryan's enabled file for that desk. A reviewer at its
    daily cap leaves the request waiting, and Ryan hears which cap and when it resets;
