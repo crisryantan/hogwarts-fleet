@@ -175,6 +175,29 @@ class OwnSessionGuardTests(ManyCase):
         self.assertEqual((other["round"], other["verdict"]), (1, "CHANGES"))
         self.assertNotEqual(other["task_id"], capped)
 
+    def test_a_task_interrupted_after_its_commit_is_recorded_stays_retryable(self):
+        sha = self.commit("first")
+        real_record = pensieve.record_commit
+
+        def interrupted(*args, **kwargs):
+            real_record(*args, **kwargs)
+            raise KeyboardInterrupt  # killed between recording the commit and opening the first round
+
+        self.enable("moody")
+        with mock.patch.object(pensieve, "record_commit", side_effect=interrupted), self.assertRaises(KeyboardInterrupt):
+            review.review_own(self.conn, str(self.repo), title="my own fix", fetch=False)
+        [task_id] = self.own_tasks()
+        self.assertEqual(self.own_tasks("closed"), [])
+        self.assertEqual(capacity.review_rounds(self.conn, task_id), [])
+        self.assertEqual([row["sha"] for row in pensieve.task_commits(self.conn, task_id)], [sha])
+        with mock.patch.object(pensieve, "create_task", side_effect=AssertionError("made a task")):
+            with self.assertRaisesRegex(FleetError, f"is already task {task_id}; run fleet review own --repo-dir"
+                                                    f" <checkout> --task {task_id} to review it again"):
+                review.review_own(self.conn, str(self.repo), title="my own fix", fetch=False)
+        retried = self.own_review(task_id)
+        self.assertEqual((retried["task_id"], retried["sha"], retried["round"], retried["verdict"]),
+                         (task_id, sha, 1, "CHANGES"))
+
     def test_a_new_task_that_fails_before_its_first_round_is_closed(self):
         self.commit("first")
         with mock.patch.object(review.verify, "verify", side_effect=FleetError("verify broke")):

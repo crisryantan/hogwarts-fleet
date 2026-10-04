@@ -244,6 +244,12 @@ def get_commit(conn: Conn, repo: str, sha: str) -> Optional[dict]:
     )
 
 
+def task_commits(conn: Conn, task_id: str) -> list[dict]:
+    """The commits recorded on a task, in the order they were recorded."""
+    return db.fetch_all(conn, "SELECT * FROM task_commits WHERE task_id = ? ORDER BY rowid",
+                        (ids.check("task", task_id),))
+
+
 def close_task(conn: Conn, task_id: str, reason: str, token: Optional[str] = None,
                now: Optional[int] = None) -> dict:
     # owlery imports this module, so import it here to avoid a cycle.

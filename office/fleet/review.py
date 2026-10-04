@@ -53,7 +53,9 @@ Author tasks run side by side: Harry, Hermione, Moody, Ron and Ryan's own sessio
 tasks, so a task waiting for a fix round blocks nothing. Ryan's own sessions start a new review whatever else
 of theirs is in review or waiting for fixes, with two refusals made before anything changes: a commit another
 task already holds (review it with --task), and a checkout whose open task is at its round cap, so leaving out
---task never gets past the cap. A new task that fails before its first round opens is closed as abandoned.
+--task never gets past the cap. A new task that fails before its first round opens is closed as abandoned,
+unless its commit was already recorded on it: then it stays active, --task <id> retries it, and a new review
+of that commit names it.
 """
 from __future__ import annotations
 
@@ -447,9 +449,11 @@ def _review_own(conn, repo_dir: str, title: Optional[str], intent: Optional[str]
             task = pensieve.set_worktree(conn, task["id"], f"{ids.WORKTREES_ROOT}/{task['id']}")
             return _review_own_at(conn, task, record, sha, lock_fd)
         except BaseException:
-            # A new task that failed before its first round opened is closed, so it never sits active.
+            # A new task that failed before its first round opened is closed, so it never sits active, unless
+            # its commit is already recorded on it: that task stays active for --task to retry, since a closed
+            # task never reopens and the commit can belong to no other task.
             with contextlib.suppress(Exception):
-                if not capacity.review_rounds(conn, task["id"]):
+                if not capacity.review_rounds(conn, task["id"]) and not pensieve.task_commits(conn, task["id"]):
                     pensieve.close_task(conn, task["id"], "abandoned")
             raise
     else:

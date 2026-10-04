@@ -189,6 +189,9 @@ class TaskLifecycleTests(StoreCase):
             pensieve.record_commit(self.conn, second["id"], REPO, SHA)
         with self.assertRaises(ConflictError):
             pensieve.record_commit(self.conn, self.task("alpha")["id"], REPO, "f" * 40)
+        pensieve.record_commit(self.conn, first["id"], REPO, "e" * 40, now=NOW + 1)
+        self.assertEqual([row["sha"] for row in pensieve.task_commits(self.conn, first["id"])], [SHA, "e" * 40])
+        self.assertEqual(pensieve.task_commits(self.conn, second["id"]), [])
         with self.assertRaises(sqlite3.IntegrityError):
             self.conn.execute("UPDATE task_commits SET task_id = ?", (second["id"],))
         with self.assertRaises(sqlite3.IntegrityError):
