@@ -110,7 +110,7 @@ class MigrationV3Tests(unittest.TestCase):
     def test_migration_3_adds_restores_to_a_populated_v2_db(self):
         path, first, second = self.v2_database()
         conn = self.open(path)
-        self.assertEqual(db.schema_version(conn), 3)
+        self.assertEqual(db.schema_version(conn), db.SCHEMA_VERSION)
         self.assertIn("restores", fact_columns(conn))
         self.assertEqual([row[0] for row in conn.execute("SELECT restores FROM facts ORDER BY id")], [None, None])
         restored = facts.withdraw(conn, second, now=NOW + 20)["restored_id"]
@@ -120,15 +120,15 @@ class MigrationV3Tests(unittest.TestCase):
         path, _, _ = self.v2_database()
         conn = self.open(path)
         before, changes = snapshot(conn), conn.total_changes
-        self.assertEqual(db.migrate(conn), 3)
+        self.assertEqual(db.migrate(conn), db.SCHEMA_VERSION)
         self.assertEqual(conn.total_changes, changes)
         self.open(path)
         with db.transaction(conn):
-            for statement in db.pending_statements(conn, db.V3):
+            for statement in db.pending_statements(conn, db.V3 + db.V4):
                 conn.execute(statement)
         self.assertEqual(snapshot(conn), before)
         self.assertEqual([row[0] for row in conn.execute("SELECT version FROM schema_version ORDER BY version")],
-                         [1, 2, 3])
+                         list(range(1, db.SCHEMA_VERSION + 1)))
 
 
 class FactsV2Case(StoreCase):

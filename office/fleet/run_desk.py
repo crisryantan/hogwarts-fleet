@@ -20,9 +20,16 @@ and the request's task is the desk's own. Any other owl runs in the desk's work 
 
 --dry-run prints the argv as JSON and runs nothing. A real run needs the desk to be
 enabled (a plain file named "enabled" in its office folder, made by Ryan), stays under
-the desk's daily run and spend caps, waits for the per-desk lock, and records usage to
-the store's metrics. A run that exits 0 reads and acks its owl. A run that fails raises a
-headmaster event. No bypass flag is ever built, and the guard refuses one if it appears.
+the desk's daily run and spend caps plus any bump Ryan made today, and holds the per-desk
+lock (it waits for it, unless its caller already holds it). Under that lock, before the process
+starts, it records a launch that counts toward the daily run cap at once, so a run that is killed or
+interrupted still counts; when the process ends its usage and cost are recorded against that launch.
+A refusal by a cap tells Ryan which cap, how
+many requests wait and when it resets, once per cap and effective limit a day; a desk at 80% of
+a cap gets one warning per effective limit a day. A run that exits 0 reads and acks its owl.
+A run that fails raises a headmaster event, labelled claude_plan or codex_plan when the
+vendor's own usage limit stopped it. No bypass flag is ever built, and the guard refuses one
+if it appears.
 
 This is the only fleet module that starts processes.
 
@@ -32,6 +39,7 @@ Run it with the wrapper line:
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import math
 import os
@@ -41,12 +49,12 @@ import shutil
 import subprocess
 import sys
 import time
-from typing import Optional
+from typing import Callable, Iterator, Optional
 
 if __name__ == "__main__" and "/Users/crisryantan/.hogwarts" not in sys.path:
     sys.path.insert(0, "/Users/crisryantan/.hogwarts")
 
-from hogwarts import ids, owlery, pensieve  # noqa: E402
+from hogwarts import capacity, ids, owlery, pensieve  # noqa: E402
 from hogwarts.errors import NotFoundError, StoreError  # noqa: E402
 
 from fleet import common, config, gitops, safefs, toolchain  # noqa: E402
@@ -81,7 +89,10 @@ SOCKET_KEYS = ("allowUnixSockets", "allowAllUnixSockets")
 CASTLE_DENY_WRITE = (".git", ".claude", "tasks", "worktrees", "CLAUDE.md", "PLAN.md", "standing-orders.md",
                      ".gitignore")
 FAILED_SUMMARY = "a headless run did not finish cleanly; its run log is in the office"
-CAP_SUMMARY = "a headless desk reached its daily cap, so the run was not started"
+CAP_REASONS = {"runs": "daily run cap reached", "spend": "daily spend cap reached"}
+CAP_FLAGS = {"runs": "--runs +N", "spend": "--spend +X"}
+PLAN_NAMES = {"claude_plan": "Claude plan", "codex_plan": "Codex plan"}
+ERROR_TEXT_MAX = 4096
 
 
 class Capped(FleetError):
@@ -447,24 +458,77 @@ def build_plan(conn, desk: str, owl_id: Optional[str] = None, mcp_job: Optional[
 # Enabling, caps, launching and running
 
 
+def cap_status(conn, desk: str, now: Optional[int] = None) -> dict:
+    """This cap day's runs and spend for one desk against its caps plus Ryan's bumps."""
+    return capacity.cap_status(conn, desk, config.DAILY_RUN_CAP[desk], config.DAILY_SPEND_CAP_USD.get(desk),
+                               common.now_stamp(now), config.CAP_RESET_UTC_SECONDS)
+
+
 def over_daily_cap(conn, desk: str, now: Optional[int] = None) -> Optional[str]:
-    """Why this desk may not start another run today, read from the store's metrics, or None."""
-    since = max(0, common.now_stamp(now) - config.DAY_SECONDS)
-    used = next((row for row in pensieve.summary(conn, since) if row["desk"] == desk), None)
-    if used is None:
-        return None
-    if used["runs"] >= config.DAILY_RUN_CAP[desk]:
-        return "daily run cap reached"
-    spend_cap = config.DAILY_SPEND_CAP_USD.get(desk)
-    if spend_cap is not None and (used["cost_usd"] or 0) >= spend_cap:
-        return "daily spend cap reached"
-    return None
+    """Why this desk may not start another run this cap day, or None. Runs are read from the store's launch
+    rows, so a killed run counts, and spend from the cost its runs recorded."""
+    reached = cap_status(conn, desk, now)["reached"]
+    return None if reached is None else CAP_REASONS[reached]
+
+
+def _used_text(status: dict, cap: str) -> str:
+    if cap == "runs":
+        return f"{status['runs_used']} of {status['runs_limit']} runs"
+    return f"${status['spend_used_usd']:.2f} of ${status['spend_limit_usd']:.2f}"
+
+
+def _limit_key(status: dict, cap: str) -> str:
+    """The effective limit (cap plus bumps) as it appears in a dedupe key, so a raised limit is a new event."""
+    if cap == "runs":
+        return str(status["runs_limit"])
+    return repr(float(status["spend_limit_usd"]))
 
 
 def report_cap(conn, desk: str, now: Optional[int] = None) -> None:
-    day = common.now_stamp(now) // config.DAY_SECONDS
-    pensieve.add_event(conn, desk, "rundesk.cap", "headmaster", CAP_SUMMARY,
-                       dedupe_key=f"rundesk:cap:{desk}:{day}", now=now)
+    """Record a refusal by a fleet cap. Ryan hears once per desk, cap, effective limit and day: which cap,
+    what waits, when it resets. After a bump, reaching the raised limit is news again."""
+    status = cap_status(conn, desk, now)
+    cap = status["reached"] or "runs"
+    capacity.record_cap_hit(conn, desk, cap, "fleet", now=now)
+    waiting = len(capacity.waiting_requests(conn, desk))
+    summary = (f"{desk} was not started: its fleet daily {cap} cap is reached ({_used_text(status, cap)}),"
+               f" cap_source fleet. {waiting} request(s) waiting for {desk}. The cap resets at"
+               f" {status['resets_at_local']}; castle desk cap {desk} {CAP_FLAGS[cap]} lifts it until then")
+    pensieve.add_event(conn, desk, "rundesk.cap", "headmaster", summary,
+                       dedupe_key=f"rundesk:cap:{desk}:{cap}:{_limit_key(status, cap)}:{status['day_start']}",
+                       now=now)
+
+
+def warn_near_cap(conn, desk: str, now: Optional[int] = None) -> list:
+    """One headmaster event per desk, cap, effective limit and day once today's runs or spend reach
+    CAP_WARN_FRACTION of it, so a bumped limit warns again near its own end."""
+    status = cap_status(conn, desk, now)
+    caps = [("runs", status["runs_used"], status["runs_limit"])]
+    if status["spend_limit_usd"] is not None:
+        caps.append(("spend", status["spend_used_usd"], status["spend_limit_usd"]))
+    warned = []
+    for cap, used, limit in caps:
+        if limit <= 0 or used < round(config.CAP_WARN_FRACTION * limit, 6):
+            continue
+        summary = (f"{desk} has used {_used_text(status, cap)} of its fleet daily {cap} cap today;"
+                   f" the cap resets at {status['resets_at_local']}")
+        event = pensieve.add_event(conn, desk, "rundesk.cap-near", "headmaster", summary,
+                                   dedupe_key=f"rundesk:cap-near:{desk}:{cap}:{_limit_key(status, cap)}"
+                                              f":{status['day_start']}", now=now)
+        if event["created"]:
+            warned.append(cap)
+    return warned
+
+
+def report_plan_limit(conn, desk: str, cap_source: str, run_id: str, now: Optional[int] = None) -> None:
+    """A run the vendor's own usage or rate limit stopped. No fleet bump lifts that, and the event says so."""
+    capacity.record_cap_hit(conn, desk, "plan", cap_source, run_id=run_id, now=now)
+    day_start, _ = capacity.day_bounds(common.now_stamp(now), config.CAP_RESET_UTC_SECONDS)
+    summary = (f"{desk} stopped at the {PLAN_NAMES[cap_source]}'s own usage or rate limit, cap_source"
+               f" {cap_source}. This is the vendor's limit, not a fleet cap: castle desk cap does not lift it,"
+               f" and it clears only on the vendor's own reset")
+    pensieve.add_event(conn, desk, "rundesk.plan-limit", "headmaster", summary,
+                       dedupe_key=f"rundesk:plan-limit:{desk}:{cap_source}:{day_start}", now=now)
 
 
 def report_failure(conn, desk: str, owl_id: Optional[str], now: Optional[int] = None) -> None:
@@ -563,6 +627,94 @@ def parse_codex_usage(raw: bytes) -> dict:
     return usage
 
 
+def _result_of(data: object) -> dict:
+    if isinstance(data, list):  # the older single JSON array form
+        data = next((item for item in reversed(data) if isinstance(item, dict) and item.get("type") == "result"), None)
+    return data if isinstance(data, dict) and data.get("type") == "result" else {}
+
+
+def _claude_result_event(raw: bytes) -> dict:
+    """The last {"type": "result"} event, from one JSON document or from stream-json output with one
+    event per line, or {} when there is none."""
+    try:
+        return _result_of(json.loads(raw))
+    except (ValueError, RecursionError):
+        pass
+    found: dict = {}
+    for line in raw.split(b"\n"):
+        if b'"result"' not in line:
+            continue
+        try:
+            found = _result_of(json.loads(line)) or found
+        except (ValueError, RecursionError):
+            continue
+    return found
+
+
+def _claude_error_texts(raw: bytes, failed: bool) -> list:
+    data = _claude_result_event(raw)
+    if not data:
+        # No result event. A failed run that printed plain text, and no JSON event at all, is read as
+        # its error text. A JSON stream cut short is not, so a desk's own words never count.
+        if not failed:
+            return []
+        for line in raw.split(b"\n"):
+            try:
+                if isinstance(json.loads(line), dict):
+                    return []
+            except (ValueError, RecursionError):
+                continue
+        return [raw[-ERROR_TEXT_MAX:].decode("utf-8", "replace")]
+    subtype = data.get("subtype") if isinstance(data.get("subtype"), str) else ""
+    if subtype.startswith("error_max"):
+        return []  # the fleet's own per-run turn or budget limit, never the plan's
+    if data.get("is_error") is not True and not subtype.startswith("error"):
+        return []
+    texts = [value[:ERROR_TEXT_MAX] for value in (data.get("result"), data.get("error")) if isinstance(value, str)]
+    if data.get("api_error_status") == 429:
+        texts.append("429")
+    return texts
+
+
+def _codex_error_texts(raw: bytes, failed: bool) -> list:
+    """The message that ended a failed Codex run: its last turn.failed, else its last error event.
+
+    A run that exits 0 was not stopped, whatever retries it logged on the way, and an error event the
+    run recovered from (a turn.completed came after it) is not what stopped it."""
+    if not failed:
+        return []
+    turn_failed, last_error = None, None
+    for line in raw.split(b"\n"):
+        try:
+            event = json.loads(line)
+        except (ValueError, RecursionError):
+            continue
+        if not isinstance(event, dict):
+            continue
+        kind = event.get("type")
+        if kind == "turn.completed":
+            last_error = None
+        elif kind == "error" and isinstance(event.get("message"), str):
+            last_error = event["message"]
+        elif kind == "turn.failed" and isinstance(event.get("error"), dict) \
+                and isinstance(event["error"].get("message"), str):
+            turn_failed = event["error"]["message"]
+    message = turn_failed if turn_failed is not None else last_error
+    return [] if message is None else [message[:ERROR_TEXT_MAX]]
+
+
+def plan_limit(family: str, raw: bytes, failed: bool) -> Optional[str]:
+    """claude_plan or codex_plan when the run's own output says the vendor's usage or rate limit stopped it."""
+    if family == "claude":
+        texts, patterns, source = _claude_error_texts(raw, failed), config.CLAUDE_PLAN_LIMIT_PATTERNS, "claude_plan"
+    else:
+        texts, patterns, source = _codex_error_texts(raw, failed), config.CODEX_PLAN_LIMIT_PATTERNS, "codex_plan"
+    for text in texts:
+        if any(re.search(pattern, text, re.IGNORECASE) for pattern in patterns):
+            return source
+    return None
+
+
 def _ack_owl(conn, desk: str, owl_id: str, now: Optional[int]) -> None:
     try:
         owlery.read(conn, owl_id, desk, now=now)
@@ -583,7 +735,25 @@ def require_castle_dir(path: str) -> None:
         pass
 
 
-def run(conn, desk: str, owl_id: str, mcp_job: Optional[str] = None, now: Optional[int] = None) -> dict:
+@contextlib.contextmanager
+def desk_lock(desk: str, wait: bool = True) -> Iterator[int]:
+    """The per-desk lock a run holds from its cap check until its usage is recorded, yielding its fd. The
+    desk's process inherits that fd, so the lock stays held while it runs even if this process is killed.
+    wait=False raises safefs.Busy at once when someone else holds it, instead of waiting for them."""
+    desk = ids.check("desk", desk)
+    with safefs.opened_dir(config.OFFICE_ROOT, "locks", create=True) as locks_fd, \
+            safefs.held_lock(locks_fd, f"desk-{desk}.lock", blocking=wait,
+                             timeout=config.DESK_LOCK_WAIT_SECONDS if wait else None) as lock_fd:
+        yield lock_fd
+
+
+def run(conn, desk: str, owl_id: str, mcp_job: Optional[str] = None, now: Optional[int] = None,
+        on_start: Optional[Callable[[], None]] = None, lock_held: bool = False, keep_fds: tuple = ()) -> dict:
+    """Run one desk on one owl. on_start is called under the desk lock once the caps allow the run,
+    just before it launches, so a caller's own bookkeeping never runs for a refused run. lock_held
+    means the caller already holds this desk's lock (the review script does, from before its round
+    opens until its reviewer task closes) and passes its fd in keep_fds. The desk's process inherits
+    every fd in keep_fds, so the locks they hold outlive this process if it is killed mid-run."""
     if not is_enabled(desk):
         raise FleetError(f"{desk} is not enabled; Ryan enables a headless desk by hand")
     plan = build_plan(conn, desk, owl_id, mcp_job)
@@ -591,21 +761,28 @@ def run(conn, desk: str, owl_id: str, mcp_job: Optional[str] = None, now: Option
         with safefs.opened_dir(config.CASTLE_ROOT, "desks", plan["desk"], config.CODEX_WORK_DIR, create=True):
             pass
     require_castle_dir(plan["cwd"])
-    with safefs.opened_dir(config.OFFICE_ROOT, "locks", create=True) as locks_fd, \
-            safefs.held_lock(locks_fd, f"desk-{plan['desk']}.lock", blocking=True,
-                             timeout=config.DESK_LOCK_WAIT_SECONDS):
+    with contextlib.ExitStack() as held:
+        if not lock_held:
+            keep_fds = (*keep_fds, held.enter_context(desk_lock(plan["desk"])))
         cap = over_daily_cap(conn, plan["desk"], now)
         if cap is not None:
             report_cap(conn, plan["desk"], now)
             raise Capped(cap)
-        result = _launch(conn, plan, now)
-    if result["exit_code"] == 0:
+        if on_start is not None:
+            on_start()
+        result = _launch(conn, plan, now, keep_fds)
+    warn_near_cap(conn, plan["desk"], now)
+    if result["cap_source"] is not None:
+        report_plan_limit(conn, plan["desk"], result["cap_source"], run_id=result["run_id"], now=now)
+    elif result["exit_code"] == 0:
         _ack_owl(conn, plan["desk"], plan["owl_id"], now)
     return result
 
 
-def _launch(conn, plan: dict, now: Optional[int]) -> dict:
+def _launch(conn, plan: dict, now: Optional[int], keep_fds: tuple = ()) -> dict:
     desk, run_id = plan["desk"], plan["run_id"]
+    # Counted from here, before the process starts: a run killed or interrupted below still uses a run.
+    capacity.record_launch(conn, desk, run_id, plan["model"], now=now)
     if plan.get("temp"):
         fresh_temp(plan["temp"])  # here, not in build_plan, so a dry run never empties a live run's folder
     with safefs.opened_dir(config.OFFICE_ROOT, "runs", desk, create=True) as run_fd:
@@ -615,7 +792,7 @@ def _launch(conn, plan: dict, now: Optional[int]) -> dict:
         try:
             completed = subprocess.run(plan["argv"], cwd=plan["cwd"], env=plan.get("env") or child_env(), stdin=subprocess.DEVNULL,
                                        stdout=out_fd, stderr=err_fd, timeout=config.RUN_TIMEOUT_SECONDS,
-                                       check=False)
+                                       check=False, pass_fds=tuple(keep_fds))
             exit_code = completed.returncode
         except subprocess.TimeoutExpired:
             exit_code = -1
@@ -628,9 +805,10 @@ def _launch(conn, plan: dict, now: Optional[int]) -> dict:
         except FleetError:
             output = b""  # usage then records as zero; the run log keeps the full output
     usage = parse_claude_usage(output) if plan["family"] == "claude" else parse_codex_usage(output)
-    pensieve.add_metric(conn, desk, run_id, plan["model"], usage["input_tokens"], usage["output_tokens"],
-                        usage["cache_read_tokens"], usage["cost_usd"], duration_ms, ts=now)
-    return {"desk": desk, "run_id": run_id, "exit_code": exit_code, "timed_out": exit_code == -1, **usage}
+    capacity.record_launch_usage(conn, run_id, usage["input_tokens"], usage["output_tokens"],
+                                 usage["cache_read_tokens"], usage["cost_usd"], duration_ms, now=now)
+    return {"desk": desk, "run_id": run_id, "exit_code": exit_code, "timed_out": exit_code == -1,
+            "cap_source": plan_limit(plan["family"], output, exit_code != 0), **usage}
 
 
 def main(argv: Optional[list] = None) -> int:
@@ -655,10 +833,11 @@ def main(argv: Optional[list] = None) -> int:
             sys.stdout.write(json.dumps(result, ensure_ascii=True, indent=2) + "\n")
             return 0
         result = run(conn, args.desk, args.owl, args.mcp_job)
-        sys.stdout.write(json.dumps({"ok": result["exit_code"] == 0, **result}, ensure_ascii=True) + "\n")
-        if result["exit_code"] != 0:
+        clean = result["exit_code"] == 0 and result["cap_source"] is None
+        sys.stdout.write(json.dumps({"ok": clean, **result}, ensure_ascii=True) + "\n")
+        if not clean and result["cap_source"] is None:
             report_failure(conn, args.desk, args.owl)
-        return 0 if result["exit_code"] == 0 else 1
+        return 0 if clean else 1
     except (FleetError, StoreError) as exc:
         sys.stderr.write(json.dumps({"ok": False, "error": common.one_line(exc, 200)}, ensure_ascii=True) + "\n")
         if not args.dry_run and not isinstance(exc, Capped):

@@ -69,11 +69,35 @@ REVIEWER_FOR_FAMILY = {"codex": "hermione", "claude": "moody"}
 CODEX_WORK_DIR = "work"
 # Castle folders each Claude desk may read through --add-dir. Writes there are denied by its settings.
 CLAUDE_READ_DIRS = {"hermione": ("tasks", "worktrees"), "ron": ("tasks",), "portrait": ()}
-# Runs per desk in any 24 hours, and spend for the Claude desks, read from the store's metrics.
-DAILY_RUN_CAP = {"hermione": 20, "ron": 40, "portrait": 3, "harry": 10, "moody": 20}
-DAILY_SPEND_CAP_USD = {"hermione": 20.0, "ron": 5.0, "portrait": 4.0}
+# Runs per desk in one cap day, counted from launch rows so a killed run counts, and spend for the Claude
+# desks, from the cost runs recorded. Sized for a busy day of 12 to 14 PRs plus side work. Ryan lifts one
+# for the rest of the day with castle desk cap.
+DAILY_RUN_CAP = {"hermione": 80, "ron": 120, "portrait": 3, "harry": 40, "moody": 80}
+DAILY_SPEND_CAP_USD = {"hermione": 60.0, "ron": 10.0, "portrait": 4.0}
 DAY_SECONDS = 86400
-# A run waits this long for another run of the same desk to finish.
+# When the cap day starts: caps, bumps and cap events all reset then. None is local midnight on this Mac,
+# daylight saving included; a number fixes the reset that many seconds after UTC midnight instead.
+# A cap day resets all at once, so a desk busy on both sides of the reset can use up to two days' cap
+# within hours. Ryan's call whether to add a rolling 24 hour guard on top.
+CAP_RESET_UTC_SECONDS = None
+# A desk at this share of a cap today gets one headmaster event per cap per day.
+CAP_WARN_FRACTION = 0.8
+# Review rounds per author task. The next one waits for Ryan's castle task allow-round. Only a reviewer
+# run that recorded a verdict uses up a round; the daily run caps bound retries of runs that did not.
+REVIEW_ROUND_CAP = 3
+# A failed run whose error text matches one of these hit the vendor's own usage or rate limit, not a
+# fleet cap. Matched without case against Claude's result text when is_error is set, and against the
+# message that ended a failed Codex run (its last turn.failed, else its last error event).
+CLAUDE_PLAN_LIMIT_PATTERNS = (
+    r"usage limit", r"(?:session|weekly|opus|sonnet|[0-9]+[ -]hour) limit reached",
+    r"hit your (?:usage |session |weekly )?limit", r"out of (?:extra )?usage",
+    r"rate[ _-]?limit", r"too many requests", r"\b429\b",
+)
+CODEX_PLAN_LIMIT_PATTERNS = (
+    r"usage[ _-]?limit", r"hit your (?:usage )?limit", r"rate[ _-]?limit", r"too many requests", r"\b429\b",
+    r"quota",
+)
+# A run the Owl Post starts waits this long for another run of the same desk to finish. A review never waits.
 DESK_LOCK_WAIT_SECONDS = 1860
 RUN_TIMEOUT_SECONDS = 1800
 ENABLED_MARKER = "enabled"

@@ -13,12 +13,14 @@ import sys
 from pathlib import Path
 from typing import Callable, Optional, Sequence
 
-from . import db, facts, ids, owlery, pensieve
+from . import capacity, db, facts, ids, owlery, pensieve
 from .errors import IntegrityError, NotFoundError, StoreError, ValidationError
 
 _WHOLE = re.compile(r"[0-9]{1,18}")
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 _AMOUNT = re.compile(r"[0-9]{1,9}(?:\.[0-9]{1,9})?")
+_PLUS_WHOLE = re.compile(r"\+[0-9]{1,3}")
+_PLUS_AMOUNT = re.compile(r"\+[0-9]{1,3}(?:\.[0-9]{1,2})?")
 TOKEN_LINE_LIMIT = 200
 OPS_FILE_LIMIT = 256 * 1024
 
@@ -38,6 +40,18 @@ def _amount(value: str) -> float:
     if _AMOUNT.fullmatch(value) is None:
         raise argparse.ArgumentTypeError("expected a decimal amount")
     return float(value)
+
+
+def _plus_whole(value: str) -> int:
+    if _PLUS_WHOLE.fullmatch(value) is None:
+        raise argparse.ArgumentTypeError("expected +N, a whole number of extra runs")
+    return int(value[1:])
+
+
+def _plus_amount(value: str) -> float:
+    if _PLUS_AMOUNT.fullmatch(value) is None:
+        raise argparse.ArgumentTypeError("expected +X, extra dollars with at most two decimals")
+    return float(value[1:])
 
 
 def _stdin_text(limit: int) -> str:
@@ -195,9 +209,48 @@ def _fact_as_of(conn: sqlite3.Connection, args: argparse.Namespace) -> list:
     return facts.as_of_belief(conn, args.belief, args.scope)
 
 
+def _clock() -> int:
+    return ids.stamp(None)
+
+
+def _fleet_caps():
+    # The cap numbers are the fleet's settings, kept in fleet/config.py next to this package in the office.
+    from fleet import config as fleet_config
+
+    return fleet_config
+
+
+def _cap_status(conn: sqlite3.Connection, caps, desk: str, now: int) -> dict:
+    return capacity.cap_status(conn, desk, caps.DAILY_RUN_CAP[desk], caps.DAILY_SPEND_CAP_USD.get(desk), now,
+                               caps.CAP_RESET_UTC_SECONDS)
+
+
+def _desk_cap(conn: sqlite3.Connection, args: argparse.Namespace) -> dict:
+    """A bump to one capped desk's runs or spend cap, until the next cap reset."""
+    caps = _fleet_caps()
+    desk = pensieve.get_desk(conn, args.desk)["name"]
+    kind, amount = ("runs", args.runs) if args.runs is not None else ("spend", args.spend)
+    capped = caps.DAILY_RUN_CAP if kind == "runs" else caps.DAILY_SPEND_CAP_USD
+    if desk not in capped:
+        raise ValidationError(f"{desk} has no fleet {kind} cap to bump")
+    now = _clock()
+    _, resets_at = capacity.day_bounds(now, caps.CAP_RESET_UTC_SECONDS)
+    bump = capacity.add_bump(conn, desk, kind, amount, resets_at, now=now)
+    return {"bump": bump, "caps": _cap_status(conn, caps, desk, now)}
+
+
+def _desk_caps(conn: sqlite3.Connection, args: argparse.Namespace) -> list:
+    caps = _fleet_caps()
+    now = _clock()
+    registered = {desk["name"] for desk in pensieve.list_desks(conn)}
+    return [_cap_status(conn, caps, desk, now) for desk in sorted(caps.DAILY_RUN_CAP) if desk in registered]
+
+
 HANDLERS: dict[str, Callable] = {
     "desk add": lambda c, a: pensieve.add_desk(c, a.name, a.family, a.role, a.model),
     "desk list": lambda c, a: pensieve.list_desks(c),
+    "desk cap": _desk_cap,
+    "desk caps": _desk_caps,
     "task create": lambda c, a: pensieve.create_task(
         c, a.desk, a.title, a.intent_path, a.parent, a.request, a.session, a.worktree, a.id),
     "task start": lambda c, a: pensieve.start_task(c, a.task),
@@ -207,6 +260,8 @@ HANDLERS: dict[str, Callable] = {
     "task close": lambda c, a: pensieve.close_task(c, a.task, a.reason, _token(a)),
     "task show": lambda c, a: pensieve.get_task(c, a.task),
     "task list": lambda c, a: pensieve.list_tasks(c, a.desk, a.status),
+    "task allow-round": lambda c, a: capacity.allow_round(c, a.task, _clock()),
+    "task rounds": lambda c, a: capacity.review_rounds(c, a.task),
     "token mint": lambda c, a: owlery.mint(c, a.task, "cli", a.ttl),
     "owl send": lambda c, a: owlery.send(
         c, a.sender, a.recipient, a.kind, a.subject, _body(a), a.body_path, a.task, a.request,
@@ -296,6 +351,12 @@ def _desk_parsers(commands: argparse._SubParsersAction) -> None:
     add.add_argument("--role")
     add.add_argument("--model")
     _sub(group, "list", "desk list")
+    bump = _sub(group, "cap", "desk cap")
+    bump.add_argument("desk")
+    amount = bump.add_mutually_exclusive_group(required=True)
+    amount.add_argument("--runs", type=_plus_whole)
+    amount.add_argument("--spend", type=_plus_amount)
+    _sub(group, "caps", "desk caps")
 
 
 def _task_parsers(commands: argparse._SubParsersAction) -> None:
@@ -309,7 +370,7 @@ def _task_parsers(commands: argparse._SubParsersAction) -> None:
     create.add_argument("--request")
     create.add_argument("--session")
     create.add_argument("--worktree")
-    for name in ("start", "show"):
+    for name in ("start", "show", "allow-round", "rounds"):
         _sub(group, name, f"task {name}").add_argument("task")
     awaiting = _sub(group, "await-close", "task await-close")
     awaiting.add_argument("task")

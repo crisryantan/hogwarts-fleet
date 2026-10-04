@@ -12,7 +12,7 @@ from .errors import ConflictError, IntegrityError, NotFoundError, StoreError, Va
 
 DEFAULT_DB = Path("/Users/crisryantan/.hogwarts/state/pensieve.db")
 CODE_ROOT = Path(os.path.abspath(__file__)).parent.parent
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 WAL_ATTEMPTS = 50
 BYTECODE_SUFFIXES = (".pyc", ".pyo", ".so")
 SIDECARS = ("-wal", "-shm")
@@ -32,6 +32,9 @@ REQUEST_OUTCOMES = ("done", "deferred", "declined")
 REQUEST_REASONS = ("conflict", "safety", "missing_access", "ambiguous_scope")
 REVIEW_VERDICTS = ("PASS", "CHANGES", "HEADMASTER")
 TOKEN_MINTERS = ("hook", "cli")
+CAP_KINDS = ("runs", "spend")
+CAP_HIT_CAPS = CAP_KINDS + ("plan",)
+CAP_SOURCES = ("fleet", "claude_plan", "codex_plan")
 
 PathLike = Union[str, Path]
 
@@ -58,6 +61,9 @@ _ENUMS = {
     "reasons": _choices(REQUEST_REASONS),
     "review_verdicts": _choices(REVIEW_VERDICTS),
     "minters": _choices(TOKEN_MINTERS),
+    "cap_kinds": _choices(CAP_KINDS),
+    "cap_hit_caps": _choices(CAP_HIT_CAPS),
+    "cap_sources": _choices(CAP_SOURCES),
 }
 
 
@@ -410,7 +416,130 @@ V3 = (
     ),
 )
 
-MIGRATIONS = ((1, V1), (2, V2), (3, V3))
+# Busy-day capacity: Ryan's temporary cap bumps, which cap stopped a desk, review rounds per author task,
+# and a launch record per headless run.
+V4 = (
+    _table(
+        """CREATE TABLE IF NOT EXISTS cap_bumps (
+        id INTEGER PRIMARY KEY,
+        desk TEXT NOT NULL REFERENCES desks(name),
+        kind TEXT NOT NULL CHECK (kind IN {cap_kinds}),
+        amount REAL NOT NULL CHECK (amount > 0),
+        created_at INTEGER NOT NULL,
+        expires_at INTEGER NOT NULL,
+        CHECK (expires_at > created_at)
+    )"""
+    ),
+    "CREATE INDEX IF NOT EXISTS cap_bumps_desk ON cap_bumps(desk, expires_at)",
+    _table(
+        """CREATE TABLE IF NOT EXISTS cap_hits (
+        id INTEGER PRIMARY KEY,
+        ts INTEGER NOT NULL,
+        desk TEXT NOT NULL REFERENCES desks(name),
+        cap TEXT NOT NULL CHECK (cap IN {cap_hit_caps}),
+        cap_source TEXT NOT NULL CHECK (cap_source IN {cap_sources}),
+        run_id TEXT,
+        CHECK ((cap_source = 'fleet') = (cap <> 'plan'))
+    )"""
+    ),
+    "CREATE INDEX IF NOT EXISTS cap_hits_desk ON cap_hits(desk, ts)",
+    _table(
+        """CREATE TABLE IF NOT EXISTS round_allowances (
+        id INTEGER PRIMARY KEY,
+        task_id TEXT NOT NULL REFERENCES tasks(id),
+        granted_at INTEGER NOT NULL
+    )"""
+    ),
+    "CREATE INDEX IF NOT EXISTS round_allowances_task ON round_allowances(task_id)",
+    _table(
+        """CREATE TABLE IF NOT EXISTS review_rounds (
+        request_id TEXT PRIMARY KEY NOT NULL REFERENCES requests(id),
+        task_id TEXT NOT NULL REFERENCES tasks(id),
+        reviewer TEXT NOT NULL REFERENCES desks(name),
+        sha TEXT NOT NULL,
+        round INTEGER NOT NULL CHECK (round >= 1),
+        allowance_id INTEGER REFERENCES round_allowances(id),
+        created_at INTEGER NOT NULL,
+        superseded_by TEXT REFERENCES requests(id),
+        superseded_at INTEGER,
+        review_id TEXT UNIQUE REFERENCES review_passes(id),
+        CHECK ((superseded_by IS NULL) = (superseded_at IS NULL)),
+        CHECK (superseded_by IS NULL OR superseded_by <> request_id),
+        CHECK (superseded_by IS NULL OR review_id IS NULL)
+    )"""
+    ),
+    "CREATE INDEX IF NOT EXISTS review_rounds_task ON review_rounds(task_id)",
+    _guard("cap_bumps_immutable", "BEFORE UPDATE ON cap_bumps", "cap bumps are immutable"),
+    _guard("cap_bumps_no_delete", "BEFORE DELETE ON cap_bumps", "cap bumps are never deleted"),
+    _guard("cap_hits_immutable", "BEFORE UPDATE ON cap_hits", "cap hits are immutable"),
+    _guard("cap_hits_no_delete", "BEFORE DELETE ON cap_hits", "cap hits are never deleted"),
+    _guard("round_allowances_immutable", "BEFORE UPDATE ON round_allowances", "round allowances are immutable"),
+    _guard("round_allowances_no_delete", "BEFORE DELETE ON round_allowances", "round allowances are never deleted"),
+    _guard(
+        "review_rounds_fixed",
+        "BEFORE UPDATE OF request_id, task_id, reviewer, sha, round, allowance_id, created_at ON review_rounds",
+        "review round fields are fixed",
+    ),
+    _guard(
+        "review_rounds_superseded_once",
+        "BEFORE UPDATE ON review_rounds WHEN OLD.superseded_by IS NOT NULL",
+        "a superseded review round is final",
+    ),
+    # A round's verdict is the review_passes row recorded with it, set once and only for that round's commit.
+    _guard(
+        "review_rounds_open_without_verdict",
+        "BEFORE INSERT ON review_rounds WHEN NEW.review_id IS NOT NULL",
+        "a review round opens without a verdict",
+    ),
+    _guard(
+        "review_rounds_verdict_once",
+        "BEFORE UPDATE OF review_id ON review_rounds WHEN OLD.review_id IS NOT NULL",
+        "a review round verdict is final",
+    ),
+    _guard(
+        "review_rounds_verdict_matches",
+        "BEFORE UPDATE OF review_id ON review_rounds WHEN NOT EXISTS (SELECT 1 FROM review_passes"
+        " WHERE id = NEW.review_id AND task_id = OLD.task_id AND sha = OLD.sha AND reviewer_desk = OLD.reviewer)",
+        "a round verdict must be the review of its commit by its reviewer",
+    ),
+    _guard("review_rounds_no_delete", "BEFORE DELETE ON review_rounds", "review rounds are never deleted"),
+    # One row per headless run, written before its process starts, so a run counts toward the daily run cap
+    # even when it is killed before it records usage. Its usage is the metrics row tied to it once it ends.
+    _table(
+        """CREATE TABLE IF NOT EXISTS run_launches (
+        run_id TEXT PRIMARY KEY NOT NULL,
+        desk TEXT NOT NULL REFERENCES desks(name),
+        model TEXT NOT NULL,
+        launched_at INTEGER NOT NULL,
+        metric_id INTEGER UNIQUE REFERENCES metrics(id)
+    )"""
+    ),
+    "CREATE INDEX IF NOT EXISTS run_launches_desk ON run_launches(desk, launched_at)",
+    _guard(
+        "run_launches_fixed",
+        "BEFORE UPDATE OF run_id, desk, model, launched_at ON run_launches",
+        "run launch fields are fixed",
+    ),
+    _guard(
+        "run_launches_open_without_usage",
+        "BEFORE INSERT ON run_launches WHEN NEW.metric_id IS NOT NULL",
+        "a run launch opens without usage",
+    ),
+    _guard(
+        "run_launches_usage_once",
+        "BEFORE UPDATE OF metric_id ON run_launches WHEN OLD.metric_id IS NOT NULL",
+        "a run launch usage is final",
+    ),
+    _guard(
+        "run_launches_usage_matches",
+        "BEFORE UPDATE OF metric_id ON run_launches WHEN NOT EXISTS (SELECT 1 FROM metrics"
+        " WHERE id = NEW.metric_id AND desk = OLD.desk AND run_id = OLD.run_id)",
+        "a run launch usage must be the metrics row of that run",
+    ),
+    _guard("run_launches_no_delete", "BEFORE DELETE ON run_launches", "run launches are never deleted"),
+)
+
+MIGRATIONS = ((1, V1), (2, V2), (3, V3), (4, V4))
 
 
 def _uid() -> int:
