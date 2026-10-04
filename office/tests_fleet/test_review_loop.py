@@ -233,6 +233,25 @@ class VerifyTests(LoopCase):
         self.assertTrue(table.endswith("network={enabled=false}}"))
         self.assertNotIn("--sandbox", argv)
 
+    def test_own_session_checks_run_without_the_codex_sandbox_and_say_so(self):
+        self.write_file(self.repo / "fix.txt", "fix\n")
+        self.git("add", "fix.txt")
+        self.git("commit", "-q", "-m", "my own fix")
+        self.enable("moody")
+        built = []
+        real = verify.sandbox_argv
+        with mock.patch.object(verify, "sandbox_argv", side_effect=lambda *a: built.append(a) or real(*a)), \
+                self.fake_reviewer("PASS"):
+            result = review.review_own(self.conn, str(self.repo), title="my own fix", fetch=False,
+                                       intent="Fix it.\nAC-1 the fix file is there | check: `test -f fix.txt`")
+        self.assertEqual(built, [])
+        self.assertEqual(result["failed_checks"], [])
+        text = (self.castle / "tasks" / result["task_id"] / "evidence.md").read_text()
+        self.assertIn("without the Codex sandbox, because Ryan's own session wrote this code", text)
+        self.assertIn("AC-1 the fix file is there\ncheck: `test -f fix.txt`\nexit: 0", text)
+        task_md = (self.castle / "tasks" / result["task_id"] / "TASK.md").read_text()
+        self.assertIn("## Intent\nFix it.\n\n## Acceptance criteria\nAC-1 the fix file is there", task_md)
+
     def test_parse_checks(self):
         checks = verify.parse_checks("AC-1 a | check: `x`\nnoise\nAC-12 b | check: look at it\nAC-x c | check: `y`\n")
         self.assertEqual([(c["id"], c["command"]) for c in checks], [("AC-1", "x"), ("AC-12", None)])
