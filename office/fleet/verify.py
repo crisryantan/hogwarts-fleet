@@ -26,7 +26,7 @@ from typing import Optional
 
 from hogwarts import ids, pensieve
 
-from fleet import common, config, gitops, run_desk, safefs
+from fleet import common, config, gitops, run_desk, safefs, toolchain
 from fleet.safefs import FleetError
 
 AC_LINE = re.compile(r"AC-(\d{1,3})\s+(.+?)\s*\|\s*check:\s*(.+?)\s*")
@@ -72,6 +72,9 @@ def sandbox_argv(record: dict, scratch: str, command: str) -> list:
     entries += [f'"{gitops.check_safe_path(path, "a verify read path")}"="read"' for path in config.CODEX_EXTRA_READS]
     entries.append('":workspace_roots"={"."="write"}')
     entries.append(f'"{gitops.check_safe_path(record["common_dir"], "the repo .git folder")}"="read"')
+    tools = toolchain.for_record(record)
+    for path in tools["read"] + tools["path"]:
+        entries.append(f'"{gitops.check_safe_path(path, "a toolchain folder")}"="read"')
     entries.append(f'"{gitops.check_safe_path(scratch, "the scratch folder")}"="write"')
     entries.append(f'"{gitops.check_safe_path(config.TMP_WRITE_ROOT, "the temp folder")}"="write"')
     temp = run_desk.user_temp_dir()
@@ -83,9 +86,10 @@ def sandbox_argv(record: dict, scratch: str, command: str) -> list:
             "-C", record["path"], "--", config.BASH_BIN, "--noprofile", "--norc", "-c", command]
 
 
-def child_env(scratch: str) -> dict:
-    return {"HOME": f"{scratch}/home", "TMPDIR": f"{scratch}/tmp", "PATH": config.CHILD_PATH,
-            "LANG": "en_US.UTF-8", "CI": "1", "RTK_DISABLED": "1"}
+def child_env(scratch: str, record: Optional[dict] = None) -> dict:
+    tools = toolchain.for_record(record)
+    return {"HOME": f"{scratch}/home", "TMPDIR": f"{scratch}/tmp", "PATH": ":".join([*tools["path"], config.CHILD_PATH]),
+            "LANG": "en_US.UTF-8", "CI": "1", "RTK_DISABLED": "1", **tools["env"]}
 
 
 def _tail(path: str) -> tuple:
@@ -102,7 +106,7 @@ def run_check(record: dict, scratch: str, command: str) -> dict:
     fd = os.open(out_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
     started = time.monotonic()
     try:
-        done = subprocess.run(sandbox_argv(record, scratch, command), cwd=record["path"], env=child_env(scratch),
+        done = subprocess.run(sandbox_argv(record, scratch, command), cwd=record["path"], env=child_env(scratch, record),
                               stdin=subprocess.DEVNULL, stdout=fd, stderr=subprocess.STDOUT,
                               timeout=config.VERIFY_TIMEOUT_SECONDS, check=False)
         exit_code = done.returncode

@@ -250,7 +250,7 @@ def review_build(conn, task_id: str) -> dict:
         if handoff is None:
             raise FleetError("the worktree has changes but the desk posted no handoff with a commit message")
         subject, body = commit_message(handoff)
-        gitops.git(["add", "-A"], record["git_dir"], record["path"])
+        gitops.git(["add", "-A", "--", ".", *gitops.link_excludes(record)], record["git_dir"], record["path"])
         message = ["-m", subject] + (["-m", body] if body else [])
         gitops.git(["commit", "--no-verify", *message], record["git_dir"], record["path"])
     sha = gitops.rev(record)

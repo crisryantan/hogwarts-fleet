@@ -38,7 +38,7 @@ INSTALLED = Path(HOME_DIR) / ".hogwarts"
 CHECKOUT = Path(__file__).resolve().parents[1]
 CHECKOUT_OFFICE = CHECKOUT / "office"
 CODE_FILES = ("fleet/config.py", "fleet/run_desk.py", "fleet/gitops.py", "fleet/safefs.py", "fleet/common.py",
-              "desks/harry/codex.toml", "desks/moody/codex.toml")
+              "fleet/toolchain.py", "desks/harry/codex.toml", "desks/moody/codex.toml")
 FULL_SHA = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
 
 

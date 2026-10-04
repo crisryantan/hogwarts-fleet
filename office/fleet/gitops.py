@@ -163,8 +163,31 @@ def remote_slug(record: dict, remote: str = "origin") -> str:
     return repo_slug(url)
 
 
+def link_excludes(record: dict) -> list:
+    """Pathspecs that keep the worktree's read-only dependency links out of status and add."""
+    return [f":(exclude){name}" for name in record.get("links") or []]
+
+
+def borrowed_link(record: dict, name: str) -> bool:
+    """Whether <worktree>/<name> is still the link to the main checkout's copy that the worktree script made."""
+    path = f"{record['path']}/{name}"
+    return os.path.islink(path) and os.readlink(path) == f"{record['repo_dir']}/{name}"
+
+
+def check_links(record: dict) -> None:
+    """Refuse a worktree whose dependency link was replaced. Status and add skip that path, so a replacement
+    would let checks use files that no commit holds."""
+    for name in record.get("links") or []:
+        if os.path.lexists(f"{record['path']}/{name}") and not borrowed_link(record, name):
+            raise FleetError(f"{name} in the worktree is no longer the read-only link to the main checkout's copy, "
+                             "so checks could use files no commit holds; delete it from the worktree first")
+
+
 def dirty(record: dict) -> bool:
-    return bool(git(["status", "--porcelain", "--untracked-files=all"], record["git_dir"], record["path"]).strip())
+    """Whether the worktree has changes outside its dependency links. Refuses a replaced link."""
+    check_links(record)
+    return bool(git(["status", "--porcelain", "--untracked-files=all", "--", ".", *link_excludes(record)],
+                    record["git_dir"], record["path"]).strip())
 
 
 # Office records
@@ -191,6 +214,7 @@ def _check_record(data: object, name: str) -> dict:
         "branch": data.get("branch"),
         "base": data.get("base"),
         "repo": data.get("repo"),
+        "links": data.get("links") or [],
     }
     if record["name"] != name:
         raise FleetError("worktree record name does not match its file")
@@ -207,6 +231,8 @@ def _check_record(data: object, name: str) -> dict:
         check_branch(record["branch"])
     check_ref(record["base"], "worktree record base")
     ids.check("repo", record["repo"])
+    if not isinstance(record["links"], list) or any(name not in config.LINKABLE_DEPS for name in record["links"]):
+        raise FleetError("worktree record links name a folder that is not a linkable dependency")
     return record
 
 
