@@ -213,14 +213,52 @@ class OwnSessionGuardTests(ManyCase):
             self.own_review(capped)
         self.commit("one more change")
         with mock.patch.object(pensieve, "create_task", side_effect=AssertionError("made a task")):
-            with self.assertRaisesRegex(FleetError, f"task {capped} on this checkout is at its review round cap;"
-                                                    f" castle task allow-round {capped}"):
+            with self.assertRaisesRegex(FleetError, self.capped_text(capped)):
                 self.own_review()
         self.assertEqual(self.own_tasks(), [capped])
+        # An unused allowance does not open the checkout to a new task: the allowed round goes on the capped one.
         capacity.allow_round(self.conn, capped)
+        with mock.patch.object(pensieve, "create_task", side_effect=AssertionError("made a task")):
+            with self.assertRaisesRegex(FleetError, self.capped_text(capped)):
+                self.own_review()
+        self.assertEqual(capacity.allow_round(self.conn, capped)["created"], False)
+        allowed = self.own_review(capped)
+        self.assertEqual((allowed["task_id"], allowed["round"]), (capped, 4))
+        # Once Ryan closes the capped task, the checkout takes a new task with its own count.
+        pensieve.close_task(self.conn, capped, "abandoned")
+        self.commit("after the close")
         other = self.own_review()
         self.assertEqual((other["round"], other["verdict"]), (1, "CHANGES"))
         self.assertNotEqual(other["task_id"], capped)
+
+    def test_repeated_new_commits_without_task_never_reset_the_count(self):
+        self.commit("round one")
+        capped = self.own_review()["task_id"]
+        for number in (2, 3):
+            self.commit(f"round {number}")
+            self.own_review(capped)
+        made = mock.patch.object(pensieve, "create_task", side_effect=AssertionError("made a task"))
+        for number in range(4):
+            if number % 2:
+                capacity.allow_round(self.conn, capped)
+            self.commit(f"try a new task {number}")
+            with made, self.assertRaisesRegex(FleetError, self.capped_text(capped)):
+                self.own_review()
+        self.assertEqual(self.own_tasks(), [capped])
+        self.assertEqual(self.own_tasks("closed"), [])
+        allowed = self.own_review(capped)
+        self.assertEqual(allowed["round"], 4)
+        self.commit("and again")
+        with made, self.assertRaisesRegex(FleetError, self.capped_text(capped)):
+            self.own_review()
+        counted = [row["round"] for row in capacity.review_rounds(self.conn, capped) if row["counts"]]
+        self.assertEqual(counted, [1, 2, 3, 4])
+
+    @staticmethod
+    def capped_text(task_id: str) -> str:
+        return re.escape(f"task {task_id} on this checkout has used its 3 review rounds, so this checkout's"
+                         f" reviews go on that task: run fleet review own --repo-dir <checkout> --task {task_id}"
+                         f" once castle task allow-round {task_id} allows one more round, or close that task first")
 
     def test_a_task_interrupted_after_its_commit_is_recorded_stays_retryable(self):
         sha = self.commit("first")

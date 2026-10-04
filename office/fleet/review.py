@@ -52,8 +52,9 @@ the desk lock. Only Ryan closes a task as complete.
 Author tasks run side by side: Harry, Hermione, Moody, Ron and Ryan's own sessions may each hold many active
 tasks, so a task waiting for a fix round blocks nothing. Ryan's own sessions start a new review whatever else
 of theirs is in review or waiting for fixes, with two refusals made before anything changes: a commit another
-task already holds (review it with --task), and a checkout whose open task is at its round cap, so leaving out
---task never gets past the cap. A new task that fails before its first round opens is closed as abandoned,
+task already holds (review it with --task), and a checkout whose open task has used its round cap: that
+checkout's reviews go on that task with --task until Ryan closes it, allowance or not, so leaving out --task
+never starts a fresh count. A new task that fails before its first round opens is closed as abandoned,
 unless its commit was already recorded on it: then it stays active, --task <id> retries it, and a new review
 of that commit names it.
 """
@@ -468,15 +469,19 @@ def _review_own(conn, repo_dir: str, title: Optional[str], intent: Optional[str]
 
 
 def _check_new_own(conn, repo_dir: str, common_dir: str, sha: str) -> None:
-    """Refuse a new own task, before anything is made, while an open task on the same checkout is at its round
-    cap, so leaving out --task never gets past the cap, or for a commit another task already holds."""
+    """Refuse a new own task, before anything is made, for a commit another task already holds, or while an
+    open task on the same checkout has used its round cap. That task's rounds go on with --task until Ryan
+    closes it, allowance or not, so leaving out --task never starts a fresh count."""
+    cap = config.REVIEW_ROUND_CAP
     for other in pensieve.list_tasks(conn, desk=OWN_DESK, status="active"):
         record = None if other["worktree"] is None else gitops.find_record(worktree.castle_path(other["worktree"]))
         if record is None or record["repo_dir"] != repo_dir:
             continue
-        if capacity.needs_allowance(conn, other["id"], config.REVIEW_ROUND_CAP):
-            raise FleetError(f"task {other['id']} on this checkout is at its review round cap; castle task"
-                             f" allow-round {other['id']} allows one more round on it, or close it first")
+        if sum(1 for row in capacity.review_rounds(conn, other["id"]) if row["counts"]) >= cap:
+            raise FleetError(f"task {other['id']} on this checkout has used its {cap} review rounds, so this"
+                             f" checkout's reviews go on that task: run fleet review own --repo-dir <checkout>"
+                             f" --task {other['id']} once castle task allow-round {other['id']} allows one more"
+                             " round, or close that task first")
     repo = gitops.repo_slug(gitops.git(["config", "--get", "remote.origin.url"], common_dir))
     held = pensieve.get_commit(conn, repo, sha)
     if held is not None:
