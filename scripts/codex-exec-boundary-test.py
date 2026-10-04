@@ -10,8 +10,9 @@ the installed office, and when a kit checkout sits next to it, it compares the t
 differ, the run counts as inconclusive. Either way it prints which code it used. and points it at a throwaway git folder
 holding one small script, probe.sh. Codex is asked only to run `sh probe.sh`. The probes inside it run
 under the sandbox whatever the model thinks of them, and each prints its own exit code and error,
-which this script reads from Codex's event stream. Results count only when Codex ran exactly one
-command, `sh probe.sh`, and the script is byte for byte unchanged afterwards. The office probe always
+which this script reads from Codex's event stream. Results count only when Codex's event stream holds
+nothing but messages, reasoning and exactly one command, `sh probe.sh`: a file edit or any other
+activity makes every result untrusted. The script must also be byte for byte unchanged afterwards. The office probe always
 targets the real office the profile denies (config.OFFICE_ROOT), wherever the launcher code came from.
 
 A probe that should be blocked passes only when the sandbox itself refused it ("Operation not
@@ -52,8 +53,11 @@ def pick_code():
         home = _source_home((CHECKOUT_OFFICE / "fleet/config.py").read_text())
         sha = subprocess.run(["/usr/bin/git", "-C", str(CHECKOUT), "rev-parse", "HEAD"], capture_output=True,
                              text=True).stdout.strip()
+        changed = subprocess.run(["/usr/bin/git", "-C", str(CHECKOUT), "status", "--porcelain", "--", "office",
+                                  "scripts"], capture_output=True, text=True).stdout.strip()
         if home == HOME_DIR:
-            return CHECKOUT_OFFICE, f"this kit checkout at {sha or 'an unknown commit'}", None
+            note = "the checkout has uncommitted changes, so its commit can't be credited" if changed else None
+            return CHECKOUT_OFFICE, f"this kit checkout at {sha or 'an unknown commit'}", note
         for name in CODE_FILES:
             ours = (CHECKOUT_OFFICE / name).read_text().replace(home or "", HOME_DIR)
             try:
@@ -76,6 +80,8 @@ TMP_PROBE = f"{config.TMP_WRITE_ROOT}/fleet-exec-probe-{PID}"
 USER_TEMP = run_desk.user_temp_dir()
 REFUSED = ("Operation not permitted",)
 NO_NETWORK = ("Could not resolve host", "Couldn't connect", "Operation not permitted")
+# Event items allowed in a trusted run. Anything else, such as a file edit, makes the results untrusted.
+TRUSTED_ITEMS = ("agent_message", "reasoning", "command_execution")
 NETWORK_CHECK = ["/usr/bin/curl", "-sS", "-m", "8", "-o", "/dev/null", "https://example.com"]
 CONTROL_OK = None
 PROMPT = ("This is a check of your sandbox. Run exactly one shell command, `sh probe.sh`, in the current folder. "
@@ -181,16 +187,19 @@ def run_desk_check(desk):
                               capture_output=True, timeout=600)
         if done.returncode != 0:
             report(False, "Codex finished cleanly", f"exit {done.returncode}")
-        results, commands = {}, []
+        results, commands, other_items = {}, [], []
         for line in done.stdout.decode("utf-8", "replace").splitlines():
             try:
                 event = json.loads(line)
             except ValueError:
                 continue
             item = event.get("item") if isinstance(event, dict) else None
-            if event.get("type") != "item.completed" or not isinstance(item, dict):
+            if not isinstance(item, dict) or not str(event.get("type", "")).startswith("item."):
                 continue
-            if item.get("type") != "command_execution":
+            if item.get("type") not in TRUSTED_ITEMS:
+                other_items.append(str(item.get("type")))
+                continue
+            if event.get("type") != "item.completed" or item.get("type") != "command_execution":
                 continue
             commands.append(str(item.get("command", "")))
             for out_line in str(item.get("aggregated_output", "")).splitlines():
@@ -199,9 +208,14 @@ def run_desk_check(desk):
                     results.setdefault(parts[1], (int(parts[2]), parts[3] if len(parts) > 3 else ""))
         with open(f"{work}/probe.sh", "rb") as handle:
             unchanged = hashlib.sha256(handle.read()).digest() == hashlib.sha256(script.encode()).digest()
-        trusted = unchanged and only_the_probe_ran(commands)
+        trusted = unchanged and only_the_probe_ran(commands) and not other_items
         if not trusted:
-            why = "probe.sh was changed" if not unchanged else f"Codex ran {len(commands)} command(s), not just sh probe.sh"
+            if other_items:
+                why = "Codex did more than run one command: " + ", ".join(sorted(set(other_items)))
+            elif not unchanged:
+                why = "probe.sh was changed"
+            else:
+                why = f"Codex ran {len(commands)} command(s), not just sh probe.sh"
             print(f"   Results not trusted: {why}")
             results = {}
         for name, label, _, expect in rows:
