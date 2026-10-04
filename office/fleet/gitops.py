@@ -294,6 +294,12 @@ def find_record(worktree_path: Optional[str]) -> Optional[dict]:
         return None
 
 
+def drop_record(name: str) -> None:
+    """Remove the office record of a worktree that was taken back before any task held it."""
+    with safefs.opened_dir(config.OFFICE_ROOT, RECORD_DIR) as fd:
+        os.unlink(f"{safefs.check_component(name)}.json", dir_fd=fd)
+
+
 def write_record(record: dict) -> dict:
     record = _check_record(record, record["name"])
     data = (json.dumps(record, ensure_ascii=True, indent=2, sort_keys=True) + "\n").encode("ascii")

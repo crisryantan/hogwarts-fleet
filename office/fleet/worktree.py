@@ -8,7 +8,9 @@ It refuses rather than guesses:
   evidence, handoff and reviews are written next to it. One worktree command per TASK.md runs at a time:
   it takes that TASK.md's lock without waiting before it checks, and holds it until the task is active, so
   a second command for a task under the same TASK.md is refused at once and changes nothing. The last
-  check and the start share one store transaction;
+  check, the attach and the start share one store transaction. When that transaction refuses, say a
+  single-task Harry started a task under another TASK.md meanwhile, or McGonagall closed the parent, the
+  command takes back the worktree, its new branch and its record before it says why;
 - the repo must be a main checkout in Ryan's home, outside the office and the castle, with a GitHub origin;
 - the branch must be new, plain and free of fleet words.
 Then it fetches the base (unless --no-fetch), adds ~/hogwarts/worktrees/<task-id> on a new branch,
@@ -129,6 +131,28 @@ def holder_lock(holder: str) -> Iterator[None]:
         yield
 
 
+def _take_back(record: dict, made_at: Optional[str], exc: BaseException) -> None:
+    """Undo add_worktree for a task that was refused before it got the worktree, so the task stays queued with
+    nothing left on disk and the same command can run again. The branch goes only while it still sits where the
+    worktree was made. If the undo fails, the refusal says what is left to remove by hand."""
+    branch, common_dir = record["branch"], record["common_dir"]
+    path, branch_left = f"the worktree {record['path']}", f"branch {branch}"
+    left = [path] + ([branch_left] if branch is not None else []) + [f"the record {record['name']}.json"]
+    try:
+        toolchain.unlink_deps(record)
+        gitops.git(["worktree", "remove", record["path"]], common_dir)
+        left.remove(path)
+        if branch is not None and made_at is not None:
+            tip = gitops.git(["rev-parse", "--verify", "--quiet", f"refs/heads/{branch}"], common_dir, check=False)
+            if tip.strip() == made_at:
+                gitops.git(["update-ref", "-d", f"refs/heads/{branch}", made_at], common_dir)
+            left.remove(branch_left)
+        gitops.drop_record(record["name"])
+    except Exception as undo:
+        raise FleetError(f"{exc}; taking back the new worktree also failed ({undo}), so remove"
+                         f" {' and '.join(left)} by hand") from exc
+
+
 def start_desk(conn, task: dict) -> str:
     """Start the desk's run on its request owl, when Ryan has enabled the desk. Returns what happened."""
     owl_id = _request_owl(conn, task)
@@ -153,11 +177,17 @@ def create(conn, task_id: str, repo_dir: str, branch: str, base: str = config.DE
             raise FleetError("the task must be queued and have no worktree yet")
         _check_startable(conn, task)
         record = add_worktree(conn, task["id"], repo_dir, base, branch, fetch)
-        with db.transaction(conn):
-            # BEGIN IMMEDIATE: the check sees every start committed before it, and no start lands in between.
-            _check_startable(conn, task)
-            pensieve.set_worktree(conn, task["id"], _real_worktree(task["id"]))
-            task = pensieve.start_task(conn, task["id"])
+        made_at = None
+        try:
+            made_at = gitops.rev(record)
+            with db.transaction(conn):
+                # BEGIN IMMEDIATE: the check sees every start committed before it, and no start lands in between.
+                _check_startable(conn, task)
+                pensieve.set_worktree(conn, task["id"], _real_worktree(task["id"]))
+                task = pensieve.start_task(conn, task["id"])
+        except BaseException as exc:
+            _take_back(record, made_at, exc)
+            raise
     if task["request_id"] is not None:
         owlery.advance(conn, task["request_id"], "claimed", detail="worktree attached")
         owlery.advance(conn, task["request_id"], "running", detail="build desk started")

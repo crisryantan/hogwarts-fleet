@@ -98,6 +98,53 @@ class ManyCase(LoopCase):
         with self.fake_reviewer(verdict):
             return review.review_build(self.conn, task["id"])
 
+    def race(self, first: dict, second: dict) -> dict:
+        """Two worktree commands, each on its own connection and thread. The first pauses
+        inside add_worktree, after its holder check, while the second runs start to finish. Each outcome is
+        the command's result or its FleetError."""
+        real_add, inside, release, outcomes = worktree.add_worktree, threading.Event(), threading.Event(), {}
+
+        def paused_add(conn, task_id, *args, **kwargs):
+            if task_id == first["id"]:
+                inside.set()
+                release.wait(10)
+            return real_add(conn, task_id, *args, **kwargs)
+
+        def run(task: dict, branch: str) -> None:
+            conn = db.connect(self.db_path)
+            try:
+                outcomes[task["id"]] = worktree.create(conn, task["id"], str(self.repo), branch, fetch=False)
+            except FleetError as exc:
+                outcomes[task["id"]] = exc
+            finally:
+                conn.close()
+
+        with mock.patch.object(worktree, "add_worktree", side_effect=paused_add), mock.patch.object(run_desk, "spawn"):
+            one = threading.Thread(target=run, args=(first, "fix/widget"))
+            one.start()
+            try:
+                self.assertTrue(inside.wait(10))
+                two = threading.Thread(target=run, args=(second, "fix/other"))
+                two.start()
+                two.join(10)
+            finally:
+                release.set()
+                one.join(10)
+        self.assertEqual(set(outcomes), {first["id"], second["id"]})
+        return outcomes
+
+    def harry_active(self) -> list:
+        return [task["id"] for task in pensieve.list_tasks(self.conn, desk="harry", status="active")]
+
+    def assert_taken_back(self, task: dict, branch: str) -> None:
+        """A refused worktree command left its task queued with nothing on disk: no worktree, branch or record."""
+        self.assertEqual(pensieve.get_task(self.conn, task["id"])["status"], "queued")
+        self.assertIsNone(pensieve.get_task(self.conn, task["id"])["worktree"])
+        self.assertFalse(os.path.lexists(config.worktree_dir(task["id"])))
+        self.assertFalse(os.path.lexists(self.office / "worktrees" / f"{task['id']}.json"))
+        self.assertEqual(self.git("branch", "--list", branch), "")
+        self.assertNotIn(task["id"], self.git("worktree", "list"))
+
     def own_tasks(self, status: str = "active") -> list:
         return [task["id"] for task in pensieve.list_tasks(self.conn, desk="ryan-claude-1", status=status)]
 
@@ -312,44 +359,6 @@ class BuildDeskTests(ManyCase):
         self.assertEqual(pensieve.get_task(self.conn, second["id"])["status"], "queued")
         self.assertNotIn("fix/other", self.git("branch", "--list", "fix/other"))
 
-    def race(self, first: dict, second: dict) -> dict:
-        """Two worktree commands under one TASK.md, each on its own connection and thread. The first pauses
-        inside add_worktree, after its holder check, while the second runs start to finish. Each outcome is
-        the command's result or its FleetError."""
-        real_add, inside, release, outcomes = worktree.add_worktree, threading.Event(), threading.Event(), {}
-
-        def paused_add(conn, task_id, *args, **kwargs):
-            if task_id == first["id"]:
-                inside.set()
-                release.wait(10)
-            return real_add(conn, task_id, *args, **kwargs)
-
-        def run(task: dict, branch: str) -> None:
-            conn = db.connect(self.db_path)
-            try:
-                outcomes[task["id"]] = worktree.create(conn, task["id"], str(self.repo), branch, fetch=False)
-            except FleetError as exc:
-                outcomes[task["id"]] = exc
-            finally:
-                conn.close()
-
-        with mock.patch.object(worktree, "add_worktree", side_effect=paused_add), mock.patch.object(run_desk, "spawn"):
-            one = threading.Thread(target=run, args=(first, "fix/widget"))
-            one.start()
-            try:
-                self.assertTrue(inside.wait(10))
-                two = threading.Thread(target=run, args=(second, "fix/other"))
-                two.start()
-                two.join(10)
-            finally:
-                release.set()
-                one.join(10)
-        self.assertEqual(set(outcomes), {first["id"], second["id"]})
-        return outcomes
-
-    def harry_active(self) -> list:
-        return [task["id"] for task in pensieve.list_tasks(self.conn, desk="harry", status="active")]
-
     def test_two_worktree_commands_under_one_task_md_race_and_exactly_one_starts(self):
         parent = self.queued_parent()
         first, _ = self.harry_request(parent)
@@ -375,8 +384,72 @@ class BuildDeskTests(ManyCase):
         self.assertEqual(outcomes[second["id"]]["task_id"], second["id"])
         self.assertRegex(str(outcomes[first["id"]]), f"task {second['id']} of harry is still open under the same")
         self.assertEqual(self.harry_active(), [second["id"]])
-        self.assertEqual(pensieve.get_task(self.conn, first["id"])["status"], "queued")
-        self.assertIsNone(pensieve.get_task(self.conn, first["id"])["worktree"])
+        self.assert_taken_back(first, "fix/widget")
+        # Once the second is closed, the same command starts the first.
+        pensieve.close_task(self.conn, second["id"], "abandoned")
+        with mock.patch.object(run_desk, "spawn"):
+            again = worktree.create(self.conn, first["id"], str(self.repo), "fix/widget", fetch=False)
+        self.assertEqual(again["branch"], "fix/widget")
+        self.assertEqual(self.harry_active(), [first["id"]])
+
+    def test_a_parent_closed_while_the_worktree_is_added_takes_the_worktree_back(self):
+        parent = self.queued_parent()
+        task, _ = self.harry_request(parent)
+        real_add = worktree.add_worktree
+
+        def add_then_close(conn, *args, **kwargs):
+            added = real_add(conn, *args, **kwargs)
+            pensieve.close_task(self.conn, parent, "abandoned")  # McGonagall closes the parent meanwhile
+            return added
+
+        with mock.patch.object(worktree, "add_worktree", side_effect=add_then_close), \
+                mock.patch.object(run_desk, "spawn", side_effect=AssertionError("spawned")):
+            with self.assertRaisesRegex(ConflictError, "a worktree can only be attached to a queued or active task"):
+                worktree.create(self.conn, task["id"], str(self.repo), "fix/widget", fetch=False)
+        self.assertEqual(pensieve.get_task(self.conn, task["id"])["status"], "closed")
+        self.assertFalse(os.path.lexists(config.worktree_dir(task["id"])))
+        self.assertFalse(os.path.lexists(self.office / "worktrees" / f"{task['id']}.json"))
+        self.assertEqual(self.git("branch", "--list", "fix/widget"), "")
+
+    def test_a_branch_that_moved_is_kept_when_the_worktree_is_taken_back(self):
+        parent = self.queued_parent()
+        task, _ = self.harry_request(parent)
+
+        def moved_then_refused(conn, refused):
+            if refused["id"] == task["id"] and os.path.lexists(config.worktree_dir(task["id"])):
+                moved = self.git("commit-tree", "HEAD^{tree}", "-p", "HEAD", "-m", "work on the branch")
+                self.git("update-ref", "refs/heads/fix/widget", moved)
+                raise FleetError("refused late")
+
+        with mock.patch.object(worktree, "_check_startable", side_effect=moved_then_refused), \
+                mock.patch.object(run_desk, "spawn", side_effect=AssertionError("spawned")):
+            with self.assertRaisesRegex(FleetError, "^refused late$"):
+                worktree.create(self.conn, task["id"], str(self.repo), "fix/widget", fetch=False)
+        self.assertEqual(pensieve.get_task(self.conn, task["id"])["status"], "queued")
+        self.assertFalse(os.path.lexists(config.worktree_dir(task["id"])))
+        self.assertFalse(os.path.lexists(self.office / "worktrees" / f"{task['id']}.json"))
+        self.assertIn("fix/widget", self.git("branch", "--list", "fix/widget"))
+
+    def test_a_failed_take_back_names_what_is_left(self):
+        parent = self.queued_parent()
+        task, _ = self.harry_request(parent)
+        real_git = worktree.gitops.git
+
+        def failing_remove(args, *rest, **kwargs):
+            if args[:2] == ["worktree", "remove"]:
+                raise FleetError("git worktree failed: locked")
+            return real_git(args, *rest, **kwargs)
+
+        with mock.patch.object(worktree, "_check_startable", side_effect=[None, FleetError("refused late")]), \
+                mock.patch.object(worktree.gitops, "git", side_effect=failing_remove), \
+                mock.patch.object(run_desk, "spawn", side_effect=AssertionError("spawned")):
+            with self.assertRaisesRegex(FleetError, "^refused late; taking back the new worktree also failed"
+                                                    r" \(git worktree failed: locked\), so remove the worktree"
+                                                    f" {re.escape(config.worktree_dir(task['id']))} and branch"
+                                                    f" fix/widget and the record {task['id']}.json by hand$"):
+                worktree.create(self.conn, task["id"], str(self.repo), "fix/widget", fetch=False)
+        self.assertEqual(pensieve.get_task(self.conn, task["id"])["status"], "queued")
+        self.assertTrue(os.path.lexists(config.worktree_dir(task["id"])))
 
     def test_a_single_build_desk_refuses_before_any_worktree(self):
         first, _, _ = self.built("fix/widget")
@@ -385,6 +458,26 @@ class BuildDeskTests(ManyCase):
             with self.assertRaisesRegex(FleetError, f"harry already has an active task {first['id']}"):
                 worktree.create(self.conn, second["id"], str(self.repo), "fix/other", fetch=False)
         self.assertFalse(os.path.lexists(config.worktree_dir(second["id"])))
+
+
+class SingleBuildDeskRaceTests(ManyCase):
+    # A store that never ran castle desk many-tasks harry: the holder locks differ, so only the start
+    # transaction keeps a second task of Harry's from starting.
+    many_task_desks = tuple(desk for desk in MANY_TASK_DESKS if desk != "harry")
+
+    def test_a_single_harry_racing_under_two_task_mds_starts_one_and_takes_the_other_back(self):
+        self.assertFalse(pensieve.takes_many_tasks(self.conn, "harry"))
+        first, _ = self.harry_request(self.queued_parent("one"))
+        second, _ = self.harry_request(self.queued_parent("two"))
+        outcomes = self.race(first, second)
+        self.assertEqual(outcomes[second["id"]]["task_id"], second["id"])
+        self.assertEqual(str(outcomes[first["id"]]), f"harry already has an active task {second['id']}")
+        self.assertEqual(self.harry_active(), [second["id"]])
+        self.assert_taken_back(first, "fix/widget")
+        pensieve.close_task(self.conn, second["id"], "abandoned")
+        with mock.patch.object(run_desk, "spawn"):
+            self.assertEqual(worktree.create(self.conn, first["id"], str(self.repo), "fix/widget",
+                                             fetch=False)["task_id"], first["id"])
 
 
 class PushTests(ManyCase, GateCase):
