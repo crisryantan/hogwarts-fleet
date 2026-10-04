@@ -16,7 +16,9 @@
 #   - ~/hogwarts/desks/harry and ~/hogwarts/tasks, read
 #   - its own outbox, write (inside the readable desk folder; write beats read)
 #   - the repo's .git folder from the office worktree record, read
-#   - /private/tmp and the per-user temp folder, write, as Codex's own workspace-write mode allows
+#   - its own temp folder, <user temp>/hogwarts-harry, write, emptied before each run and set as TMPDIR
+#   - xcrun's lookup cache, <user temp>/xcrun_db, read, so /usr/bin shims resolve quietly
+#   - /private/tmp, denied: it holds other sessions' files, and Codex's ":minimal" set would make it writable
 #   - ~/.hogwarts, denied by name; network off
 # Proven on 0.160.0 by codex-boundary-test.sh and, under real codex exec runs,
 # codex-exec-boundary-test.py (both in scripts/ in the fleet kit).

@@ -16,7 +16,8 @@
 #   - ~/hogwarts/desks/moody and ~/hogwarts/tasks, read
 #   - the repo's .git folder from the office worktree record, read
 #   - ~/.hogwarts, denied by name; network off
-#   - /private/tmp, denied: Codex's ":minimal" set would otherwise make it writable
+#   - xcrun's lookup cache, <user temp>/xcrun_db, read, so /usr/bin shims resolve quietly
+#   - /private/tmp, denied: it holds other sessions' files, and Codex's ":minimal" set would make it writable
 # Proven on 0.160.0 by codex-boundary-test.sh and, under real codex exec runs,
 # codex-exec-boundary-test.py (both in scripts/ in the fleet kit).
 # This file must not set sandbox_mode, default_permissions, [permissions.*] or

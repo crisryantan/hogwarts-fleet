@@ -195,7 +195,8 @@ class CodexDeskTests(RunDeskCase):
                 self.assertIn(f'default_permissions="fleet-{desk}"', self.overrides(argv))
 
     def test_moody_runs_read_only_with_the_fleet_profile(self):
-        argv = self.dry_run("moody")["argv"]
+        with mock.patch.object(run_desk, "user_temp_dir", return_value="/private/var/folders/ab/cd/T"):
+            argv = self.dry_run("moody")["argv"]
         self.assertEqual(argv[:4], [config.CODEX_BIN, "exec", "--ignore-user-config", "--ignore-rules"])
         self.assertIn("--ephemeral", argv)
         last = argv[argv.index("--output-last-message") + 1]
@@ -207,7 +208,12 @@ class CodexDeskTests(RunDeskCase):
         self.assertIn(f'"{self.office}"="deny"', table)
         self.assertIn("network={enabled=false}", table)
         self.assertNotIn('="write"', table)
-        self.assertIn(f'"{config.TMP_WRITE_ROOT}"="deny"', table)
+        self.assertIn(f'"{config.SHARED_TEMP_ROOT}"="deny"', table)
+        self.assertIn('"/private/var/folders/ab/cd/T/xcrun_db"="read"', table)
+        self.assertNotIn('"/private/var/folders/ab/cd/T"=', table)
+        policy = next(item for item in argv if item.startswith("shell_environment_policy.set="))
+        self.assertEqual(policy, 'shell_environment_policy.set={GIT_CONFIG_GLOBAL="/dev/null", '
+                                 'XDG_CONFIG_HOME="/dev/null"}')
         self.assertTrue(argv[-1].startswith("# moody brief"))
         self.assert_no_bypass(argv)
 
@@ -221,7 +227,15 @@ class CodexDeskTests(RunDeskCase):
         table = self.profile(argv, "harry")
         writes = [entry for entry in table.split(", ") if entry.endswith('="write"') or '"."="write"' in entry]
         self.assertEqual(writes, ['":workspace_roots"={"."="write"}', f'"{self.castle}/desks/harry/outbox"="write"',
-                                  f'"{config.TMP_WRITE_ROOT}"="write"', '"/private/var/folders/ab/cd/T"="write"'])
+                                  '"/private/var/folders/ab/cd/T/hogwarts-harry"="write"'])
+        self.assertIn(f'"{config.SHARED_TEMP_ROOT}"="deny"', table)
+        self.assertIn('"/private/var/folders/ab/cd/T/xcrun_db"="read"', table)
+        self.assertNotIn('"/private/var/folders/ab/cd/T"=', table)
+        policy = next(item for item in argv if item.startswith("shell_environment_policy.set="))
+        self.assertIn('TMPDIR="/private/var/folders/ab/cd/T/hogwarts-harry"', policy)
+        self.assertIn('GIT_CONFIG_GLOBAL="/dev/null"', policy)
+        self.assertIn('XDG_CONFIG_HOME="/dev/null"', policy)
+        self.assertNotIn("GIT_CONFIG_GLOBAL", json.dumps(plan.get("env", {})))
         self.assertIn(f'"{self.castle}/CLAUDE.md"="read"', table)
         self.assertIn(f'"{self.castle}/AGENTS.md"="read"', table)
         self.assertIn(f'"{self.castle}/desks/harry"="read"', table)
@@ -230,6 +244,31 @@ class CodexDeskTests(RunDeskCase):
         self.assertTrue(table.endswith("network={enabled=false}}"))
         self.assertIn(f"Owl {owl_id} was delivered", argv[-1])
         self.assert_no_bypass(argv)
+
+    def test_a_desk_that_writes_needs_its_own_temp_folder(self):
+        with self.assertRaises(safefs.FleetError):
+            run_desk.codex_permissions("harry", None)
+        self.assertIn('"/private/var/folders/ab/cd/T/hogwarts-harry"="write"',
+                      run_desk.codex_permissions("harry", None, (), "/private/var/folders/ab/cd/T/hogwarts-harry")[1])
+        for name in ("../x", "Harry", "", "a" * 65, "x/y"):
+            with self.subTest(name=name), self.assertRaises(safefs.FleetError):
+                run_desk.desk_temp_dir(name)
+
+    def test_fresh_temp_replaces_a_link_and_empties_a_folder(self):
+        target = self.tmp / "elsewhere"
+        target.mkdir()
+        self.write_file(target / "keep.txt", "keep\n")
+        path = self.tmp / "hogwarts-harry"
+        os.symlink(target, path)
+        run_desk.fresh_temp(str(path))
+        self.assertFalse(path.is_symlink())
+        self.assertEqual(os.listdir(path), [])
+        self.assertTrue((target / "keep.txt").exists())
+        (path / "sub").mkdir()
+        self.write_file(path / "sub" / "old.txt", "old\n")
+        run_desk.fresh_temp(str(path))
+        self.assertEqual(os.listdir(path), [])
+        self.assertEqual(path.stat().st_mode & 0o777, 0o700)
 
     def test_the_repo_git_folder_is_readable_only_from_the_office_record(self):
         owl_id, task_id = self.request("harry", worktree="tk-demo")
@@ -351,6 +390,20 @@ class RealRunTests(RunDeskCase):
         self.assertEqual(code, 1)
         self.assertEqual([owl["id"] for owl in owlery.inbox(self.conn, "hermione")], [owl_id])
         self.assertEqual(len(self.events_of("rundesk.failed")), 1)
+
+    def test_harry_gets_a_fresh_private_temp_at_launch_but_not_in_a_dry_run(self):
+        user_temp = self.tmp / "usertemp"
+        (user_temp / "hogwarts-harry").mkdir(parents=True)
+        self.write_file(user_temp / "hogwarts-harry" / "stale.txt", "from an earlier run\n")
+        self.enable("harry")
+        owl_id, _ = self.request("harry", worktree="tk-demo")
+        with mock.patch.object(run_desk, "user_temp_dir", return_value=str(user_temp)):
+            self.dry_run("harry", "--owl", owl_id)
+            self.assertTrue((user_temp / "hogwarts-harry" / "stale.txt").exists())
+            code, _, err, started = self.real_run("harry", owl_id, 0)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(os.listdir(user_temp / "hogwarts-harry"), [])
+        self.assertEqual(started.call_args.kwargs["env"]["TMPDIR"], f"{user_temp}/hogwarts-harry")
 
     def test_a_codex_run_without_a_worktree_gets_its_own_work_folder(self):
         self.enable("moody")

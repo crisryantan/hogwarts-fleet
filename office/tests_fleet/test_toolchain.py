@@ -197,6 +197,8 @@ class DeskToolTests(ToolchainCase):
         argv = REAL_SANDBOX_ARGV(record, "/private/tmp/hogwarts-verify-x", "go test ./...")
         self.assertIn(f'"{self.home_dir}/go/pkg/mod"="read"', argv[argv.index("-c") + 1])
         self.assertEqual(verify.child_env("/private/tmp/x", record)["GOPROXY"], "off")
+        self.assertEqual(plan["env"]["GOCACHE"], f"{self.user_temp}/hogwarts-harry/fleet-go-build")
+        self.assertEqual(verify.child_env("/private/tmp/x", record)["GOCACHE"], "/private/tmp/x/tmp/fleet-go-build")
 
     def test_borrowed_folders_are_never_writable_and_the_office_stays_denied(self):
         self.node_repo()

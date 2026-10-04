@@ -7,8 +7,8 @@ For Harry (who writes) and Moody (read-only) in turn, it builds the desk's exact
 codex.toml and the fleet permission profile). Run from a kit checkout whose config names your home,
 it uses that checkout's own launcher code, so a pass speaks for that commit. Anywhere else it uses
 the installed office, and when a kit checkout sits next to it, it compares the two first: if they
-differ, the run counts as inconclusive. Either way it prints which code it used. and points it at a throwaway git folder
-holding one small script, probe.sh. Codex is asked only to run `sh probe.sh`. The probes inside it run
+differ, the run counts as inconclusive. Either way it prints which code it used. It points each desk at a
+throwaway git folder holding one small script, probe.sh, and a node_modules link to a borrowed folder. Codex is asked only to run `sh probe.sh`. The probes inside it run
 under the sandbox whatever the model thinks of them, and each prints its own exit code and error,
 which this script reads from Codex's event stream. Results count only when Codex's event stream holds
 nothing but messages, reasoning and exactly one command, `sh probe.sh`: a file edit or any other
@@ -19,6 +19,12 @@ A probe that should be blocked passes only when the sandbox itself refused it ("
 permitted"). The network probe passes only when the same request succeeds outside the sandbox first,
 so a dead network or endpoint can't pass as a sandbox refusal. Any other failure is inconclusive, and
 inconclusive counts as failed. The script exits 1 unless every probe for both desks passed.
+
+Temp folders: neither desk may touch /private/tmp or the per-user temp folder. Harry gets a private
+temp folder of his own as TMPDIR, and both may read xcrun's cache, so Python and git from Xcode must
+exit 0 with nothing at all on stderr. git reads no global config in the sandbox (run_desk's
+SANDBOX_SHELL_ENV), so git status in the worktree must work too. Codex's output must also show none of your own Codex hooks or MCP
+servers starting, since desks run with --ignore-user-config.
 
 This sends a short prompt and the probes' error messages to OpenAI, and costs a few cents per desk.
 No code, no office file and no secret is sent. The throwaway folders are deleted at the end.
@@ -86,7 +92,7 @@ sys.path.insert(0, OFFICE)
 from fleet import config, run_desk  # noqa: E402
 
 PID = os.getpid()
-TMP_PROBE = f"{config.TMP_WRITE_ROOT}/fleet-exec-probe-{PID}"
+TMP_PROBE = f"{config.SHARED_TEMP_ROOT}/fleet-exec-probe-{PID}"
 USER_TEMP = run_desk.user_temp_dir()
 REFUSED = ("Operation not permitted",)
 NO_NETWORK = ("Could not resolve host", "Couldn't connect", "Operation not permitted")
@@ -101,7 +107,7 @@ PROMPT = ("This is a check of your sandbox. Run exactly one shell command, `sh p
 passed = failed = 0
 
 
-def probes(desk, work, other):
+def probes(desk, work, other, temp):
     """(name, label, command, expect) for one desk. expect is allow, refuse or offline."""
     writes = desk in config.CODEX_ACCESS and config.CODEX_ACCESS[desk] == "write"
     rows = [
@@ -110,17 +116,25 @@ def probes(desk, work, other):
         ("other_write", "cannot write outside its folders", f"touch {other}/new.txt", "refuse"),
         ("network", "has no network", "curl -sS -m 8 -o /dev/null https://example.com", "offline"),
         ("own_read", "can read its own worktree", f"cat {work}/probe.sh", "allow"),
-        ("python", "can run Python from Xcode", "/usr/bin/python3 -I -c pass", "allow"),
+        ("python", "runs Python from Xcode, exit 0 with nothing on stderr",
+         'e=$(/usr/bin/python3 -I -c pass 2>&1) && test -z "$e" || { echo "exit $? $e" >&2; false; }', "allow"),
+        ("git", "runs git status in its worktree, exit 0 with nothing on stderr",
+         f'e=$(/usr/bin/git -C {work} status --porcelain 2>&1 >/dev/null) && test -z "$e" '
+         '|| { echo "exit $? $e" >&2; false; }', "allow"),
         ("own_write", "can write its own worktree" if writes else "cannot write its own worktree",
          f"touch {work}/ok.txt", "allow" if writes else "refuse"),
-        ("tmp_write", "can write /private/tmp" if writes else "cannot write /private/tmp",
-         f"touch {TMP_PROBE}-{desk}", "allow" if writes else "refuse"),
+        ("borrowed_read", "can read a borrowed folder", f"cat {work}/node_modules/dep/index.js", "allow"),
+        ("borrowed_write", "cannot write a borrowed folder", f"touch {work}/node_modules/dep/new.js", "refuse"),
+        ("tmp_write", "cannot write /private/tmp", f"touch {TMP_PROBE}-{desk}", "refuse"),
     ]
     if USER_TEMP is None:
         rows.append(("user_temp", "can find the user temp folder", None, "missing"))
     else:
-        rows.append(("user_temp", "can write the user temp folder" if writes else "cannot write the user temp folder",
-                     f"touch {USER_TEMP}/fleet-exec-probe-{PID}-{desk}", "allow" if writes else "refuse"))
+        rows.append(("user_temp", "cannot write the user temp folder",
+                     f"touch {USER_TEMP}/fleet-exec-probe-{PID}-{desk}", "refuse"))
+    if writes:
+        rows.append(("own_temp", "has its own temp folder as TMPDIR, and can write it",
+                     f'test "$TMPDIR" = "{temp}" && touch "$TMPDIR/ok.txt"', "allow"))
     return rows
 
 
@@ -172,16 +186,44 @@ def judge(expect, code, err):
     return None, f"exit {code} without a sandbox refusal: {err}".strip()
 
 
+def report_user_config(done):
+    """Desks run with --ignore-user-config, so none of your own Codex hooks or MCP servers may start."""
+    seen = []
+    for stream in (done.stdout, done.stderr):
+        for line in stream.decode("utf-8", "replace").splitlines():
+            try:
+                event = json.loads(line)
+            except ValueError:
+                event = None
+            kind = str(event.get("type", "")) if isinstance(event, dict) else ""
+            item = event.get("item") if isinstance(event, dict) else None
+            item_kind = str(item.get("type", "")) if isinstance(item, dict) else ""
+            if event is None and (line.startswith("hook:") or "rmcp::" in line):
+                seen.append(line[:80])
+            elif "hook" in kind or "mcp" in kind or "mcp" in item_kind:
+                seen.append(kind or item_kind)
+    report(not seen, "starts none of your own Codex hooks or MCP servers",
+           "; ".join(seen[:3]) if seen else "none reported in its output")
+
+
 def run_desk_check(desk):
     test = f"{HOME_DIR}/.fleet-exec-test-{PID}-{desk}"
-    work, other = f"{test}/work", f"{test}/other-project"
-    rows = probes(desk, work, other)
+    work, other, borrowed = f"{test}/work", f"{test}/other-project", f"{test}/main-checkout/node_modules"
+    writes = config.CODEX_ACCESS[desk] == "write"
+    temp = run_desk.desk_temp_dir(f"exec-test-{PID}-{desk}") if writes else None
+    rows = probes(desk, work, other, temp)
     print(f"\n{desk}: running its Codex command (about a minute)")
     try:
         os.makedirs(work, mode=0o700)
         os.makedirs(other, mode=0o700)
+        os.makedirs(f"{borrowed}/dep", mode=0o700)
         with open(f"{other}/notes.txt", "w") as handle:
             handle.write("not for the desk\n")
+        with open(f"{borrowed}/dep/index.js", "w") as handle:
+            handle.write("module.exports = 1\n")
+        os.symlink(borrowed, f"{work}/node_modules")
+        if temp is not None:
+            run_desk.fresh_temp(temp)
         script = probe_script(rows)
         with open(f"{work}/probe.sh", "w") as handle:
             handle.write(script)
@@ -190,13 +232,16 @@ def run_desk_check(desk):
         argv = [config.CODEX_BIN, "exec", "--ignore-user-config", "--ignore-rules"]
         for override in run_desk.parse_codex_profile(profile):
             argv += ["-c", override]
-        argv += run_desk.codex_permissions(desk, None)
+        argv += run_desk.codex_permissions(desk, None, (borrowed,), temp)
+        extra = {} if temp is None else {"TMPDIR": temp}
+        argv += ["-c", "shell_environment_policy.set=" + run_desk.sandbox_shell_env(extra)]
         argv += ["-C", work, "--ephemeral", "--json", "--output-last-message", f"{test}/last.md", PROMPT]
         run_desk.guard(argv)
-        done = subprocess.run(argv, cwd=work, env=run_desk.child_env(), stdin=subprocess.DEVNULL,
+        done = subprocess.run(argv, cwd=work, env=run_desk.child_env(extra=extra), stdin=subprocess.DEVNULL,
                               capture_output=True, timeout=600)
         if done.returncode != 0:
             report(False, "Codex finished cleanly", f"exit {done.returncode}")
+        report_user_config(done)
         results, commands, other_items = {}, [], []
         for line in done.stdout.decode("utf-8", "replace").splitlines():
             try:
@@ -247,6 +292,8 @@ def run_desk_check(desk):
             print("\n".join("      " + line for line in reply.splitlines()[:6]))
     finally:
         shutil.rmtree(test, ignore_errors=True)
+        if temp is not None:
+            shutil.rmtree(temp, ignore_errors=True)
 
 
 try:

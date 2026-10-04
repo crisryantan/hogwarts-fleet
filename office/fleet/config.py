@@ -88,9 +88,14 @@ VERIFY_TIMEOUT_SECONDS = 900
 VERIFY_OUTPUT_MAX_BYTES = 262144
 EVIDENCE_EXCERPT_LINES = 40
 DEFAULT_BASE = "origin/main"
-# A Codex desk that writes, and the verify sandbox, may also write here, as Codex's own workspace-write
-# mode allows. Test suites keep their temp folders in it. Network stays off.
-TMP_WRITE_ROOT = "/private/tmp"
+# The temp folder every user and app shares. Codex's ":minimal" set makes it writable, so every Codex
+# profile denies it outright: it holds other sessions' scratch files.
+SHARED_TEMP_ROOT = "/private/tmp"
+# Each Codex desk that writes, and each verify run, gets its own temp folder instead, set as TMPDIR,
+# inside the per-user temp folder: <user temp>/hogwarts-<name>. Nothing else in that folder is granted
+# except xcrun's lookup cache, read-only, so /usr/bin shims resolve without trying to write it.
+DESK_TEMP_PREFIX = "hogwarts-"
+XCRUN_CACHE = "xcrun_db"
 # The castle charter files every desk follows. Codex desks may read them.
 CASTLE_CHARTERS = ("CLAUDE.md", "AGENTS.md")
 # Words that never leave the fleet: in branch names, commit messages and PR text.

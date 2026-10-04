@@ -70,6 +70,11 @@ class LoopCase(FleetCase):
                                                                       command])
         sandbox.start()
         self.addCleanup(sandbox.stop)
+        self.user_temp = self.tmp / "usertemp"
+        self.user_temp.mkdir(mode=0o700)
+        temp = mock.patch.object(run_desk, "user_temp_dir", return_value=str(self.user_temp))
+        temp.start()
+        self.addCleanup(temp.stop)
 
     def git(self, *args, cwd=None) -> str:
         done = subprocess.run([config.GIT_BIN, *args], cwd=cwd or self.repo, capture_output=True, check=True,
@@ -279,7 +284,8 @@ class VerifyTests(LoopCase):
     def test_verify_builds_the_sandbox_profile(self):
         _, task, _, _, _ = self.build()
         record = gitops.read_record(task["id"])
-        argv = REAL_SANDBOX_ARGV(record, "/private/tmp/hogwarts-verify-x", "make test")
+        scratch = f"{self.user_temp}/hogwarts-verify-x"
+        argv = REAL_SANDBOX_ARGV(record, scratch, "make test")
         self.assertEqual(argv[:2], [config.CODEX_BIN, "sandbox"])
         self.assertEqual(argv[argv.index("-P") + 1], "fleet-verify")
         self.assertEqual(argv[argv.index("-C") + 1], record["path"])
@@ -288,9 +294,28 @@ class VerifyTests(LoopCase):
         self.assertIn(f'"{config.OFFICE_ROOT}"="deny"', table)
         self.assertIn('":workspace_roots"={"."="write"}', table)
         self.assertIn(f'"{record["common_dir"]}"="read"', table)
-        self.assertIn('"/private/tmp/hogwarts-verify-x"="write"', table)
+        self.assertIn(f'"{scratch}"="write"', table)
+        self.assertIn(f'"{config.SHARED_TEMP_ROOT}"="deny"', table)
+        self.assertIn(f'"{self.user_temp}/xcrun_db"="read"', table)
+        self.assertNotIn(f'"{self.user_temp}"=', table)
         self.assertTrue(table.endswith("network={enabled=false}}"))
         self.assertNotIn("--sandbox", argv)
+
+    def test_each_verify_run_gets_a_private_scratch_folder_that_is_removed(self):
+        _, task, _, _, _ = self.build()
+        seen = []
+        real_check = verify.run_check
+
+        def check(record, scratch, command, sandboxed=True):
+            seen.append(scratch)
+            self.assertTrue(os.path.isdir(f"{scratch}/home") and os.path.isdir(f"{scratch}/tmp"))
+            return real_check(record, scratch, command, sandboxed)
+
+        with mock.patch.object(verify, "run_check", side_effect=check):
+            verify.verify(self.conn, task["id"])
+        self.assertEqual(len(set(seen)), 1)
+        self.assertTrue(seen[0].startswith(f"{self.user_temp}/hogwarts-verify-"))
+        self.assertFalse(os.path.exists(seen[0]))
 
     def test_build_desk_checks_always_run_under_codex_sandbox(self):
         parent, task, _, _, _ = self.build()
