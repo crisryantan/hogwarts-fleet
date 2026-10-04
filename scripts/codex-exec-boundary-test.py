@@ -22,7 +22,8 @@ inconclusive counts as failed. The script exits 1 unless every probe for both de
 
 Temp folders: neither desk may touch /private/tmp or the per-user temp folder. Harry gets a private
 temp folder of his own as TMPDIR, and both may read xcrun's cache, so Python and git from Xcode must
-run with nothing at all on stderr. Codex's output must also show none of your own Codex hooks or MCP
+exit 0 with nothing at all on stderr. git reads no global config in the sandbox (run_desk's
+SANDBOX_SHELL_ENV), so git status in the worktree must work too. Codex's output must also show none of your own Codex hooks or MCP
 servers starting, since desks run with --ignore-user-config.
 
 This sends a short prompt and the probes' error messages to OpenAI, and costs a few cents per desk.
@@ -115,10 +116,11 @@ def probes(desk, work, other, temp):
         ("other_write", "cannot write outside its folders", f"touch {other}/new.txt", "refuse"),
         ("network", "has no network", "curl -sS -m 8 -o /dev/null https://example.com", "offline"),
         ("own_read", "can read its own worktree", f"cat {work}/probe.sh", "allow"),
-        ("python", "runs Python from Xcode with nothing on stderr",
-         'e=$(/usr/bin/python3 -I -c pass 2>&1); test -z "$e" || { echo "$e" >&2; false; }', "allow"),
-        ("git", "runs git from Xcode with nothing on stderr",
-         'e=$(/usr/bin/git --version 2>&1 >/dev/null); test -z "$e" || { echo "$e" >&2; false; }', "allow"),
+        ("python", "runs Python from Xcode, exit 0 with nothing on stderr",
+         'e=$(/usr/bin/python3 -I -c pass 2>&1) && test -z "$e" || { echo "exit $? $e" >&2; false; }', "allow"),
+        ("git", "runs git status in its worktree, exit 0 with nothing on stderr",
+         f'e=$(/usr/bin/git -C {work} status --porcelain 2>&1 >/dev/null) && test -z "$e" '
+         '|| { echo "exit $? $e" >&2; false; }', "allow"),
         ("own_write", "can write its own worktree" if writes else "cannot write its own worktree",
          f"touch {work}/ok.txt", "allow" if writes else "refuse"),
         ("borrowed_read", "can read a borrowed folder", f"cat {work}/node_modules/dep/index.js", "allow"),
@@ -232,8 +234,7 @@ def run_desk_check(desk):
             argv += ["-c", override]
         argv += run_desk.codex_permissions(desk, None, (borrowed,), temp)
         extra = {} if temp is None else {"TMPDIR": temp}
-        if extra:
-            argv += ["-c", "shell_environment_policy.set=" + run_desk._toml_env(extra)]
+        argv += ["-c", "shell_environment_policy.set=" + run_desk.sandbox_shell_env(extra)]
         argv += ["-C", work, "--ephemeral", "--json", "--output-last-message", f"{test}/last.md", PROMPT]
         run_desk.guard(argv)
         done = subprocess.run(argv, cwd=work, env=run_desk.child_env(extra=extra), stdin=subprocess.DEVNULL,

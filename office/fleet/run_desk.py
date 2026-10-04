@@ -261,6 +261,15 @@ def _claude_argv(desk: str, row: dict, brief: str, prompt: str, mcp_job: Optiona
 
 
 ENV_VALUE = re.compile(r"[A-Za-z0-9._/=:+-]{1,400}")
+# A command in a Codex sandbox can't read ~/.gitconfig or ~/.config, and git stops with "Operation not
+# permitted" instead of treating them as missing. With these, git reads none of Ryan's settings and
+# behaves as on a fresh account. Set only for the sandboxed commands, never for Codex itself.
+SANDBOX_SHELL_ENV = {"GIT_CONFIG_GLOBAL": "/dev/null", "XDG_CONFIG_HOME": "/dev/null"}
+
+
+def sandbox_shell_env(tools_env: dict) -> dict:
+    """The -c shell_environment_policy.set value for a Codex desk: its tools' values plus the git fix."""
+    return _toml_env({**tools_env, **SANDBOX_SHELL_ENV})
 
 
 def _toml_env(env: dict) -> str:
@@ -375,8 +384,7 @@ def _codex_argv(desk: str, task: Optional[dict], brief: str, prompt: str, run_id
         argv += ["-c", override]
     argv += codex_permissions(desk, None if record is None else record["common_dir"],
                               tuple(tools["read"]) + tuple(tools["path"]), temp)
-    if tools["env"]:
-        argv += ["-c", "shell_environment_policy.set=" + _toml_env(tools["env"])]
+    argv += ["-c", "shell_environment_policy.set=" + sandbox_shell_env(tools["env"])]
     argv += ["-C", cwd]
     argv += [
         "--ephemeral",
