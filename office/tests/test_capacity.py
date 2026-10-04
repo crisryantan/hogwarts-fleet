@@ -573,6 +573,24 @@ class ManyTaskCapacityTests(RoundCase):
         self.assertEqual((row["desk"], row["count"], row["running"]), ("alpha", 9, 2))
         self.assertEqual(list(row["states"]), [state for state in capacity.FLIGHT_STATES if state in row["states"]])
 
+    def test_a_latest_round_that_ended_without_a_verdict_asks_for_a_retry_but_does_not_count(self):
+        self.run_reviewer(self.round(SHAS[0]))
+        self.assertEqual(self.flight()[self.author]["state"], "CHANGES")
+        failed = self.round(SHAS[1])
+        self.run_reviewer(failed, verdict=False)  # the reviewer task closed by the review's cleanup
+        # The author's own run going does not make a finished review read as in review.
+        capacity.record_launch(self.conn, "alpha", "run-author", "model-x", task_id=self.author, now=NOW - 60)
+        row = self.flight()[self.author]
+        self.assertEqual((row["state"], row["round"], row["verdict"], row["rounds_used"], row["needs_allowance"]),
+                         ("review died", 2, None, 1, False))
+        self.assertTrue(row["running"])
+        retried = self.round(SHAS[2])
+        self.assertEqual(retried["round"], 2)
+        self.run_reviewer(retried)
+        capacity.record_launch_usage(self.conn, "run-author", 1, 1, 0, 0.1, 10, now=NOW)
+        self.assertEqual((self.flight()[self.author]["state"], self.flight()[self.author]["rounds_used"]),
+                         ("CHANGES", 2))
+
     def test_a_killed_launch_older_than_the_window_is_not_running(self):
         capacity.record_launch(self.conn, "alpha", "run-killed", "model-x", task_id=self.author,
                                now=NOW - self.WINDOW - 1)

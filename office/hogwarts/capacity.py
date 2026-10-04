@@ -515,8 +515,9 @@ def _flight_state(task: dict, latest: Optional[dict], running: bool, needs_allow
     if latest is not None and latest["waiting"]:
         return "review queued"
     if latest is not None and not latest["has_verdict"]:
-        # A round with no verdict and no run going was left by a review that died before closing its round.
-        return "in review" if running else "review died"
+        # A run that ended without a verdict asks for a retry, and so does a round with no verdict and no run
+        # going, which a review that died before closing its round left behind.
+        return "in review" if running and latest["counts"] else "review died"
     if latest is not None and latest["verdict"] == "HEADMASTER":
         return "HEADMASTER"
     if latest is not None and latest["verdict"] == "CHANGES" and not running:
@@ -526,8 +527,9 @@ def _flight_state(task: dict, latest: Optional[dict], running: bool, needs_allow
 
 def _flight_row(conn: Conn, task: dict, since: int, max_rounds: int) -> dict:
     rows = review_rounds(conn, task["id"])
-    # A round whose run ended without a verdict neither counts nor says where the task stands.
-    live = [row for row in rows if row["superseded_by"] is None and (row["counts"] or row["waiting"])]
+    # The latest attempt says where the task stands, even one whose run ended without a verdict and so does
+    # not count toward the cap.
+    live = [row for row in rows if row["superseded_by"] is None]
     latest = live[-1] if live else None
     holding = [row for row in rows if row["counts"]]
     needs_allowance = _needs_allowance(conn, task["id"], holding, max_rounds)
@@ -550,7 +552,9 @@ def in_flight(conn: Conn, now: Optional[int] = None, running_window: int = 3600,
     A reviewer's round task is folded into its author task and never listed alone. running means a launch
     for the task, or for one of its rounds' reviewer tasks, has no usage yet and started within
     running_window: a run killed before it recorded usage stops counting as running once the window passes.
-    A latest round with no verdict reads "in review" while a run is going and "review died" once none is.
+    A latest round with no verdict reads "in review" while its run is going, and "review died" once none is or
+    once its run ended without a verdict: that round does not count toward the cap, and the task needs its
+    review run again.
     Read from launch rows only, never by probing a lock, so reading it never makes a review queue.
     """
     ts = ids.stamp(now)

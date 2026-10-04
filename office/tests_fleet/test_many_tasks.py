@@ -355,6 +355,57 @@ class ReviewerBusyTests(ManyCase):
         self.assertIn(stranded[0], event["summary"])
 
 
+class FailedReviewTests(ManyCase):
+    def crashed_review(self, task_id: str = None) -> None:
+        """A reviewer run that starts and exits with no verdict: run_review's own cleanup closes its task."""
+        def failed(conn, desk, owl_id, mcp_job=None, now=None, on_start=None, lock_held=False, keep_fds=()):
+            on_start()
+            return {"desk": desk, "run_id": "run-" + "d" * 16, "exit_code": 1, "cap_source": None}
+
+        self.enable("moody")
+        with mock.patch.object(run_desk, "run", side_effect=failed), self.assertRaises(FleetError):
+            if task_id is None:
+                review.review_own(self.conn, str(self.repo), title="my own fix", fetch=False)
+            else:
+                review.review_own(self.conn, str(self.repo), task_id=task_id, fetch=False)
+
+    def board(self, task_id: str) -> dict:
+        found = capacity.in_flight(self.conn, NOW, config.RUNNING_WINDOW_SECONDS, max_rounds=config.REVIEW_ROUND_CAP)
+        return next(task for row in found["desks"] for task in row["tasks"] if task["id"] == task_id)
+
+    def digest_line(self, task_id: str) -> str:
+        lines = session_start.digest(self.conn, "mcgonagall", now=NOW)
+        return next(line for line in lines if line.startswith(f"- {task_id} "))
+
+    def test_a_crash_after_changes_shows_review_died_not_the_older_verdict(self):
+        self.commit("first try")
+        task_id = self.own_review()["task_id"]
+        self.commit("second try")
+        self.crashed_review(task_id)
+        [first, second] = capacity.review_rounds(self.conn, task_id)
+        self.assertEqual((first["verdict"], first["counts"]), ("CHANGES", True))
+        self.assertEqual(pensieve.get_task(self.conn, second["reviewer_task_id"])["status"], "closed")
+        self.assertEqual((second["has_verdict"], second["counts"]), (False, False))
+        self.assertEqual(capacity.stranded_rounds(self.conn, "moody"), [])
+        row = self.board(task_id)
+        self.assertEqual((row["state"], row["round"], row["verdict"], row["rounds_used"]), ("review died", 2, None, 1))
+        self.assertEqual(self.digest_line(task_id), f"- {task_id} ryan-claude-1 review died r2: my own fix | its review"
+                                                    " run ended with no verdict; run the review again")
+        retried = self.own_review(task_id)
+        self.assertEqual((retried["round"], retried["verdict"]), (2, "CHANGES"))
+        self.assertEqual((self.board(task_id)["state"], self.board(task_id)["rounds_used"]), ("CHANGES", 2))
+
+    def test_a_first_round_that_crashed_shows_review_died_not_working(self):
+        self.commit("first try")
+        self.crashed_review()
+        [task_id] = self.own_tasks()
+        self.assertEqual([row["counts"] for row in capacity.review_rounds(self.conn, task_id)], [False])
+        self.assertEqual((self.board(task_id)["state"], self.board(task_id)["rounds_used"]), ("review died", 0))
+        self.assertIn("ryan-claude-1 review died r1: my own fix | its review run ended with no verdict; run the"
+                      " review again", self.digest_line(task_id))
+        self.assertEqual(self.own_review(task_id)["round"], 1)
+
+
 class SingleReviewerTests(ManyCase):
     # A store where Moody takes one task at a time: an active task of its own still makes it busy.
     many_task_desks = tuple(desk for desk in MANY_TASK_DESKS if desk != "moody")
