@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Callable, Optional, Sequence
 
 from . import capacity, db, facts, ids, owlery, pensieve, wands
-from .errors import IntegrityError, NotFoundError, StoreError, ValidationError
+from .errors import ConflictError, IntegrityError, NotFoundError, StoreError, ValidationError
 
 _WHOLE = re.compile(r"[0-9]{1,18}")
 _SHA256 = re.compile(r"[0-9a-f]{64}")
@@ -266,6 +266,22 @@ def _task_board(conn: sqlite3.Connection, args: argparse.Namespace) -> dict:
     return capacity.in_flight(conn, _clock(), caps.RUNNING_WINDOW_SECONDS, args.desk, caps.REVIEW_ROUND_CAP)
 
 
+def _task_start(conn: sqlite3.Connection, args: argparse.Namespace) -> dict:
+    """Start a queued task. A build desk's task gets the TASK.md check that fleet worktree makes before it starts
+    one (kept in fleet/worktree.py next to this package), so this command is no way round it. Every other desk's
+    task starts as the store allows."""
+    task = pensieve.get_task(conn, args.task)
+    if task["desk"] not in _fleet_caps().WORKTREE_DESKS:
+        return pensieve.start_task(conn, task["id"])
+    from fleet import worktree as fleet_worktree
+    from fleet.safefs import FleetError
+
+    try:
+        return fleet_worktree.start_task(conn, task["id"])
+    except FleetError as exc:
+        raise ConflictError(str(exc)) from None
+
+
 def _desk_model(conn: sqlite3.Connection, args: argparse.Namespace) -> dict:
     if args.approve:
         return wands.approve(conn, args.desk, blocked=_blocked_models(), retiring_within=_retiring_window())
@@ -289,7 +305,7 @@ HANDLERS: dict[str, Callable] = {
     "model line": lambda c, a: wands.classify(c, a.name, a.line, blocked=_blocked_models()),
     "task create": lambda c, a: pensieve.create_task(
         c, a.desk, a.title, a.intent_path, a.parent, a.request, a.session, a.worktree, a.id),
-    "task start": lambda c, a: pensieve.start_task(c, a.task),
+    "task start": _task_start,
     "task await-close": lambda c, a: pensieve.mark_awaiting_close(c, a.task, a.repo, a.sha),
     "task commit": lambda c, a: pensieve.record_commit(c, a.task, a.repo, a.sha),
     "task worktree": lambda c, a: pensieve.set_worktree(c, a.task, a.path),
