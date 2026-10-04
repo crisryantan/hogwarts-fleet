@@ -29,9 +29,11 @@ Then, for either:
 
 The verdict is recorded on its round in the same transaction that stores it, so the round counts even
 if publishing the review afterwards fails. The reviewer's task is closed as superseded once its verdict is
-recorded, so the desk is free for the next review. One review per reviewer runs at a time: it holds the
-reviewer's review lock from before its task starts until that task is closed, so a second review waits
-instead of finding the desk still busy. Only Ryan closes a task as complete.
+recorded, or once its run fails, so the desk is free for the next review. One review per reviewer runs at a
+time: it holds the reviewer's review lock from before its round opens until that task is closed, so a second
+review waits instead of finding the desk still busy. A review that died before closing its task (killed, or
+its cleanup failed) is found by the next review under that lock: it closes the task, and a round with no
+verdict stops counting. Only Ryan closes a task as complete.
 """
 from __future__ import annotations
 
@@ -191,8 +193,8 @@ def _finish_reviewer_task(conn, request_id: str, reviewer_task_id: str) -> None:
 
 
 @contextlib.contextmanager
-def _review_lock(reviewer: str, queued: str) -> Iterator[None]:
-    """One review per reviewer at a time, held until its verdict is recorded and its task is closed.
+def _review_lock(reviewer: str) -> Iterator[None]:
+    """One review per reviewer at a time, held from before its round opens until its task is closed.
     run_desk takes the desk lock inside this one and never this one, so the two cannot deadlock."""
     with contextlib.ExitStack() as stack:
         locks_fd = stack.enter_context(safefs.opened_dir(config.OFFICE_ROOT, "locks", create=True))
@@ -200,9 +202,22 @@ def _review_lock(reviewer: str, queued: str) -> Iterator[None]:
             stack.enter_context(safefs.held_lock(locks_fd, f"review-{reviewer}.lock", blocking=True,
                                                  timeout=config.REVIEW_LOCK_WAIT_SECONDS))
         except safefs.Busy:
-            raise FleetError(f"an earlier review by {reviewer} is still running, so {queued}; run the review"
-                             f" again once it ends, and that review supersedes this one") from None
+            raise FleetError(f"an earlier review by {reviewer} is still running, so nothing was sent to"
+                             f" {reviewer}; run the review again once it ends") from None
         yield
+
+
+def _recover_stranded(conn, reviewer: str, now: Optional[int]) -> None:
+    """Close the reviewer tasks a review left active when it died (killed, or its cleanup failed), so the
+    desk is free and a round with no verdict stops counting. Only called under the reviewer's review lock."""
+    for row in capacity.stranded_rounds(conn, reviewer):
+        _finish_reviewer_task(conn, row["request_id"], row["reviewer_task_id"])
+        counted = ("its recorded verdict still counts" if row["has_verdict"]
+                   else "it recorded no verdict, so its round does not count")
+        pensieve.add_event(conn, reviewer, "review.recovered", "routine",
+                           f"an earlier review of task {row['task_id']} ended without closing {reviewer}'s task"
+                           f" {row['reviewer_task_id']}, so the next review closed it; {counted}",
+                           task_id=row["task_id"], dedupe_key=f"review:recovered:{row['request_id']}", now=now)
 
 
 def _open_round(conn, task: dict, reviewer: str, sha: str, body: str, now: Optional[int]) -> dict:
@@ -221,6 +236,38 @@ def _open_round(conn, task: dict, reviewer: str, sha: str, body: str, now: Optio
         raise FleetError(str(exc)) from None
 
 
+def _review_and_record(conn, task: dict, record: dict, sha: str, holder_id: str, reviewer: str, waits: str,
+                       request_id: str, reviewer_task_id: str, owl_id: str, start) -> tuple:
+    """Run the reviewer and record its verdict on the round, then publish the review. (verdict, castle path)"""
+    try:
+        result = run_desk.run(conn, reviewer, owl_id, on_start=start)
+    except run_desk.Capped:
+        raise run_desk.Capped(f"{reviewer} reached its fleet daily cap while it waited for its desk lock,"
+                              f" so {waits}") from None
+    if result.get("cap_source") is not None:
+        raise FleetError(f"the {reviewer} run stopped at the vendor's own usage limit (cap_source"
+                         f" {result['cap_source']}); a fleet cap bump does not lift it")
+    if result["exit_code"] != 0:
+        raise FleetError(f"the {reviewer} run did not finish cleanly; its log is in the office runs folder")
+    family = pensieve.get_desk(conn, reviewer)["family"]
+    verdict, block = review_block(reviewer_output(reviewer, family, result["run_id"]), task["id"], sha)
+    name = f"review-{sha}-{reviewer}-{result['run_id']}.md"
+    with safefs.opened_dir(config.OFFICE_ROOT, "reviews", task["id"], create=True) as fd:
+        safefs.write_new(fd, name, block.encode("utf-8"))
+    # From here the round counts, even if publishing the review below fails.
+    capacity.record_round_verdict(conn, request_id, record["repo"], verdict,
+                                  review_path=f"{ids.REVIEWS_ROOT}/{task['id']}/{name}")
+    castle_review = _castle_task_file(holder_id, "review-latest.md", block)
+    _castle_task_file(holder_id, f"review-{sha[:12]}-{reviewer}.md", block)
+    posted = owlery.send(conn, reviewer, task["desk"], "result", f"review {verdict} {task['id']} @ {sha[:12]}",
+                         body=block, task_id=reviewer_task_id, request_id=request_id)
+    owlery.mark_delivered(conn, posted["id"])
+    owlery.read(conn, posted["id"], task["desk"])
+    owlery.ack(conn, posted["id"], task["desk"])
+    owlery.advance(conn, request_id, "result_posted", detail=verdict)
+    return verdict, castle_review
+
+
 def run_review(conn, task: dict, record: dict, sha: str, holder_id: str, handoff: bool,
                now: Optional[int] = None) -> dict:
     author = pensieve.get_desk(conn, task["desk"])
@@ -234,57 +281,37 @@ def run_review(conn, task: dict, record: dict, sha: str, holder_id: str, handoff
         raise FleetError("HEAD moved before the review started; run the review again")
     pensieve.record_commit(conn, task["id"], record["repo"], sha)
     body = _request_body(task, sha, record, holder_id, handoff)
-    opened = _open_round(conn, task, reviewer, sha, body, now)
-    request_id, reviewer_task, owl_id = opened["request"]["id"], opened["task"], opened["owl"]["id"]
-    _deliver(conn, owl_id, reviewer, body)
-    pensieve.set_worktree(conn, reviewer_task["id"], task["worktree"])
-    queued = f"round {opened['round']} of {task['id']} @ {sha[:12]} waits as request {request_id}"
-    waits = (f"{queued}; run the review again after the reset or a castle desk cap bump, and that review"
-             f" supersedes this one")
-    if run_desk.over_daily_cap(conn, reviewer, now) is not None:
-        run_desk.report_cap(conn, reviewer, now)
-        raise run_desk.Capped(f"{reviewer} is at its fleet daily cap, so {waits}")
-    started = []
+    with _review_lock(reviewer):
+        _recover_stranded(conn, reviewer, now)
+        opened = _open_round(conn, task, reviewer, sha, body, now)
+        request_id, reviewer_task, owl_id = opened["request"]["id"], opened["task"], opened["owl"]["id"]
+        _deliver(conn, owl_id, reviewer, body)
+        pensieve.set_worktree(conn, reviewer_task["id"], task["worktree"])
+        waits = (f"round {opened['round']} of {task['id']} @ {sha[:12]} waits as request {request_id}; run the"
+                 f" review again after the reset or a castle desk cap bump, and that review supersedes this one")
+        if run_desk.over_daily_cap(conn, reviewer, now) is not None:
+            run_desk.report_cap(conn, reviewer, now)
+            raise run_desk.Capped(f"{reviewer} is at its fleet daily cap, so {waits}")
+        started = []
 
-    def start() -> None:
-        # Under the reviewer's desk lock, once its caps allow the run: a refused run leaves the request waiting.
-        pensieve.start_task(conn, reviewer_task["id"])
-        owlery.advance(conn, request_id, "claimed", detail="review script")
-        owlery.advance(conn, request_id, "running", detail="review script")
-        started.append(True)
+        def start() -> None:
+            # Under the reviewer's desk lock, once its caps allow the run: a refused run leaves the request waiting.
+            pensieve.start_task(conn, reviewer_task["id"])
+            started.append(True)  # before anything else can fail, so the task is closed below whatever happens
+            owlery.advance(conn, request_id, "claimed", detail="review script")
+            owlery.advance(conn, request_id, "running", detail="review script")
 
-    with _review_lock(reviewer, queued):
         try:
-            try:
-                result = run_desk.run(conn, reviewer, owl_id, on_start=start)
-            except run_desk.Capped:
-                raise run_desk.Capped(f"{reviewer} reached its fleet daily cap while it waited for its desk lock,"
-                                      f" so {waits}") from None
-            if result.get("cap_source") is not None:
-                raise FleetError(f"the {reviewer} run stopped at the vendor's own usage limit (cap_source"
-                                 f" {result['cap_source']}); a fleet cap bump does not lift it")
-            if result["exit_code"] != 0:
-                raise FleetError(f"the {reviewer} run did not finish cleanly; its log is in the office runs folder")
-            family = pensieve.get_desk(conn, reviewer)["family"]
-            verdict, block = review_block(reviewer_output(reviewer, family, result["run_id"]), task["id"], sha)
-            name = f"review-{sha}-{reviewer}-{result['run_id']}.md"
-            with safefs.opened_dir(config.OFFICE_ROOT, "reviews", task["id"], create=True) as fd:
-                safefs.write_new(fd, name, block.encode("utf-8"))
-            # From here the round counts, even if publishing the review below fails.
-            capacity.record_round_verdict(conn, request_id, record["repo"], verdict,
-                                          review_path=f"{ids.REVIEWS_ROOT}/{task['id']}/{name}")
-            castle_review = _castle_task_file(holder_id, "review-latest.md", block)
-            _castle_task_file(holder_id, f"review-{sha[:12]}-{reviewer}.md", block)
-            posted = owlery.send(conn, reviewer, task["desk"], "result",
-                                 f"review {verdict} {task['id']} @ {sha[:12]}",
-                                 body=block, task_id=reviewer_task["id"], request_id=request_id)
-            owlery.mark_delivered(conn, posted["id"])
-            owlery.read(conn, posted["id"], task["desk"])
-            owlery.ack(conn, posted["id"], task["desk"])
-            owlery.advance(conn, request_id, "result_posted", detail=verdict)
-        finally:
+            verdict, castle_review = _review_and_record(conn, task, record, sha, holder_id, reviewer, waits,
+                                                        request_id, reviewer_task["id"], owl_id, start)
+        except BaseException:
             if started:
-                _finish_reviewer_task(conn, request_id, reviewer_task["id"])
+                # A cleanup that fails here must not hide why the review failed; the next review by this
+                # reviewer closes the task instead, under this same lock.
+                with contextlib.suppress(Exception):
+                    _finish_reviewer_task(conn, request_id, reviewer_task["id"])
+            raise
+        _finish_reviewer_task(conn, request_id, reviewer_task["id"])
     if verdict == "PASS" and pensieve.get_task(conn, task["id"])["status"] == "active":
         pensieve.mark_awaiting_close(conn, task["id"])
     if verdict == "HEADMASTER":

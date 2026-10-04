@@ -5,6 +5,7 @@ import contextlib
 import io
 import json
 import os
+import signal
 from unittest import mock
 
 from fleet import config, tools
@@ -49,3 +50,17 @@ class ToolsTests(FleetCase):
             for path in (home_dir / "link.md", big, outside, home_dir / "missing.md", "relative.md"):
                 with self.subTest(path=str(path)), self.assertRaises((FleetError, OSError)):
                     tools.read_intent(str(path))
+
+    def test_sigterm_and_sighup_end_the_command_through_its_finally_blocks(self):
+        for number in (signal.SIGTERM, signal.SIGHUP):
+            with self.subTest(signal=number):
+                before, cleaned = signal.getsignal(number), []
+                with self.assertRaises(SystemExit) as caught:
+                    with tools.ended_by_signals():
+                        try:
+                            os.kill(os.getpid(), number)
+                            self.fail("the signal did not end the command")
+                        finally:
+                            cleaned.append(number)
+                self.assertEqual((caught.exception.code, cleaned), (128 + number, [number]))
+                self.assertIs(signal.getsignal(number), before)

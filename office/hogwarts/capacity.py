@@ -255,6 +255,23 @@ def review_rounds(conn: Conn, task_id: str) -> list[dict]:
              "counts": _holds_round(row)} for row in _round_rows(conn, task_id)]
 
 
+def stranded_rounds(conn: Conn, reviewer_desk: str) -> list[dict]:
+    """Review rounds addressed to reviewer_desk whose reviewer task is still active. Under that reviewer's
+    review lock no review of theirs is running, so these were left by a review that died."""
+    reviewer_desk = pensieve.get_desk(conn, ids.check("desk", reviewer_desk, "reviewer desk"))["name"]
+    rows = db.fetch_all(
+        conn,
+        "SELECT review_rounds.request_id, review_rounds.task_id, requests.task_id AS reviewer_task_id,"
+        " review_rounds.review_id IS NOT NULL AS has_verdict"
+        " FROM review_rounds JOIN requests ON requests.id = review_rounds.request_id"
+        " JOIN tasks ON tasks.id = requests.task_id"
+        " WHERE review_rounds.reviewer = ? AND tasks.status = 'active'"
+        " ORDER BY review_rounds.created_at, review_rounds.rowid",
+        (reviewer_desk,),
+    )
+    return [{**row, "has_verdict": bool(row["has_verdict"])} for row in rows]
+
+
 def allow_round(conn: Conn, task_id: str, now: Optional[int] = None) -> dict:
     """Ryan's allowance for exactly one more review round. A second call before it is used changes nothing."""
     task_id = ids.check("task", task_id)

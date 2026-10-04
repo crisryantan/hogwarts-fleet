@@ -16,10 +16,13 @@ desks cannot read the office, and Ryan's own sessions are denied it by his setti
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
+import signal
 import sys
-from typing import Optional
+import threading
+from typing import Iterator, Optional
 
 if __name__ == "__main__" and "/Users/crisryantan/.hogwarts" not in sys.path:
     sys.path.insert(0, "/Users/crisryantan/.hogwarts")
@@ -101,6 +104,25 @@ def run(conn, args: argparse.Namespace) -> object:
     raise FleetError("unknown command")
 
 
+@contextlib.contextmanager
+def ended_by_signals() -> Iterator[None]:
+    """SIGTERM or SIGHUP (a closed terminal, a caller's timeout) ends the command through its finally blocks,
+    so a review closes its reviewer task and a desk run kills its child, instead of Python dying mid-step."""
+    if threading.current_thread() is not threading.main_thread():
+        yield
+        return
+
+    def stop(signum, frame) -> None:
+        raise SystemExit(128 + signum)
+
+    previous = {number: signal.signal(number, stop) for number in (signal.SIGTERM, signal.SIGHUP)}
+    try:
+        yield
+    finally:
+        for number, handler in previous.items():
+            signal.signal(number, signal.SIG_DFL if handler is None else handler)
+
+
 def main(argv: Optional[list] = None) -> int:
     args = build_parser().parse_args(sys.argv[1:] if argv is None else argv)
     try:
@@ -109,7 +131,8 @@ def main(argv: Optional[list] = None) -> int:
         sys.stdout.write(json.dumps({"ok": False, "error": common.one_line(exc, 300)}, ensure_ascii=True) + "\n")
         return 1
     try:
-        data = run(conn, args)
+        with ended_by_signals():
+            data = run(conn, args)
         sys.stdout.write(json.dumps({"ok": True, "data": data}, ensure_ascii=True, indent=2) + "\n")
         return 0
     except (FleetError, StoreError) as exc:

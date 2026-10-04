@@ -267,6 +267,20 @@ class RoundCapTests(RoundCase):
         with self.assertRaises(capacity.RoundCapReached):
             self.round(SHAS[3])
 
+    def test_stranded_rounds_are_the_reviewer_tasks_still_active_for_that_reviewer(self):
+        self.run_reviewer(self.round(SHAS[0]))
+        self.assertEqual(capacity.stranded_rounds(self.conn, "beta"), [])
+        running = self.round(SHAS[1])
+        pensieve.start_task(self.conn, running["task"]["id"], now=NOW)
+        self.assertEqual(capacity.stranded_rounds(self.conn, "alpha"), [])
+        [row] = capacity.stranded_rounds(self.conn, "beta")
+        self.assertEqual((row["request_id"], row["task_id"], row["reviewer_task_id"], row["has_verdict"]),
+                         (running["request"]["id"], self.author, running["task"]["id"], False))
+        self.record_verdict(running)
+        self.assertTrue(capacity.stranded_rounds(self.conn, "beta")[0]["has_verdict"])
+        pensieve.close_task(self.conn, running["task"]["id"], "superseded", now=NOW)
+        self.assertEqual(capacity.stranded_rounds(self.conn, "beta"), [])
+
     def test_an_allowance_taken_by_a_run_without_a_verdict_is_given_back(self):
         self.three_rounds()
         allowance = capacity.allow_round(self.conn, self.author, now=NOW)

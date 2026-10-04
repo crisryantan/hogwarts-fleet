@@ -6,6 +6,7 @@ import threading
 from unittest import mock
 
 from hogwarts import capacity, db, owlery, pensieve
+from hogwarts.errors import ConflictError
 from tests.support import NOW
 
 from fleet import config, review, run_desk, safefs
@@ -239,17 +240,104 @@ class ReviewRoundTests(LoopCase):
                          [(first_sha, "CHANGES", True, "cleaned"), (second_sha, "CHANGES", True, "cleaned")])
         self.assertTrue((self.office / "locks" / "review-moody.lock").exists())
 
-    def test_a_review_that_waits_too_long_for_the_review_lock_leaves_its_round_waiting(self):
-        first_sha = self.commit("first try")
+    def test_a_review_that_waits_too_long_for_the_review_lock_opens_no_round(self):
+        self.commit("first try")
         with mock.patch.object(config, "REVIEW_LOCK_WAIT_SECONDS", 0.2), \
                 mock.patch.object(run_desk, "run", side_effect=AssertionError("ran without the review lock")), \
                 safefs.opened_dir(config.OFFICE_ROOT, "locks", create=True) as locks_fd, \
                 safefs.held_lock(locks_fd, "review-moody.lock", blocking=False):
-            with self.assertRaisesRegex(FleetError, "earlier review by moody is still running.*waits as request"):
+            with self.assertRaisesRegex(FleetError, "earlier review by moody is still running, so nothing was sent"):
                 review.review_own(self.conn, str(self.repo), title="my own fix", fetch=False)
         [task] = pensieve.list_tasks(self.conn, desk="ryan-claude-1")
-        [waiting] = capacity.review_rounds(self.conn, task["id"])
-        self.assertEqual((waiting["sha"], waiting["waiting"], waiting["counts"]), (first_sha, True, True))
+        self.assertEqual(capacity.review_rounds(self.conn, task["id"]), [])
+        self.assertEqual(pensieve.list_tasks(self.conn, desk="moody"), [])
         second_sha = self.commit("second try")
         result = self.own_review(task["id"])
-        self.assertEqual((result["sha"], result["round"], result["superseded"]), (second_sha, 1, [waiting["request_id"]]))
+        self.assertEqual((result["sha"], result["round"], result["superseded"]), (second_sha, 1, []))
+
+    def moody_active(self) -> list:
+        return [task["id"] for task in pensieve.list_tasks(self.conn, desk="moody", status="active")]
+
+    def test_a_failure_right_after_the_reviewer_task_starts_still_closes_it(self):
+        # The store is busy when the request moves to claimed: the task started, so it must close.
+        self.commit("first try")
+        real_advance, calls = owlery.advance, []
+
+        def busy_once(conn, request_id, to_phase, detail=None, now=None):
+            if to_phase == "claimed" and not calls:
+                calls.append(to_phase)
+                raise ConflictError("database is busy, try again")
+            return real_advance(conn, request_id, to_phase, detail=detail, now=now)
+
+        with mock.patch.object(owlery, "advance", side_effect=busy_once):
+            with self.assertRaisesRegex(ConflictError, "database is busy"):
+                self.own_review()
+        self.assertEqual(self.moody_active(), [])
+        [task] = pensieve.list_tasks(self.conn, desk="ryan-claude-1")
+        [dead] = capacity.review_rounds(self.conn, task["id"])
+        self.assertEqual((dead["has_verdict"], dead["reviewer_task_status"], dead["counts"]), (False, "closed", False))
+        result = self.own_review(task["id"], verdict="PASS")
+        self.assertEqual((result["round"], result["verdict"]), (1, "PASS"))
+
+    def test_a_cleanup_that_fails_keeps_the_real_error_and_the_next_review_closes_the_task(self):
+        self.commit("first try")
+        with mock.patch.object(pensieve, "close_task", side_effect=ConflictError("database is busy, try again")):
+            self.failed_run(None)
+        [stranded] = self.moody_active()
+        [task] = pensieve.list_tasks(self.conn, desk="ryan-claude-1")
+        [dead] = capacity.review_rounds(self.conn, task["id"])
+        self.assertEqual((dead["reviewer_task_status"], dead["counts"]), ("active", True))
+        self.commit("second try")
+        result = self.own_review(task["id"])
+        self.assertEqual((result["round"], result["verdict"]), (1, "CHANGES"))
+        self.assertEqual(pensieve.get_task(self.conn, stranded)["close_reason"], "superseded")
+        self.assertEqual([row["counts"] for row in capacity.review_rounds(self.conn, task["id"])], [False, True])
+        [event] = [event for event in self.events() if event["kind"] == "review.recovered"]
+        self.assertEqual((event["desk"], event["verdict"]), ("moody", "routine"))
+        self.assertIn(f"closing moody's task {stranded}", event["summary"])
+        self.assertIn("its round does not count", event["summary"])
+
+    def test_a_review_killed_before_cleanup_frees_its_round_for_the_next_review(self):
+        # A kill (SIGKILL, or a SIGTERM in an older fleet) skips every finally: round three is left with
+        # moody's task active. The next review closes it before it opens its own round, so the cap still fits.
+        first = self.own_review()
+        task_id = first["task_id"]
+        self.commit("round two")
+        self.own_review(task_id)
+        self.commit("round three")
+        with mock.patch.object(review, "_finish_reviewer_task"):
+            self.failed_run(task_id)
+        self.assertEqual(len(self.moody_active()), 1)
+        self.assertEqual([row["counts"] for row in capacity.review_rounds(self.conn, task_id)], [True, True, True])
+        result = self.own_review(task_id)
+        self.assertEqual((result["round"], result["verdict"]), (3, "CHANGES"))
+        self.assertEqual(self.moody_active(), [])
+        self.assertEqual([row["counts"] for row in capacity.review_rounds(self.conn, task_id)],
+                         [True, True, False, True])
+
+    def test_a_review_killed_after_its_verdict_keeps_the_round_when_recovered(self):
+        self.commit("first try")
+        with mock.patch.object(review, "_castle_task_file", side_effect=SystemExit(143)), \
+                mock.patch.object(review, "_finish_reviewer_task"):
+            with self.assertRaises(SystemExit):
+                self.own_review()
+        [task] = pensieve.list_tasks(self.conn, desk="ryan-claude-1")
+        self.commit("second try")
+        self.assertEqual(self.own_review(task["id"])["round"], 2)
+        [event] = [event for event in self.events() if event["kind"] == "review.recovered"]
+        self.assertIn("its recorded verdict still counts", event["summary"])
+        self.assertEqual(self.moody_active(), [])
+
+    def test_a_signal_during_the_run_closes_the_reviewer_task(self):
+        # The fleet command turns SIGTERM and SIGHUP into SystemExit, which the review cleans up after.
+        self.commit("first try")
+
+        def killed(conn, desk, owl_id, mcp_job=None, now=None, on_start=None):
+            on_start()
+            raise SystemExit(143)
+        with mock.patch.object(run_desk, "run", side_effect=killed):
+            with self.assertRaises(SystemExit):
+                review.review_own(self.conn, str(self.repo), title="my own fix", fetch=False)
+        self.assertEqual(self.moody_active(), [])
+        [task] = pensieve.list_tasks(self.conn, desk="ryan-claude-1")
+        self.assertEqual([row["counts"] for row in capacity.review_rounds(self.conn, task["id"])], [False])
