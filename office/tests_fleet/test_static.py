@@ -42,7 +42,7 @@ KNOWN_FLAGS = {
     "--git-dir", "--work-tree", "--verify", "--end-of-options", "--get", "--porcelain", "--no-verify",
     "--no-ext-diff", "--no-textconv", "--detach", "-b", "-m", "-F", "--stdin", "--force", "-z",
     "--no-decorate", "--oneline", "--format", "--is-ancestor", "--quiet", "--name-only",
-    "-f", "-d",  # git clean -f -d -X: ignored files only, never tracked or untracked ones
+    "-f", "-d", "-n", "--ignored",  # git clean -n/-f -d -X: ignored files only, never tracked or untracked ones
     # the review, worktree, verify and push scripts and the push gate
     "--task", "--repo-dir", "--branch", "--base", "--title", "--no-fetch", "--yes", "--mode",
     "--intent-file", "--permission-profile", "--cd", "--noprofile", "--norc", "sandbox",
