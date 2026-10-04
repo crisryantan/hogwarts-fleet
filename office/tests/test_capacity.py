@@ -191,6 +191,20 @@ class RoundCapTests(RoundCase):
         self.assertEqual((rows[crashed["request"]["id"]]["counts"], rows[crashed["request"]["id"]]["has_verdict"]),
                          (False, False))
 
+    def test_a_result_owl_from_a_run_that_then_crashed_does_not_use_up_a_round(self):
+        # The reviewer desk can post a result owl itself; only the review script's result_posted counts.
+        crashed = self.round(SHAS[0])
+        request_id, task_id = crashed["request"]["id"], crashed["task"]["id"]
+        pensieve.start_task(self.conn, task_id, now=NOW)
+        owlery.advance(self.conn, request_id, "claimed", now=NOW)
+        owlery.advance(self.conn, request_id, "running", now=NOW)
+        owlery.send(self.conn, "beta", "alpha", "result", "my review", body="REVIEW", task_id=task_id,
+                    request_id=request_id, now=NOW)
+        pensieve.close_task(self.conn, task_id, "superseded", now=NOW)
+        rows = {row["request_id"]: row for row in capacity.review_rounds(self.conn, self.author)}
+        self.assertEqual((rows[request_id]["counts"], rows[request_id]["has_verdict"]), (False, False))
+        self.assertEqual(self.round(SHAS[1])["round"], 1)
+
     def test_three_verdict_rounds_then_a_fourth_is_refused_whatever_crashed_between(self):
         for index, sha in enumerate(SHAS[:3]):
             self.run_reviewer(self.round(sha, now=NOW + index), verdict=False)

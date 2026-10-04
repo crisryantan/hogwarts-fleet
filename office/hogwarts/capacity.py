@@ -4,7 +4,9 @@ The cap numbers live in the fleet's config. The store keeps what changes during 
 Ryan makes with castle desk cap, one row each time a cap refuses a run or a vendor limit stops one,
 and one row per review request, so a newer commit supersedes a review that is still waiting and a
 round past the cap waits for Ryan's castle task allow-round. Only a reviewer run that recorded a
-verdict uses up a round; the daily run caps still bound the retries of runs that did not.
+verdict uses up a round, and the proof is the request reaching result_posted, which the review script
+does right after it records the review. A result owl alone is not proof, since the reviewer desk can post
+one itself. The daily run caps still bound the retries of runs that did not record one.
 """
 from __future__ import annotations
 
@@ -24,8 +26,8 @@ MAX_ROUNDS_LIMIT = 100
 
 _ROUND_ROWS = """SELECT review_rounds.*, requests.phase AS request_phase, requests.outcome AS request_outcome,
        tasks.status AS reviewer_task_status,
-       EXISTS (SELECT 1 FROM owls WHERE owls.request_id = review_rounds.request_id AND owls.kind = 'result')
-           AS has_verdict
+       EXISTS (SELECT 1 FROM request_phases WHERE request_phases.request_id = review_rounds.request_id
+               AND request_phases.phase = 'result_posted') AS has_verdict
    FROM review_rounds JOIN requests ON requests.id = review_rounds.request_id
    LEFT JOIN tasks ON tasks.id = requests.task_id
    WHERE review_rounds.task_id = ? ORDER BY review_rounds.created_at, review_rounds.rowid"""
