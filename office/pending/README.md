@@ -85,11 +85,11 @@ Undo: restore the backup, or remove the entry.
 
 ## (f) Desk settings: the push gate for headless desks
 
-Files: `~/.hogwarts/desks/hermione/settings.json`, `ron/settings.json` and `portrait/settings.json`. Merge `a4-desk-settings-push-gate.merge.json` into each one's top level as a `hooks` object.
+The desk settings for Hermione, Ron and the portrait ship with the push gate as a top-level `hooks` object. `a4-desk-settings-push-gate.merge.json` shows that block on its own.
 
 This is defence in depth: those desks have no network, so a push fails anyway. Whether hooks in a `--settings` file run under `--restricted` is still an open check. If the hook cannot load, it exits 1, which Claude Code treats as a non-blocking error, so it changes nothing else.
 
-Undo: remove the `hooks` object again.
+Undo: remove the `hooks` object from each desk's settings.
 
 ## (g) The review loop, step by step
 

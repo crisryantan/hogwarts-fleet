@@ -85,7 +85,7 @@ def reviewer_output(desk: str, family: str, run_id: str) -> str:
     return result
 
 
-def commit_message(handoff: str) -> tuple:
+def commit_message(handoff: str, check_words: bool = True) -> tuple:
     """(subject, body) from the COMMIT MESSAGE section of a build desk's handoff."""
     lines = handoff.splitlines()
     try:
@@ -106,7 +106,7 @@ def commit_message(handoff: str) -> tuple:
         raise FleetError("the commit subject must be one printable line of at most 100 characters")
     if len(body) > COMMIT_MESSAGE_MAX or "\x00" in body:
         raise FleetError("the commit message body is too long")
-    word = gitops.fleet_words_in(subject + "\n" + body)
+    word = gitops.fleet_words_in(subject + "\n" + body) if check_words else None
     if word:
         raise FleetError(f"the commit message contains a fleet word ({word})")
     return subject, body
@@ -249,7 +249,7 @@ def review_build(conn, task_id: str) -> dict:
     if gitops.dirty(record):
         if handoff is None:
             raise FleetError("the worktree has changes but the desk posted no handoff with a commit message")
-        subject, body = commit_message(handoff)
+        subject, body = commit_message(handoff, check_words=record["repo"] not in config.FLEET_WORDS_ALLOWED_REPOS)
         gitops.git(["add", "-A", "--", ".", *gitops.link_excludes(record)], record["git_dir"], record["path"])
         message = ["-m", subject] + (["-m", body] if body else [])
         gitops.git(["commit", "--no-verify", *message], record["git_dir"], record["path"])

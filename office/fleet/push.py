@@ -63,13 +63,14 @@ def check(conn, task_id: str) -> dict:
     if not owlery.has_pass(conn, record["repo"], sha):
         raise FleetError("HEAD has no review pass from the other model family; run fleet review first")
     branch = gitops.check_branch(record["branch"])
-    messages = gitops.git(["log", "--format=%B", f"{record['base']}..{sha}"], record["git_dir"], record["path"])
-    word = gitops.fleet_words_in(messages)
-    if word:
-        raise FleetError(f"a commit message contains a fleet word ({word})")
-    hits = _fleet_word_hits(record, sha)
-    if hits:
-        raise FleetError("added lines contain fleet words: " + ", ".join(hits))
+    if record["repo"] not in config.FLEET_WORDS_ALLOWED_REPOS:
+        messages = gitops.git(["log", "--format=%B", f"{record['base']}..{sha}"], record["git_dir"], record["path"])
+        word = gitops.fleet_words_in(messages)
+        if word:
+            raise FleetError(f"a commit message contains a fleet word ({word})")
+        hits = _fleet_word_hits(record, sha)
+        if hits:
+            raise FleetError("added lines contain fleet words: " + ", ".join(hits))
     commits = gitops.git(["log", "--no-decorate", "--oneline", f"{record['base']}..{sha}"], record["git_dir"],
                          record["path"]).strip().splitlines()
     return {"task": task, "record": record, "sha": sha, "branch": branch, "commits": commits}

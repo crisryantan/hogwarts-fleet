@@ -96,6 +96,9 @@ CASTLE_CHARTERS = ("CLAUDE.md", "AGENTS.md")
 # Words that never leave the fleet: in branch names, commit messages and PR text.
 FLEET_WORDS = ("hogwarts", "mcgonagall", "harry", "hermione", "moody", "ron", "snape", "dumbledore",
                "marauder", "marauders", "gringotts", "owlpost", "headmaster", "pensieve")
+# The fleet's own public kit, where these names are the product. Commit messages and added lines there
+# skip the fleet-word check. Branch names never do. Set at onboarding with GITHUB_ACCOUNT.
+FLEET_WORDS_ALLOWED_REPOS = (GITHUB_ACCOUNT + "/hogwarts-fleet",)
 
 # Size limits.
 OWL_MAX_BYTES = 65536
