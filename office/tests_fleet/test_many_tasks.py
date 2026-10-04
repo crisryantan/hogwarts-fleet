@@ -11,6 +11,7 @@ import os
 import contextlib
 import io
 import re
+import shlex
 import stat
 import subprocess
 import threading
@@ -20,7 +21,7 @@ from unittest import mock
 
 from hogwarts import capacity, cli, db, ids, owlery, pensieve
 from hogwarts.errors import ConflictError, ValidationError
-from tests.support import NOW
+from tests.support import NOW, temp_dir
 
 from fleet import config, gitops, owl_post, push, review, run_desk, verify, worktree
 from fleet.hooks import pre_compact, session_start
@@ -1456,6 +1457,30 @@ class DeskTextTests(unittest.TestCase):
         loop = re.search(r"for desk in ([a-z0-9 -]+); do\n\t\"\$CASTLE_CLI\" desk many-tasks", self.text("install.sh"))
         self.assertIsNotNone(loop)
         self.assertEqual(tuple(loop.group(1).split()), db.MANY_TASK_DESKS_SEED)
+
+    def test_the_placeholder_scan_skips_test_folders_but_lists_every_real_file(self):
+        # Runs only the scan function from install.sh, on a made-up tree. install.sh itself never runs here.
+        script = self.text("install.sh")
+        scan = re.search(r"^unfilled_placeholders\(\) \{\n.*?^\}\n", script, re.DOTALL | re.MULTILINE)
+        placeholders = re.search(r"^PLACEHOLDERS='([^']+)'$", script, re.MULTILINE)
+        self.assertIsNotNone(scan)
+        self.assertIsNotNone(placeholders)
+        root = temp_dir(self)
+        office, castle = root / "office", root / "castle"
+        real = [office / "fleet" / "config.py", office / "desks" / "ron" / "settings.json",
+                castle / ".claude" / "settings.json", castle / "tests" / "notes.md"]
+        fixtures = [office / "tests" / "test_a.py", office / "tests_fleet" / "test_b.py",
+                    office / "tests_fleet" / "fixtures" / "live-tools" / "snape.json"]
+        for path in real + fixtures:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("a placeholder: <chat-mcp>\n")
+        (office / "fleet" / "filled.py").write_text("nothing left to fill in\n")
+        shell = (f"OFFICE={shlex.quote(str(office))}\nCASTLE={shlex.quote(str(castle))}\n"
+                 f"PLACEHOLDERS={shlex.quote(placeholders.group(1))}\n{scan.group(0)}\n"
+                 'unfilled_placeholders "$OFFICE" "$CASTLE" "$OFFICE/missing-agent.md"\n')
+        done = subprocess.run(["/bin/sh", "-c", shell], capture_output=True, check=True,
+                              env={"PATH": config.CHILD_PATH})
+        self.assertEqual(sorted(done.stdout.decode().splitlines()), sorted(str(path) for path in real))
 
 
 class SeedTests(unittest.TestCase):
