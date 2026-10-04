@@ -63,6 +63,7 @@ A Harry Potter themed fleet of single-purpose AI agents for Claude Code and Code
 | `scripts/owlpost-setup.sh` | Your one command to switch on the Owl Post and send a test owl (onboarding stage 3) | |
 | `scripts/codex-boundary-test.sh` | Proves the Codex desks' permission profile on your Mac: no office, no folder it isn't given, no network. Run it before enabling Harry or Moody, and after every Codex upgrade | |
 | `scripts/codex-exec-boundary-test.py` | Proves the boundary again under real `codex exec` runs for Harry and Moody, launched exactly the way the desk launcher does: the folders, temp folders and network above, a borrowed folder, quiet Xcode tools, and none of your own Codex hooks or MCP servers. Sends a short prompt to OpenAI and costs a few cents | |
+| `scripts/installed-office-check.sh` | Installs the kit into a throwaway home, fills the GitHub account, watched repos, blocked models and MCP names with made-up values, and runs both suites there. A test that leans on your own private values fails. Never touches your real `~/.hogwarts` or `~/hogwarts` | |
 | `uninstall.sh` | A dry run by default. With `--yes` it removes the fleet and keeps an archive | |
 
 `install.sh` never touches `~/.claude/settings.json`, `~/.codex` or launchd. Those changes are yours to apply, and the onboarding guide shows how.

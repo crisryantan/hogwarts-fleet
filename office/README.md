@@ -317,6 +317,8 @@ cd /Users/crisryantan/.hogwarts && /usr/bin/env -i /usr/bin/python3 -I -B -X pyc
 
 Tests make their temporary directories under the constant `/private/tmp`, so `tempfile` never reads `TMPDIR`. They never touch `state/` and never read environment variables.
 
+A clone of the kit can also run both suites against an installed copy whose private values are made up: `sh scripts/installed-office-check.sh` installs into a throwaway home, fills the GitHub account, watched repos, blocked models and MCP names with fake values, and runs the suites there, so a test that quietly depends on your own private values fails. It never reads or writes your real `~/.hogwarts` or `~/hogwarts`.
+
 ## Mapping from the teammate's modules
 
 | `db_adapter.py` / `dispatch_store.py` | Here |
