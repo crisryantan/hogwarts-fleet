@@ -26,6 +26,7 @@ No code, no office file and no secret is sent. The throwaway folders are deleted
 import hashlib
 import json
 import os
+import re
 import shlex
 from pathlib import Path
 import shutil
@@ -38,6 +39,7 @@ CHECKOUT = Path(__file__).resolve().parents[1]
 CHECKOUT_OFFICE = CHECKOUT / "office"
 CODE_FILES = ("fleet/config.py", "fleet/run_desk.py", "fleet/gitops.py", "fleet/safefs.py", "fleet/common.py",
               "desks/harry/codex.toml", "desks/moody/codex.toml")
+FULL_SHA = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
 
 
 def _source_home(text):
@@ -56,6 +58,8 @@ def pick_code():
         status = subprocess.run(["/usr/bin/git", "-C", str(CHECKOUT), "status", "--porcelain", "--", "office",
                                  "scripts"], capture_output=True, text=True)
         sha = head.stdout.strip() if head.returncode == 0 else ""
+        if not FULL_SHA.fullmatch(sha):
+            sha = ""
         if head.returncode != 0 or status.returncode != 0 or not sha:
             note = "git could not confirm the checkout's commit and cleanliness, so no commit can be credited"
         elif status.stdout.strip():
