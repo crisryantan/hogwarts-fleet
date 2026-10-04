@@ -66,7 +66,7 @@ Four programs, and only one you need every day. Three of them live in the termin
 | **Claude Code** (every day) | Anthropic's coding agent. It runs McGonagall, Hermione, Ron, Snape and the portrait. | The Code tab in the Claude desktop app, or type `claude` in Terminal. | McGonagall's session in `~/hogwarts`, and Snape from any session. |
 | **Codex** (behind the scenes) | OpenAI's coding agent. It runs Harry, who builds, and Moody, who reviews Claude-written code. | Type `codex` in Terminal for your own experiments. The fleet runs it for Harry and Moody through a script. | Rarely by hand. McGonagall routes work to Harry. |
 | **castle** (when you want to look) | The command line for the fleet's database: tasks, requests between desks, reviews and memory. Only you and the fleet's scripts use it. | Type `~/.hogwarts/bin/castle` in Terminal, followed by a command such as `task list`. | To check what's in flight, or to close a task by hand. |
-| **herdr** (optional) | A terminal workspace manager: tabs and split panes for running several of your own agent sessions side by side. | Type `herdr` in Terminal. It isn't a Mac app, which is why Spotlight can't see it. | Only if you like a multi-pane view of your own sessions. Fleet desks never run inside it. |
+| **herdr** (optional) | A terminal workspace manager: tabs and split panes, and one space per desk if you want a live view of the fleet. | Type `herdr` in Terminal. It isn't a Mac app, which is why Spotlight can't see it. | Only if you like a multi-pane view. Desks that can run commands never run inside it, so most spaces are read-only feeds. |
 
 ## One-time setup
 
@@ -145,6 +145,7 @@ The name after the dash is the job. When in doubt, ask McGonagall. When you know
 | Know where my PRs stand, whether a red build is real, or watch a rollout | Ron - Release Engineer | His morning lineup, or ask McGonagall |
 | Pull numbers from the warehouse or observability tools, or read an experiment | Snape - Data Analyst | A new session outside `~/hogwarts`: "Use the snape agent to..." |
 | Find out why a desk lacked context, or tidy what the fleet remembers | Dumbledore - Knowledge Manager | His nightly patch, or ask McGonagall |
+| See or steer which model each desk runs, or find out why one moved | Ollivander - Model Keeper | He runs by himself every morning. `castle desk models` shows his picks, and his notes arrive with your other rows |
 
 ## What's live
 
@@ -161,6 +162,9 @@ What each piece looks like once onboarding is done, and what switches on next.
 | Ron - Release Engineer and the Marauder's Map | Ron installed and off. The Map is not built yet | `claude auth login`, then the shadow stage (5.2). |
 | Dumbledore - Knowledge Manager | Installed, off | `claude auth login`, then the memory stage (5.3). |
 | Gringotts - Backup | Not built yet | The shadow stage (5.2). |
+| Ollivander - Model Keeper | Installed, off | Load his daily job (5.5). Until then every desk runs the model it was registered with. |
+| The live view: `fleet feed` and the herdr spaces | Installed, off | Run `hogwarts-spaces` (5.6). `fleet feed` itself works any time. |
+| Busy-day caps and review rounds | Live once installed | Nothing. They guard every headless run, so they matter once a desk is on. `castle desk caps` shows today's numbers. |
 
 A desk switches on when you create its `enabled` file after reading its dry run, one desk at a time. Nothing switches itself on.
 
@@ -171,11 +175,102 @@ A desk switches on when you create its `enabled` file after reading its dry run,
 - **Quick data questions.** In a new session outside `~/hogwarts`: "Use the snape agent to..." When the question has a link, start with "Read <link>, then". He answers with the query behind every number.
 - **When a session gets long.** If you see the Tempus warning (past about 200k tokens), ask for a Checkpoint and start a fresh session. Long sessions are the single biggest cost.
 - **Reviews.** They happen before anything is pushed, by the other model family. You'll see the verdict in your rows.
+- **Model notes.** Ollivander's notes arrive with your other rows. A move to a cheaper or equal model has already happened. A costlier one waits for `castle desk model <desk> --approve`.
+- **Cap warnings.** A desk at 80% of a daily cap sends one note. At the cap its next run waits for the reset or a bump, as in [Busy days and caps](#busy-days-and-caps).
 - **Wrapping up.** Merge what's ready yourself, then type `Mischief managed <task-id>` for each finished task.
 
-## herdr in five minutes
+## Which model each desk runs
 
-herdr keeps several terminal sessions in one window and keeps them running after you close it. It's handy for watching a couple of your own `claude` or `codex` sessions side by side. Fleet desks never run inside it, because any pane in herdr can type into any other pane.
+You don't pick models by name. Each desk has a role card at `~/.hogwarts/desks/<desk>/role.json` that says what its job needs: a frontier, workhorse or fast model, an effort level and one line of why. Ollivander - Model Keeper reads the cards every morning and picks the model. A desk never changes family, so Claude desks stay on Claude and Codex desks stay on Codex. The cross-family review rule depends on that.
+
+| Desk | Needs | Effort | Why |
+| --- | --- | --- | --- |
+| McGonagall - Chief of Staff | frontier | high | Scope and spec judgment, used rarely |
+| Hermione - Staff Engineer | frontier | high | Deep reviews of Codex work |
+| Moody - Security Reviewer | frontier | high | Security review of Claude work |
+| Dumbledore - Knowledge Manager | frontier | medium | One nightly memory review |
+| Snape - Data Analyst | workhorse | high | Accurate SQL at moderate cost |
+| Harry - Senior Engineer | workhorse | high | Everyday coding |
+| Ron - Release Engineer | fast | low | Sorts lots of PR and CI updates |
+
+**How he picks**
+
+- Claude desks take the alias for their tier: `opus` for frontier, `sonnet` for workhorse and `haiku` for fast. An alias always means the newest model of that line that your Claude Code knows, so a new release needs no edit.
+- Codex desks take a model from Codex's own catalog. He files each one by the wording of its description, then takes the top-ranked visible model of the tier. He skips anything the catalog calls older, legacy or previous generation, and anything that retires within 30 days.
+- The effort is the card's, lowered to the nearest level that model lists.
+- A name that fits no tier, or more than one, is never picked. You get one note asking you to file it with `castle model line <name> <line>`, where the line is `frontier`, `workhorse`, `fast` or `ignore`. Your filing beats his guess.
+
+**What happens after a pick**
+
+- A desk's first pick applies by itself.
+- After that, a move to the same tier or a cheaper one (fast, then workhorse, then frontier) applies by itself, with a note.
+- A costlier move waits as a pending pick. To say yes, run `castle desk model <desk> --approve`.
+- McGonagall and Snape take their model from the `model:` line in their agent files. Ollivander never edits those files. He tells you the one line to change.
+
+**Look and steer**
+
+```
+castle desk models                  each desk's tier, model, pin and pending pick
+fleet ollivander --dry-run          the whole plan as JSON, changing nothing
+castle desk model <desk> <model>    pin a desk to one model
+castle desk model <desk> --role     unpin, so the role picks again
+castle desk model <desk> --approve  take a pending costlier pick
+castle model line <name> <line>     file a model name under a tier
+```
+
+`fleet` is `~/.hogwarts/bin/fleet`, the same kind of command as `castle`. A pin takes an alias or a full `claude-` model id for a Claude desk, and a slug from the last Codex catalog for a Codex desk. Ollivander leaves a pinned desk alone.
+
+**Safety nets**
+
+- **The two-run trial.** The first two runs after a switch are a trial. If both fail, the desk goes back to its previous model, pinned, and you get a note. Unpin it with `--role` once you've looked. A run that Claude's or Codex's own usage limit stopped never counts. A switch you made yourself, by pin or approval, is never reverted. You hear about the failures and your choice stands.
+- **The blocklist.** If your organization forbids some models, list them in `BLOCKED_MODEL_PREFIXES` in `~/.hogwarts/fleet/config.py`. It is empty in the kit. Each entry is a lowercase prefix, matched against Claude aliases, full Claude ids and Codex slugs. To forbid a whole Claude line, list its alias and its id prefix, for example `("<alias>", "claude-<alias>-")`. A blocked model is never picked, pinned, filed or launched. If every model of a tier is blocked, the desk keeps the one it has and you get one note.
+- **The stop file.** When a CLI update goes wrong, Ollivander writes `~/.hogwarts/state/ollivander-stop`, and no headless desk launches until you've looked and run `castle ollivander clear`.
+- **CLI updates.** They are off unless you make the plain file `~/.hogwarts/desks/ollivander/update-clis`. With it, each pass runs `claude update` and `brew upgrade --cask codex`, then checks both versions and every enabled desk's dry run. Any failure stops the desks. So does a new Codex version, because the Codex boundary is proven per version: rerun `scripts/codex-boundary-test.sh` first. A new Claude Code version is only a note.
+- **The daily job.** `com.hogwarts.ollivander` runs at 06:00 every day. Onboarding stage 5.5 loads it.
+
+## Busy days and caps
+
+Every headless desk has a daily cap on runs, and the Claude desks have a cap on spend too. The caps are runaway guards, not targets. They're sized for a busy day of a dozen or so PRs plus side work, so a normal day never sees them.
+
+| Desk | Runs a day | Spend a day |
+| --- | --- | --- |
+| Hermione - Staff Engineer | 80 | $60 |
+| Ron - Release Engineer | 120 | $10 |
+| Dumbledore - Knowledge Manager | 3 | $4 |
+| Harry - Senior Engineer | 40 | none |
+| Moody - Security Reviewer | 80 | none |
+
+The day resets at local midnight on your Mac, daylight saving included. The counts come from the store's own run records.
+
+- **The warning.** A desk that reaches 80% of a cap sends one note for that cap that day.
+- **The cap event.** At the cap, the desk's next run doesn't start and its request keeps waiting. You get one note that names the cap, how much was used, how many requests are waiting, when it resets and the command that lifts it.
+- **Look and lift.** `castle desk caps` shows today's numbers for every desk. `castle desk cap <desk> --runs +N` or `--spend +X` raises one cap until the next reset, then it falls back.
+- **Reviews wait, too.** If the reviewer is at its cap, the review request waits. After the reset or a bump, run `fleet review <task-id>` again. The new review replaces the waiting one, so only the newest commit of a task gets reviewed.
+- **Three rounds per task.** A task gets three review rounds. Only a round where the reviewer recorded a verdict counts. A crash, a timeout, a cap refusal or a vendor limit doesn't use one up. The next round waits for you: `castle task allow-round <task-id>` allows exactly one more, and `castle task rounds <task-id>` lists every round and whether it counts.
+- **Which limit hit.** The note says whether it was the fleet's cap or the vendor's own limit: `cap_source fleet`, or `claude_plan` or `codex_plan` when your Claude or Codex plan's own usage or rate limit stopped the run. A bump can't lift a plan limit. It clears on the vendor's own reset.
+
+## Watch live, run short
+
+Desks run short. A headless desk takes one owl, does the job and exits, one run at a time, so there's no long session to sit inside. You can still watch every desk work, without typing into anything.
+
+- `fleet feed --desk <name>` follows one desk. `fleet feed --desk owl-post` follows every owl.
+- `fleet feed --all` follows every desk at once.
+
+A feed prints a line whenever something happens: owls to and from the desk (kind and subject, never the body), the start and end of each run with its model, time, tokens and cost, the desk's notes to you, and, while a run is going, what the desk says and which tools it calls. It is read-only. It opens the store read-only, only reads files, and strips every control sequence from what a desk wrote, so a desk can't steer your terminal through it. Ctrl+C stops it.
+
+**One space per desk.** `~/.hogwarts/bin/hogwarts-spaces` opens a herdr space for each desk, named like "Hermione - Staff Engineer". McGonagall and Snape get live sessions, because neither has a shell tool. Hers opens in `~/hogwarts`, and his opens in your Documents folder, outside the castle. Every other space, including the Owl Post and Ollivander, runs a feed, because any herdr pane can type into any other pane, and a desk that can run commands must never sit where it could type into the rest.
+
+```
+~/.hogwarts/bin/hogwarts-spaces --dry-run
+~/.hogwarts/bin/hogwarts-spaces
+```
+
+- `--dry-run` lists what it would open and changes nothing.
+- `--only "<label>"` handles just the space with exactly that name.
+- `--herdr <path>` points it at herdr if that isn't at `~/.local/bin/herdr`.
+- A space whose name already exists is left alone, so running it twice is safe. It prints OK, SKIP or FAILED for each space.
+
+**herdr in five minutes.** herdr keeps several terminal sessions in one window and keeps them running after you close it. It's handy for the spaces above, and for watching a couple of your own `claude` or `codex` sessions side by side.
 
 1. **Start it.** Open Terminal and type `herdr`. The first launch walks you through a short setup.
 2. **Use the prefix.** Every shortcut starts with Ctrl+B. Press it, let go, then press the next key.
@@ -211,7 +306,28 @@ Everything `castle` prints is JSON. If you added the shortcut in one-time setup,
 | `castle audit` | Find stuck requests and unanswered owls |
 | `castle fact current` | See what the fleet currently believes |
 | `castle desk list` | See every desk and its job |
+| `castle desk caps` | See today's runs and spend against each desk's caps |
+| `castle desk cap <desk> --runs +N` | Lift a desk's run cap until the next reset |
+| `castle desk cap <desk> --spend +X` | Lift a desk's spend cap until the next reset |
+| `castle task rounds <task-id>` | See a task's review rounds and which count |
+| `castle task allow-round <task-id>` | Allow one more review round |
+| `castle desk models` | See each desk's tier, model, pin and pending pick |
+| `castle desk model <desk> --approve` | Approve a costlier pick that's waiting |
+| `castle desk model <desk> <model>` | Pin a desk to a model |
+| `castle desk model <desk> --role` | Unpin a desk |
+| `castle model line <name> <line>` | File a model name as frontier, workhorse, fast or ignore |
+| `castle ollivander clear` | Clear Ollivander's stop file so desks launch again |
 | `castle doctor` | Health check |
+
+**fleet** (the same path style as castle: `~/.hogwarts/bin/fleet`)
+
+| Type | To |
+| --- | --- |
+| `fleet feed --desk <name>` | Watch one desk, read-only |
+| `fleet feed --all` | Watch every desk, read-only |
+| `fleet ollivander --dry-run` | See Ollivander's plan without changing anything |
+| `fleet review <task-id>` | Review a task's newest commit, or run a waiting review again |
+| `~/.hogwarts/bin/hogwarts-spaces` | Open one herdr space per desk |
 
 **Claude Code**
 
@@ -244,7 +360,7 @@ Six things only you do.
 - **Send things.** Desks draft messages. You send them.
 - **Sign in.** Desks never see a password or token. If something needs a login, it stops and tells you.
 - **Change settings.** Security, permissions, hooks and background jobs are yours to apply. The fleet only prepares the change.
-- **Never bypass.** Don't start Claude or Codex with any skip-permissions or bypass flag, and don't run fleet desks inside herdr.
+- **Never bypass.** Don't start Claude or Codex with any skip-permissions or bypass flag, and don't run a desk that can run commands inside herdr.
 
 ## Troubleshooting
 
@@ -255,7 +371,11 @@ Six things only you do.
 | `command not found: castle` | Use the full path `~/.hogwarts/bin/castle`, or add the shortcut from one-time setup and open a new Terminal window. |
 | `install.sh` says a folder already exists | Nothing was changed. The fleet is already installed. Use `./install.sh --force` only if you want a fresh copy; it moves the old folders aside first. |
 | A tool name with `<warehouse-mcp>`, `<observability-mcp>` or `<chat-mcp>` in it | A placeholder was never filled. See onboarding stage 2. |
-| A headless desk never answers | Run `claude auth status`. Headless desks need the command line signed in. Check the desk has an `enabled` file. Then run `castle audit` to see where the request stopped. |
+| A headless desk never answers | Run `claude auth status`. Headless desks need the command line signed in. Check the desk has an `enabled` file. Then run `castle audit` to see where the request stopped. If a note says a cap is reached, see [Busy days and caps](#busy-days-and-caps). |
+| No headless desk launches, and a note mentions Ollivander | His stop file is in place. Read the note and his log in `~/.hogwarts/logs`, then run `castle ollivander clear`. |
+| A review round was refused | The task has used its three rounds. Run `castle task rounds <task-id>` to look, then `castle task allow-round <task-id>` if one more is worth it. |
+| A desk keeps an old model after a note said it would move | A costlier move waits for you: `castle desk model <desk> --approve`. A pinned desk never moves. `castle desk models` shows both. |
+| `hogwarts-spaces` prints FAILED | herdr isn't running or isn't at `~/.local/bin/herdr`. Open herdr, or pass `--herdr <path>`. A space it already made is left alone when you run it again. |
 | McGonagall doesn't introduce herself | Make sure the session's folder is `~/hogwarts`. Her settings only apply there. |
 | The Tempus warning appears | Ask for a Checkpoint, then start a fresh session. She picks up from the digest. |
 | "Mischief managed" says it could not confirm | Close the task from your terminal: `castle token mint <task-id>`, then `castle task close <task-id> --reason complete --token-stdin` and paste the token. |

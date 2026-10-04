@@ -33,7 +33,9 @@ It exits with 0 when nothing is left for you, with 1 when your settings still me
    rm ~/Library/LaunchAgents/com.hogwarts.owlpost.plist
    ```
 
-   Repeat for any other `com.hogwarts.*` label the first command shows.
+   Repeat for any other `com.hogwarts.*` label the first command shows. Ollivander's job, `com.hogwarts.ollivander`, is one of them, so the script and this loop both cover it.
+
+   The herdr spaces are not in either folder. They live in herdr itself, so close each one there. Run `herdr workspace list` to see them. The spaces the fleet opened are named like "Hermione - Staff Engineer", plus one each for the Owl Post and Ollivander. Closing a space ends what runs in it and nothing else.
 
 2. **Check your settings.** These four files may mention the fleet: `~/.claude/settings.json`, `~/.claude/settings.local.json`, `~/.codex/config.toml` and `~/.codex/hooks.json`.
 
@@ -97,7 +99,7 @@ tar -xzf ~/hogwarts-fleet-archive-<timestamp>.tar.gz -C ~
 ~/.hogwarts/bin/castle doctor
 ```
 
-Then switch the Owl Post back on with `sh scripts/owlpost-setup.sh` from your clone, and re-apply any settings you restored away in step 2.
+Then switch the Owl Post back on with `sh scripts/owlpost-setup.sh` from your clone, load Ollivander's job again as in [onboarding stage 5.5](ONBOARDING.md#55-ollivander-the-model-keeper), reopen the herdr spaces with `~/.hogwarts/bin/hogwarts-spaces`, and re-apply any settings you restored away in step 2.
 
 ## Remove the repo
 

@@ -32,6 +32,8 @@ File modes (0700 directories, 0600 files) keep other users out. They do not stop
   hogwarts/pensieve.py                  desks, tasks, commits, events, sessions, extracts, key points, facts, metrics, scrub
   hogwarts/facts.py                     fact validity windows, subject keys, volatility lint, as-of reads, approved patches
   hogwarts/owlery.py                    owls, requests, review passes, close tokens, purge, audit
+  hogwarts/capacity.py                  the cap day, cap bumps, cap hits, review rounds and round allowances
+  hogwarts/wands.py                     Ollivander's ledger: model filing, catalogs, each desk's model, trials, the stop file
   hogwarts/cli.py                       argparse CLI, JSON output
   tests/                                unittest suite
   state/pensieve.db                     the real database, created by castle init
@@ -87,7 +89,7 @@ The only file the CLI reads is the ops file for `castle fact apply --file PATH`.
 - CLI output is `json.dumps(ensure_ascii=True)`. List views never include owl bodies.
 - Close tokens and owl bodies never travel on argv. They come from stdin only.
 
-## Schema summary (version 3)
+## Schema summary (version 5)
 
 All tables are STRICT when SQLite supports it. Timestamps are integer unix seconds.
 
@@ -109,10 +111,18 @@ All tables are STRICT when SQLite supports it. Timestamps are integer unix secon
 | `request_phases` | Phase history for each request. |
 | `review_passes` | Review verdicts with author and reviewer families. Each one points at a recorded commit. Immutable. |
 | `close_tokens` | Hashed single use tokens for closing a task as complete. |
+| `cap_bumps` | One row each time you lift a desk's runs or spend cap with `castle desk cap`. It lasts until the next cap reset. Immutable. |
+| `cap_hits` | One row each time a fleet cap refuses a run, or a vendor's own limit stops one. `cap_source` says which: `fleet`, `claude_plan` or `codex_plan`. Immutable. |
+| `review_rounds` | One row per review request of an author task, with its round number and whether a newer commit superseded it. |
+| `round_allowances` | One row each time you allow another review round with `castle task allow-round`. Immutable. |
+| `model_lines` | How you filed a model name: `frontier`, `workhorse`, `fast` or `ignore`. The latest row per name wins. Immutable. |
+| `model_catalog` | The model names each family offered at Ollivander's last look. |
+| `desk_models` | Each Claude and Codex desk's role need, current model and effort, pin, pending pick and trial state. The `desks` table itself stays immutable. |
+| `model_changes` | Every model switch, with its reason: `initial`, `role`, `pin`, `approved` or `revert`. Immutable. |
 
 Triggers also block deletes on desks, tasks, task commits, requests, events, facts, owls and review passes. Fact triggers require `valid_from` and `recorded_at` on every row, and keep `valid_to`, `closed_at` and `end_reason` set or unset together, with `valid_to` no earlier than `valid_from` and `closed_at` no earlier than `recorded_at`. `superseded_by` is only set on a superseded row. `restores` never changes once written.
 
-Migration 2 adds the fact columns, backfills `valid_from` and `recorded_at` from `created_at`, and builds the index and `facts_fts`. Migration 3 adds `facts.restores` and the trigger that keeps it fixed. Each column is added only while it is missing, so running a migration again changes nothing.
+Migration 2 adds the fact columns, backfills `valid_from` and `recorded_at` from `created_at`, and builds the index and `facts_fts`. Migration 3 adds `facts.restores` and the trigger that keeps it fixed. Migration 4 adds the cap and review round tables. Migration 5 adds the model tables. Each column is added only while it is missing, so running a migration again changes nothing.
 
 ## Why facts work this way
 
@@ -136,6 +146,8 @@ Every function takes a connection from `db.connect(path)` as its first argument.
   - Writes: `add_fact`, `supersede(scope, subject_key, text, source, tier="aging", valid_from=None, lookup=None, expires_at=None)`, `withdraw(fact_id, desk=None)`, `expire()`, `set_key(fact_id, subject_key)`, `apply_ops(ops)`.
   - Reads: `current_facts(scope=None)`, `find_facts(query, scope=None, include_history=False, limit=10)`, `as_of_world(t, scope=None)`, `as_of_belief(t, scope=None)`, `history(scope, subject_key)`, `contradiction_candidates(since, limit_per_fact=3)`.
   - Lint: `VOLATILE_PATTERNS`, `volatile_match(text)`, `LOOKUP_COMMAND`.
+- `hogwarts.capacity`: `day_bounds(now, reset_offset)`, `add_bump`, `active_bumps`, `list_bumps`, `cap_status`, `record_cap_hit`, `list_cap_hits`, `waiting_requests`, `open_review_round`, `review_rounds`, `allow_round`.
+- `hogwarts.wands`: `classify`, `ryan_lines`, `record_catalog`, `last_catalog`, `get_desk_model`, `list_desk_models`, `set_need`, `apply_model`, `set_pending`, `clear_pending`, `approve`, `pin`, `unpin`, `record_outcome`, `changes`, `clear_stop`. The calls that file, pin, approve or apply a model take the fleet's `BLOCKED_MODEL_PREFIXES` and refuse a name one of them matches.
 - `hogwarts.owlery`
   - Owls: `send`, `inbox`, `read`, `ack`, `mark_delivered`.
   - Requests: `REQUEST_PHASES`, `open_request`, `advance`, `defer`, `decline`, `get_request`, `list_requests`, `request_owls`.
@@ -194,12 +206,20 @@ castle init
 castle doctor
 castle desk add NAME --family F [--role R] [--model M]
 castle desk list
+castle desk cap DESK (--runs +N | --spend +X)
+castle desk caps
+castle desk model DESK (MODEL | --role | --approve)
+castle desk models
+castle model line NAME frontier|workhorse|fast|ignore
+castle ollivander clear
 castle task create --desk D --title T [--id TASK] [--intent-path P] [--parent TASK] [--request REQ] [--session S] [--worktree P]
 castle task start|show TASK
 castle task await-close TASK [--repo O/N --sha SHA]
 castle task commit TASK --repo O/N --sha SHA
 castle task close TASK --reason complete|abandoned|superseded [--token-stdin]
 castle task list [--desk D] [--status S]
+castle task allow-round TASK
+castle task rounds TASK
 castle token mint TASK [--ttl SECONDS]
 castle owl send --from D --to D --kind K --subject S [--body-path P | --body-stdin] [--task T] [--request R] [--reply-to OWL] [--key K]
 castle owl inbox DESK [--all]
@@ -251,6 +271,8 @@ Every command except `init` and `doctor` needs an existing database. `init` is s
   {"op": "archive", "fact_id": 9}
 ]
 ```
+
+`desk cap` raises one desk's runs or spend cap until the next cap reset, which is local midnight unless `CAP_RESET_UTC_SECONDS` in the fleet's config says otherwise. `desk model DESK MODEL` pins a desk to a model of its own family, `--role` unpins it and `--approve` takes a pending costlier pick. `ollivander clear` removes Ollivander's stop file. The cap numbers, the review round cap and the blocklist are the fleet's settings, kept in `fleet/config.py` next to this package.
 
 `token mint` prints the raw token once. Never send its stdout to a log file, and never set a launchd `StandardOutPath` for a job that mints tokens.
 

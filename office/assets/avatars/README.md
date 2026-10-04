@@ -1,6 +1,6 @@
 # Hogwarts fleet avatars
 
-Ten SVG badges struck as one coin set. Transparent PNGs at 512, 128 and 64 live in `png/<name>-<size>.png`, exported with headless Chrome. Don't cut PNGs from qlmanage, it fills the corners with opaque white.
+Eleven SVG badges struck as one coin set. Transparent PNGs at 512, 128 and 64 live in `png/<name>-<size>.png`, exported with headless Chrome. Don't cut PNGs from qlmanage, it fills the corners with opaque white.
 
 | File | Display name | Job | Emblem | Ring |
 |---|---|---|---|---|
@@ -14,6 +14,7 @@ Ten SVG badges struck as one coin set. Transparent PNGs at 512, 128 and 64 live 
 | map.svg | Marauder's Map - PR Watcher | Zero-token script that diffs PR and CI state | Two pairs of footprints on a dashed trail with a faint compass rose, on parchment | Script pewter |
 | gringotts.svg | Gringotts - Backup | Nightly local backup script | Diagonal gold vault key over three tilted coins, on deep bronze | Script pewter |
 | owlpost.svg | Owl Post - Message Router | Script that moves requests between desks and stamps the sender | Sealed envelope with a red wax seal and an owl feather, on deep teal | Script pewter |
+| ollivander.svg | Ollivander - Model Keeper | Daily script that keeps each desk on the model its role card asks for | Slim wand box with its lid slid half open and a wand across it throwing three sparks, on plum | Claude gold |
 
 ## Style rules
 

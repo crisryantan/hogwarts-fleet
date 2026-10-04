@@ -40,7 +40,7 @@ The fleet needs the macOS Command Line Tools, Homebrew and a handful of tools fr
    brew install rtk
    ```
 
-5. Optional: herdr gives you tabs and panes for your own sessions. The fleet never needs it. Install it from its own project page if you want it.
+5. Optional: herdr gives you tabs and panes, and the live view of the fleet in stage 5.6. The fleet never needs it. Install it from its own project page if you want it.
 
 **You're done when** all of these print a path or a version, and the last line prints `fts5 ok`:
 
@@ -71,7 +71,7 @@ command -v git jq gh rg shellcheck claude codex
    ./install.sh
    ```
 
-   It copies `office/` to `~/.hogwarts` and `castle/` to `~/hogwarts`. It adds `~/.claude/agents/snape.md` only if that file is missing. The fleet uses fixed absolute paths on purpose, so the installer rewrites the original home folder in the copied files to yours. It sets every folder to mode 0700 and every file to 0600, with `bin/castle` at 0700. It makes the castle a local git repo with no remote, creates the database, registers the twelve desks, and runs both test suites.
+   It copies `office/` to `~/.hogwarts` and `castle/` to `~/hogwarts`. It adds `~/.claude/agents/snape.md` only if that file is missing. The fleet uses fixed absolute paths on purpose, so the installer rewrites the original home folder in the copied files to yours. It sets every folder to mode 0700 and every file to 0600, with `bin/castle` at 0700. It makes the castle a local git repo with no remote, creates the database, registers the thirteen desks, and runs both test suites.
 
    It refuses to touch an existing `~/.hogwarts` or `~/hogwarts`. If you really want to reinstall, `./install.sh --force` first moves each folder aside to `<folder>.pre-install-<timestamp>`.
 
@@ -80,8 +80,8 @@ command -v git jq gh rg shellcheck claude codex
 **You're done when** the installer ends with lines like these, and then lists the placeholder files for stage 2:
 
 ```
-tests: Ran 380 tests in ... OK
-tests_fleet: Ran 119 tests in ... OK
+tests: Ran 456 tests in ... OK
+tests_fleet: Ran 339 tests in ... OK
 castle doctor: ok
 ```
 
@@ -279,6 +279,8 @@ These checks prove the store, the Owl Post and the task flow work before any des
 
 The fleet grows in the same order as its published rollout. Each later stage needs scripts that are not built yet. The launchd templates for them already sit in `~/.hogwarts/launchd/`, but the modules they call (`fleet.map`, `fleet.morning`, `fleet.keeper`, `fleet.portrait` and `fleet.gringotts`) do not exist, so don't load those plists until each stage ships its code and tests.
 
+5.5 and 5.6 are the exception: Ollivander and the live view are built, and you can switch them on any time after stage 4.
+
 Every headless desk starts disabled. A desk is enabled only by a plain file named `enabled` in its office folder. One desk at a time, read the exact command the fleet would run for it, then make the file. `--dry-run` prints the command as JSON and runs nothing.
 
 ```
@@ -321,6 +323,73 @@ Close the memory loop, with you approving every change.
 
 If the numbers justify it: the RTK hook in hook-only mode, with its exclude list set and recall off first. Then write your own standing orders in `~/hogwarts/standing-orders.md`. A standing order can never include a merge or a deploy.
 
+### 5.5 Ollivander, the model keeper
+
+Ollivander - Model Keeper keeps each desk on the model its job needs, and never moves a desk to the other model family. He has no `enabled` file. His daily job is what switches him on. Until you load it, every desk runs the model it was registered with.
+
+1. Read the role cards. Each one says what its desk needs: a tier (frontier, workhorse or fast), an effort and one line of why. If you disagree with one, edit it as in [CUSTOMISE.md](CUSTOMISE.md#change-a-desks-model).
+
+   ```
+   cat ~/.hogwarts/desks/*/role.json
+   ```
+
+2. If your organization forbids some models, list them in `BLOCKED_MODEL_PREFIXES` in `~/.hogwarts/fleet/config.py` before his first pass. [CUSTOMISE.md](CUSTOMISE.md#block-models-your-organization-forbids) shows how. Skip this if nothing is forbidden.
+
+3. Read his plan. A dry run asks both CLIs what models they offer and prints each desk's pick as JSON. It changes nothing and runs no update.
+
+   ```
+   ~/.hogwarts/bin/fleet ollivander --dry-run
+   ```
+
+4. Load his daily job, the same way you loaded the Owl Post. Lint the template, copy it in, then load it. It runs at 06:00 every day and doesn't run when loaded.
+
+   ```
+   plutil -lint ~/.hogwarts/launchd/com.hogwarts.ollivander.plist
+   cp ~/.hogwarts/launchd/com.hogwarts.ollivander.plist ~/Library/LaunchAgents/com.hogwarts.ollivander.plist
+   chmod 644 ~/Library/LaunchAgents/com.hogwarts.ollivander.plist
+   launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.hogwarts.ollivander.plist
+   ```
+
+5. Run his first pass by hand, so you don't wait for 06:00. Each desk's first pick applies by itself. Later moves to a cheaper or equal tier apply with a note, and a costlier one waits for you.
+
+   ```
+   ~/.hogwarts/bin/fleet ollivander
+   ```
+
+To take the job off again: `launchctl bootout gui/$(id -u)/com.hogwarts.ollivander`, then `rm ~/Library/LaunchAgents/com.hogwarts.ollivander.plist`. His CLI updates stay off unless you make `~/.hogwarts/desks/ollivander/update-clis`. Watch a few passes before you do.
+
+**You're done when** all of these hold:
+
+- `launchctl print gui/$(id -u)/com.hogwarts.ollivander | head -5` shows the job.
+- `~/.hogwarts/bin/castle desk models` lists every Claude and Codex desk with a tier, and a model for each.
+- `ls ~/.hogwarts/state/` shows no `ollivander-stop` file.
+
+### 5.6 The live view
+
+Desks run short, one owl at a time, so you watch them instead of sitting inside them. The feeds are read-only, and herdr is optional.
+
+1. Try a feed first. It works without herdr and prints a line when anything happens. Press Ctrl+C to stop it.
+
+   ```
+   ~/.hogwarts/bin/fleet feed --all
+   ```
+
+2. Open herdr in one Terminal window. In a second window, read what the spaces script would do. It lists one space per desk, named like "Hermione - Staff Engineer", and changes nothing.
+
+   ```
+   ~/.hogwarts/bin/hogwarts-spaces --dry-run
+   ```
+
+3. Open the spaces. McGonagall and Snape get live sessions, because neither has a shell tool. Every other desk, the Owl Post and Ollivander get a read-only feed, since any herdr pane can type into any other. A space that already exists is left alone, so you can run it again.
+
+   ```
+   ~/.hogwarts/bin/hogwarts-spaces
+   ```
+
+   If it prints FAILED, herdr isn't running or isn't at `~/.local/bin/herdr`. Open it, or add `--herdr <path>`.
+
+**You're done when** the first command prints "watching every desk, read-only", and the last one printed OK or SKIP for all nine spaces, which herdr's workspace list now shows.
+
 ## Stage 6: Daily use
 
 From here on, the [handbook](HANDBOOK.md) is your guide: which desk to ask, the daily rhythm, the cheat sheet, the rules only you perform, and what to do when something looks off. Start every piece of work with McGonagall.
@@ -343,3 +412,5 @@ From here on, the [handbook](HANDBOOK.md) is your guide: which desk to ask, the 
 - [ ] **5.2** Map, Ron and Gringotts in shadow for three days. Restore drill done.
 - [ ] **5.3** Portrait proposals reviewed twice. RTK go or no-go.
 - [ ] **5.4** RTK hook and standing orders, only if the numbers say so.
+- [ ] **5.5** Role cards read, any forbidden models listed, `fleet ollivander --dry-run` read, the daily job loaded, a first pass run, and `castle desk models` shows a tier for every desk.
+- [ ] **5.6** `fleet feed --all` prints its first line. `hogwarts-spaces` printed OK or SKIP for all nine spaces.
