@@ -189,6 +189,16 @@ class TaskLifecycleTests(StoreCase):
             pensieve.record_commit(self.conn, second["id"], REPO, SHA)
         with self.assertRaises(ConflictError):
             pensieve.record_commit(self.conn, self.task("alpha")["id"], REPO, "f" * 40)
+        pensieve.record_commit(self.conn, first["id"], REPO, "e" * 40, now=NOW + 1)
+        self.assertEqual([row["sha"] for row in pensieve.task_commits(self.conn, first["id"])], [SHA, "e" * 40])
+        self.assertEqual(pensieve.task_commits(self.conn, second["id"]), [])
+        # A slug in another letter case is another row; commits_with_sha finds both, oldest first.
+        pensieve.record_commit(self.conn, second["id"], REPO.upper(), SHA, now=NOW + 2)
+        self.assertEqual([(row["repo"], row["task_id"]) for row in pensieve.commits_with_sha(self.conn, SHA)],
+                         [(REPO, first["id"]), (REPO.upper(), second["id"])])
+        self.assertEqual(pensieve.commits_with_sha(self.conn, "d" * 40), [])
+        with self.assertRaises(ValidationError):
+            pensieve.commits_with_sha(self.conn, "HEAD")
         with self.assertRaises(sqlite3.IntegrityError):
             self.conn.execute("UPDATE task_commits SET task_id = ?", (second["id"],))
         with self.assertRaises(sqlite3.IntegrityError):
@@ -337,6 +347,87 @@ class CascadeTests(StoreCase):
         self.assertIsNone(self.conn.execute("SELECT consumed_at FROM close_tokens").fetchone()[0])
 
 
+class ManyTaskDeskTests(StoreCase):
+    def setUp(self):
+        super().setUp()
+        self.desks()
+        pensieve.allow_many_tasks(self.conn, "beta", now=NOW)
+
+    def test_a_many_task_desk_starts_three_tasks(self):
+        started = [self.started("beta")["id"] for _ in range(3)]
+        self.assertEqual([task["id"] for task in pensieve.list_tasks(self.conn, desk="beta", status="active")], started)
+        self.assertIsNone(pensieve.blocking_task(self.conn, "beta"))
+
+    def test_a_single_desk_still_refuses_through_the_api_and_a_raw_write(self):
+        first = self.started("alpha")
+        self.assertEqual(pensieve.blocking_task(self.conn, "alpha")["id"], first["id"])
+        second = self.task("alpha")
+        with self.assertRaisesRegex(ConflictError, f"desk already has an active task {first['id']}"):
+            pensieve.start_task(self.conn, second["id"])
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "desk already has an active task"):
+            self.conn.execute("UPDATE tasks SET status = 'active', started_at = 1 WHERE id = ?", (second["id"],))
+        self.assertEqual(pensieve.get_task(self.conn, second["id"])["status"], "queued")
+
+    def test_a_raw_write_on_a_many_task_desk_is_allowed(self):
+        self.started("beta")
+        second = self.task("beta")
+        self.conn.execute("UPDATE tasks SET status = 'active', started_at = 1 WHERE id = ?", (second["id"],))
+        self.assertEqual(len(pensieve.list_tasks(self.conn, desk="beta", status="active")), 2)
+
+    def test_the_session_rule_still_holds_on_a_many_task_desk(self):
+        self.started("beta", session_id="session-aaaa1")
+        same = self.task("beta", session_id="session-aaaa1")
+        with self.assertRaisesRegex(ConflictError, "session already has an active task"):
+            pensieve.start_task(self.conn, same["id"])
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.conn.execute("UPDATE tasks SET status = 'active', started_at = 1 WHERE id = ?", (same["id"],))
+        self.assertEqual(self.started("beta", session_id="session-bbbb2")["status"], "active")
+
+    def test_the_grant_is_one_way_and_idempotent(self):
+        again = pensieve.allow_many_tasks(self.conn, "beta", now=NOW + 5)
+        self.assertEqual((again["name"], again["many_tasks"], again["created"]), ("beta", 1, False))
+        self.assertEqual(self.conn.execute("SELECT granted_at FROM many_task_desks WHERE desk = 'beta'").fetchone()[0],
+                         NOW)
+        self.assertEqual({desk["name"]: desk["many_tasks"] for desk in pensieve.list_desks(self.conn)},
+                         {"alpha": 0, "beta": 1})
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "desk task modes are fixed"):
+            self.conn.execute("UPDATE many_task_desks SET desk = 'alpha'")
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "desk task modes are never deleted"):
+            self.conn.execute("DELETE FROM many_task_desks")
+        self.assertTrue(pensieve.takes_many_tasks(self.conn, "beta"))
+
+    def test_an_unknown_or_reserved_desk_is_refused(self):
+        with self.assertRaises(NotFoundError):
+            pensieve.allow_many_tasks(self.conn, "gamma")
+        with self.assertRaises(ValidationError):
+            pensieve.allow_many_tasks(self.conn, "fleet")
+        self.assertEqual(self.count("many_task_desks"), 1)
+
+    def test_mcgonagall_snape_dumbledore_ryan_and_the_scripts_are_refused_many_tasks(self):
+        singles = (("mcgonagall", "claude"), ("snape", "claude"), ("portrait", "claude"), ("ryan", "human"),
+                   ("owl-post", "script"))
+        for name, family in singles:
+            self.desk(name, family)
+            with self.subTest(desk=name):
+                with self.assertRaisesRegex(ValidationError, f"{name} keeps one active task at a time"):
+                    pensieve.allow_many_tasks(self.conn, name)
+                with self.assertRaisesRegex(sqlite3.IntegrityError, "keeps one active task at a time"):
+                    self.conn.execute("INSERT INTO many_task_desks(desk, granted_at) VALUES (?, 1)", (name,))
+                self.assertFalse(pensieve.takes_many_tasks(self.conn, name))
+        self.assertEqual(self.count("many_task_desks"), 1)
+
+    def test_list_tasks_open_filter(self):
+        queued = self.task("beta")
+        active = self.started("beta")
+        waiting = pensieve.mark_awaiting_close(self.conn, self.started("beta")["id"])
+        closed = self.task("beta")
+        pensieve.close_task(self.conn, closed["id"], "abandoned", now=NOW)
+        self.assertEqual([task["id"] for task in pensieve.list_tasks(self.conn, desk="beta", open_only=True)],
+                         [queued["id"], active["id"], waiting["id"]])
+        with self.assertRaises(ValidationError):
+            pensieve.list_tasks(self.conn, desk="beta", status="active", open_only=True)
+
+
 class StartRaceTests(StoreCase):
     def test_two_processes_racing_start_task_exactly_one_succeeds(self):
         context = multiprocessing.get_context("spawn")
@@ -361,6 +452,24 @@ class StartRaceTests(StoreCase):
             self.assertEqual(len(active), 1)
             winner = next(value for kind, value in outcomes if kind == "ok")
             self.assertEqual(active[0]["id"], winner)
+
+    def test_two_processes_racing_on_a_many_task_desk_both_succeed(self):
+        context = multiprocessing.get_context("spawn")
+        self.desk("racer", "codex")
+        pensieve.allow_many_tasks(self.conn, "racer", now=NOW)
+        first, second = self.task("racer")["id"], self.task("racer")["id"]
+        barrier = context.Barrier(2)
+        results = context.Queue()
+        workers = [context.Process(target=_race_worker, args=(str(self.db_path), task_id, barrier, results))
+                   for task_id in (first, second)]
+        for worker in workers:
+            worker.start()
+        outcomes = sorted(results.get(timeout=60) for _ in workers)
+        for worker in workers:
+            worker.join(timeout=60)
+            self.assertEqual(worker.exitcode, 0)
+        self.assertEqual(outcomes, sorted([("ok", first), ("ok", second)]))
+        self.assertEqual(len(pensieve.list_tasks(self.conn, desk="racer", status="active")), 2)
 
 
 if __name__ == "__main__":
@@ -389,6 +498,58 @@ class WorktreeTests(StoreCase):
             with self.subTest(path=path), self.assertRaises(ValidationError):
                 pensieve.set_worktree(self.conn, task["id"], path)
         self.assertIsNone(pensieve.get_task(self.conn, task["id"])["worktree"])
+
+    def test_a_review_branch_is_set_on_an_active_task_moves_and_is_never_cleared(self):
+        queued = self.task()
+        with self.assertRaisesRegex(ConflictError, "active task"):
+            pensieve.set_review_branch(self.conn, queued["id"], "fix/site")
+        task = self.started()
+        self.assertIsNone(task["review_branch"])
+        self.assertEqual(pensieve.set_review_branch(self.conn, task["id"], "fix/site")["review_branch"], "fix/site")
+        self.assertEqual(pensieve.set_review_branch(self.conn, task["id"], "fix/site")["review_branch"], "fix/site")
+        self.assertEqual(pensieve.set_review_branch(self.conn, task["id"], "fix/renamed")["review_branch"],
+                         "fix/renamed")
+        for bad in ("", "-x", "a..b", "a b", "x" * 256, None, "fix/\n"):
+            with self.subTest(branch=bad), self.assertRaises(ValidationError):
+                pensieve.set_review_branch(self.conn, task["id"], bad)
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "never cleared"):
+            self.conn.execute("UPDATE tasks SET review_branch = NULL WHERE id = ?", (task["id"],))
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "CHECK"):
+            self.conn.execute("UPDATE tasks SET review_branch = 'Upper case' WHERE id = ?", (task["id"],))
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "set on an active task"):
+            self.conn.execute("INSERT INTO tasks(id, desk, title, status, created_at, review_branch)"
+                              " VALUES ('tk_00000000000000aa', 'alpha', 'x', 'queued', 1, 'main')")
+        pensieve.mark_awaiting_close(self.conn, task["id"])
+        with self.assertRaisesRegex(ConflictError, "active task"):
+            pensieve.set_review_branch(self.conn, task["id"], "fix/other")
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "set on an active task"):
+            self.conn.execute("UPDATE tasks SET review_branch = 'fix/other' WHERE id = ?", (task["id"],))
+        self.assertEqual(pensieve.get_task(self.conn, task["id"])["review_branch"], "fix/renamed")
+
+    def test_a_review_branch_is_any_name_git_takes_in_printable_ascii(self):
+        task = self.started()
+        for good in ("Cris-Ryan-Tan/do-the-@pr-feedback-skill.-i-think-some-of-the-rec", "Fix-Upper", "a@b", "@",
+                     "fix/moody-notes", "x/HEAD", "v1.2.3", "!#$%&'()+,;<=>`{|}\"", "x" * 255):
+            with self.subTest(branch=good):
+                self.assertEqual(pensieve.set_review_branch(self.conn, task["id"], good)["review_branch"], good)
+        for bad in ("", None, b"main", 7, "a b", " main", "main ", "a\tb", "a\x01b", "a\x7fb", "caf\u00e9", "x" * 256,
+                    "a..b", "x.lock", "x.lock/y", "-x", "HEAD", "/x", "x/", "x.", "a//b", ".x", "x/.y", "a@{b",
+                    "@{-1}", "a~b", "a^b", "a:b", "a?b", "a*b", "a[b", "a\\b"):
+            with self.subTest(branch=bad), self.assertRaisesRegex(ValidationError, "a name git takes as a branch"):
+                pensieve.set_review_branch(self.conn, task["id"], bad)
+        self.assertEqual(pensieve.get_task(self.conn, task["id"])["review_branch"], "x" * 255)
+
+    def test_the_review_branch_check_holds_raw_writes_to_255_bytes_of_printable_ascii(self):
+        task = self.started()
+        for good in ("Cris-Ryan-Tan/do-the-@pr-feedback-skill.-i-think-some-of-the-rec", "!", "~" * 255):
+            with self.subTest(branch=good):
+                self.conn.execute("UPDATE tasks SET review_branch = ? WHERE id = ?", (good, task["id"]))
+                self.assertEqual(pensieve.get_task(self.conn, task["id"])["review_branch"], good)
+        # A blob is refused as a STRICT column's type where SQLite has them, and by the CHECK's typeof otherwise.
+        for bad in ("", "a b", "a\tb", "a\nb", "a\x00b", "a\x7fb", "caf\u00e9", "x" * 256, b"main"):
+            with self.subTest(branch=bad), self.assertRaisesRegex(sqlite3.IntegrityError, "CHECK|BLOB"):
+                self.conn.execute("UPDATE tasks SET review_branch = ? WHERE id = ?", (bad, task["id"]))
+        self.assertEqual(pensieve.get_task(self.conn, task["id"])["review_branch"], "~" * 255)
 
     def test_a_task_awaiting_close_or_closed_takes_no_worktree(self):
         task = self.task()

@@ -17,10 +17,12 @@ from __future__ import annotations
 import json
 import os
 import re
+import stat
 import subprocess
 from typing import Optional
 
-from hogwarts import ids
+from hogwarts import ids, pensieve
+from hogwarts.errors import ValidationError
 
 from fleet import common, config, safefs
 from fleet.safefs import FleetError
@@ -75,7 +77,18 @@ def check_repo_dir(path: object) -> str:
     return path
 
 
+def same_checkout(first: str, second: str) -> bool:
+    """Whether two checkout paths name one real folder, by device and inode rather than by spelling, since a
+    case-insensitive disk takes one checkout under paths that differ only in letter case."""
+    try:
+        one, two = os.lstat(first), os.lstat(second)
+    except OSError:
+        return False
+    return stat.S_ISDIR(one.st_mode) and stat.S_ISDIR(two.st_mode) and os.path.samestat(one, two)
+
+
 def check_branch(name: object) -> str:
+    """A branch the fleet makes and pushes: lowercase, plain and free of fleet words, since teammates see it."""
     if not isinstance(name, str) or BRANCH.fullmatch(name) is None or ".." in name \
             or name.endswith((".lock", "/", ".")) or "//" in name or "/." in name:
         raise FleetError("branch names use lowercase letters, digits, dot, dash, underscore and slash")
@@ -83,6 +96,36 @@ def check_branch(name: object) -> str:
     if fleet_word:
         raise FleetError(f"the branch name contains a fleet word ({fleet_word})")
     return name
+
+
+def check_lineage_branch(git_dir: str, name: object) -> str:
+    """A branch Ryan made, which an own-session review records as its lineage: any name git itself takes as a
+    branch (git check-ref-format --branch, run here after the store's own rule), in 1 to 255 bytes of
+    printable ASCII with no whitespace. Capitals and fleet words are fine, since the name is only compared,
+    never pushed or shown to teammates. The refusal never repeats the name."""
+    try:
+        name = pensieve.check_review_branch(name)
+    except ValidationError as exc:
+        raise FleetError(str(exc)) from None
+    try:
+        out = git(["check-ref-format", "--branch", name], git_dir)
+    except FleetError:
+        raise FleetError("git does not take it as a branch name") from None
+    if out != name + "\n":  # --branch expands a shorthand such as @{-1}, so the name must come back unchanged
+        raise FleetError("git reads it as a shorthand for another branch, not as a branch name")
+    return name
+
+
+def current_branch(git_dir: str) -> Optional[str]:
+    """The branch a checkout has out, unchecked, or None when its HEAD is detached."""
+    ref = git(["symbolic-ref", "--quiet", "HEAD"], git_dir, check=False).strip()
+    return ref[len("refs/heads/"):] if ref.startswith("refs/heads/") and len(ref) > len("refs/heads/") else None
+
+
+def has_branch(git_dir: str, name: str) -> bool:
+    """Whether the checkout has exactly this local branch."""
+    out = git(["for-each-ref", "--format=%(refname)", f"refs/heads/{name}"], git_dir, check=False)
+    return f"refs/heads/{name}" in out.splitlines()
 
 
 def check_ref(name: object, label: str = "ref") -> str:
@@ -120,9 +163,24 @@ def child_env() -> dict:
     }
 
 
+# Ancestry is read from the commits as written: replace refs and an info/grafts file can hide a parent link
+# without changing any sha, and a commit-graph file can answer for a commit that is gone.
+TRUE_HISTORY_FLAGS = ("--no-replace-objects", "-c", "core.commitGraph=false")
+TRUE_HISTORY_ENV = {"GIT_NO_REPLACE_OBJECTS": "1", "GIT_GRAFT_FILE": "/dev/null/no-grafts"}
+
+
 def git(args: list, git_dir: Optional[str], work_tree: Optional[str] = None, check: bool = True,
         timeout: Optional[int] = None, folder: Optional[str] = None) -> str:
     """Run one git command with the hardening flags. Returns stdout. Never uses a shell."""
+    code, out, err = _run(args, git_dir, work_tree, timeout, folder)
+    if check and code != 0:
+        raise FleetError(f"git {args[0]} failed: {common.one_line(err, 300)}")
+    return out
+
+
+def _run(args: list, git_dir: Optional[str], work_tree: Optional[str], timeout: Optional[int],
+         folder: Optional[str], true_history: bool = False) -> tuple:
+    """(exit code, stdout, stderr) of one hardened git command. true_history reads commits as written."""
     if git_dir is not None:
         argv = [config.GIT_BIN, "--git-dir", git_dir]
         if work_tree is not None:
@@ -132,17 +190,36 @@ def git(args: list, git_dir: Optional[str], work_tree: Optional[str] = None, che
         argv, cwd = [config.GIT_BIN, "-C", folder], folder
     else:
         raise FleetError("git needs a git folder or a working folder")
-    argv += [*HARDENING, *args]
+    argv += [*HARDENING, *(TRUE_HISTORY_FLAGS if true_history else ()), *args]
+    env = {**child_env(), **(TRUE_HISTORY_ENV if true_history else {})}
     try:
-        done = subprocess.run(argv, cwd=cwd, env=child_env(), stdin=subprocess.DEVNULL,
+        done = subprocess.run(argv, cwd=cwd, env=env, stdin=subprocess.DEVNULL,
                               capture_output=True, timeout=timeout or config.GIT_TIMEOUT_SECONDS, check=False)
     except subprocess.TimeoutExpired:
         raise FleetError(f"git {args[0]} timed out") from None
-    out = done.stdout.decode("utf-8", "replace")[:OUTPUT_MAX_CHARS]
-    if check and done.returncode != 0:
-        err = common.one_line(done.stderr.decode("utf-8", "replace"), 300)
-        raise FleetError(f"git {args[0]} failed: {err}")
-    return out
+    return (done.returncode, done.stdout.decode("utf-8", "replace")[:OUTPUT_MAX_CHARS],
+            done.stderr.decode("utf-8", "replace"))
+
+
+def is_ancestor(git_dir: str, ancestor: str, sha: str) -> Optional[bool]:
+    """Whether commit ancestor is sha or one of its ancestors, by the parents its commits really name (no
+    replace refs or grafts), or None when this checkout cannot tell: it is shallow, so its history may stop
+    short of ancestor, or git failed. A commit missing from the object store is no ancestor only when every
+    commit sha builds on is there, since a clone cut short with its shallow file removed says it is full."""
+    if SHA.fullmatch(ancestor) is None or SHA.fullmatch(sha) is None:
+        raise FleetError("an ancestry check needs two full commit shas")
+    shallow = git(["rev-parse", "--is-shallow-repository"], git_dir).strip()
+    if shallow not in ("true", "false"):
+        return None
+    if _run(["cat-file", "-e", f"{ancestor}^{{commit}}"], git_dir, None, None, None, true_history=True)[0] != 0:
+        if shallow == "true":
+            return None
+        walked = _run(["rev-list", "--count", sha], git_dir, None, None, None, true_history=True)[0]
+        return False if walked == 0 else None
+    code = _run(["merge-base", "--is-ancestor", ancestor, sha], git_dir, None, None, None, true_history=True)[0]
+    if code == 0:
+        return True
+    return False if code == 1 and shallow == "false" else None
 
 
 def git_in(folder: str, args: list, check: bool = True, timeout: int = 10) -> str:
@@ -292,6 +369,12 @@ def find_record(worktree_path: Optional[str]) -> Optional[dict]:
         return read_record(record_name(worktree_path))
     except safefs.Missing:
         return None
+
+
+def drop_record(name: str) -> None:
+    """Remove the office record of a worktree that was taken back before any task held it."""
+    with safefs.opened_dir(config.OFFICE_ROOT, RECORD_DIR) as fd:
+        os.unlink(f"{safefs.check_component(name)}.json", dir_fd=fd)
 
 
 def write_record(record: dict) -> dict:

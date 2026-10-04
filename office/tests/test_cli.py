@@ -132,6 +132,33 @@ class CommandTests(CliCase):
         self.assertEqual(self.ok("task", "show", task["id"])["status"], "closed")
         self.assertEqual(len(self.ok("task", "list", "--desk", "alpha", "--status", "closed")), 1)
 
+    def test_desk_many_tasks_lets_a_desk_hold_many_active_tasks(self):
+        self.assertEqual({desk["name"]: desk["many_tasks"] for desk in self.ok("desk", "list")}, {"alpha": 0, "beta": 0})
+        granted = self.ok("desk", "many-tasks", "beta")
+        self.assertEqual((granted["name"], granted["many_tasks"], granted["created"]), ("beta", 1, True))
+        self.assertFalse(self.ok("desk", "many-tasks", "beta")["created"])
+        self.assertEqual({desk["name"]: desk["many_tasks"] for desk in self.ok("desk", "list")}, {"alpha": 0, "beta": 1})
+        self.fails(4, "NotFoundError", "desk", "many-tasks", "gamma")
+        for _ in range(2):
+            task = self.ok("task", "create", "--desk", "beta", "--title", "ship it")
+            self.assertEqual(self.ok("task", "start", task["id"])["status"], "active")
+        self.assertEqual(len(self.ok("task", "list", "--desk", "beta", "--status", "active")), 2)
+
+    def test_task_list_open_and_task_board(self):
+        queued = self.ok("task", "create", "--desk", "alpha", "--title", "later")
+        active = self.ok("task", "create", "--desk", "alpha", "--title", "now")
+        self.ok("task", "start", active["id"])
+        closed = self.ok("task", "create", "--desk", "alpha", "--title", "dropped")
+        self.ok("task", "close", closed["id"], "--reason", "abandoned")
+        self.assertEqual([task["id"] for task in self.ok("task", "list", "--desk", "alpha", "--open")],
+                         [queued["id"], active["id"]])
+        self.fails(2, "ValidationError", "task", "list", "--open", "--status", "active")
+        board = self.ok("task", "board")
+        self.assertEqual((board["tasks"], [row["desk"] for row in board["desks"]]), (1, ["alpha"]))
+        [task] = board["desks"][0]["tasks"]
+        self.assertEqual((task["id"], task["state"], task["running"]), (active["id"], "working", False))
+        self.assertEqual(self.ok("task", "board", "--desk", "beta")["tasks"], 0)
+
     def test_task_create_takes_a_minted_id_and_its_own_intent_path(self):
         task_id = "tk_0123456789abcdef"
         intent = f"/Users/crisryantan/hogwarts/tasks/{task_id}/TASK.md"

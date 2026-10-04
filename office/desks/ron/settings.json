@@ -4,6 +4,7 @@
       "Read(~/hogwarts/CLAUDE.md)",
       "Read(~/hogwarts/desks/ron/**)",
       "Edit(~/hogwarts/desks/ron/scratchpad.md)",
+      "Edit(~/hogwarts/desks/ron/pads/**)",
       "Edit(~/hogwarts/desks/ron/outbox/**)",
       "Read(~/hogwarts/tasks/**)",
       "Bash(gh pr view *)",

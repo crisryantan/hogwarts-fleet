@@ -55,7 +55,41 @@ def get_desk(conn: Conn, name: str) -> dict:
 
 
 def list_desks(conn: Conn) -> list[dict]:
-    return db.fetch_all(conn, "SELECT * FROM desks ORDER BY name")
+    """Every desk, with many_tasks 1 for a desk that may hold many active tasks at once."""
+    return db.fetch_all(conn, "SELECT desks.*, many_task_desks.desk IS NOT NULL AS many_tasks FROM desks"
+                              " LEFT JOIN many_task_desks ON many_task_desks.desk = desks.name ORDER BY desks.name")
+
+
+def allow_many_tasks(conn: Conn, desk: str, now: Optional[int] = None) -> dict:
+    """Let a desk hold many active tasks at once. One way: a desk never goes back to one task at a time,
+    and a second call changes nothing. McGonagall, Snape, Dumbledore, Ryan and the scripts are refused."""
+    desk = ids.check("desk", desk)
+    if desk in RESERVED_DESKS:
+        raise ValidationError("desk name is reserved")
+    ts = ids.stamp(now)
+    with db.transaction(conn):
+        row = get_desk(conn, desk)
+        if desk in db.SINGLE_TASK_DESKS or row["family"] in db.SINGLE_TASK_FAMILIES:
+            raise ValidationError(f"{desk} keeps one active task at a time")
+        created = not takes_many_tasks(conn, desk)
+        if created:
+            conn.execute("INSERT INTO many_task_desks(desk, granted_at) VALUES (?, ?)", (desk, ts))
+    return {**get_desk(conn, desk), "many_tasks": 1, "created": created}
+
+
+def takes_many_tasks(conn: Conn, desk: str) -> bool:
+    return db.fetch_one(conn, "SELECT 1 AS found FROM many_task_desks WHERE desk = ?",
+                        (ids.check("desk", desk),)) is not None
+
+
+def blocking_task(conn: Conn, desk: str) -> Optional[dict]:
+    """The active task that stops a single desk from starting another, or None. Always None for a desk
+    that takes many tasks."""
+    desk = ids.check("desk", desk)
+    if takes_many_tasks(conn, desk):
+        return None
+    return db.fetch_one(conn, "SELECT * FROM tasks WHERE desk = ? AND status = 'active' ORDER BY rowid LIMIT 1",
+                        (desk,))
 
 
 # Tasks
@@ -113,9 +147,7 @@ def start_task(conn: Conn, task_id: str, now: Optional[int] = None) -> dict:
             raise ConflictError("only queued tasks can start")
         if closed_ancestors(conn, task_id):
             raise ConflictError("a parent task is closed, so this task can no longer start")
-        busy = db.fetch_one(
-            conn, "SELECT id FROM tasks WHERE desk = ? AND status = 'active'", (task["desk"],)
-        )
+        busy = blocking_task(conn, task["desk"])
         if busy is not None:
             raise ConflictError(f"desk already has an active task {busy['id']}")
         if task["session_id"] is not None and db.fetch_one(
@@ -145,6 +177,38 @@ def set_worktree(conn: Conn, task_id: str, worktree: str) -> dict:
         if task["worktree"] is not None:
             raise ConflictError("this task already has a different worktree")
         conn.execute("UPDATE tasks SET worktree = ? WHERE id = ? AND worktree IS NULL", (worktree, task_id))
+    return get_task(conn, task_id)
+
+
+# Anything outside printable ASCII (whitespace and control characters included), and what git's own ref rules
+# never allow anywhere in a name: ~ ^ : ? * [ \, two dots, @{ and an empty path part.
+REVIEW_BRANCH_FORBIDDEN = re.compile(r"[^!-~]|[~^:?*\[\\]|\.\.|@\{|//")
+
+
+def check_review_branch(branch: object) -> str:
+    """A branch an own-session review records: a name git itself takes as a branch (git check-ref-format
+    --branch), in 1 to REVIEW_BRANCH_MAX bytes of printable ASCII with no whitespace. Letter case and fleet words
+    are not checked, since the name is Ryan's own branch and is only compared, never pushed."""
+    if (not isinstance(branch, str) or not 0 < len(branch) <= db.REVIEW_BRANCH_MAX
+            or REVIEW_BRANCH_FORBIDDEN.search(branch) is not None or branch == "HEAD"
+            or branch.startswith(("-", "/")) or branch.endswith(("/", "."))
+            or any(part.startswith(".") or part.endswith(".lock") for part in branch.split("/"))):
+        raise ValidationError(f"a review branch is a name git takes as a branch, in 1 to {db.REVIEW_BRANCH_MAX}"
+                              " bytes of printable ASCII with no whitespace")
+    return branch
+
+
+def set_review_branch(conn: Conn, task_id: str, branch: str) -> dict:
+    """Record the branch an active own-session review task follows, so a fix commit on that branch goes on
+    this task. It only moves to another branch, never back to none, and only while the task is active."""
+    task_id = ids.check("task", task_id)
+    branch = check_review_branch(branch)
+    with db.transaction(conn):
+        task = get_task(conn, task_id)
+        if task["status"] != "active":
+            raise ConflictError("a review branch is set on an active task")
+        if task["review_branch"] != branch:
+            conn.execute("UPDATE tasks SET review_branch = ? WHERE id = ?", (branch, task_id))
     return get_task(conn, task_id)
 
 
@@ -212,6 +276,17 @@ def get_commit(conn: Conn, repo: str, sha: str) -> Optional[dict]:
     )
 
 
+def commits_with_sha(conn: Conn, sha: str) -> list[dict]:
+    """Every recorded commit with this sha, in any repository, in the order they were recorded."""
+    return db.fetch_all(conn, "SELECT * FROM task_commits WHERE sha = ? ORDER BY rowid", (ids.check("sha", sha),))
+
+
+def task_commits(conn: Conn, task_id: str) -> list[dict]:
+    """The commits recorded on a task, in the order they were recorded."""
+    return db.fetch_all(conn, "SELECT * FROM task_commits WHERE task_id = ? ORDER BY rowid",
+                        (ids.check("task", task_id),))
+
+
 def close_task(conn: Conn, task_id: str, reason: str, token: Optional[str] = None,
                now: Optional[int] = None) -> dict:
     # owlery imports this module, so import it here to avoid a cycle.
@@ -272,14 +347,19 @@ def _requests_for_task(conn: Conn, task_id: str) -> list[str]:
     return [row["id"] for row in rows]
 
 
-def list_tasks(conn: Conn, desk: Optional[str] = None, status: Optional[str] = None) -> list[dict]:
+def list_tasks(conn: Conn, desk: Optional[str] = None, status: Optional[str] = None,
+               open_only: bool = False) -> list[dict]:
+    """Tasks oldest first, optionally of one desk, and either of one status or open (queued, active or
+    awaiting close)."""
     desk = ids.optional("desk", desk)
     status = None if status is None else ids.check_enum(status, db.TASK_STATUSES, "task status")
+    if open_only and status is not None:
+        raise ValidationError("pass a status or open, not both")
     return db.fetch_all(
         conn,
         "SELECT * FROM tasks WHERE (? IS NULL OR desk = ?) AND (? IS NULL OR status = ?)"
-        " ORDER BY created_at, rowid",
-        (desk, desk, status, status),
+        " AND (? = 0 OR status IN ('queued', 'active', 'awaiting_close')) ORDER BY created_at, rowid",
+        (desk, desk, status, status, 1 if open_only else 0),
     )
 
 

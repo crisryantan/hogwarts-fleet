@@ -4,6 +4,7 @@
       "Read(~/hogwarts/CLAUDE.md)",
       "Read(~/hogwarts/desks/hermione/**)",
       "Edit(~/hogwarts/desks/hermione/scratchpad.md)",
+      "Edit(~/hogwarts/desks/hermione/pads/**)",
       "Edit(~/hogwarts/desks/hermione/outbox/**)",
       "Read(~/hogwarts/tasks/**)",
       "Read(~/hogwarts/worktrees/**)",

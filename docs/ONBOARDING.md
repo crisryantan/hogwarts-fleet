@@ -366,7 +366,7 @@ To take the job off again: `launchctl bootout gui/$(id -u)/com.hogwarts.ollivand
 
 ### 5.6 The live view
 
-Desks run short, one owl at a time, so you watch them instead of sitting inside them. The feeds are read-only, and herdr is optional.
+Desks run short, one owl at a time per desk, so you watch them instead of sitting inside them. A desk's other tasks wait between runs without blocking it. The feeds are read-only, and herdr is optional.
 
 1. Try a feed first. It works without herdr and prints a line when anything happens. Press Ctrl+C to stop it.
 

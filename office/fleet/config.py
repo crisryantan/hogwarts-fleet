@@ -26,7 +26,7 @@ CHILD_PATH = "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin"
 GITHUB_ACCOUNT = "<github-account>"
 WATCHED_REPOS = ("<repos-to-watch>",)
 
-# Desks with a folder in the castle (desks/<name>/inbox, outbox, scratchpad.md).
+# Desks with a folder in the castle (desks/<name>/inbox, outbox, scratchpad.md, and pads/ for TASK_PAD_DESKS).
 CASTLE_DESKS = ("mcgonagall", "harry", "hermione", "moody", "ron", "snape", "portrait")
 # Desks a person drives. The Owl Post rings them with a routine event.
 # Snape is a subagent that Ryan summons, so owls to him are refused.
@@ -64,6 +64,11 @@ CODEX_OUTBOX_WRITERS = ("harry",)
 LINKABLE_DEPS = ("node_modules",)
 # Desks that build in a worktree. The Owl Post starts them only once their task has one.
 WORKTREE_DESKS = ("harry",)
+# Desks that keep one pad per task, castle desks/<desk>/pads/<key>.md, as their Checkpoint for a run. Every
+# review round of one author task shares that task's pad. Only a Claude desk can write its own folder. Harry's per-task memory is the CHECKPOINT in his handoff, and Moody's
+# is review-latest.md in the task folder.
+TASK_PAD_DESKS = ("hermione", "ron")
+PADS_DIR = "pads"
 # Reviewer for each author family. A pass needs the other family.
 REVIEWER_FOR_FAMILY = {"codex": "hermione", "claude": "moody"}
 # A Codex desk with no worktree of its own runs here, never in its desk folder.
@@ -110,6 +115,9 @@ STDERR_PLAN_LIMIT_PATTERNS = (
 # A run the Owl Post starts waits this long for another run of the same desk to finish. A review never waits.
 DESK_LOCK_WAIT_SECONDS = 1860
 RUN_TIMEOUT_SECONDS = 1800
+# A launch with no usage yet counts as running for this long, so a run killed before it recorded usage
+# stops showing as running once its timeout has surely passed.
+RUNNING_WINDOW_SECONDS = RUN_TIMEOUT_SECONDS + 120
 ENABLED_MARKER = "enabled"
 CLAUDE_SETTINGS_FILE = "settings.json"
 CODEX_PROFILE_FILE = "codex.toml"

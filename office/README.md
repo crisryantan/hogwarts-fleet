@@ -95,7 +95,7 @@ The only file the CLI reads is the ops file for `castle fact apply --file PATH`.
 - CLI output is `json.dumps(ensure_ascii=True)`. List views never include owl bodies.
 - Close tokens and owl bodies never travel on argv. They come from stdin only.
 
-## Schema summary (version 6)
+## Schema summary (version 7)
 
 All tables are STRICT when SQLite supports it. Timestamps are integer unix seconds.
 
@@ -103,7 +103,8 @@ All tables are STRICT when SQLite supports it. Timestamps are integer unix secon
 | --- | --- |
 | `schema_version` | Applied migrations. |
 | `desks` | Name, family (`claude`, `codex`, `human`, `script`), role, model. Desks are immutable. `fleet` is reserved. |
-| `tasks` | Status `queued`, `active`, `awaiting_close`, `closed`. One active task per desk and one per session (partial unique indexes). Tasks are inserted queued. A closed task never reopens (trigger). |
+| `tasks` | Status `queued`, `active`, `awaiting_close`, `closed`. One active task per session (a partial unique index), and one per desk unless the desk is in `many_task_desks` (a trigger, so a raw write is refused too). A task keeps its desk (trigger), so no write moves an active task onto a single desk. Tasks are inserted queued. A closed task never reopens (trigger). `review_branch` (version 7) is the branch an own-session review task follows: set only on an active task and never cleared (triggers), NULL on rows from before version 7. It is Ryan's own branch, so any name git takes as a branch counts, capitals included, held to 1 to 255 bytes of printable ASCII with no whitespace (a CHECK); the fleet's lowercase, fleet-word-free rule is only for the branches it makes and pushes. |
+| `many_task_desks` | The desks that may hold many active tasks at once, with when each was granted. Version 7 grants `harry`, `hermione`, `moody`, `ron` and `ryan-claude-1` on a store that already has them, and `castle desk many-tasks` grants one. `mcgonagall`, `snape`, `portrait` and every human or script desk are refused, by the API and a trigger. One way: rows are never changed or deleted. |
 | `task_commits` | The repo and sha a task produced. One task per commit. Immutable. |
 | `events` | Episodic events. Verdict `routine` or `headmaster`. Optional unique `dedupe_key`. |
 | `sessions` | One row per agent session, with token counts. |
@@ -120,7 +121,7 @@ All tables are STRICT when SQLite supports it. Timestamps are integer unix secon
 | `cap_bumps` | One row each time you lift a desk's runs or spend cap with `castle desk cap`. It lasts until the next cap reset. Immutable. |
 | `cap_hits` | One row each time a fleet cap refuses a run, or a vendor's own limit stops one. `cap_source` says which: `fleet`, `claude_plan` or `codex_plan`. Immutable. |
 | `review_rounds` | One row per review request of an author task, with its round number, whether a newer commit superseded it, and the review it recorded. That review is stored and tied to its round in one step and never changes, so a round with a verdict counts even if publishing the review afterwards failed. |
-| `run_launches` | One row per headless run, written before its process starts, so the run counts toward the daily run cap even if it is killed before it records usage. Its usage is the `metrics` row tied to it once it ends, set once. Never deleted. |
+| `run_launches` | One row per headless run, written before its process starts, so the run counts toward the daily run cap even if it is killed before it records usage. Its usage is the `metrics` row tied to it once it ends, set once. `task_id` is the desk's own task the run was for, when it had one, and never changes. Never deleted. |
 | `round_allowances` | One row each time you allow another review round with `castle task allow-round`. Immutable. |
 | `model_lines` | How you filed a model name: `frontier`, `workhorse`, `fast` or `ignore`. The latest row per name wins. Immutable. |
 | `model_catalog` | The model names each family offered at Ollivander's last look, with whether the catalog listed each, the tier it was filed under then and when it retires. Each look gets the family's next look number, and the latest look is the one with the highest number, so two looks in the same second never mix. A row's look number only moves forward. `castle desk model --approve`, a pin and a trial revert check against the latest look. |
@@ -144,8 +145,8 @@ Every function takes a connection from `db.connect(path)` as its first argument.
 
 - `hogwarts.db`: `connect(path, create=True)`, `connect_readonly(path)`, `migrate(conn)`, `pending_statements(conn, statements)`, `schema_version(conn)`, `transaction(conn)`, `snapshot(conn)`, `doctor(path, code_root=None)`, `stray_bytecode(root)`, `DEFAULT_DB`.
 - `hogwarts.pensieve`
-  - Desks: `add_desk`, `get_desk`, `list_desks`.
-  - Tasks: `create_task(desk, title, intent_path=None, parent_task_id=None, request_id=None, session_id=None, worktree=None, task_id=None)`, `start_task`, `mark_awaiting_close(task, repo=None, sha=None)`, `record_commit`, `get_commit`, `close_task`, `closed_ancestors`, `get_task`, `list_tasks`.
+  - Desks: `add_desk`, `get_desk`, `list_desks` (with `many_tasks`), `allow_many_tasks(desk)`, `takes_many_tasks(desk)`, `blocking_task(desk)`.
+  - Tasks: `create_task(desk, title, intent_path=None, parent_task_id=None, request_id=None, session_id=None, worktree=None, task_id=None)`, `start_task`, `mark_awaiting_close(task, repo=None, sha=None)`, `record_commit`, `get_commit`, `task_commits`, `check_review_branch(branch)`, `set_review_branch(task, branch)`, `close_task`, `closed_ancestors`, `get_task`, `list_tasks(desk=None, status=None, open_only=False)`.
   - Events: `add_event`, `drain(max_chars=1500)`, `ack(event_id)`.
   - Memory: `record_session`, `get_session`, `add_extract`, `add_keypoint`, `find(query, limit)`, `fts_query`, `fts_phrases`, `scrub(text)`.
   - Facts: `add_fact(scope, text, tier, source, expires_at=None, subject_key=None, valid_from=None, lookup=None)` (the same function as `facts.add_fact`), `touch`, `decay`, `archive_stale`, `archive`, `list_facts(scope=None, include_archived=False, include_closed=False)` (open rows, plus archived or closed rows when asked), `context_facts(desk)` (current fleet and desk facts).
@@ -154,7 +155,7 @@ Every function takes a connection from `db.connect(path)` as its first argument.
   - Writes: `add_fact`, `supersede(scope, subject_key, text, source, tier="aging", valid_from=None, lookup=None, expires_at=None)`, `withdraw(fact_id, desk=None)`, `expire()`, `set_key(fact_id, subject_key)`, `apply_ops(ops)`.
   - Reads: `current_facts(scope=None)`, `find_facts(query, scope=None, include_history=False, limit=10)`, `as_of_world(t, scope=None)`, `as_of_belief(t, scope=None)`, `history(scope, subject_key)`, `contradiction_candidates(since, limit_per_fact=3)`.
   - Lint: `VOLATILE_PATTERNS`, `volatile_match(text)`, `LOOKUP_COMMAND`.
-- `hogwarts.capacity`: `day_bounds(now, reset_offset)`, `add_bump`, `active_bumps`, `list_bumps`, `cap_status`, `record_cap_hit`, `list_cap_hits`, `waiting_requests`, `record_launch`, `record_launch_usage`, `list_launches`, `open_review_round`, `record_round_verdict`, `review_rounds`, `stranded_rounds`, `allow_round`.
+- `hogwarts.capacity`: `day_bounds(now, reset_offset)`, `add_bump`, `active_bumps`, `list_bumps`, `cap_status`, `record_cap_hit`, `list_cap_hits`, `waiting_requests`, `record_launch(desk, run_id, model, task_id=None)`, `record_launch_usage`, `list_launches`, `open_review_round`, `record_round_verdict`, `review_rounds`, `stranded_rounds`, `allow_round`, `needs_allowance(task, max_rounds=3)`, `review_task_ids`, `round_author(reviewer_task)`, `in_flight(now, running_window, desk=None, max_rounds=3)`.
 - `hogwarts.wands`: `classify`, `ryan_lines`, `record_catalog`, `last_catalog`, `catalog_entry`, `get_desk_model`, `list_desk_models`, `set_need`, `apply_model`, `set_pending`, `clear_pending`, `approve`, `pin`, `unpin`, `desk_choice`, `record_outcome`, `changes`, `base_alias`, `record_resolution`, `resolutions`, `resolved_id`, `blocked_resolution`, `blocked_resolutions`, `clear_stop`. The calls that file, pin, approve or apply a model take the fleet's `BLOCKED_MODEL_PREFIXES` and refuse a name one of them matches. Pin, approve, apply, a pending pick and a trial's revert also refuse an alias that ever ran as a full id one of them matches. A labelled alias such as `opus[1m]` shares the plain alias's resolutions. `approve` also refuses a pick that the latest stored catalog no longer lists, hides, files under another tier or shows retiring within 30 days. `pin` on the desk's current model ends its trial, and its result carries a `warning` when the latest catalog hides the model or shows it retiring soon. `record_outcome` never reverts a desk pinned since its switch, nor, while anything is blocked, onto no model at all, nor onto a model filed as ignore or one the latest catalog no longer lists, hides or shows retiring within 30 days.
 - `hogwarts.watch` (read only, for a connection from `db.connect_readonly`): `marks`, `owls_after`, `headmaster_events_after`, `metrics_after`, `run_recorded`.
 - `hogwarts.owlery`
@@ -168,7 +169,8 @@ Every function takes a connection from `db.connect(path)` as its first argument.
 
 - Writes run in `BEGIN IMMEDIATE` through `db.transaction`. A write helper nests inside another write transaction as a savepoint, so a nested helper that fails undoes its own changes even when the caller catches the error and commits. It refuses with `StoreError` inside a `snapshot` or a transaction the caller opened, and so does `consume`.
 - `create_task` takes an optional `task_id`, so a fleet script can mint the id (`tk_` and 16 lowercase hex digits), write `tasks/<task_id>/TASK.md`, then register the task. An id that is already taken raises `ConflictError`. An `intent_path` needs that `task_id` and must be exactly `/Users/crisryantan/hogwarts/tasks/<task_id>/TASK.md`. Without a `task_id` the store mints one and the task has no intent path.
-- `start_task` only starts a queued task whose ancestors are all open. A desk or session that already has an active task raises `ConflictError`. `mark_awaiting_close` frees the desk and can record the head commit.
+- `start_task` only starts a queued task whose ancestors are all open. A session that already has an active task raises `ConflictError`, and so does a single desk (`blocking_task` names the task in the way). A desk granted many tasks with `allow_many_tasks` starts any number. `allow_many_tasks` refuses `mcgonagall`, `snape`, `portrait` and every human or script desk with `ValidationError`. `mark_awaiting_close` moves the task out of `active`, so a single desk can start its next one, and can record the head commit.
+- `in_flight` lists every active or awaiting-close author task by desk, and any other task with a run going for it (a queued task whose ordinary request run Owl Post started, shown as `running`), with its latest round, verdict, rounds used against the cap, whether it needs an allowance, whether a run is going, and its state: `awaiting close`, `HEADMASTER`, `round cap`, `CHANGES`, `review died`, `review queued`, `in review`, `running` or `working`. A reviewer's round task is folded into its author task. Running means a launch for the task or one of its rounds' reviewer tasks has no usage yet and started within `running_window`. The latest round says where a task stands even when it does not count: one with no verdict is `in review` while its run is going, and `review died` once none is or once its run ended without a verdict, so the task needs its review run again. `needs_allowance(task, max_rounds=3)` says whether a task's next round waits for `castle task allow-round`.
 - `close_task(task, "complete", token)` needs a valid close token. `abandoned` and `superseded` need none. Closing a task also closes every open descendant:
   - a started descendant closes `complete` only when its parent closed `complete`;
   - every other descendant, including any queued one, closes `superseded`.
@@ -203,7 +205,7 @@ Every function takes a connection from `db.connect(path)` as its first argument.
   - `set_key`: `fact_id`, `subject_key`;
   - `archive`: `fact_id`.
 - `purge` clears bodies of acked owls older than `body_days`. It deletes extracts whose own `created_at` is older than `extract_days`. It then runs a TRUNCATE checkpoint so purged bytes leave the `-wal` file, and reports `wal_checkpoint_busy` when that could not finish. It never touches facts, tasks, events or reviews.
-- `audit` is read only. It lists stale requests (60 minutes), owls to re-ring (30 to 120 minutes unacked), owls to escalate (120 minutes or more), owls never delivered after 30 minutes, active tasks older than 8 hours, tasks awaiting close for 24 hours since they started, queued tasks under a closed parent, and review passes whose task is missing. With `escalate=True` it adds headmaster events with dedupe keys, so repeating it adds nothing.
+- `audit` is read only. It lists stale requests (60 minutes), owls to re-ring (30 to 120 minutes unacked), owls to escalate (120 minutes or more), owls never delivered after 30 minutes, active tasks older than 8 hours (on a many-task desk this includes a task waiting for a fix round), tasks awaiting close for 24 hours since they started, queued tasks under a closed parent, and review passes whose task is missing. With `escalate=True` it adds headmaster events with dedupe keys, so repeating it adds nothing.
 - `has_pass(repo, sha)` finds the author through the commit's task. It is true only when that task is awaiting close or closed complete, and the latest review of the commit is a PASS from a different, PASS-capable family.
 
 ## CLI
@@ -217,6 +219,7 @@ castle desk add NAME --family F [--role R] [--model M]
 castle desk list
 castle desk cap DESK (--runs +N | --spend +X)
 castle desk caps
+castle desk many-tasks DESK
 castle desk model DESK (MODEL | --role | --approve)
 castle desk models
 castle model line NAME frontier|workhorse|fast|ignore
@@ -226,7 +229,8 @@ castle task start|show TASK
 castle task await-close TASK [--repo O/N --sha SHA]
 castle task commit TASK --repo O/N --sha SHA
 castle task close TASK --reason complete|abandoned|superseded [--token-stdin]
-castle task list [--desk D] [--status S]
+castle task list [--desk D] [--status S | --open]
+castle task board [--desk D]
 castle task allow-round TASK
 castle task rounds TASK
 castle token mint TASK [--ttl SECONDS]
@@ -281,7 +285,7 @@ Every command except `init` and `doctor` needs an existing database. `init` is s
 ]
 ```
 
-`desk cap` raises one desk's runs or spend cap until the next cap reset, which is local midnight unless `CAP_RESET_UTC_SECONDS` in the fleet's config says otherwise. `desk model DESK MODEL` pins a desk to a model of its own family, `--role` unpins it and `--approve` takes a pending costlier pick, once it has checked the pick still qualifies. `ollivander clear` removes Ollivander's stop file. The cap numbers, the review round cap and the blocklist are the fleet's settings, kept in `fleet/config.py` next to this package.
+`desk cap` raises one desk's runs or spend cap until the next cap reset, which is local midnight unless `CAP_RESET_UTC_SECONDS` in the fleet's config says otherwise. `desk model DESK MODEL` pins a desk to a model of its own family, `--role` unpins it and `--approve` takes a pending costlier pick, once it has checked the pick still qualifies. `ollivander clear` removes Ollivander's stop file. `desk many-tasks` lets a desk hold many active tasks at once, for good, and refuses McGonagall, Snape, Dumbledore, Ryan and the scripts. `task list --open` lists queued, active and awaiting-close tasks, and refuses `--status` with it. `task board` prints `in_flight`. The cap numbers, the review round cap, the running window and the blocklist are the fleet's settings, kept in `fleet/config.py` next to this package.
 
 `token mint` prints the raw token once. Never send its stdout to a log file, and never set a launchd `StandardOutPath` for a job that mints tokens.
 
@@ -318,7 +322,7 @@ Tests make their temporary directories under the constant `/private/tmp`, so `te
 | `db_adapter.py` / `dispatch_store.py` | Here |
 | --- | --- |
 | `MemoryManager` task registry | `pensieve.create_task`, `start_task`, `mark_awaiting_close`, `close_task` |
-| One open task per session or desk, `TaskConflictError` | Partial unique indexes on active tasks per desk and per session, `ConflictError`. Parallel Ryan sessions each get their own desk, for example `ryan-claude-1` and `ryan-claude-2`, both family `claude`. |
+| One open task per session or desk, `TaskConflictError` | A partial unique index on active tasks per session, and a trigger allowing one active task per desk except the desks in `many_task_desks`, `ConflictError`. `ryan-claude-1` takes many tasks, so reviews of Ryan's own sessions on different branches never block each other, while a fix commit on a branch goes on that branch's open task. |
 | `append_event` | `pensieve.add_event`, `drain`, `ack` |
 | `mem fact add`, context build | `pensieve.add_fact`, `context_facts`, `touch`, `decay`, `archive_stale`, `archive`, plus `facts.supersede`, `withdraw`, `current_facts` and the as-of reads |
 | `DispatchStore` private message bodies | `owls.body` or `owls.body_path`, returned only by `read` |

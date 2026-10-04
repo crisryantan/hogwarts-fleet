@@ -144,11 +144,11 @@ Copy the nearest sibling at every step. A new Claude reviewer starts from Hermio
    ~/.hogwarts/bin/castle desk add <name> --family claude --role "<Character> - <Job>" --model sonnet
    ```
 
-   Add the same line to `install.sh` and to `REGISTRY` in `office/tests_fleet/support.py`.
+   Add the same line to `install.sh` and to `REGISTRY` in `office/tests_fleet/support.py`. A desk that should keep many tasks in flight also needs `~/.hogwarts/bin/castle desk many-tasks <name>`, the same name in the many-tasks loop in `install.sh`, in `MANY_TASK_DESKS` in `office/tests_fleet/support.py` and in `MANY_TASK_DESKS_SEED` in `office/hogwarts/db.py`. The grant is one way. Without it the desk holds one active task at a time.
 3. **Config.** In `~/.hogwarts/fleet/config.py`, add the name to `CASTLE_DESKS`, to `ROLE_DESKS` and to `HEADLESS_CLAUDE` or `HEADLESS_CODEX`. A Claude desk also needs entries in `CLAUDE_TOOLS`, `MAX_BUDGET_USD`, `CLAUDE_READ_DIRS`, `DAILY_RUN_CAP` and `DAILY_SPEND_CAP_USD`. A Codex desk needs `CODEX_ACCESS` and `DAILY_RUN_CAP`. The fleet tests check these sets agree with each other and with the registry.
 4. **Office files.** Make `~/.hogwarts/desks/<name>/` (mode 0700) with a `BRIEF.md`, a `role.json` role card, plus `settings.json` for Claude or `codex.toml` for Codex (mode 0600). Change every path in the copied settings that names the old desk.
 5. **Fence it in.** Every Claude desk's settings must deny sandbox writes to every other desk's folder, and `run_desk` refuses to launch one that doesn't. So add `"$HOME/hogwarts/desks/<name>"` (written out in full) to `sandbox.filesystem.denyWrite` in each other desk's `settings.json`. Add `Edit(~/hogwarts/desks/<name>/**)` and `Write(~/hogwarts/desks/<name>/**)` to the deny list in `~/hogwarts/.claude/settings.json`, so McGonagall can't write there either.
-6. **Castle folder.** Make `~/hogwarts/desks/<name>/inbox` and `outbox` (mode 0700) and a `scratchpad.md` with `## Now`, `## Notes` and `## Checkpoint` headings (mode 0600).
+6. **Castle folder.** Make `~/hogwarts/desks/<name>/inbox` and `outbox` (mode 0700) and a `scratchpad.md` with `## Now`, `## Notes` and `## Checkpoint` headings (mode 0600). A Claude desk that keeps many tasks should also keep one pad per task: add it to `TASK_PAD_DESKS` in `fleet/config.py` and `Edit(~/hogwarts/desks/<name>/pads/**)` to its settings allow list. `run_desk` makes each pad at launch.
 7. **The Owl Post.** Add the new outbox to `WatchPaths` in `~/.hogwarts/launchd/com.hogwarts.owlpost.plist`, run `plutil -lint` on it, copy it to `~/Library/LaunchAgents/`, then reload it with `launchctl bootout` and `launchctl bootstrap` as in `pending/b-owlpost-launchctl.txt`.
 8. **Routing.** Tell McGonagall when to use the new desk: add a line to the Routing section of her agent file.
 9. **Avatar.** Draw an SVG that follows the style rules in `~/.hogwarts/assets/avatars/README.md`, and export transparent PNGs at 512, 128 and 64.
@@ -180,6 +180,8 @@ All in `~/.hogwarts/fleet/config.py`:
 | `RUN_TIMEOUT_SECONDS` | How long one run may take |
 | `TEMPUS_THRESHOLD` | Context size that triggers the Tempus warning |
 | `SCRATCHPAD_BUDGET_BYTES` | The scratchpad size the PreCompact hook respects |
+| `TASK_PAD_DESKS` | The desks that get one pad per task, `desks/<desk>/pads/<key>.md`: Hermione and Ron |
+| `RUNNING_WINDOW_SECONDS` | How long a launch with no usage yet counts as running in the digest and `castle task board` |
 | `DIGEST_MAX_LINES` | The length of McGonagall's startup digest |
 
 The caps guard against runaway loops, so keep them well above a normal day. A cap day resets all at once, so a desk that is busy on both sides of the reset can use up to two days' cap within hours.
@@ -216,4 +218,4 @@ The one rule that matters most: **the author and the reviewer must come from dif
 
 ## Rename the Headmaster
 
-"Ryan" appears in prose in the charter, the briefs and the agent files. Change that text freely. Two registry names also carry it: `ryan` (the human) and `ryan-claude-1` (your own Claude sessions in the castle). Those are wired into `INTERACTIVE_DESKS` and `OWN_SESSION_DESK` in `fleet/config.py`, into `install.sh` and into the fleet tests. Rename them together in your clone, then reinstall with `./install.sh --force`.
+"Ryan" appears in prose in the charter, the briefs and the agent files. Change that text freely. Two registry names also carry it: `ryan` (the human) and `ryan-claude-1` (your own Claude sessions in the castle). Those are wired into `INTERACTIVE_DESKS` and `OWN_SESSION_DESK` in `fleet/config.py`, into `install.sh`, into `MANY_TASK_DESKS_SEED` in `hogwarts/db.py` and into the fleet tests. Rename them together in your clone, then reinstall with `./install.sh --force`.

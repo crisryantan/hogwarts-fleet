@@ -206,6 +206,10 @@ add_desk owl-post --family script --role "Owl Post - Message Router"
 add_desk map --family script --role "Marauder's Map - PR Watcher"
 add_desk gringotts --family script --role "Gringotts - Backup"
 add_desk ollivander --family script --role "Ollivander - Model Keeper"
+# These desks may hold many tasks at once. Every other desk holds one active task at a time.
+for desk in harry hermione moody ron ryan-claude-1; do
+	"$CASTLE_CLI" desk many-tasks "$desk" >/dev/null
+done
 say "Created the database and registered 13 desks."
 
 # --- Tests and health check -------------------------------------------------

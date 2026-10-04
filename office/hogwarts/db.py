@@ -13,7 +13,7 @@ from .errors import ConflictError, IntegrityError, NotFoundError, StoreError, Va
 
 DEFAULT_DB = Path("/Users/crisryantan/.hogwarts/state/pensieve.db")
 CODE_ROOT = Path(os.path.abspath(__file__)).parent.parent
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 WAL_ATTEMPTS = 50
 BYTECODE_SUFFIXES = (".pyc", ".pyo", ".so")
 SIDECARS = ("-wal", "-shm")
@@ -45,6 +45,15 @@ MODEL_CHANGE_REASONS = ("initial", "role", "approved", "pin", "revert")
 # How the trial after a switch ended: a run passed, Ryan pinned the model, two failures held Ryan's own
 # choice or could not revert onto a blocked or unchecked model, or two failures reverted it.
 MODEL_TRIAL_ENDS = ("passed", "pinned", "held", "revert_blocked", "reverted")
+# Desks that may hold many active tasks at once. V7 grants them on a store that already has them; a fresh
+# install grants them with castle desk many-tasks after adding the desks.
+MANY_TASK_DESKS_SEED = ("harry", "hermione", "moody", "ron", "ryan-claude-1")
+# Desks that always hold one active task at a time: McGonagall, Snape, Dumbledore, Ryan and the scripts.
+SINGLE_TASK_DESKS = ("mcgonagall", "snape", "portrait")
+SINGLE_TASK_FAMILIES = ("human", "script")
+# The longest branch name, in bytes, an own-session review task records. The name is Ryan's own branch, any name
+# git takes in printable ASCII, so it is not held to the fleet's rule for the branches it makes and pushes.
+REVIEW_BRANCH_MAX = 255
 
 PathLike = Union[str, Path]
 
@@ -652,7 +661,70 @@ V6 = (
            "a catalog look number only moves forward"),
 )
 
-MIGRATIONS = ((1, V1), (2, V2), (3, V3), (4, V4), (5, V5), (6, V6))
+# Many tasks per desk: a desk listed in many_task_desks may hold any number of active tasks, and every other
+# desk still holds at most one. The grant is one way, and never reaches McGonagall, Snape, Dumbledore, Ryan or a
+# script. The one-per-desk index becomes a trigger that reads the
+# grant, so a raw write on a single desk is still refused, and a task keeps its desk, so no write moves an active
+# task onto a single desk either. A run launch names the task it ran for, if any. An own-session review task
+# records the branch its review lineage follows (review_branch), set only while the task is active and never
+# cleared. It is 1 to REVIEW_BRANCH_MAX bytes of printable ASCII with no whitespace (a text value, so no NUL or
+# multibyte character hides from the GLOB); pensieve and the review script hold it to git's own branch rules.
+# Rows from before V7 keep it NULL, which the review script reads as a lineage it cannot place, so such a
+# task is continued with --task or closed rather than silently left behind.
+V7 = (
+    _table(
+        """CREATE TABLE IF NOT EXISTS many_task_desks (
+        desk TEXT PRIMARY KEY NOT NULL REFERENCES desks(name),
+        granted_at INTEGER NOT NULL
+    )"""
+    ),
+    _guard("many_task_desks_immutable", "BEFORE UPDATE ON many_task_desks", "desk task modes are fixed"),
+    _guard("many_task_desks_no_delete", "BEFORE DELETE ON many_task_desks", "desk task modes are never deleted"),
+    _guard(
+        "many_task_desks_not_single",
+        "BEFORE INSERT ON many_task_desks WHEN NEW.desk IN " + _choices(SINGLE_TASK_DESKS)
+        + " OR EXISTS (SELECT 1 FROM desks WHERE name = NEW.desk AND family IN " + _choices(SINGLE_TASK_FAMILIES) + ")",
+        "this desk keeps one active task at a time",
+    ),
+    "INSERT OR IGNORE INTO many_task_desks(desk, granted_at) SELECT name, CAST(strftime('%s', 'now') AS INTEGER)"
+    " FROM desks WHERE name IN " + _choices(MANY_TASK_DESKS_SEED),
+    "DROP INDEX IF EXISTS tasks_one_active_per_desk",
+    _guard(
+        "tasks_one_active_per_single_desk",
+        "BEFORE UPDATE OF status ON tasks WHEN NEW.status = 'active' AND OLD.status <> 'active'"
+        " AND NOT EXISTS (SELECT 1 FROM many_task_desks WHERE desk = NEW.desk)"
+        " AND EXISTS (SELECT 1 FROM tasks WHERE desk = NEW.desk AND status = 'active' AND id <> NEW.id)",
+        "desk already has an active task",
+    ),
+    _guard("tasks_desk_fixed", "BEFORE UPDATE OF desk ON tasks WHEN OLD.desk IS NOT NEW.desk", "a task keeps its desk"),
+    ("run_launches", "task_id", "ALTER TABLE run_launches ADD COLUMN task_id TEXT REFERENCES tasks(id)"),
+    _guard(
+        "run_launches_task_fixed",
+        "BEFORE UPDATE OF task_id ON run_launches WHEN OLD.task_id IS NOT NEW.task_id",
+        "a run launch keeps its task",
+    ),
+    _guard(
+        "run_launches_task_of_desk",
+        "BEFORE INSERT ON run_launches WHEN NEW.task_id IS NOT NULL"
+        " AND NOT EXISTS (SELECT 1 FROM tasks WHERE id = NEW.task_id AND desk = NEW.desk)",
+        "a run launch names a task of its own desk",
+    ),
+    "CREATE INDEX IF NOT EXISTS run_launches_task ON run_launches(task_id)",
+    ("tasks", "review_branch", "ALTER TABLE tasks ADD COLUMN review_branch TEXT CHECK (review_branch IS NULL OR"
+     " (typeof(review_branch) = 'text' AND length(CAST(review_branch AS BLOB)) BETWEEN 1 AND"
+     f" {REVIEW_BRANCH_MAX} AND length(review_branch) = length(CAST(review_branch AS BLOB))"
+     " AND review_branch NOT GLOB '*[^!-~]*'))"),
+    _guard("tasks_review_branch_new", "BEFORE INSERT ON tasks WHEN NEW.review_branch IS NOT NULL",
+           "a review branch is set on an active task"),
+    _guard(
+        "tasks_review_branch_active",
+        "BEFORE UPDATE OF review_branch ON tasks WHEN OLD.review_branch IS NOT NEW.review_branch"
+        " AND (OLD.status <> 'active' OR NEW.review_branch IS NULL)",
+        "a review branch is set on an active task and never cleared",
+    ),
+)
+
+MIGRATIONS = ((1, V1), (2, V2), (3, V3), (4, V4), (5, V5), (6, V6), (7, V7))
 
 
 def _uid() -> int:
