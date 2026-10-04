@@ -51,8 +51,9 @@ MANY_TASK_DESKS_SEED = ("harry", "hermione", "moody", "ron", "ryan-claude-1")
 # Desks that always hold one active task at a time: McGonagall, Snape, Dumbledore, Ryan and the scripts.
 SINGLE_TASK_DESKS = ("mcgonagall", "snape", "portrait")
 SINGLE_TASK_FAMILIES = ("human", "script")
-# The longest branch an own-session review task records, as the fleet's branch rule allows.
-REVIEW_BRANCH_MAX = 100
+# The longest branch name, in bytes, an own-session review task records. The name is Ryan's own branch, any name
+# git takes in printable ASCII, so it is not held to the fleet's rule for the branches it makes and pushes.
+REVIEW_BRANCH_MAX = 255
 
 PathLike = Union[str, Path]
 
@@ -666,7 +667,9 @@ V6 = (
 # grant, so a raw write on a single desk is still refused, and a task keeps its desk, so no write moves an active
 # task onto a single desk either. A run launch names the task it ran for, if any. An own-session review task
 # records the branch its review lineage follows (review_branch), set only while the task is active and never
-# cleared. Rows from before V7 keep it NULL, which the review script reads as a lineage it cannot place, so such a
+# cleared. It is 1 to REVIEW_BRANCH_MAX bytes of printable ASCII with no whitespace (a text value, so no NUL or
+# multibyte character hides from the GLOB); pensieve and the review script hold it to git's own branch rules.
+# Rows from before V7 keep it NULL, which the review script reads as a lineage it cannot place, so such a
 # task is continued with --task or closed rather than silently left behind.
 V7 = (
     _table(
@@ -708,7 +711,9 @@ V7 = (
     ),
     "CREATE INDEX IF NOT EXISTS run_launches_task ON run_launches(task_id)",
     ("tasks", "review_branch", "ALTER TABLE tasks ADD COLUMN review_branch TEXT CHECK (review_branch IS NULL OR"
-     f" (length(review_branch) BETWEEN 1 AND {REVIEW_BRANCH_MAX} AND review_branch NOT GLOB '*[^a-z0-9._/-]*'))"),
+     " (typeof(review_branch) = 'text' AND length(CAST(review_branch AS BLOB)) BETWEEN 1 AND"
+     f" {REVIEW_BRANCH_MAX} AND length(review_branch) = length(CAST(review_branch AS BLOB))"
+     " AND review_branch NOT GLOB '*[^!-~]*'))"),
     _guard("tasks_review_branch_new", "BEFORE INSERT ON tasks WHEN NEW.review_branch IS NOT NULL",
            "a review branch is set on an active task"),
     _guard(

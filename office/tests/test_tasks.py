@@ -502,13 +502,13 @@ class WorktreeTests(StoreCase):
         self.assertEqual(pensieve.set_review_branch(self.conn, task["id"], "fix/site")["review_branch"], "fix/site")
         self.assertEqual(pensieve.set_review_branch(self.conn, task["id"], "fix/renamed")["review_branch"],
                          "fix/renamed")
-        for bad in ("", "Fix", "-x", "a..b", "a b", "x" * 101, None, "fix/\n"):
+        for bad in ("", "-x", "a..b", "a b", "x" * 256, None, "fix/\n"):
             with self.subTest(branch=bad), self.assertRaises(ValidationError):
                 pensieve.set_review_branch(self.conn, task["id"], bad)
         with self.assertRaisesRegex(sqlite3.IntegrityError, "never cleared"):
             self.conn.execute("UPDATE tasks SET review_branch = NULL WHERE id = ?", (task["id"],))
         with self.assertRaisesRegex(sqlite3.IntegrityError, "CHECK"):
-            self.conn.execute("UPDATE tasks SET review_branch = 'Upper' WHERE id = ?", (task["id"],))
+            self.conn.execute("UPDATE tasks SET review_branch = 'Upper case' WHERE id = ?", (task["id"],))
         with self.assertRaisesRegex(sqlite3.IntegrityError, "set on an active task"):
             self.conn.execute("INSERT INTO tasks(id, desk, title, status, created_at, review_branch)"
                               " VALUES ('tk_00000000000000aa', 'alpha', 'x', 'queued', 1, 'main')")
@@ -518,6 +518,31 @@ class WorktreeTests(StoreCase):
         with self.assertRaisesRegex(sqlite3.IntegrityError, "set on an active task"):
             self.conn.execute("UPDATE tasks SET review_branch = 'fix/other' WHERE id = ?", (task["id"],))
         self.assertEqual(pensieve.get_task(self.conn, task["id"])["review_branch"], "fix/renamed")
+
+    def test_a_review_branch_is_any_name_git_takes_in_printable_ascii(self):
+        task = self.started()
+        for good in ("Cris-Ryan-Tan/do-the-@pr-feedback-skill.-i-think-some-of-the-rec", "Fix-Upper", "a@b", "@",
+                     "fix/moody-notes", "x/HEAD", "v1.2.3", "!#$%&'()+,;<=>`{|}\"", "x" * 255):
+            with self.subTest(branch=good):
+                self.assertEqual(pensieve.set_review_branch(self.conn, task["id"], good)["review_branch"], good)
+        for bad in ("", None, b"main", 7, "a b", " main", "main ", "a\tb", "a\x01b", "a\x7fb", "caf\u00e9", "x" * 256,
+                    "a..b", "x.lock", "x.lock/y", "-x", "HEAD", "/x", "x/", "x.", "a//b", ".x", "x/.y", "a@{b",
+                    "@{-1}", "a~b", "a^b", "a:b", "a?b", "a*b", "a[b", "a\\b"):
+            with self.subTest(branch=bad), self.assertRaisesRegex(ValidationError, "a name git takes as a branch"):
+                pensieve.set_review_branch(self.conn, task["id"], bad)
+        self.assertEqual(pensieve.get_task(self.conn, task["id"])["review_branch"], "x" * 255)
+
+    def test_the_review_branch_check_holds_raw_writes_to_255_bytes_of_printable_ascii(self):
+        task = self.started()
+        for good in ("Cris-Ryan-Tan/do-the-@pr-feedback-skill.-i-think-some-of-the-rec", "!", "~" * 255):
+            with self.subTest(branch=good):
+                self.conn.execute("UPDATE tasks SET review_branch = ? WHERE id = ?", (good, task["id"]))
+                self.assertEqual(pensieve.get_task(self.conn, task["id"])["review_branch"], good)
+        # A blob is refused as a STRICT column's type where SQLite has them, and by the CHECK's typeof otherwise.
+        for bad in ("", "a b", "a\tb", "a\nb", "a\x00b", "a\x7fb", "caf\u00e9", "x" * 256, b"main"):
+            with self.subTest(branch=bad), self.assertRaisesRegex(sqlite3.IntegrityError, "CHECK|BLOB"):
+                self.conn.execute("UPDATE tasks SET review_branch = ? WHERE id = ?", (bad, task["id"]))
+        self.assertEqual(pensieve.get_task(self.conn, task["id"])["review_branch"], "~" * 255)
 
     def test_a_task_awaiting_close_or_closed_takes_no_worktree(self):
         task = self.task()

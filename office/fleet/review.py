@@ -49,23 +49,25 @@ closed while its desk lock is held. A review that finds its reviewer busy does n
 its own task either, since it holds the task's review lock, but leaves closing it to a review that can take
 the desk lock. Only Ryan closes a task as complete.
 
-Author tasks run side by side: Harry, Hermione, Moody, Ron and Ryan's own sessions may each hold many active
-tasks, so a task waiting for a fix round blocks nothing. A review of Ryan's own sessions follows the branch his
-checkout has out: a new task records it, and a detached HEAD, or a branch name the fleet's branch rule refuses,
-is refused. The branch is the review's lineage. A new review without --task is refused before anything changes
-for a commit another task already holds (review it with --task), and while an active own task on the same
-checkout follows the same branch: a fix commit on that branch goes on that task with --task, so its rounds and
-its cap carry on, allowance or not, and leaving out --task never starts a fresh count. Only another branch
-starts a new task with its own count, which is how one checkout carries several PRs in flight. An active task
-whose branch the checkout no longer has (renamed or deleted), or that names none, also refuses a new task, since
-its work may be this same work under a new name: --task <id> goes on with it and moves it to the branch now out,
-or Ryan closes it. --task never moves a task off a branch the checkout still has, nor onto a branch another
-task follows. A checkout is matched as a folder (device and inode), not by how its path is spelled. These
-choices are made under one short lock, so two reviews started at once on one branch never both make a task.
-The count trusts a branch name on one checkout folder: a second clone, a moved folder, or work moved onto
-another branch name starts a fresh task, and the handbook asks Ryan not to route around his cap that way.
-A new task that fails before its first round opens is closed as abandoned, unless its commit was already
-recorded on it: then it stays active, --task <id> retries it, and a new review of that commit names it.
+Author tasks run side by side: Harry, Hermione, Moody, Ron and Ryan's own sessions may each hold many active tasks,
+so a task waiting for a fix round blocks nothing. A review of Ryan's own sessions follows the branch his checkout
+has out: a new task records it, and a detached HEAD is refused. The name is Ryan's own, so any name git itself
+takes as a branch (git check-ref-format --branch) counts, capitals, @ and dots included, as long as it is 1 to 255
+bytes of printable ASCII with no whitespace. The fleet's lowercase, fleet-word-free rule is only for the branches
+the fleet makes and pushes; a lineage name is only compared. The branch is the review's lineage. A new review
+without --task is refused before anything changes for a commit another task already holds (review it with --task),
+and while an active own task on the same checkout follows the same branch: a fix commit on that branch goes on that
+task with --task, so its rounds and its cap carry on, allowance or not, and leaving out --task never starts a fresh
+count. Only another branch starts a new task with its own count, which is how one checkout carries several PRs in
+flight. An active task whose branch the checkout no longer has (renamed or deleted), or that names none, also
+refuses a new task, since its work may be this same work under a new name: --task <id> goes on with it and moves it
+to the branch now out, or Ryan closes it. --task never moves a task off a branch the checkout still has, nor onto a
+branch another task follows. A checkout is matched as a folder (device and inode), not by how its path is spelled.
+These choices are made under one short lock, so two reviews started at once on one branch never both make a task.
+The count trusts a branch name on one checkout folder: a second clone, a moved folder, or work moved onto another
+branch name starts a fresh task, and the handbook asks Ryan not to route around his cap that way. A new task that
+fails before its first round opens is closed as abandoned, unless its commit was already recorded on it: then it
+stays active, --task <id> retries it, and a new review of that commit names it.
 """
 from __future__ import annotations
 
@@ -507,13 +509,14 @@ def own_lineage_lock() -> Iterator[None]:
 
 
 def _own_branch(common_dir: str) -> str:
-    """The branch the checkout has out, which names the review's lineage. A detached HEAD has none."""
+    """The branch the checkout has out, which names the review's lineage. A detached HEAD has none. Any name git
+    takes as a branch counts, in printable ASCII: the fleet's branch rule is only for the branches it pushes."""
     branch = gitops.current_branch(common_dir)
     if branch is None:
         raise FleetError("your checkout's HEAD is detached, so this review has no branch to follow: check out"
                          " the branch the commit is on and run it again")
     try:
-        return gitops.check_branch(branch)
+        return gitops.check_lineage_branch(common_dir, branch)
     except FleetError as exc:
         raise FleetError(f"your checkout's branch cannot name a review: {exc}") from None
 

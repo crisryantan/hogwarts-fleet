@@ -180,15 +180,29 @@ def set_worktree(conn: Conn, task_id: str, worktree: str) -> dict:
     return get_task(conn, task_id)
 
 
-REVIEW_BRANCH = re.compile(r"[a-z0-9][a-z0-9._/-]{0,%d}" % (db.REVIEW_BRANCH_MAX - 1))
+# Anything outside printable ASCII (whitespace and control characters included), and what git's own ref rules
+# never allow anywhere in a name: ~ ^ : ? * [ \, two dots, @{ and an empty path part.
+REVIEW_BRANCH_FORBIDDEN = re.compile(r"[^!-~]|[~^:?*\[\\]|\.\.|@\{|//")
+
+
+def check_review_branch(branch: object) -> str:
+    """A branch an own-session review records: a name git itself takes as a branch (git check-ref-format
+    --branch), in 1 to REVIEW_BRANCH_MAX bytes of printable ASCII with no whitespace. Letter case and fleet words
+    are not checked, since the name is Ryan's own branch and is only compared, never pushed."""
+    if (not isinstance(branch, str) or not 0 < len(branch) <= db.REVIEW_BRANCH_MAX
+            or REVIEW_BRANCH_FORBIDDEN.search(branch) is not None or branch == "HEAD"
+            or branch.startswith(("-", "/")) or branch.endswith(("/", "."))
+            or any(part.startswith(".") or part.endswith(".lock") for part in branch.split("/"))):
+        raise ValidationError(f"a review branch is a name git takes as a branch, in 1 to {db.REVIEW_BRANCH_MAX}"
+                              " bytes of printable ASCII with no whitespace")
+    return branch
 
 
 def set_review_branch(conn: Conn, task_id: str, branch: str) -> dict:
     """Record the branch an active own-session review task follows, so a fix commit on that branch goes on
     this task. It only moves to another branch, never back to none, and only while the task is active."""
     task_id = ids.check("task", task_id)
-    if not isinstance(branch, str) or REVIEW_BRANCH.fullmatch(branch) is None or ".." in branch:
-        raise ValidationError("a review branch uses lowercase letters, digits, dot, dash, underscore and slash")
+    branch = check_review_branch(branch)
     with db.transaction(conn):
         task = get_task(conn, task_id)
         if task["status"] != "active":

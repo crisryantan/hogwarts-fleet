@@ -21,7 +21,8 @@ import stat
 import subprocess
 from typing import Optional
 
-from hogwarts import ids
+from hogwarts import ids, pensieve
+from hogwarts.errors import ValidationError
 
 from fleet import common, config, safefs
 from fleet.safefs import FleetError
@@ -87,12 +88,31 @@ def same_checkout(first: str, second: str) -> bool:
 
 
 def check_branch(name: object) -> str:
+    """A branch the fleet makes and pushes: lowercase, plain and free of fleet words, since teammates see it."""
     if not isinstance(name, str) or BRANCH.fullmatch(name) is None or ".." in name \
             or name.endswith((".lock", "/", ".")) or "//" in name or "/." in name:
         raise FleetError("branch names use lowercase letters, digits, dot, dash, underscore and slash")
     fleet_word = fleet_words_in(name)
     if fleet_word:
         raise FleetError(f"the branch name contains a fleet word ({fleet_word})")
+    return name
+
+
+def check_lineage_branch(git_dir: str, name: object) -> str:
+    """A branch Ryan made, which an own-session review records as its lineage: any name git itself takes as a
+    branch (git check-ref-format --branch, run here after the store's own rule), in 1 to 255 bytes of
+    printable ASCII with no whitespace. Capitals and fleet words are fine, since the name is only compared,
+    never pushed or shown to teammates. The refusal never repeats the name."""
+    try:
+        name = pensieve.check_review_branch(name)
+    except ValidationError as exc:
+        raise FleetError(str(exc)) from None
+    try:
+        out = git(["check-ref-format", "--branch", name], git_dir)
+    except FleetError:
+        raise FleetError("git does not take it as a branch name") from None
+    if out != name + "\n":  # --branch expands a shorthand such as @{-1}, so the name must come back unchanged
+        raise FleetError("git reads it as a shorthand for another branch, not as a branch name")
     return name
 
 

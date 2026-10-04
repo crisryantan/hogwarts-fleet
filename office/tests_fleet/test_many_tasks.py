@@ -19,10 +19,10 @@ from pathlib import Path
 from unittest import mock
 
 from hogwarts import capacity, db, ids, owlery, pensieve
-from hogwarts.errors import ConflictError
+from hogwarts.errors import ConflictError, ValidationError
 from tests.support import NOW
 
-from fleet import config, owl_post, push, review, run_desk, worktree
+from fleet import config, gitops, owl_post, push, review, run_desk, worktree
 from fleet.hooks import pre_compact, session_start
 from fleet.safefs import FleetError
 from tests_fleet.support import IN_KIT, MANY_TASK_DESKS, ONLY_IN_KIT, fake_children
@@ -366,19 +366,103 @@ class OwnSessionGuardTests(ManyCase):
         self.assertEqual(pensieve.get_task(self.conn, left)["review_branch"], "left")
         self.assertEqual(len(capacity.review_rounds(self.conn, left)), 1)
 
-    def test_a_detached_head_or_a_refused_branch_name_makes_nothing(self):
+    def test_a_detached_head_makes_nothing(self):
         self.commit("first")
         self.git("checkout", "-q", "--detach")
         with self.not_made(), self.assertRaisesRegex(FleetError, "HEAD is detached"):
             self.own_review()
-        self.git("checkout", "-q", "-b", "Fix-Upper")
-        with self.not_made(), self.assertRaisesRegex(FleetError, "your checkout's branch cannot name a review:"
-                                                                 " branch names use lowercase"):
-            self.own_review()
-        self.git("checkout", "-q", "-b", "fix/moody-notes")
-        with self.not_made(), self.assertRaisesRegex(FleetError, r"fleet word \(moody\)"):
-            self.own_review()
         self.assertEqual(self.own_tasks(), [])
+
+    def test_ryans_own_branch_with_capitals_at_and_dots_records_and_goes_on(self):
+        branch = "Cris-Ryan-Tan/do-the-@pr-feedback-skill.-i-think-some-of-the-rec"
+        self.on_branch(branch)
+        self.commit("round one")
+        first = self.own_review()
+        self.assertEqual((first["round"], first["verdict"]), (1, "CHANGES"))
+        task_id = first["task_id"]
+        self.assertEqual(pensieve.get_task(self.conn, task_id)["review_branch"], branch)
+        self.commit("fix after round one")
+        with self.not_made(), self.assertRaisesRegex(FleetError, self.branch_text(task_id, branch) + "$"):
+            self.own_review()
+        self.assertEqual(self.own_review(task_id)["round"], 2)
+        # Renamed to another name of Ryan's own, the task moves with --task and keeps its count.
+        renamed = "Cris-Ryan-Tan/PR-1234.Feedback@v2"
+        self.git("branch", "-m", branch, renamed)
+        self.commit("fix after round two")
+        with self.not_made(), self.assertRaisesRegex(FleetError, re.escape(
+                f"task {task_id} on this checkout follows branch {branch}, which this checkout no longer has")):
+            self.own_review()
+        self.assertEqual(self.own_review(task_id)["round"], 3)
+        self.assertEqual(pensieve.get_task(self.conn, task_id)["review_branch"], renamed)
+        # A fleet word in Ryan's own branch is fine too: the name is only compared, never pushed.
+        self.git("checkout", "-q", "main")
+        self.on_branch("Fix/Moody-Notes")
+        self.commit("another PR")
+        other = self.own_review()
+        self.assertEqual((other["round"], pensieve.get_task(self.conn, other["task_id"])["review_branch"]),
+                         (1, "Fix/Moody-Notes"))
+        self.assertEqual(sorted(self.own_tasks()), sorted([task_id, other["task_id"]]))
+
+    def test_a_branch_name_git_or_the_store_refuses_makes_nothing(self):
+        self.commit("first")
+        refusal = re.escape("your checkout's branch cannot name a review: a review branch is a name git takes as"
+                            " a branch, in 1 to 255 bytes of printable ASCII with no whitespace")
+        for name in ("two words", "main\t", "fix/\x1b[31m", "x" * 256, "a..b", "fix.lock"):
+            with self.subTest(branch=name), mock.patch.object(gitops, "current_branch", return_value=name):
+                with self.not_made(), self.assertRaisesRegex(FleetError, refusal + "$") as caught:
+                    self.own_review()
+                self.assertNotIn(name, str(caught.exception))
+        self.assertEqual(self.own_tasks(), [])
+
+    def test_git_itself_refuses_a_name_even_past_the_store_rule(self):
+        self.commit("first")
+        self.on_branch("previous")
+        self.git("checkout", "-q", "main")
+        common = str(self.repo / ".git")
+        with mock.patch.object(pensieve, "check_review_branch", side_effect=lambda name: name):
+            for name in ("a..b", "fix.lock", "-x", "HEAD", "a b"):
+                with self.subTest(branch=name), self.assertRaisesRegex(FleetError, "git does not take it"):
+                    gitops.check_lineage_branch(common, name)
+            # --branch would read @{-1} as the branch checked out before, so it must come back unchanged.
+            self.assertEqual(self.git("check-ref-format", "--branch", "@{-1}"), "previous")
+            with self.assertRaisesRegex(FleetError, "shorthand for another branch"):
+                gitops.check_lineage_branch(common, "@{-1}")
+            with mock.patch.object(gitops, "current_branch", return_value="x.lock"), self.not_made():
+                with self.assertRaisesRegex(FleetError, "cannot name a review: git does not take it"):
+                    self.own_review()
+        self.assertEqual(gitops.check_lineage_branch(common, "Fix-Upper@v1.2"), "Fix-Upper@v1.2")
+
+    def test_the_store_rule_takes_exactly_the_printable_names_git_takes(self):
+        common = str(self.repo / ".git")
+        names = ("Cris-Ryan-Tan/do-the-@pr-feedback-skill.-i-think-some-of-the-rec", "Fix", "@", "a@b", "x/HEAD",
+                 "fix/moody-notes", "!#$%&'()+,;<=>`{|}\"", "a..b", "x.lock", "x.lock/y", "a.lockx", "-x", "x-",
+                 "HEAD", "/x", "x/", "x.", "a//b", ".x", "x/.y", "x./y", "a@{b", "@{-1}", "a~b", "a^b", "a:b",
+                 "a?b", "a*b", "a[b", "a]b", "a\\b", "a{b}", "x" * 255)
+        for name in names:
+            with self.subTest(branch=name):
+                done = subprocess.run([config.GIT_BIN, "check-ref-format", "--branch", name], cwd=self.repo,
+                                      capture_output=True, env={"HOME": str(self.home_dir), "PATH": config.CHILD_PATH})
+                git_takes = done.returncode == 0 and done.stdout.decode() == name + "\n"
+                try:
+                    pensieve.check_review_branch(name)
+                    store_takes = True
+                except ValidationError:
+                    store_takes = False
+                self.assertEqual(store_takes, git_takes)
+                if git_takes:
+                    self.assertEqual(gitops.check_lineage_branch(common, name), name)
+
+    def test_the_rule_for_branches_the_fleet_makes_is_unchanged(self):
+        self.assertEqual(gitops.check_branch("fix/site"), "fix/site")
+        for name in ("Fix-Upper", "fix/Site", "a@b", "a..b", "fix.lock", "x" * 101, "fix/"):
+            with self.subTest(branch=name), self.assertRaisesRegex(FleetError, "branch names use lowercase"):
+                gitops.check_branch(name)
+        with self.assertRaisesRegex(FleetError, r"fleet word \(moody\)"):
+            gitops.check_branch("fix/moody-notes")
+        task, _ = self.harry_request(self.queued_parent())
+        with mock.patch.object(run_desk, "spawn"), self.assertRaisesRegex(FleetError, "branch names use lowercase"):
+            worktree.create(self.conn, task["id"], str(self.repo), "Fix-Upper", fetch=False)
+        self.assert_taken_back(task, "Fix-Upper")
 
     def test_a_review_starting_on_the_lineage_lock_is_refused_once_the_wait_runs_out(self):
         self.commit("first")

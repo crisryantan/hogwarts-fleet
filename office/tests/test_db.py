@@ -238,6 +238,9 @@ class MigrationV7Tests(unittest.TestCase):
         self.assertEqual(conn.execute("PRAGMA foreign_key_check").fetchall(), [])
         pensieve.set_review_branch(conn, "tk_0000000000000002", "fix/site")
         self.assertEqual(pensieve.get_task(conn, "tk_0000000000000002")["review_branch"], "fix/site")
+        pensieve.set_review_branch(conn, "tk_0000000000000002", "Cris-Ryan-Tan/fix-the-@pr-skill.-v2")
+        self.assertEqual(pensieve.get_task(conn, "tk_0000000000000002")["review_branch"],
+                         "Cris-Ryan-Tan/fix-the-@pr-skill.-v2")
 
     def test_a_fresh_database_grants_no_desk(self):
         conn = db.connect(temp_dir(self) / "state" / "pensieve.db")
