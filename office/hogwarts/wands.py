@@ -204,7 +204,8 @@ def _catalog_entry(item: object) -> tuple:
 def record_catalog(conn: Conn, family: str, names: Iterable, now: Optional[int] = None) -> list:
     """Keep one look at a family's catalog. Each entry is a name, or a dict that also says whether the
     catalog listed it, the line it was filed under at this look, and when it retires (0 for an upgrade
-    with no clear date)."""
+    with no clear date). The look gets the family's next look number, so it is the latest look even when
+    an earlier one landed in the same second."""
     family = ids.check_enum(family, db.MODEL_FAMILIES, "model family")
     if isinstance(names, str) or not isinstance(names, (list, tuple, set, frozenset)):
         raise ValidationError("catalog names must be a list")
@@ -216,22 +217,26 @@ def record_catalog(conn: Conn, family: str, names: Iterable, now: Optional[int] 
         raise ValidationError(f"a catalog holds between 1 and {CATALOG_LIMIT} names")
     ts = ids.stamp(now)
     with db.transaction(conn):
+        look = db.fetch_one(conn, "SELECT COALESCE(MAX(look), 0) + 1 AS look FROM model_catalog WHERE family = ?",
+                            (family,))["look"]
         for name, visible, line, retires_at in sorted(entries.values()):
             conn.execute(
-                "INSERT INTO model_catalog(family, name, seen_at, visible, line, retires_at) VALUES (?, ?, ?, ?, ?, ?)"
-                " ON CONFLICT(family, name) DO UPDATE SET seen_at = excluded.seen_at, visible = excluded.visible,"
-                " line = excluded.line, retires_at = excluded.retires_at",
-                (family, name, ts, visible, line, retires_at),
+                "INSERT INTO model_catalog(family, name, seen_at, look, visible, line, retires_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?)"
+                " ON CONFLICT(family, name) DO UPDATE SET seen_at = excluded.seen_at, look = excluded.look,"
+                " visible = excluded.visible, line = excluded.line, retires_at = excluded.retires_at",
+                (family, name, ts, look, visible, line, retires_at),
             )
     return sorted(entries)
 
 
 def last_catalog(conn: Conn, family: str) -> list:
+    """The names the family's latest catalog look offered: the rows with its highest look number."""
     family = ids.check_enum(family, db.MODEL_FAMILIES, "model family")
     rows = db.fetch_all(
         conn,
         "SELECT name FROM model_catalog WHERE family = ?"
-        " AND seen_at = (SELECT MAX(seen_at) FROM model_catalog WHERE family = ?) ORDER BY name",
+        " AND look = (SELECT MAX(look) FROM model_catalog WHERE family = ?) ORDER BY name",
         (family, family),
     )
     return [row["name"] for row in rows]
@@ -244,7 +249,7 @@ def catalog_entry(conn: Conn, family: str, name: str) -> Optional[dict]:
     return db.fetch_one(
         conn,
         "SELECT * FROM model_catalog WHERE family = ? AND name = ?"
-        " AND seen_at = (SELECT MAX(seen_at) FROM model_catalog WHERE family = ?)",
+        " AND look = (SELECT MAX(look) FROM model_catalog WHERE family = ?)",
         (family, name, family),
     )
 
