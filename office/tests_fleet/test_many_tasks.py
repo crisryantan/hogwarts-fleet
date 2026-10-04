@@ -967,7 +967,7 @@ class BuildDeskTests(ManyCase):
         self.assertEqual(pensieve.get_task(self.conn, second["id"])["status"], "queued")
         self.assertNotIn("fix/other", self.git("branch", "--list", "fix/other"))
 
-    def castle(self, *argv) -> tuple:
+    def run_castle(self, *argv) -> tuple:
         """castle <argv> against the test store: (exit code, the JSON it printed)."""
         out, err = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
@@ -978,26 +978,26 @@ class BuildDeskTests(ManyCase):
         parent = self.queued_parent()
         first, _, _ = self.built("fix/widget", parent)
         second, _ = self.harry_request(parent, subject="build the other half")
-        code, out = self.castle("task", "start", second["id"])
+        code, out = self.run_castle("task", "start", second["id"])
         self.assertEqual((code, out["error"]["type"]), (3, "ConflictError"))
         self.assertIn(f"task {first['id']} of harry is still open under the same TASK.md", out["error"]["message"])
         self.assertEqual(pensieve.get_task(self.conn, second["id"])["status"], "queued")
         # A worktree command for a task under this TASK.md that is still running refuses the start too.
         with worktree.holder_lock(parent):
-            code, out = self.castle("task", "start", second["id"])
+            code, out = self.run_castle("task", "start", second["id"])
         self.assertEqual((code, out["error"]["message"]), (3, worktree.WORKTREE_RUNNING))
         self.assertEqual(pensieve.get_task(self.conn, second["id"])["status"], "queued")
         # Once the first is closed the same command starts the second.
         pensieve.close_task(self.conn, first["id"], "abandoned")
-        code, out = self.castle("task", "start", second["id"])
+        code, out = self.run_castle("task", "start", second["id"])
         self.assertEqual((code, out["ok"], out["data"]["status"]), (0, True, "active"))
         # A task that is already active gets the store's own refusal, not the check's.
-        code, out = self.castle("task", "start", second["id"])
+        code, out = self.run_castle("task", "start", second["id"])
         self.assertEqual((code, out["error"]["message"]), (3, "only queued tasks can start"))
 
     def test_castle_task_start_leaves_other_desks_to_the_store(self):
         parent = self.queued_parent()
-        code, out = self.castle("task", "start", parent)
+        code, out = self.run_castle("task", "start", parent)
         self.assertEqual((code, out["data"]["status"]), (0, "active"))
         # Hermione's tasks may share a TASK.md, so a second one under it still starts.
         for subject in ("review the first change", "review the second change"):
@@ -1010,7 +1010,7 @@ class BuildDeskTests(ManyCase):
                 [delivered] = owl_post.run_pass(self.conn)["delivered"]
             owl = next(item for item in owlery.inbox(self.conn, "hermione") if item["id"] == delivered["owl_id"])
             task_id = owlery.get_request(self.conn, owl["request_id"])["task_id"]
-            code, out = self.castle("task", "start", task_id)
+            code, out = self.run_castle("task", "start", task_id)
             self.assertEqual((code, out["data"]["status"]), (0, "active"))
 
     def test_two_worktree_commands_under_one_task_md_race_and_exactly_one_starts(self):
