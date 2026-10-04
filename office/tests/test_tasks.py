@@ -396,7 +396,7 @@ class ManyTaskDeskTests(StoreCase):
             pensieve.allow_many_tasks(self.conn, "fleet")
         self.assertEqual(self.count("many_task_desks"), 1)
 
-    def test_mcgonagall_snape_dumbledore_ryan_and_the_scripts_stay_single(self):
+    def test_mcgonagall_snape_dumbledore_ryan_and_the_scripts_are_refused_many_tasks(self):
         singles = (("mcgonagall", "claude"), ("snape", "claude"), ("portrait", "claude"), ("ryan", "human"),
                    ("owl-post", "script"))
         for name, family in singles:
