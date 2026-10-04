@@ -41,6 +41,13 @@ class ManyCase(LoopCase):
         self.addCleanup(clock.stop)
         self.owls = 0
 
+    def on_branch(self, name: str) -> None:
+        """Check out branch name in Ryan's checkout, making it from HEAD when it is new."""
+        if self.git("branch", "--list", name):
+            self.git("checkout", "-q", name)
+        else:
+            self.git("checkout", "-q", "-b", name)
+
     def commit(self, text: str) -> str:
         self.write_file(self.repo / "fix.txt", text + "\n")
         self.git("add", "fix.txt")
@@ -153,19 +160,22 @@ class ManyCase(LoopCase):
 
 
 class OwnSessionTests(ManyCase):
-    def test_a_task_parked_in_changes_blocks_no_new_own_review(self):
-        # Ryan's case: a website review sits in CHANGES on ryan-claude-1 while four more reviews come in.
+    def test_a_task_parked_in_changes_blocks_no_new_own_review_on_another_branch(self):
+        # Ryan's case: a website review sits in CHANGES on ryan-claude-1 while four more PRs come in.
+        self.on_branch("website")
         self.commit("website first try")
         parked = self.own_review()
         self.assertEqual((parked["round"], parked["verdict"]), (1, "CHANGES"))
         others = []
         for number in range(4):
+            self.on_branch(f"other-{number}")
             self.commit(f"other change {number}")
             result = self.own_review()
             self.assertEqual((result["round"], result["verdict"], result["queued"]), (1, "CHANGES", None))
             others.append(result["task_id"])
         self.assertEqual(len(set(others)), 4)
         self.assertEqual(sorted(self.own_tasks()), sorted([parked["task_id"], *others]))
+        self.on_branch("website")
         self.commit("website fixed")
         fixed = self.own_review(parked["task_id"], verdict="PASS")
         self.assertEqual((fixed["round"], fixed["verdict"]), (2, "PASS"))
@@ -175,6 +185,7 @@ class OwnSessionTests(ManyCase):
     def test_a_store_that_keeps_own_sessions_single_names_the_fix(self):
         self.commit("first")
         self.own_review()
+        self.on_branch("second")
         self.commit("second")
         with mock.patch.object(pensieve, "start_task", side_effect=ConflictError("desk already has an active task")):
             with self.assertRaisesRegex(FleetError, "castle desk many-tasks ryan-claude-1"):
@@ -212,49 +223,170 @@ class OwnSessionGuardTests(ManyCase):
         with self.assertRaisesRegex(FleetError, "review round 4"):
             self.own_review(capped)
         self.commit("one more change")
-        with mock.patch.object(pensieve, "create_task", side_effect=AssertionError("made a task")):
-            with self.assertRaisesRegex(FleetError, self.capped_text(capped)):
-                self.own_review()
+        with self.not_made(), self.assertRaisesRegex(FleetError, self.capped_text(capped)):
+            self.own_review()
         self.assertEqual(self.own_tasks(), [capped])
-        # An unused allowance does not open the checkout to a new task: the allowed round goes on the capped one.
+        # An unused allowance does not open the branch to a new task: the allowed round goes on the capped one.
         capacity.allow_round(self.conn, capped)
-        with mock.patch.object(pensieve, "create_task", side_effect=AssertionError("made a task")):
-            with self.assertRaisesRegex(FleetError, self.capped_text(capped)):
-                self.own_review()
+        with self.not_made(), self.assertRaisesRegex(FleetError, self.branch_text(capped) + "$"):
+            self.own_review()
         self.assertEqual(capacity.allow_round(self.conn, capped)["created"], False)
         allowed = self.own_review(capped)
         self.assertEqual((allowed["task_id"], allowed["round"]), (capped, 4))
-        # Once Ryan closes the capped task, the checkout takes a new task with its own count.
+        # Once Ryan closes the capped task, the branch takes a new task with its own count.
         pensieve.close_task(self.conn, capped, "abandoned")
         self.commit("after the close")
         other = self.own_review()
         self.assertEqual((other["round"], other["verdict"]), (1, "CHANGES"))
         self.assertNotEqual(other["task_id"], capped)
 
-    def test_repeated_new_commits_without_task_never_reset_the_count(self):
+    def test_fix_commits_on_one_branch_without_task_go_on_one_task_up_to_the_cap(self):
+        # Moody round 3: a fix commit after each CHANGES, sent without --task, must never start a round-one task.
+        self.on_branch("fix/site")
         self.commit("round one")
-        capped = self.own_review()["task_id"]
+        first = self.own_review()
+        self.assertEqual((first["round"], first["verdict"]), (1, "CHANGES"))
+        task_id = first["task_id"]
+        self.assertEqual(pensieve.get_task(self.conn, task_id)["review_branch"], "fix/site")
         for number in (2, 3):
-            self.commit(f"round {number}")
-            self.own_review(capped)
-        made = mock.patch.object(pensieve, "create_task", side_effect=AssertionError("made a task"))
-        for number in range(4):
-            if number % 2:
-                capacity.allow_round(self.conn, capped)
-            self.commit(f"try a new task {number}")
-            with made, self.assertRaisesRegex(FleetError, self.capped_text(capped)):
+            self.commit(f"fix after round {number - 1}")
+            with self.not_made(), self.assertRaisesRegex(FleetError, self.branch_text(task_id, "fix/site") + "$"):
                 self.own_review()
-        self.assertEqual(self.own_tasks(), [capped])
-        self.assertEqual(self.own_tasks("closed"), [])
-        allowed = self.own_review(capped)
+            self.assertEqual(self.own_review(task_id)["round"], number)
+        for number in range(2):
+            self.commit(f"fix after round 3, try {number}")
+            with self.not_made(), self.assertRaisesRegex(FleetError, self.capped_text(task_id, "fix/site")):
+                self.own_review()
+        # An allowance names no cap any more, but the branch's fix still goes on its task.
+        capacity.allow_round(self.conn, task_id)
+        self.commit("fix after round 3, allowed")
+        with self.not_made(), self.assertRaisesRegex(FleetError, self.branch_text(task_id, "fix/site") + "$"):
+            self.own_review()
+        allowed = self.own_review(task_id)
         self.assertEqual(allowed["round"], 4)
         self.commit("and again")
-        with made, self.assertRaisesRegex(FleetError, self.capped_text(capped)):
+        with self.not_made(), self.assertRaisesRegex(FleetError, self.capped_text(task_id, "fix/site")):
             self.own_review()
-        counted = [row["round"] for row in capacity.review_rounds(self.conn, capped) if row["counts"]]
+        self.assertEqual(self.own_tasks(), [task_id])
+        self.assertEqual(self.own_tasks("closed"), [])
+        counted = [row["round"] for row in capacity.review_rounds(self.conn, task_id) if row["counts"]]
         self.assertEqual(counted, [1, 2, 3, 4])
 
-    def test_a_capped_checkout_named_in_other_letter_case_is_still_capped(self):
+    def test_another_branch_on_the_same_checkout_starts_its_own_task_and_count(self):
+        self.on_branch("pr-one")
+        self.commit("one, round one")
+        one = self.own_review()["task_id"]
+        for number in (2, 3):
+            self.commit(f"one, round {number}")
+            self.own_review(one)
+        self.git("checkout", "-q", "main")
+        self.on_branch("pr-two")
+        self.commit("two, round one")
+        two = self.own_review()
+        self.assertEqual((two["round"], two["verdict"]), (1, "CHANGES"))
+        self.assertNotEqual(two["task_id"], one)
+        self.assertEqual(pensieve.get_task(self.conn, two["task_id"])["review_branch"], "pr-two")
+        self.commit("two, round two")
+        self.assertEqual(self.own_review(two["task_id"])["round"], 2)
+        # Back on pr-one, a fix still goes on its capped task, and --task of the other branch's task is refused.
+        self.on_branch("pr-one")
+        self.commit("one, after the cap")
+        with self.not_made(), self.assertRaisesRegex(FleetError, self.capped_text(one, "pr-one")):
+            self.own_review()
+        with self.assertRaisesRegex(FleetError, f"branch pr-one on this checkout is task {one}, not task"
+                                                f" {two['task_id']}"):
+            self.own_review(two["task_id"])
+        self.on_branch("pr-three")
+        with self.assertRaisesRegex(FleetError, re.escape(
+                f"task {two['task_id']} follows branch pr-two, which this checkout still has: check it out to go on"
+                f" with that task, or leave out --task to start a new task for branch pr-three")):
+            self.own_review(two["task_id"])
+        self.assertEqual(sorted(self.own_tasks()), sorted([one, two["task_id"]]))
+        self.assertEqual(len(capacity.review_rounds(self.conn, two["task_id"])), 2)
+
+    def test_a_renamed_branch_keeps_its_task_and_count(self):
+        self.on_branch("feat")
+        self.commit("round one")
+        task_id = self.own_review()["task_id"]
+        self.git("branch", "-m", "feat", "feat-renamed")
+        self.commit("round two")
+        gone = re.escape(f"task {task_id} on this checkout follows branch feat, which this checkout no longer has,"
+                         f" so it may be this same work renamed: run fleet review own --repo-dir <checkout> --task"
+                         f" {task_id} to go on with it here, or close that task first")
+        with self.not_made(), self.assertRaisesRegex(FleetError, gone):
+            self.own_review()
+        self.assertEqual(self.own_review(task_id)["round"], 2)
+        self.assertEqual(pensieve.get_task(self.conn, task_id)["review_branch"], "feat-renamed")
+        self.commit("round three")
+        with self.not_made(), self.assertRaisesRegex(FleetError, self.branch_text(task_id, "feat-renamed")):
+            self.own_review()
+        self.assertEqual(self.own_review(task_id)["round"], 3)
+
+    def test_a_deleted_branch_holds_new_tasks_until_its_task_goes_on_or_closes(self):
+        self.on_branch("spike")
+        self.commit("spike")
+        spike = self.own_review()["task_id"]
+        self.git("checkout", "-q", "main")
+        self.git("branch", "-q", "-D", "spike")
+        self.on_branch("real-work")
+        self.commit("real work")
+        with self.not_made(), self.assertRaisesRegex(FleetError, f"task {spike} on this checkout follows branch"
+                                                                 " spike, which this checkout no longer has"):
+            self.own_review()
+        pensieve.close_task(self.conn, spike, "abandoned")
+        result = self.own_review()
+        self.assertEqual((result["round"], self.own_tasks()), (1, [result["task_id"]]))
+        self.assertEqual(pensieve.get_task(self.conn, result["task_id"])["review_branch"], "real-work")
+
+    def test_a_task_from_before_branches_were_recorded_must_go_on_or_close(self):
+        self.commit("old round one")
+        with mock.patch.object(pensieve, "set_review_branch"):  # as a V6 row, which V7 leaves with no branch
+            old = self.own_review()["task_id"]
+        self.assertIsNone(pensieve.get_task(self.conn, old)["review_branch"])
+        self.on_branch("new-work")
+        self.commit("new work")
+        with self.not_made(), self.assertRaisesRegex(FleetError, f"task {old} on this checkout names no branch"):
+            self.own_review()
+        self.assertEqual(self.own_review(old)["round"], 2)
+        self.assertEqual(pensieve.get_task(self.conn, old)["review_branch"], "new-work")
+
+    def test_task_never_moves_onto_a_branch_another_task_follows(self):
+        self.on_branch("left")
+        self.commit("left")
+        left = self.own_review()["task_id"]
+        self.on_branch("right")
+        self.commit("right")
+        right = self.own_review()["task_id"]
+        self.git("branch", "-q", "-D", "left")
+        self.commit("right again")
+        with self.assertRaisesRegex(FleetError, f"branch right on this checkout is task {right}, not task {left}"):
+            self.own_review(left)
+        self.assertEqual(pensieve.get_task(self.conn, left)["review_branch"], "left")
+        self.assertEqual(len(capacity.review_rounds(self.conn, left)), 1)
+
+    def test_a_detached_head_or_a_refused_branch_name_makes_nothing(self):
+        self.commit("first")
+        self.git("checkout", "-q", "--detach")
+        with self.not_made(), self.assertRaisesRegex(FleetError, "HEAD is detached"):
+            self.own_review()
+        self.git("checkout", "-q", "-b", "Fix-Upper")
+        with self.not_made(), self.assertRaisesRegex(FleetError, "your checkout's branch cannot name a review:"
+                                                                 " branch names use lowercase"):
+            self.own_review()
+        self.git("checkout", "-q", "-b", "fix/moody-notes")
+        with self.not_made(), self.assertRaisesRegex(FleetError, r"fleet word \(moody\)"):
+            self.own_review()
+        self.assertEqual(self.own_tasks(), [])
+
+    def test_a_review_starting_on_the_lineage_lock_is_refused_once_the_wait_runs_out(self):
+        self.commit("first")
+        self.enable("moody")
+        with review.own_lineage_lock(), mock.patch.object(review, "OWN_LINEAGE_WAIT_SECONDS", 0), self.not_made():
+            with self.assertRaisesRegex(FleetError, "another review of your own sessions is still starting"):
+                review.review_own(self.conn, str(self.repo), title="my own fix", fetch=False)
+        self.assertEqual(self.own_tasks(), [])
+
+    def test_a_branch_named_in_other_letter_case_of_its_checkout_is_still_that_checkout(self):
         upper = self.home_dir / "REPO"
         if not upper.is_dir():
             self.skipTest("this disk tells letter case apart, so REPO is a different folder")
@@ -265,9 +397,8 @@ class OwnSessionGuardTests(ManyCase):
             self.own_review(capped)
         self.commit("try the other spelling")
         self.enable("moody")
-        with mock.patch.object(pensieve, "create_task", side_effect=AssertionError("made a task")):
-            with self.assertRaisesRegex(FleetError, self.capped_text(capped)):
-                review.review_own(self.conn, str(upper), title="my own fix", fetch=False)
+        with self.not_made(), self.assertRaisesRegex(FleetError, self.capped_text(capped)):
+            review.review_own(self.conn, str(upper), title="my own fix", fetch=False)
         self.assertEqual(self.own_tasks(), [capped])
         capacity.allow_round(self.conn, capped)
         with self.fake_reviewer("CHANGES"):
@@ -284,10 +415,18 @@ class OwnSessionGuardTests(ManyCase):
             review.review_own(self.conn, str(other), task_id=task_id, fetch=False)
 
     @staticmethod
-    def capped_text(task_id: str) -> str:
-        return re.escape(f"task {task_id} on this checkout has used its 3 review rounds, so this checkout's"
-                         f" reviews go on that task: run fleet review own --repo-dir <checkout> --task {task_id}"
-                         f" once castle task allow-round {task_id} allows one more round, or close that task first")
+    def branch_text(task_id: str, branch: str = "main") -> str:
+        return re.escape(f"branch {branch} on this checkout is task {task_id}, so its fix commits go on that task:"
+                         f" run fleet review own --repo-dir <checkout> --task {task_id}")
+
+    def capped_text(self, task_id: str, branch: str = "main") -> str:
+        return self.branch_text(task_id, branch) + re.escape(
+            f" once castle task allow-round {task_id} allows one more round, since it has used its 3 review rounds,"
+            " or close that task first")
+
+    @staticmethod
+    def not_made():
+        return mock.patch.object(pensieve, "create_task", side_effect=AssertionError("made a task"))
 
     def test_a_task_interrupted_after_its_commit_is_recorded_stays_retryable(self):
         sha = self.commit("first")
@@ -325,15 +464,19 @@ class OwnSessionGuardTests(ManyCase):
 
 class ParallelAuthorTests(ManyCase):
     def test_parallel_authors_keep_their_own_queue_rounds_and_locks(self):
+        self.on_branch("a")
         self.commit("a one")
         first = self.own_review()
+        self.on_branch("b")
         self.commit("b one")
         second = self.own_review()
         a, b = first["task_id"], second["task_id"]
         not_run = mock.patch.object(run_desk, "run", side_effect=AssertionError("ran while moody was busy"))
+        self.on_branch("a")
         self.commit("a two")
         with run_desk.desk_lock("moody", wait=False), not_run:
             queued_a = review.review_own(self.conn, str(self.repo), task_id=a, fetch=False)
+        self.on_branch("b")
         self.commit("b two")
         with run_desk.desk_lock("moody", wait=False), not_run:
             queued_b = review.review_own(self.conn, str(self.repo), task_id=b, fetch=False)
@@ -343,19 +486,24 @@ class ParallelAuthorTests(ManyCase):
         with review.task_review_lock(a), run_desk.desk_lock("moody", wait=False), not_run:
             with self.assertRaisesRegex(FleetError, review.REVIEW_RUNNING):
                 review.review_own(self.conn, str(self.repo), task_id=a, fetch=False)
+            self.on_branch("b")
             self.commit("b three")
             queued_b2 = review.review_own(self.conn, str(self.repo), task_id=b, fetch=False)
         self.assertEqual(queued_b2["superseded"], [queued_b["request_id"]])
         self.assertTrue(capacity.review_rounds(self.conn, a)[-1]["waiting"])
+        self.on_branch("a")
         self.commit("a three")
         done_a = self.own_review(a)
         self.assertEqual((done_a["round"], done_a["superseded"]), (2, [queued_a["request_id"]]))
         self.assertTrue(capacity.review_rounds(self.conn, b)[-1]["waiting"])
+        self.on_branch("a")
         self.commit("a four")
         self.assertEqual(self.own_review(a)["round"], 3)
+        self.on_branch("a")
         self.commit("a five")
         with self.assertRaisesRegex(FleetError, "review round 4"):
             self.own_review(a)
+        self.on_branch("b")
         self.commit("b four")
         self.assertEqual(self.own_review(b)["round"], 2)
 

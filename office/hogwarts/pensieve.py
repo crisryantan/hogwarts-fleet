@@ -180,6 +180,24 @@ def set_worktree(conn: Conn, task_id: str, worktree: str) -> dict:
     return get_task(conn, task_id)
 
 
+REVIEW_BRANCH = re.compile(r"[a-z0-9][a-z0-9._/-]{0,%d}" % (db.REVIEW_BRANCH_MAX - 1))
+
+
+def set_review_branch(conn: Conn, task_id: str, branch: str) -> dict:
+    """Record the branch an active own-session review task follows, so a fix commit on that branch goes on
+    this task. It only moves to another branch, never back to none, and only while the task is active."""
+    task_id = ids.check("task", task_id)
+    if not isinstance(branch, str) or REVIEW_BRANCH.fullmatch(branch) is None or ".." in branch:
+        raise ValidationError("a review branch uses lowercase letters, digits, dot, dash, underscore and slash")
+    with db.transaction(conn):
+        task = get_task(conn, task_id)
+        if task["status"] != "active":
+            raise ConflictError("a review branch is set on an active task")
+        if task["review_branch"] != branch:
+            conn.execute("UPDATE tasks SET review_branch = ? WHERE id = ?", (branch, task_id))
+    return get_task(conn, task_id)
+
+
 def closed_ancestors(conn: Conn, task_id: str) -> list[str]:
     return [row["id"] for row in db.fetch_all(
         conn,

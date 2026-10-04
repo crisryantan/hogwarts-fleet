@@ -492,6 +492,33 @@ class WorktreeTests(StoreCase):
                 pensieve.set_worktree(self.conn, task["id"], path)
         self.assertIsNone(pensieve.get_task(self.conn, task["id"])["worktree"])
 
+    def test_a_review_branch_is_set_on_an_active_task_moves_and_is_never_cleared(self):
+        queued = self.task()
+        with self.assertRaisesRegex(ConflictError, "active task"):
+            pensieve.set_review_branch(self.conn, queued["id"], "fix/site")
+        task = self.started()
+        self.assertIsNone(task["review_branch"])
+        self.assertEqual(pensieve.set_review_branch(self.conn, task["id"], "fix/site")["review_branch"], "fix/site")
+        self.assertEqual(pensieve.set_review_branch(self.conn, task["id"], "fix/site")["review_branch"], "fix/site")
+        self.assertEqual(pensieve.set_review_branch(self.conn, task["id"], "fix/renamed")["review_branch"],
+                         "fix/renamed")
+        for bad in ("", "Fix", "-x", "a..b", "a b", "x" * 101, None, "fix/\n"):
+            with self.subTest(branch=bad), self.assertRaises(ValidationError):
+                pensieve.set_review_branch(self.conn, task["id"], bad)
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "never cleared"):
+            self.conn.execute("UPDATE tasks SET review_branch = NULL WHERE id = ?", (task["id"],))
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "CHECK"):
+            self.conn.execute("UPDATE tasks SET review_branch = 'Upper' WHERE id = ?", (task["id"],))
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "set on an active task"):
+            self.conn.execute("INSERT INTO tasks(id, desk, title, status, created_at, review_branch)"
+                              " VALUES ('tk_00000000000000aa', 'alpha', 'x', 'queued', 1, 'main')")
+        pensieve.mark_awaiting_close(self.conn, task["id"])
+        with self.assertRaisesRegex(ConflictError, "active task"):
+            pensieve.set_review_branch(self.conn, task["id"], "fix/other")
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "set on an active task"):
+            self.conn.execute("UPDATE tasks SET review_branch = 'fix/other' WHERE id = ?", (task["id"],))
+        self.assertEqual(pensieve.get_task(self.conn, task["id"])["review_branch"], "fix/renamed")
+
     def test_a_task_awaiting_close_or_closed_takes_no_worktree(self):
         task = self.task()
         pensieve.start_task(self.conn, task["id"])

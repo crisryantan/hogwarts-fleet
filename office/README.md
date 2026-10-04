@@ -103,7 +103,7 @@ All tables are STRICT when SQLite supports it. Timestamps are integer unix secon
 | --- | --- |
 | `schema_version` | Applied migrations. |
 | `desks` | Name, family (`claude`, `codex`, `human`, `script`), role, model. Desks are immutable. `fleet` is reserved. |
-| `tasks` | Status `queued`, `active`, `awaiting_close`, `closed`. One active task per session (a partial unique index), and one per desk unless the desk is in `many_task_desks` (a trigger, so a raw write is refused too). A task keeps its desk (trigger), so no write moves an active task onto a single desk. Tasks are inserted queued. A closed task never reopens (trigger). |
+| `tasks` | Status `queued`, `active`, `awaiting_close`, `closed`. One active task per session (a partial unique index), and one per desk unless the desk is in `many_task_desks` (a trigger, so a raw write is refused too). A task keeps its desk (trigger), so no write moves an active task onto a single desk. Tasks are inserted queued. A closed task never reopens (trigger). `review_branch` (version 7) is the branch an own-session review task follows: set only on an active task and never cleared (triggers), NULL on rows from before version 7. |
 | `many_task_desks` | The desks that may hold many active tasks at once, with when each was granted. Version 7 grants `harry`, `hermione`, `moody`, `ron` and `ryan-claude-1` on a store that already has them, and `castle desk many-tasks` grants one. `mcgonagall`, `snape`, `portrait` and every human or script desk are refused, by the API and a trigger. One way: rows are never changed or deleted. |
 | `task_commits` | The repo and sha a task produced. One task per commit. Immutable. |
 | `events` | Episodic events. Verdict `routine` or `headmaster`. Optional unique `dedupe_key`. |
@@ -146,7 +146,7 @@ Every function takes a connection from `db.connect(path)` as its first argument.
 - `hogwarts.db`: `connect(path, create=True)`, `connect_readonly(path)`, `migrate(conn)`, `pending_statements(conn, statements)`, `schema_version(conn)`, `transaction(conn)`, `snapshot(conn)`, `doctor(path, code_root=None)`, `stray_bytecode(root)`, `DEFAULT_DB`.
 - `hogwarts.pensieve`
   - Desks: `add_desk`, `get_desk`, `list_desks` (with `many_tasks`), `allow_many_tasks(desk)`, `takes_many_tasks(desk)`, `blocking_task(desk)`.
-  - Tasks: `create_task(desk, title, intent_path=None, parent_task_id=None, request_id=None, session_id=None, worktree=None, task_id=None)`, `start_task`, `mark_awaiting_close(task, repo=None, sha=None)`, `record_commit`, `get_commit`, `task_commits`, `close_task`, `closed_ancestors`, `get_task`, `list_tasks(desk=None, status=None, open_only=False)`.
+  - Tasks: `create_task(desk, title, intent_path=None, parent_task_id=None, request_id=None, session_id=None, worktree=None, task_id=None)`, `start_task`, `mark_awaiting_close(task, repo=None, sha=None)`, `record_commit`, `get_commit`, `task_commits`, `set_review_branch(task, branch)`, `close_task`, `closed_ancestors`, `get_task`, `list_tasks(desk=None, status=None, open_only=False)`.
   - Events: `add_event`, `drain(max_chars=1500)`, `ack(event_id)`.
   - Memory: `record_session`, `get_session`, `add_extract`, `add_keypoint`, `find(query, limit)`, `fts_query`, `fts_phrases`, `scrub(text)`.
   - Facts: `add_fact(scope, text, tier, source, expires_at=None, subject_key=None, valid_from=None, lookup=None)` (the same function as `facts.add_fact`), `touch`, `decay`, `archive_stale`, `archive`, `list_facts(scope=None, include_archived=False, include_closed=False)` (open rows, plus archived or closed rows when asked), `context_facts(desk)` (current fleet and desk facts).
@@ -322,7 +322,7 @@ Tests make their temporary directories under the constant `/private/tmp`, so `te
 | `db_adapter.py` / `dispatch_store.py` | Here |
 | --- | --- |
 | `MemoryManager` task registry | `pensieve.create_task`, `start_task`, `mark_awaiting_close`, `close_task` |
-| One open task per session or desk, `TaskConflictError` | A partial unique index on active tasks per session, and a trigger allowing one active task per desk except the desks in `many_task_desks`, `ConflictError`. `ryan-claude-1` takes many tasks, so parallel reviews of Ryan's own sessions never block each other. |
+| One open task per session or desk, `TaskConflictError` | A partial unique index on active tasks per session, and a trigger allowing one active task per desk except the desks in `many_task_desks`, `ConflictError`. `ryan-claude-1` takes many tasks, so reviews of Ryan's own sessions on different branches never block each other, while a fix commit on a branch goes on that branch's open task. |
 | `append_event` | `pensieve.add_event`, `drain`, `ack` |
 | `mem fact add`, context build | `pensieve.add_fact`, `context_facts`, `touch`, `decay`, `archive_stale`, `archive`, plus `facts.supersede`, `withdraw`, `current_facts` and the as-of reads |
 | `DispatchStore` private message bodies | `owls.body` or `owls.body_path`, returned only by `read` |

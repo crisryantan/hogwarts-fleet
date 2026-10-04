@@ -231,6 +231,14 @@ class MigrationV7Tests(unittest.TestCase):
         self.assertEqual([row[0] for row in conn.execute("SELECT desk FROM tasks WHERE status = 'active' ORDER BY id")],
                          ["harry", "mcgonagall", "moody"])
 
+    def test_v7_leaves_rows_from_before_it_valid_with_no_review_branch(self):
+        conn = self.v6_database()
+        self.assertEqual([row[0] for row in conn.execute("SELECT review_branch FROM tasks")], [None, None, None])
+        self.assertEqual(conn.execute("PRAGMA integrity_check").fetchone()[0], "ok")
+        self.assertEqual(conn.execute("PRAGMA foreign_key_check").fetchall(), [])
+        pensieve.set_review_branch(conn, "tk_0000000000000002", "fix/site")
+        self.assertEqual(pensieve.get_task(conn, "tk_0000000000000002")["review_branch"], "fix/site")
+
     def test_a_fresh_database_grants_no_desk(self):
         conn = db.connect(temp_dir(self) / "state" / "pensieve.db")
         self.addCleanup(conn.close)

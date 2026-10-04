@@ -50,15 +50,20 @@ its own task either, since it holds the task's review lock, but leaves closing i
 the desk lock. Only Ryan closes a task as complete.
 
 Author tasks run side by side: Harry, Hermione, Moody, Ron and Ryan's own sessions may each hold many active
-tasks, so a task waiting for a fix round blocks nothing. Ryan's own sessions start a new review whatever else
-of theirs is in review or waiting for fixes, with two refusals made before anything changes: a commit another
-task already holds (review it with --task), and a checkout whose open task has used its round cap: that
-checkout's reviews go on that task with --task until Ryan closes it, allowance or not, so leaving out --task
-never starts a fresh count. A checkout is matched as a folder (device and inode), not by how its path is spelled.
-The cap is per task: below it, a new review without --task is a new task with its own count, since one checkout
-carries several tasks in flight. A new task that fails before its first round opens is closed as abandoned,
-unless its commit was already recorded on it: then it stays active, --task <id> retries it, and a new review
-of that commit names it.
+tasks, so a task waiting for a fix round blocks nothing. A review of Ryan's own sessions follows the branch his
+checkout has out: a new task records it, and a detached HEAD, or a branch name the fleet's branch rule refuses,
+is refused. The branch is the review's lineage. A new review without --task is refused before anything changes
+for a commit another task already holds (review it with --task), and while an active own task on the same
+checkout follows the same branch: a fix commit on that branch goes on that task with --task, so its rounds and
+its cap carry on, allowance or not, and leaving out --task never starts a fresh count. Only another branch
+starts a new task with its own count, which is how one checkout carries several PRs in flight. An active task
+whose branch the checkout no longer has (renamed or deleted), or that names none, also refuses a new task, since
+its work may be this same work under a new name: --task <id> goes on with it and moves it to the branch now out,
+or Ryan closes it. --task never moves a task off a branch the checkout still has, nor onto a branch another
+task follows. A checkout is matched as a folder (device and inode), not by how its path is spelled. These
+choices are made under one short lock, so two reviews started at once on one branch never both make a task.
+A new task that fails before its first round opens is closed as abandoned, unless its commit was already
+recorded on it: then it stays active, --task <id> retries it, and a new review of that commit names it.
 """
 from __future__ import annotations
 
@@ -81,6 +86,8 @@ COMMIT_MESSAGE_MAX = 4000
 REVIEW_MAX_BYTES = 262144
 OWN_DESK = config.OWN_SESSION_DESK
 REVIEW_RUNNING = "a review of this task is already running; run it again when it ends"
+OWN_LINEAGE_LOCK = "review-own-lineage.lock"
+OWN_LINEAGE_WAIT_SECONDS = 120
 
 
 # Reading desk output
@@ -433,58 +440,102 @@ def _review_own(conn, repo_dir: str, title: Optional[str], intent: Optional[str]
     sha = gitops.git(["rev-parse", "--verify", "--end-of-options", "HEAD^{commit}"], common_dir).strip()
     if gitops.SHA.fullmatch(sha) is None:
         raise FleetError("git did not return a full commit sha")
+    branch = _own_branch(common_dir)
     if task_id is None:
         title = ids.clean_text(title or "", "title", 200, single_line=True)
         if not title:
             raise FleetError("a new review needs --title")
-        _check_new_own(conn, repo_dir, common_dir, sha)
-        intent_path = _write_own_task_md(target, title, intent or title)
-        task = pensieve.create_task(conn, OWN_DESK, title, intent_path=intent_path, task_id=target)
+        with own_lineage_lock():
+            _check_new_own(conn, repo_dir, common_dir, sha, branch)
+            intent_path = _write_own_task_md(target, title, intent or title)
+            task = pensieve.create_task(conn, OWN_DESK, title, intent_path=intent_path, task_id=target)
+            try:
+                pensieve.start_task(conn, task["id"])
+            except ConflictError as exc:
+                # Only a store where ryan-claude-1 still takes one task at a time refuses here.
+                pensieve.close_task(conn, task["id"], "abandoned")
+                raise FleetError(f"{OWN_DESK} could not start a new task: {exc}; castle desk many-tasks {OWN_DESK}"
+                                 " lets it hold many") from None
+            try:
+                pensieve.set_review_branch(conn, task["id"], branch)
+                record = worktree.add_worktree(conn, task["id"], repo_dir, base, None, fetch, detach_at=sha)
+                task = pensieve.set_worktree(conn, task["id"], f"{ids.WORKTREES_ROOT}/{task['id']}")
+            except BaseException:
+                _abandon_unreviewed(conn, task["id"])
+                raise
         try:
-            pensieve.start_task(conn, task["id"])
-        except ConflictError as exc:
-            # Only a store where ryan-claude-1 still takes one task at a time refuses here.
-            pensieve.close_task(conn, task["id"], "abandoned")
-            raise FleetError(f"{OWN_DESK} could not start a new task: {exc}; castle desk many-tasks {OWN_DESK}"
-                             " lets it hold many") from None
-        try:
-            record = worktree.add_worktree(conn, task["id"], repo_dir, base, None, fetch, detach_at=sha)
-            task = pensieve.set_worktree(conn, task["id"], f"{ids.WORKTREES_ROOT}/{task['id']}")
             return _review_own_at(conn, task, record, sha, lock_fd)
         except BaseException:
-            # A new task that failed before its first round opened is closed, so it never sits active, unless
-            # its commit is already recorded on it: that task stays active for --task to retry, since a closed
-            # task never reopens and the commit can belong to no other task.
-            with contextlib.suppress(Exception):
-                if not capacity.review_rounds(conn, task["id"]) and not pensieve.task_commits(conn, task["id"]):
-                    pensieve.close_task(conn, task["id"], "abandoned")
+            _abandon_unreviewed(conn, task["id"])
             raise
-    else:
-        task = pensieve.get_task(conn, target)
-        if task["desk"] != OWN_DESK or task["status"] != "active":
-            raise FleetError("--task must be an active task of your own sessions")
-        record = gitops.find_record(worktree.castle_path(task["worktree"]))
-        if record is None or not gitops.same_checkout(record["repo_dir"], repo_dir):
-            raise FleetError("that task's worktree is for a different checkout")
-        gitops.git(["checkout", "--detach", sha], record["git_dir"], record["path"])
+    task = pensieve.get_task(conn, target)
+    if task["desk"] != OWN_DESK or task["status"] != "active":
+        raise FleetError("--task must be an active task of your own sessions")
+    record = gitops.find_record(worktree.castle_path(task["worktree"]))
+    if record is None or not gitops.same_checkout(record["repo_dir"], repo_dir):
+        raise FleetError("that task's worktree is for a different checkout")
+    with own_lineage_lock():
+        task = _continue_own(conn, task, repo_dir, common_dir, branch)
+    gitops.git(["checkout", "--detach", sha], record["git_dir"], record["path"])
     return _review_own_at(conn, task, record, sha, lock_fd)
 
 
-def _check_new_own(conn, repo_dir: str, common_dir: str, sha: str) -> None:
+def _abandon_unreviewed(conn, task_id: str) -> None:
+    """Close a new own task that failed before its first round opened, so it never sits active, unless its
+    commit is already recorded on it: that task stays active for --task to retry, since a closed task never
+    reopens and the commit can belong to no other task."""
+    with contextlib.suppress(Exception):
+        if not capacity.review_rounds(conn, task_id) and not pensieve.task_commits(conn, task_id):
+            pensieve.close_task(conn, task_id, "abandoned")
+
+
+@contextlib.contextmanager
+def own_lineage_lock() -> Iterator[None]:
+    """Held while a review of Ryan's own sessions decides which task its branch belongs to and records it,
+    so two reviews started at once on one branch never both make a task. Never held through a review run."""
+    with contextlib.ExitStack() as stack:
+        locks_fd = stack.enter_context(safefs.opened_dir(config.OFFICE_ROOT, "locks", create=True))
+        try:
+            stack.enter_context(safefs.held_lock(locks_fd, OWN_LINEAGE_LOCK, blocking=True,
+                                                 timeout=OWN_LINEAGE_WAIT_SECONDS))
+        except safefs.Busy:
+            raise FleetError("another review of your own sessions is still starting; run this again once it"
+                             " has") from None
+        yield
+
+
+def _own_branch(common_dir: str) -> str:
+    """The branch the checkout has out, which names the review's lineage. A detached HEAD has none."""
+    branch = gitops.current_branch(common_dir)
+    if branch is None:
+        raise FleetError("your checkout's HEAD is detached, so this review has no branch to follow: check out"
+                         " the branch the commit is on and run it again")
+    try:
+        return gitops.check_branch(branch)
+    except FleetError as exc:
+        raise FleetError(f"your checkout's branch cannot name a review: {exc}") from None
+
+
+def _own_tasks_on(conn, repo_dir: str) -> list:
+    """The active own-session tasks whose worktree is for this checkout, matched as a folder."""
+    found = []
+    for task in pensieve.list_tasks(conn, desk=OWN_DESK, status="active"):
+        record = None if task["worktree"] is None else gitops.find_record(worktree.castle_path(task["worktree"]))
+        if record is not None and gitops.same_checkout(record["repo_dir"], repo_dir):
+            found.append(task)
+    return found
+
+
+def _continue_text(task: dict) -> str:
+    return f"fleet review own --repo-dir <checkout> --task {task['id']}"
+
+
+def _check_new_own(conn, repo_dir: str, common_dir: str, sha: str, branch: str) -> None:
     """Refuse a new own task, before anything is made, for a commit another task already holds, or while an
-    open task on the same checkout has used its round cap. That task's rounds go on with --task until Ryan
-    closes it, allowance or not, so leaving out --task never starts a fresh count. The checkout is matched as a
-    folder, so another letter case of its path on a case-insensitive disk is still that checkout."""
-    cap = config.REVIEW_ROUND_CAP
-    for other in pensieve.list_tasks(conn, desk=OWN_DESK, status="active"):
-        record = None if other["worktree"] is None else gitops.find_record(worktree.castle_path(other["worktree"]))
-        if record is None or not gitops.same_checkout(record["repo_dir"], repo_dir):
-            continue
-        if sum(1 for row in capacity.review_rounds(conn, other["id"]) if row["counts"]) >= cap:
-            raise FleetError(f"task {other['id']} on this checkout has used its {cap} review rounds, so this"
-                             f" checkout's reviews go on that task: run fleet review own --repo-dir <checkout>"
-                             f" --task {other['id']} once castle task allow-round {other['id']} allows one more"
-                             " round, or close that task first")
+    active task on this checkout follows the same branch, or one the checkout no longer has. So a branch's fix
+    commits always go on its open task and its round count, allowance or not, and only another branch starts
+    a new task with its own count. The checkout is matched as a folder, so another letter case of its path on
+    a case-insensitive disk is still that checkout."""
     repo = gitops.repo_slug(gitops.git(["config", "--get", "remote.origin.url"], common_dir))
     held = pensieve.get_commit(conn, repo, sha)
     if held is not None:
@@ -494,6 +545,37 @@ def _check_new_own(conn, repo_dir: str, common_dir: str, sha: str) -> None:
                              f" <checkout> --task {owner['id']} to review it again")
         raise FleetError(f"HEAD {sha[:12]} already belongs to task {owner['id']}, which is"
                          f" {owner['status'].replace('_', ' ')}; make a new commit for a new review")
+    cap = config.REVIEW_ROUND_CAP
+    for other in _own_tasks_on(conn, repo_dir):
+        followed = other["review_branch"]
+        if followed == branch:
+            text = (f"branch {branch} on this checkout is task {other['id']}, so its fix commits go on that task:"
+                    f" run {_continue_text(other)}")
+            if capacity.needs_allowance(conn, other["id"], cap):
+                text += (f" once castle task allow-round {other['id']} allows one more round, since it has used"
+                         f" its {cap} review rounds, or close that task first")
+            raise FleetError(text)
+        if followed is None or not gitops.has_branch(common_dir, followed):
+            gone = ("names no branch" if followed is None
+                    else f"follows branch {followed}, which this checkout no longer has")
+            raise FleetError(f"task {other['id']} on this checkout {gone}, so it may be this same work renamed:"
+                             f" run {_continue_text(other)} to go on with it here, or close that task first")
+
+
+def _continue_own(conn, task: dict, repo_dir: str, common_dir: str, branch: str) -> dict:
+    """A fix round with --task goes on that task's branch. The task moves to the checkout's branch only when its
+    own branch is gone (renamed or deleted) or was never recorded, and never onto a branch another task follows."""
+    if task["review_branch"] == branch:
+        return task
+    for other in _own_tasks_on(conn, repo_dir):
+        if other["id"] != task["id"] and other["review_branch"] == branch:
+            raise FleetError(f"branch {branch} on this checkout is task {other['id']}, not task {task['id']}:"
+                             f" run {_continue_text(other)}, or check out task {task['id']}'s branch")
+    if task["review_branch"] is not None and gitops.has_branch(common_dir, task["review_branch"]):
+        raise FleetError(f"task {task['id']} follows branch {task['review_branch']}, which this checkout still"
+                         f" has: check it out to go on with that task, or leave out --task to start a new task"
+                         f" for branch {branch}")
+    return pensieve.set_review_branch(conn, task["id"], branch)
 
 
 def _review_own_at(conn, task: dict, record: dict, sha: str, lock_fd: int) -> dict:

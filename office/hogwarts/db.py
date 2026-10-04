@@ -51,6 +51,8 @@ MANY_TASK_DESKS_SEED = ("harry", "hermione", "moody", "ron", "ryan-claude-1")
 # Desks that always hold one active task at a time: McGonagall, Snape, Dumbledore, Ryan and the scripts.
 SINGLE_TASK_DESKS = ("mcgonagall", "snape", "portrait")
 SINGLE_TASK_FAMILIES = ("human", "script")
+# The longest branch an own-session review task records, as the fleet's branch rule allows.
+REVIEW_BRANCH_MAX = 100
 
 PathLike = Union[str, Path]
 
@@ -662,7 +664,10 @@ V6 = (
 # desk still holds at most one. The grant is one way, and never reaches McGonagall, Snape, Dumbledore, Ryan or a
 # script. The one-per-desk index becomes a trigger that reads the
 # grant, so a raw write on a single desk is still refused, and a task keeps its desk, so no write moves an active
-# task onto a single desk either. A run launch names the task it ran for, if any.
+# task onto a single desk either. A run launch names the task it ran for, if any. An own-session review task
+# records the branch its review lineage follows (review_branch), set only while the task is active and never
+# cleared. Rows from before V7 keep it NULL, which the review script reads as a lineage it cannot place, so such a
+# task is continued with --task or closed rather than silently left behind.
 V7 = (
     _table(
         """CREATE TABLE IF NOT EXISTS many_task_desks (
@@ -702,6 +707,16 @@ V7 = (
         "a run launch names a task of its own desk",
     ),
     "CREATE INDEX IF NOT EXISTS run_launches_task ON run_launches(task_id)",
+    ("tasks", "review_branch", "ALTER TABLE tasks ADD COLUMN review_branch TEXT CHECK (review_branch IS NULL OR"
+     f" (length(review_branch) BETWEEN 1 AND {REVIEW_BRANCH_MAX} AND review_branch NOT GLOB '*[^a-z0-9._/-]*'))"),
+    _guard("tasks_review_branch_new", "BEFORE INSERT ON tasks WHEN NEW.review_branch IS NOT NULL",
+           "a review branch is set on an active task"),
+    _guard(
+        "tasks_review_branch_active",
+        "BEFORE UPDATE OF review_branch ON tasks WHEN OLD.review_branch IS NOT NEW.review_branch"
+        " AND (OLD.status <> 'active' OR NEW.review_branch IS NULL)",
+        "a review branch is set on an active task and never cleared",
+    ),
 )
 
 MIGRATIONS = ((1, V1), (2, V2), (3, V3), (4, V4), (5, V5), (6, V6), (7, V7))

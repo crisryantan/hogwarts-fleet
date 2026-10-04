@@ -96,6 +96,18 @@ def check_branch(name: object) -> str:
     return name
 
 
+def current_branch(git_dir: str) -> Optional[str]:
+    """The branch a checkout has out, unchecked, or None when its HEAD is detached."""
+    ref = git(["symbolic-ref", "--quiet", "HEAD"], git_dir, check=False).strip()
+    return ref[len("refs/heads/"):] if ref.startswith("refs/heads/") and len(ref) > len("refs/heads/") else None
+
+
+def has_branch(git_dir: str, name: str) -> bool:
+    """Whether the checkout has exactly this local branch."""
+    out = git(["for-each-ref", "--format=%(refname)", f"refs/heads/{name}"], git_dir, check=False)
+    return f"refs/heads/{name}" in out.splitlines()
+
+
 def check_ref(name: object, label: str = "ref") -> str:
     if not isinstance(name, str) or REF.fullmatch(name) is None or ".." in name or name.endswith(".lock"):
         raise FleetError(f"{label} is not a plain git ref")
