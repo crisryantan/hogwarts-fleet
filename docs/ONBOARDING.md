@@ -81,7 +81,7 @@ command -v git jq gh rg shellcheck claude codex
 
 ```
 tests: Ran 486 tests in ... OK
-tests_fleet: Ran 401 tests in ... OK
+tests_fleet: Ran 415 tests in ... OK
 castle doctor: ok
 ```
 
