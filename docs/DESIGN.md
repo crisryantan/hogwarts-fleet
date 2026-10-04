@@ -131,7 +131,7 @@ Standard-library Python that runs on the Mac's built-in Python 3.9, with a CLI c
 | Review passes | A pass counts only for that exact commit, only when it is registered on the author's task, and only when the reviewer's family differs from the author's. |
 | Facts | One current fact per subject. Volatile facts need a live lookup or a short expiry. Nightly changes arrive as typed operations applied all or nothing. |
 
-The full contract is in `office/README.md`. 456 store tests and 339 fleet tests pass on the system Python. They include checks that no code reads environment variables and that hostile ids and paths are refused at every entry point.
+The full contract is in `office/README.md`. 462 store tests and 342 fleet tests pass on the system Python. They include checks that no code reads environment variables and that hostile ids and paths are refused at every entry point.
 
 ## Spending fewer tokens
 
