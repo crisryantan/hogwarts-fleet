@@ -13,7 +13,7 @@ from .errors import ConflictError, IntegrityError, NotFoundError, StoreError, Va
 
 DEFAULT_DB = Path("/Users/crisryantan/.hogwarts/state/pensieve.db")
 CODE_ROOT = Path(os.path.abspath(__file__)).parent.parent
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 WAL_ATTEMPTS = 50
 BYTECODE_SUFFIXES = (".pyc", ".pyo", ".so")
 SIDECARS = ("-wal", "-shm")
@@ -637,7 +637,22 @@ V5 = (
     "CREATE INDEX IF NOT EXISTS metrics_desk ON metrics(desk, id)",
 )
 
-MIGRATIONS = ((1, V1), (2, V2), (3, V3), (4, V4), (5, V5))
+# Catalog looks: each look at a family's catalog gets the next look number for that family, so the latest
+# look is the highest number even when two looks land in the same second. Existing rows are numbered by
+# their seen_at order within each family. A row's look number only moves forward.
+V6 = (
+    ("model_catalog", "look", "ALTER TABLE model_catalog ADD COLUMN look INTEGER CHECK (look >= 1)"),
+    "UPDATE model_catalog SET look = (SELECT COUNT(DISTINCT older.seen_at) FROM model_catalog AS older"
+    " WHERE older.family = model_catalog.family AND older.seen_at <= model_catalog.seen_at) WHERE look IS NULL",
+    "CREATE INDEX IF NOT EXISTS model_catalog_look ON model_catalog(family, look)",
+    _guard("model_catalog_look_required", "BEFORE INSERT ON model_catalog WHEN NEW.look IS NULL",
+           "a catalog row needs its look number"),
+    _guard("model_catalog_look_forward",
+           "BEFORE UPDATE ON model_catalog WHEN NEW.look IS NULL OR NEW.look < OLD.look",
+           "a catalog look number only moves forward"),
+)
+
+MIGRATIONS = ((1, V1), (2, V2), (3, V3), (4, V4), (5, V5), (6, V6))
 
 
 def _uid() -> int:

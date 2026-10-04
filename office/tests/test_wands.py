@@ -59,6 +59,44 @@ class MigrationTests(StoreCase):
         self.assertEqual(pensieve.get_desk(conn, "alpha")["model"], "opus")
         self.assertEqual(wands.list_desk_models(conn)[0]["model"], "opus")
 
+    def test_v6_numbers_the_catalog_looks_a_v5_database_kept(self):
+        path = temp_dir(self) / "state" / "pensieve.db"
+        with mock.patch.object(db, "MIGRATIONS", db.MIGRATIONS[:5]), mock.patch.object(db, "SCHEMA_VERSION", 5):
+            conn = db.connect(path)
+            for family, name, seen_at in (("codex", "gpt-6-luna", NOW), ("codex", "gpt-6.1-sol", NOW + 10),
+                                          ("codex", "gpt-6-astra", NOW + 10), ("claude", "opus", NOW + 5)):
+                conn.execute("INSERT INTO model_catalog(family, name, seen_at) VALUES (?, ?, ?)",
+                             (family, name, seen_at))
+            conn.close()
+        conn = db.connect(path)
+        self.addCleanup(conn.close)
+        self.assertEqual(db.schema_version(conn), db.SCHEMA_VERSION)
+        looks = {(row[0], row[1]): row[2] for row in conn.execute("SELECT family, name, look FROM model_catalog")}
+        self.assertEqual(looks, {("codex", "gpt-6-luna"): 1, ("codex", "gpt-6.1-sol"): 2,
+                                 ("codex", "gpt-6-astra"): 2, ("claude", "opus"): 1})
+        self.assertEqual(wands.last_catalog(conn, "codex"), ["gpt-6-astra", "gpt-6.1-sol"])
+        wands.record_catalog(conn, "codex", ["gpt-6.1-sol"], now=NOW + 10)
+        self.assertEqual(wands.last_catalog(conn, "codex"), ["gpt-6.1-sol"])
+        self.assertEqual(wands.catalog_entry(conn, "codex", "gpt-6.1-sol")["look"], 3)
+        before = conn.execute("SELECT family, name, look FROM model_catalog ORDER BY family, name").fetchall()
+        with db.transaction(conn):
+            for statement in db.pending_statements(conn, db.V6):
+                conn.execute(statement)
+        self.assertEqual(conn.execute("SELECT family, name, look FROM model_catalog ORDER BY family, name").fetchall(),
+                         before)
+
+    def test_a_catalog_row_keeps_a_look_number_that_only_moves_forward(self):
+        conn = db.connect(temp_dir(self) / "state" / "pensieve.db")
+        self.addCleanup(conn.close)
+        wands.record_catalog(conn, "codex", ["gpt-6.1-sol"], now=NOW)
+        wands.record_catalog(conn, "codex", ["gpt-6.1-sol"], now=NOW)
+        for statement in ("INSERT INTO model_catalog(family, name, seen_at) VALUES ('codex', 'gpt-6-luna', 1)",
+                          "UPDATE model_catalog SET look = 1 WHERE name = 'gpt-6.1-sol'",
+                          "UPDATE model_catalog SET look = NULL WHERE name = 'gpt-6.1-sol'"):
+            with self.subTest(statement=statement), self.assertRaises(sqlite3.IntegrityError):
+                conn.execute(statement)
+        self.assertEqual(wands.catalog_entry(conn, "codex", "gpt-6.1-sol")["look"], 2)
+
 
 class LineTests(WandsCase):
     def test_the_latest_filing_of_a_name_wins(self):
@@ -98,6 +136,40 @@ class CatalogTests(WandsCase):
         wands.record_catalog(self.conn, "codex", ["gpt-6.1-sol"], now=NOW + 10)
         self.assertEqual(wands.last_catalog(self.conn, "codex"), ["gpt-6.1-sol"])
         self.assertEqual(wands.last_catalog(self.conn, "claude"), ["haiku", "opus", "sonnet"])
+
+    def test_two_looks_in_the_same_second_keep_only_the_later_one(self):
+        wands.record_catalog(self.conn, "codex", ["gpt-6.1-sol"], now=NOW)
+        self.assertEqual(wands.last_catalog(self.conn, "codex"), ["gpt-6.1-sol"])
+        self.assertIsNone(wands.catalog_entry(self.conn, "codex", "gpt-6-astra"))
+        self.assertEqual(wands.last_catalog(self.conn, "claude"), ["haiku", "opus", "sonnet"])
+        # The newest look wins even when its clock reads earlier than the look before it.
+        wands.record_catalog(self.conn, "codex", ["gpt-6-luna"], now=NOW - 5)
+        self.assertEqual(wands.last_catalog(self.conn, "codex"), ["gpt-6-luna"])
+        self.assertIsNone(wands.catalog_entry(self.conn, "codex", "gpt-6.1-sol"))
+
+    def test_a_pin_refuses_a_slug_a_same_second_look_dropped(self):
+        wands.record_catalog(self.conn, "codex", entries({"gpt-6.1-sol": "workhorse"}), now=NOW)
+        with self.assertRaisesRegex(ValidationError, "last Codex catalog"):
+            wands.pin(self.conn, "harry", "gpt-6-astra", now=NOW)
+        self.assertEqual(wands.pin(self.conn, "harry", "gpt-6.1-sol", now=NOW)["model"], "gpt-6.1-sol")
+
+    def test_approval_refuses_a_pick_a_same_second_look_dropped(self):
+        wands.set_need(self.conn, "harry", "frontier", now=NOW)
+        wands.apply_model(self.conn, "harry", "gpt-6-luna", "high", "fast", "initial", now=NOW)
+        self.assertTrue(wands.set_pending(self.conn, "harry", "gpt-6-astra", "high", "frontier", now=NOW))
+        wands.record_catalog(self.conn, "codex", entries({"gpt-6-luna": "fast"}), now=NOW)
+        with self.assertRaisesRegex(ConflictError, "latest codex catalog no longer offers it"):
+            wands.approve(self.conn, "harry", now=NOW)
+
+    def test_a_trial_never_reverts_onto_a_slug_a_same_second_look_dropped(self):
+        wands.apply_model(self.conn, "harry", "gpt-6-astra", "high", "frontier", "initial", now=NOW)
+        wands.apply_model(self.conn, "harry", "gpt-6.1-sol", "high", "workhorse", "role", now=NOW)
+        wands.record_catalog(self.conn, "codex", entries({"gpt-6.1-sol": "workhorse"}), now=NOW)
+        wands.record_outcome(self.conn, "harry", False, self.change(), now=NOW, blocked=())
+        outcome = wands.record_outcome(self.conn, "harry", False, self.change(), now=NOW, blocked=())
+        self.assertEqual((outcome["reverted"], outcome["revert_blocked"], outcome["unavailable"]),
+                         (False, True, "the latest codex catalog no longer offers it"))
+        self.assertEqual(wands.get_desk_model(self.conn, "harry")["model"], "gpt-6.1-sol")
 
     def test_a_catalog_needs_safe_names(self):
         for names in ([], ["ok-name", "../x"], "opus", [None]):

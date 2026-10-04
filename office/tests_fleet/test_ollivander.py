@@ -7,6 +7,7 @@ import io
 import json
 import os
 import subprocess
+import unittest
 from pathlib import Path
 from unittest import mock
 
@@ -16,7 +17,7 @@ from tests.support import NOW
 from fleet import common, config, gitops, ollivander, owl_post, run_desk, safefs, tools
 from fleet.safefs import FleetError
 from hogwarts.errors import ConflictError, ValidationError
-from tests_fleet.support import CODEX_PROFILE, FleetCase, fake_children
+from tests_fleet.support import CODEX_PROFILE, IN_KIT, ONLY_IN_KIT, FleetCase, fake_children, kit_setting
 
 KIT = Path(__file__).resolve().parents[1]
 FIXTURE = Path(__file__).resolve().parent / "fixtures" / "codex_models_20261004.json"
@@ -92,10 +93,10 @@ class OllivanderCase(FleetCase):
             patcher = mock.patch.object(subprocess, name, side_effect=AssertionError("no process may start"))
             patcher.start()
             self.addCleanup(patcher.stop)
+        # The kit's role cards, from the role table, never the cards this office has been given.
         for desk in config.ROLE_DESKS:
-            folder = self.office / "desks" / desk
-            folder.mkdir(mode=0o700, exist_ok=True)
-            self.write_file(folder / "role.json", (KIT / "desks" / desk / "role.json").read_text())
+            (self.office / "desks" / desk).mkdir(mode=0o700, exist_ok=True)
+            self.write_role(desk)
         (self.office / "desks" / "ollivander").mkdir(mode=0o700)
         self.user_dir = self.tmp / "user"
         for root in (self.castle, self.user_dir):
@@ -137,6 +138,7 @@ class OllivanderCase(FleetCase):
 
 
 class RoleCardTests(OllivanderCase):
+    @unittest.skipUnless(IN_KIT, ONLY_IN_KIT)
     def test_the_kit_role_cards_match_the_role_table(self):
         self.assertEqual(set(config.ROLE_DESKS), set(ROLE_TABLE))
         for desk, (family, need, effort, why) in ROLE_TABLE.items():
@@ -1413,8 +1415,14 @@ class BlockedModelTests(OllivanderCase):
     def blocks(self, prefixes=MADE_UP_BLOCKS):
         return mock.patch.object(config, "BLOCKED_MODEL_PREFIXES", prefixes)
 
+    @unittest.skipUnless(IN_KIT, ONLY_IN_KIT)
     def test_the_kit_blocks_nothing(self):
+        self.assertEqual(kit_setting("BLOCKED_MODEL_PREFIXES"), ())
+
+    def test_the_tests_block_nothing_unless_they_say_so(self):
         self.assertEqual(config.BLOCKED_MODEL_PREFIXES, ())
+
+    def test_a_prefix_blocks_the_names_it_starts(self):
         self.assertEqual(wands.blocked_by("claude-fennel-5", ("fennel", "claude-fennel-")), "claude-fennel-")
         self.assertEqual(wands.blocked_by("fennel", ("fennel", "claude-fennel-")), "fennel")
         self.assertIsNone(wands.blocked_by("claude-opus-5-5", ("fennel", "claude-fennel-")))

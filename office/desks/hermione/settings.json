@@ -7,13 +7,13 @@
       "Edit(~/hogwarts/desks/hermione/outbox/**)",
       "Read(~/hogwarts/tasks/**)",
       "Read(~/hogwarts/worktrees/**)",
-      "Bash(git -C * diff --no-ext-diff --no-textconv origin/main...HEAD)",
-      "Bash(git -C * diff --no-ext-diff --no-textconv --stat origin/main...HEAD)",
-      "Bash(git -C * log --no-decorate --oneline origin/main..HEAD)",
+      "Bash(git -C * diff --no-ext-diff --no-textconv *...HEAD)",
+      "Bash(git -C * diff --no-ext-diff --no-textconv --stat *...HEAD)",
+      "Bash(git -C * log --no-decorate --oneline *..HEAD)",
       "Bash(git -C * rev-parse HEAD)",
-      "Bash(RTK_DISABLED=1 git -C * diff --no-ext-diff --no-textconv origin/main...HEAD)",
-      "Bash(RTK_DISABLED=1 git -C * diff --no-ext-diff --no-textconv --stat origin/main...HEAD)",
-      "Bash(RTK_DISABLED=1 git -C * log --no-decorate --oneline origin/main..HEAD)",
+      "Bash(RTK_DISABLED=1 git -C * diff --no-ext-diff --no-textconv *...HEAD)",
+      "Bash(RTK_DISABLED=1 git -C * diff --no-ext-diff --no-textconv --stat *...HEAD)",
+      "Bash(RTK_DISABLED=1 git -C * log --no-decorate --oneline *..HEAD)",
       "Bash(RTK_DISABLED=1 git -C * rev-parse HEAD)"
     ],
     "deny": [
@@ -31,6 +31,7 @@
       "Bash(git *--work-tree*)",
       "Bash(git *--ext-diff*)",
       "Bash(git *--textconv*)",
+      "Bash(git *--no-index*)",
       "Bash(RTK_DISABLED=1 git * -c *)",
       "Bash(RTK_DISABLED=1 git *--config-env*)",
       "Bash(RTK_DISABLED=1 git *--output*)",
@@ -38,7 +39,8 @@
       "Bash(RTK_DISABLED=1 git *--git-dir*)",
       "Bash(RTK_DISABLED=1 git *--work-tree*)",
       "Bash(RTK_DISABLED=1 git *--ext-diff*)",
-      "Bash(RTK_DISABLED=1 git *--textconv*)"
+      "Bash(RTK_DISABLED=1 git *--textconv*)",
+      "Bash(RTK_DISABLED=1 git *--no-index*)"
     ],
     "disableBypassPermissionsMode": "disable"
   },

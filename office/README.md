@@ -95,7 +95,7 @@ The only file the CLI reads is the ops file for `castle fact apply --file PATH`.
 - CLI output is `json.dumps(ensure_ascii=True)`. List views never include owl bodies.
 - Close tokens and owl bodies never travel on argv. They come from stdin only.
 
-## Schema summary (version 5)
+## Schema summary (version 6)
 
 All tables are STRICT when SQLite supports it. Timestamps are integer unix seconds.
 
@@ -123,14 +123,14 @@ All tables are STRICT when SQLite supports it. Timestamps are integer unix secon
 | `run_launches` | One row per headless run, written before its process starts, so the run counts toward the daily run cap even if it is killed before it records usage. Its usage is the `metrics` row tied to it once it ends, set once. Never deleted. |
 | `round_allowances` | One row each time you allow another review round with `castle task allow-round`. Immutable. |
 | `model_lines` | How you filed a model name: `frontier`, `workhorse`, `fast` or `ignore`. The latest row per name wins. Immutable. |
-| `model_catalog` | The model names each family offered at Ollivander's last look, with whether the catalog listed each, the tier it was filed under then and when it retires. `castle desk model --approve` checks a pending pick against it. |
+| `model_catalog` | The model names each family offered at Ollivander's last look, with whether the catalog listed each, the tier it was filed under then and when it retires. Each look gets the family's next look number, and the latest look is the one with the highest number, so two looks in the same second never mix. A row's look number only moves forward. `castle desk model --approve`, a pin and a trial revert check against the latest look. |
 | `desk_models` | Each Claude and Codex desk's role need, current model and effort, pin, pending pick and trial state, including how the last trial ended (`trial_end`: `passed`, `pinned`, `held`, `revert_blocked` or `reverted`). The `desks` table itself stays immutable. |
 | `model_changes` | Every model switch, with its reason: `initial`, `role`, `pin`, `approved` or `revert`. Immutable. |
 | `model_resolutions` | Every full Claude id each alias was seen to run as, with its first and last sighting. Only the last sighting moves, and rows are never deleted. |
 
 Triggers also block deletes on desks, tasks, task commits, requests, events, facts, owls and review passes. Fact triggers require `valid_from` and `recorded_at` on every row, and keep `valid_to`, `closed_at` and `end_reason` set or unset together, with `valid_to` no earlier than `valid_from` and `closed_at` no earlier than `recorded_at`. `superseded_by` is only set on a superseded row. `restores` never changes once written.
 
-Migration 2 adds the fact columns, backfills `valid_from` and `recorded_at` from `created_at`, and builds the index and `facts_fts`. Migration 3 adds `facts.restores` and the trigger that keeps it fixed. Migration 4 adds the cap and review round tables. Migration 5 adds the model tables. Each column is added only while it is missing, so running a migration again changes nothing.
+Migration 2 adds the fact columns, backfills `valid_from` and `recorded_at` from `created_at`, and builds the index and `facts_fts`. Migration 3 adds `facts.restores` and the trigger that keeps it fixed. Migration 4 adds the cap and review round tables. Migration 5 adds the model tables. Migration 6 adds the catalog look number and numbers the rows already kept by their `seen_at` order in each family. Each column is added only while it is missing, so running a migration again changes nothing.
 
 ## Why facts work this way
 
