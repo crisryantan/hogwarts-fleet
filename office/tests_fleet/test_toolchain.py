@@ -183,6 +183,30 @@ class DeskToolTests(ToolchainCase):
         self.assertIn(f'"{self.home_dir}/go/pkg/mod"="read"', argv[argv.index("-c") + 1])
         self.assertEqual(verify.child_env("/private/tmp/x", record)["GOPROXY"], "off")
 
+    def test_borrowed_folders_are_never_writable_and_the_office_stays_denied(self):
+        self.node_repo()
+        self.write_file(self.repo / "go.mod", "module example.com/app\n\ngo 1.26\n")
+        self.git("add", "go.mod")
+        self.git("commit", "-q", "-m", "go module")
+        self.git("update-ref", "refs/remotes/origin/main", "HEAD")
+        _, task, owl_id, _, _ = self.build()
+        record = gitops.read_record(task["id"])
+        tools = toolchain.for_record(record)
+        borrowed = tools["read"] + tools["path"]
+        self.assertEqual(sorted(tools["read"]), sorted([f"{self.repo}/node_modules", f"{self.nvm}/v24.19.0",
+                                                        f"{self.home_dir}/go/pkg/mod"]))
+        plan = run_desk.build_plan(self.conn, "harry", owl_id)
+        harry = next(item for item in plan["argv"] if item.startswith("permissions.fleet-harry="))
+        argv = REAL_SANDBOX_ARGV(record, "/private/tmp/hogwarts-verify-x", "make test")
+        checks = argv[argv.index("-c") + 1]
+        for name, table in (("harry", harry), ("verify", checks)):
+            with self.subTest(profile=name):
+                for path in borrowed:
+                    self.assertNotIn(f'"{path}"="write"', table)
+                for path in tools["read"]:
+                    self.assertIn(f'"{path}"="read"', table)
+                self.assertIn(f'"{config.OFFICE_ROOT}"="deny"', table)
+
     def test_environment_values_that_need_quoting_are_refused(self):
         for value in ('a"b', "a b", "a\\b", ""):
             with self.subTest(value=value), self.assertRaises(FleetError):
