@@ -1,0 +1,13 @@
+{
+  "tools": [
+    "Read",
+    "Write",
+    "Edit",
+    "Glob",
+    "Grep",
+    "ToolSearch",
+    "mcp__<chat-mcp>__list_messages",
+    "mcp__<chat-mcp>__search_conversations",
+    "mcp__<chat-mcp>__search_messages"
+  ]
+}

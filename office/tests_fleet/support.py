@@ -7,6 +7,7 @@ castle and office are never touched.
 """
 from __future__ import annotations
 
+import ast
 import io
 import json
 import os
@@ -40,6 +41,23 @@ SCRATCHPAD = "# Scratchpad\n\n## Now\n\n## Notes\n\n## Checkpoint\n"
 REAL_CASTLE = "/Users/crisryantan/hogwarts"
 REAL_OFFICE = "/Users/crisryantan/.hogwarts"
 CASTLE_SHARED = (".git", ".claude", "tasks", "worktrees", "CLAUDE.md", "PLAN.md", "standing-orders.md", ".gitignore")
+# The office these tests run in. In a clone of the kit it is the kit's office folder, next to install.sh. In an
+# installed office it holds that install's own config, trusted lists and agent files, so tests never rely on them.
+OFFICE = Path(__file__).resolve().parents[1]
+IN_KIT = OFFICE.name == "office" and (OFFICE.parent / "install.sh").is_file()
+ONLY_IN_KIT = "checks the kit's shipped files, which are only in a clone of the kit, not in an installed office"
+# Copies of the kit's placeholder trusted lists, for tests that need a trusted list in their temp office.
+LIVE_TOOLS_FIXTURES = Path(__file__).resolve().parent / "fixtures" / "live-tools"
+
+
+def kit_setting(name: str):
+    """A setting as the kit's fleet/config.py ships it, read from the file rather than the patched module."""
+    tree = ast.parse((OFFICE / "fleet" / "config.py").read_text())
+    for node in tree.body:
+        targets = node.targets if isinstance(node, ast.Assign) else [getattr(node, "target", None)]
+        if any(isinstance(target, ast.Name) and target.id == name for target in targets):
+            return ast.literal_eval(node.value)
+    raise KeyError(name)
 
 
 def claude_settings(desk: str) -> dict:
@@ -123,6 +141,10 @@ class FleetCase(unittest.TestCase):
             patcher = mock.patch.object(config, name, value)
             patcher.start()
             self.addCleanup(patcher.stop)
+        # Nothing is blocked unless a test blocks it, whatever the office's own config blocks.
+        unblocked = mock.patch.object(config, "BLOCKED_MODEL_PREFIXES", ())
+        unblocked.start()
+        self.addCleanup(unblocked.stop)
         # No desk process ever starts: a test that launches one fakes it with fake_children.
         never = mock.patch.object(run_desk, "start_child", side_effect=AssertionError("no desk process may start"))
         never.start()

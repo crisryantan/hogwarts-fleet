@@ -12,6 +12,7 @@ from pathlib import Path
 from tests.support import temp_dir
 
 from fleet import agent_gate
+from tests_fleet.support import LIVE_TOOLS_FIXTURES
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "bin" / "hogwarts-spaces"
@@ -51,8 +52,9 @@ class SpacesCase(unittest.TestCase):
         os.chmod(self.herdr, 0o700)
         self.existing(["McGonagall - Chief of Staff", "Someone else's space"])
         # A temp home laid out like an install: the office holds a copy of this checkout's fleet
-        # code with its config pointed at the temp home and the kit's trusted tool lists, and the
-        # castle, Documents and user agents folder hold safe definitions. The real home is never read.
+        # code with its config pointed at the temp home and the temp claude, and the fixture copies
+        # of the kit's trusted tool lists, never this office's own. The castle, Documents and user
+        # agents folder hold safe definitions. The real home is never read.
         house = self.state / "home"
         self.house = house
         self.castle = house / "hogwarts"
@@ -61,13 +63,16 @@ class SpacesCase(unittest.TestCase):
         for folder in (self.castle / ".claude" / "agents", self.documents, self.user_agents):
             folder.mkdir(parents=True)
         office = house / ".hogwarts"
+        self.office = office
         shutil.copytree(ROOT / "fleet", office / "fleet", ignore=shutil.ignore_patterns("__pycache__"))
         self.config = office / "fleet" / "config.py"
         self.config.write_text(self.config.read_text().replace(REAL_HOME, str(house)))
         for name in ("mcgonagall", "snape"):
             (office / "desks" / name).mkdir(parents=True)
-            shutil.copy(ROOT / "desks" / name / agent_gate.LIVE_TOOLS_FILE, office / "desks" / name)
+            shutil.copy(LIVE_TOOLS_FIXTURES / f"{name}.json", office / "desks" / name / agent_gate.LIVE_TOOLS_FILE)
         self.fake_claude(house / ".local" / "bin" / "claude")
+        # The claude install.sh would pick in this home, whichever one this office's config names.
+        self.set_claude_bin(f"{house}/.local/bin/claude")
         (self.castle / ".claude" / "settings.json").write_text(json.dumps({"agent": "mcgonagall"}))
         self.agent("mcgonagall", "Read, Write, Edit, Glob, Grep")
         self.agent("snape", "Read, Grep, Glob, mcp__<warehouse-mcp>__execute_query")
@@ -214,9 +219,9 @@ class LiveSessionGateTests(SpacesCase):
             tools = command.split(" --tools ")[1].split(" ")[0].split(",")
             self.assertTrue(set(tools) <= agent_gate.SAFE_BUILTINS - {"Skill"}, tools)
             self.assertIn("ToolSearch", tools)
-            # And every one of them on that agent's trusted list in the kit.
+            # And every one of them on that agent's trusted list in the kit, copied into the temp office.
             agent = command.split(" --agent ")[1].split(" ")[0]
-            self.assertTrue(set(tools) <= agent_gate.trusted_tools(agent, ROOT), (agent, tools))
+            self.assertTrue(set(tools) <= agent_gate.trusted_tools(agent, self.office), (agent, tools))
 
     def test_an_unsafe_definition_is_refused_and_nothing_is_made_for_it(self):
         self.existing([])

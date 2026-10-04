@@ -13,6 +13,7 @@ from pathlib import Path
 from tests.support import temp_dir
 
 from fleet import agent_gate
+from tests_fleet.support import IN_KIT, LIVE_TOOLS_FIXTURES, ONLY_IN_KIT
 
 ROOT = Path(__file__).resolve().parents[1]
 # The kit's own definitions, present in a clone of the repo but not in an installed office.
@@ -42,11 +43,11 @@ class GateCase(unittest.TestCase):
         self.mcgonagall = self.castle / ".claude" / "agents" / "mcgonagall.md"
         self.snape.write_text(definition("snape"))
         self.mcgonagall.write_text(definition("mcgonagall"))
-        # A temp office holding a copy of the kit's trusted tool lists.
+        # A temp office holding the fixture copies of the kit's trusted tool lists, never this office's own.
         self.office = self.house / ".hogwarts"
         for agent in ("snape", "mcgonagall"):
             (self.office / "desks" / agent).mkdir(parents=True)
-            shutil.copy(ROOT / "desks" / agent / agent_gate.LIVE_TOOLS_FILE, self.trusted_file(agent))
+            shutil.copy(LIVE_TOOLS_FIXTURES / f"{agent}.json", self.trusted_file(agent))
 
     def trusted_file(self, agent: str) -> Path:
         return self.office / "desks" / agent / agent_gate.LIVE_TOOLS_FILE
@@ -72,7 +73,7 @@ class DefinitionTests(GateCase):
         self.check_snape()
         self.check_mcgonagall()
 
-    @unittest.skipUnless(KIT_SNAPE.is_file() and KIT_MCGONAGALL.is_file(), "the kit agent files are only in a clone")
+    @unittest.skipUnless(IN_KIT and KIT_SNAPE.is_file() and KIT_MCGONAGALL.is_file(), ONLY_IN_KIT)
     def test_the_kit_definitions_pass(self):
         self.snape.write_text(KIT_SNAPE.read_text())
         self.mcgonagall.write_text(KIT_MCGONAGALL.read_text())
@@ -382,6 +383,7 @@ class TrustedListTests(GateCase):
                 with self.assertRaises(agent_gate.Refused):
                     agent_gate.trusted_tools(agent, self.office)
 
+    @unittest.skipUnless(IN_KIT, ONLY_IN_KIT)
     def test_the_kit_lists_are_safe_and_use_placeholders(self):
         placeholder = re.compile(r"mcp__<(warehouse|observability|chat)-mcp>__[a-z_]+")
         for agent in ("snape", "mcgonagall"):
@@ -390,6 +392,13 @@ class TrustedListTests(GateCase):
                 self.assertIn("ToolSearch", tools)
                 for tool in tools:
                     self.assertTrue(tool in agent_gate.SAFE_BUILTINS or placeholder.fullmatch(tool), tool)
+
+    @unittest.skipUnless(IN_KIT, ONLY_IN_KIT)
+    def test_the_fixture_lists_are_the_kit_lists(self):
+        for agent in ("snape", "mcgonagall"):
+            with self.subTest(agent=agent):
+                self.assertEqual((LIVE_TOOLS_FIXTURES / f"{agent}.json").read_bytes(),
+                                 (ROOT / "desks" / agent / agent_gate.LIVE_TOOLS_FILE).read_bytes())
 
 
 class SettingsTests(GateCase):

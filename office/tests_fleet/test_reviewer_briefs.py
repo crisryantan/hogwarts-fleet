@@ -11,6 +11,7 @@ import unittest
 from pathlib import Path
 
 from fleet import review
+from tests_fleet.support import IN_KIT, ONLY_IN_KIT
 
 KIT = Path(__file__).resolve().parents[1]
 REVIEWERS = ("moody", "hermione")
@@ -37,6 +38,8 @@ def rule_matches(rule: str, command: str) -> bool:
     return re.fullmatch(pattern, command, re.DOTALL) is not None
 
 
+# The kit's briefs and settings; an installed office keeps its own, which may be worded privately.
+@unittest.skipUnless(IN_KIT, ONLY_IN_KIT)
 class ReviewerBriefTest(unittest.TestCase):
     def test_the_briefs_read_the_diff_the_request_names(self):
         command = request_diff(STACKED_BASE)
