@@ -318,11 +318,12 @@ def desk_temp_dir(name: str) -> str:
 
 
 def fresh_temp(path: str) -> str:
-    """Make path an empty folder only Ryan can open, so nothing carries over from an earlier run."""
-    if os.path.islink(path):
-        os.unlink(path)
-    elif os.path.lexists(path):
+    """Make path an empty folder only Ryan can open, so nothing carries over from an earlier run.
+    Whatever sits there is removed first: a folder with its contents, or a link or file itself."""
+    if os.path.isdir(path) and not os.path.islink(path):
         shutil.rmtree(path)
+    elif os.path.lexists(path):
+        os.unlink(path)
     os.mkdir(path, 0o700)
     return path
 

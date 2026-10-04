@@ -54,12 +54,12 @@ A Harry Potter themed fleet of single-purpose AI agents for Claude Code and Code
 | Path | What it is | Installed to |
 | --- | --- | --- |
 | `office/` | The store, `bin/castle`, `bin/fleet`, the fleet scripts and hooks, both test suites, desk briefs and settings, launchd templates, pending settings snippets and the avatars | `~/.hogwarts` |
-| `castle/` | The charter, an empty plan, standing orders, desk folders, and McGonagall's settings and agent file | `~/hogwarts` |
+| `castle/` | The charter, an empty plan, standing orders, desk folders, McGonagall's settings and agent file, and a Codex config that keeps any Codex session opened there read-only | `~/hogwarts` |
 | `claude-agents/snape.md` | Snape's user-level agent file | `~/.claude/agents/snape.md`, only if absent |
 | `install.sh` | Installs the two homes, creates the database, registers the desks and runs the tests | |
 | `scripts/owlpost-setup.sh` | Your one command to switch on the Owl Post and send a test owl (onboarding stage 3) | |
 | `scripts/codex-boundary-test.sh` | Proves the Codex desks' permission profile on your Mac: no office, no folder it isn't given, no network. Run it before enabling Harry or Moody, and after every Codex upgrade | |
-| `scripts/codex-exec-boundary-test.py` | Proves the boundary again under real `codex exec` runs for Harry and Moody, launched exactly the way the desk launcher does. Sends a short prompt to OpenAI and costs a few cents | |
+| `scripts/codex-exec-boundary-test.py` | Proves the boundary again under real `codex exec` runs for Harry and Moody, launched exactly the way the desk launcher does: the folders, temp folders and network above, a borrowed folder, quiet Xcode tools, and none of your own Codex hooks or MCP servers. Sends a short prompt to OpenAI and costs a few cents | |
 | `uninstall.sh` | A dry run by default. With `--yes` it removes the fleet and keeps an archive | |
 
 `install.sh` never touches `~/.claude/settings.json`, `~/.codex` or launchd. Those changes are yours to apply, and the onboarding guide shows how.
