@@ -25,14 +25,22 @@ File modes (0700 directories, 0600 files) keep other users out. They do not stop
   README.md
   .gitignore                            ignores state/
   bin/castle                            POSIX sh wrapper, mode 0700
+  bin/fleet                             POSIX sh wrapper for the fleet command, mode 0700
+  bin/hogwarts-spaces                   opens one herdr space per desk, after fleet/agent_gate.py checks the live ones
+  desks/<desk>/live-tools.json          for mcgonagall and snape: every tool their live herdr session may have, by exact name
   hogwarts/__init__.py                  version string
   hogwarts/errors.py                    error classes and exit codes
   hogwarts/ids.py                       id generation, strict validators, path roots
-  hogwarts/db.py                        connect, schema, migrations, transactions, doctor
+  hogwarts/db.py                        connect, read-only connect, schema, migrations, transactions, doctor
   hogwarts/pensieve.py                  desks, tasks, commits, events, sessions, extracts, key points, facts, metrics, scrub
   hogwarts/facts.py                     fact validity windows, subject keys, volatility lint, as-of reads, approved patches
   hogwarts/owlery.py                    owls, requests, review passes, close tokens, purge, audit
+  hogwarts/capacity.py                  the cap day, cap bumps, cap hits, review rounds and round allowances
+  hogwarts/wands.py                     Ollivander's ledger: model filing, catalogs, each desk's model, trials, alias resolutions, the stop file
+  hogwarts/watch.py                     read-only queries behind fleet feed
   hogwarts/cli.py                       argparse CLI, JSON output
+  fleet/                                the fleet scripts and hooks: run_desk.py, review.py, push.py, owl_post.py,
+                                        ollivander.py, feed.py, tools.py (the fleet command) and their helpers
   tests/                                unittest suite
   state/pensieve.db                     the real database, created by castle init
 ```
@@ -87,7 +95,7 @@ The only file the CLI reads is the ops file for `castle fact apply --file PATH`.
 - CLI output is `json.dumps(ensure_ascii=True)`. List views never include owl bodies.
 - Close tokens and owl bodies never travel on argv. They come from stdin only.
 
-## Schema summary (version 3)
+## Schema summary (version 5)
 
 All tables are STRICT when SQLite supports it. Timestamps are integer unix seconds.
 
@@ -103,16 +111,26 @@ All tables are STRICT when SQLite supports it. Timestamps are integer unix secon
 | `keypoints` | Scrubbed key points with tags, with an FTS5 index. |
 | `facts` | Curated facts. Tier `pinned`, `aging` or `perishable`. Each row has an optional `subject_key`, a world validity window (`valid_from`, `valid_to`), a belief window (`recorded_at`, `closed_at`), an `end_reason` (`superseded`, `withdrawn`, `expired`), `superseded_by`, `restores` (the earlier row a restored fact continues) and an optional `lookup`. A partial unique index (`facts_one_current`) allows one current fact per scope and subject key. Facts are archived, never deleted. |
 | `facts_fts` | FTS5 index over fact text, kept in sync by triggers. |
-| `metrics` | Per run token counts, cost and duration. |
+| `metrics` | Per run token counts, cost and duration. A headless run's row is tied to its launch. |
 | `owls` | Messages between desks. Kind `request`, `question`, `answer`, `result`, `fyi`. One answer per question. |
 | `requests` | Peer requests with a forward only phase and an outcome. |
 | `request_phases` | Phase history for each request. |
 | `review_passes` | Review verdicts with author and reviewer families. Each one points at a recorded commit. Immutable. |
 | `close_tokens` | Hashed single use tokens for closing a task as complete. |
+| `cap_bumps` | One row each time you lift a desk's runs or spend cap with `castle desk cap`. It lasts until the next cap reset. Immutable. |
+| `cap_hits` | One row each time a fleet cap refuses a run, or a vendor's own limit stops one. `cap_source` says which: `fleet`, `claude_plan` or `codex_plan`. Immutable. |
+| `review_rounds` | One row per review request of an author task, with its round number, whether a newer commit superseded it, and the review it recorded. That review is stored and tied to its round in one step and never changes, so a round with a verdict counts even if publishing the review afterwards failed. |
+| `run_launches` | One row per headless run, written before its process starts, so the run counts toward the daily run cap even if it is killed before it records usage. Its usage is the `metrics` row tied to it once it ends, set once. Never deleted. |
+| `round_allowances` | One row each time you allow another review round with `castle task allow-round`. Immutable. |
+| `model_lines` | How you filed a model name: `frontier`, `workhorse`, `fast` or `ignore`. The latest row per name wins. Immutable. |
+| `model_catalog` | The model names each family offered at Ollivander's last look, with whether the catalog listed each, the tier it was filed under then and when it retires. `castle desk model --approve` checks a pending pick against it. |
+| `desk_models` | Each Claude and Codex desk's role need, current model and effort, pin, pending pick and trial state, including how the last trial ended (`trial_end`: `passed`, `pinned`, `held`, `revert_blocked` or `reverted`). The `desks` table itself stays immutable. |
+| `model_changes` | Every model switch, with its reason: `initial`, `role`, `pin`, `approved` or `revert`. Immutable. |
+| `model_resolutions` | Every full Claude id each alias was seen to run as, with its first and last sighting. Only the last sighting moves, and rows are never deleted. |
 
 Triggers also block deletes on desks, tasks, task commits, requests, events, facts, owls and review passes. Fact triggers require `valid_from` and `recorded_at` on every row, and keep `valid_to`, `closed_at` and `end_reason` set or unset together, with `valid_to` no earlier than `valid_from` and `closed_at` no earlier than `recorded_at`. `superseded_by` is only set on a superseded row. `restores` never changes once written.
 
-Migration 2 adds the fact columns, backfills `valid_from` and `recorded_at` from `created_at`, and builds the index and `facts_fts`. Migration 3 adds `facts.restores` and the trigger that keeps it fixed. Each column is added only while it is missing, so running a migration again changes nothing.
+Migration 2 adds the fact columns, backfills `valid_from` and `recorded_at` from `created_at`, and builds the index and `facts_fts`. Migration 3 adds `facts.restores` and the trigger that keeps it fixed. Migration 4 adds the cap and review round tables. Migration 5 adds the model tables. Each column is added only while it is missing, so running a migration again changes nothing.
 
 ## Why facts work this way
 
@@ -124,7 +142,7 @@ The volatility lint matches words, not meaning, so it also catches ordinary last
 
 Every function takes a connection from `db.connect(path)` as its first argument. Functions that depend on time take an optional `now`.
 
-- `hogwarts.db`: `connect(path, create=True)`, `migrate(conn)`, `pending_statements(conn, statements)`, `schema_version(conn)`, `transaction(conn)`, `snapshot(conn)`, `doctor(path, code_root=None)`, `stray_bytecode(root)`, `DEFAULT_DB`.
+- `hogwarts.db`: `connect(path, create=True)`, `connect_readonly(path)`, `migrate(conn)`, `pending_statements(conn, statements)`, `schema_version(conn)`, `transaction(conn)`, `snapshot(conn)`, `doctor(path, code_root=None)`, `stray_bytecode(root)`, `DEFAULT_DB`.
 - `hogwarts.pensieve`
   - Desks: `add_desk`, `get_desk`, `list_desks`.
   - Tasks: `create_task(desk, title, intent_path=None, parent_task_id=None, request_id=None, session_id=None, worktree=None, task_id=None)`, `start_task`, `mark_awaiting_close(task, repo=None, sha=None)`, `record_commit`, `get_commit`, `close_task`, `closed_ancestors`, `get_task`, `list_tasks`.
@@ -136,6 +154,9 @@ Every function takes a connection from `db.connect(path)` as its first argument.
   - Writes: `add_fact`, `supersede(scope, subject_key, text, source, tier="aging", valid_from=None, lookup=None, expires_at=None)`, `withdraw(fact_id, desk=None)`, `expire()`, `set_key(fact_id, subject_key)`, `apply_ops(ops)`.
   - Reads: `current_facts(scope=None)`, `find_facts(query, scope=None, include_history=False, limit=10)`, `as_of_world(t, scope=None)`, `as_of_belief(t, scope=None)`, `history(scope, subject_key)`, `contradiction_candidates(since, limit_per_fact=3)`.
   - Lint: `VOLATILE_PATTERNS`, `volatile_match(text)`, `LOOKUP_COMMAND`.
+- `hogwarts.capacity`: `day_bounds(now, reset_offset)`, `add_bump`, `active_bumps`, `list_bumps`, `cap_status`, `record_cap_hit`, `list_cap_hits`, `waiting_requests`, `record_launch`, `record_launch_usage`, `list_launches`, `open_review_round`, `record_round_verdict`, `review_rounds`, `stranded_rounds`, `allow_round`.
+- `hogwarts.wands`: `classify`, `ryan_lines`, `record_catalog`, `last_catalog`, `catalog_entry`, `get_desk_model`, `list_desk_models`, `set_need`, `apply_model`, `set_pending`, `clear_pending`, `approve`, `pin`, `unpin`, `desk_choice`, `record_outcome`, `changes`, `base_alias`, `record_resolution`, `resolutions`, `resolved_id`, `blocked_resolution`, `blocked_resolutions`, `clear_stop`. The calls that file, pin, approve or apply a model take the fleet's `BLOCKED_MODEL_PREFIXES` and refuse a name one of them matches. Pin, approve, apply, a pending pick and a trial's revert also refuse an alias that ever ran as a full id one of them matches. A labelled alias such as `opus[1m]` shares the plain alias's resolutions. `approve` also refuses a pick that the latest stored catalog no longer lists, hides, files under another tier or shows retiring within 30 days. `pin` on the desk's current model ends its trial, and its result carries a `warning` when the latest catalog hides the model or shows it retiring soon. `record_outcome` never reverts a desk pinned since its switch, nor, while anything is blocked, onto no model at all, nor onto a model filed as ignore or one the latest catalog no longer lists, hides or shows retiring within 30 days.
+- `hogwarts.watch` (read only, for a connection from `db.connect_readonly`): `marks`, `owls_after`, `headmaster_events_after`, `metrics_after`, `run_recorded`.
 - `hogwarts.owlery`
   - Owls: `send`, `inbox`, `read`, `ack`, `mark_delivered`.
   - Requests: `REQUEST_PHASES`, `open_request`, `advance`, `defer`, `decline`, `get_request`, `list_requests`, `request_owls`.
@@ -194,12 +215,20 @@ castle init
 castle doctor
 castle desk add NAME --family F [--role R] [--model M]
 castle desk list
+castle desk cap DESK (--runs +N | --spend +X)
+castle desk caps
+castle desk model DESK (MODEL | --role | --approve)
+castle desk models
+castle model line NAME frontier|workhorse|fast|ignore
+castle ollivander clear
 castle task create --desk D --title T [--id TASK] [--intent-path P] [--parent TASK] [--request REQ] [--session S] [--worktree P]
 castle task start|show TASK
 castle task await-close TASK [--repo O/N --sha SHA]
 castle task commit TASK --repo O/N --sha SHA
 castle task close TASK --reason complete|abandoned|superseded [--token-stdin]
 castle task list [--desk D] [--status S]
+castle task allow-round TASK
+castle task rounds TASK
 castle token mint TASK [--ttl SECONDS]
 castle owl send --from D --to D --kind K --subject S [--body-path P | --body-stdin] [--task T] [--request R] [--reply-to OWL] [--key K]
 castle owl inbox DESK [--all]
@@ -251,6 +280,8 @@ Every command except `init` and `doctor` needs an existing database. `init` is s
   {"op": "archive", "fact_id": 9}
 ]
 ```
+
+`desk cap` raises one desk's runs or spend cap until the next cap reset, which is local midnight unless `CAP_RESET_UTC_SECONDS` in the fleet's config says otherwise. `desk model DESK MODEL` pins a desk to a model of its own family, `--role` unpins it and `--approve` takes a pending costlier pick, once it has checked the pick still qualifies. `ollivander clear` removes Ollivander's stop file. The cap numbers, the review round cap and the blocklist are the fleet's settings, kept in `fleet/config.py` next to this package.
 
 `token mint` prints the raw token once. Never send its stdout to a log file, and never set a launchd `StandardOutPath` for a job that mints tokens.
 
