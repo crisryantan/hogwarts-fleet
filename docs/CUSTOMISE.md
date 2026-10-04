@@ -90,13 +90,13 @@ BLOCKED_MODEL_PREFIXES = ("<model-alias>", "claude-<model-alias>-")
 
 To forbid a whole Claude line, list its alias and its full id prefix, as above. A blocked model is never picked, pinned, filed or launched. Ollivander skips it without a note. If every model of a tier is blocked, the desk keeps the one it has and you get one note. If its current model is blocked, `run_desk` won't launch the desk until you pin an allowed one. A trial that fails never reverts a desk onto a blocked model.
 
-An alias counts as blocked once it has run as a blocked full id. The office remembers every full id each alias has run as, so switching a desk away and back doesn't make it forget. That alias stays refused until a later run sees it on an allowed id or you change the list; pin an allowed alias or full id meanwhile.
+An alias counts as blocked once it has run as a blocked full id, even for a helper call that did little of the work. The office remembers every full id each alias has run as, and `opus[1m]` shares the record of `opus`, so switching a desk away and back doesn't make it forget. A later run on an allowed id doesn't lift it, since that run must have started before the block was known. That alias stays refused until you change the list, so pin an allowed alias or full id instead.
 
 ## Update the CLIs automatically
 
 Off by default. Make the plain file `~/.hogwarts/desks/ollivander/update-clis` and each of Ollivander's passes first runs `claude update` and `brew upgrade --cask codex`, with the output in `~/.hogwarts/logs/ollivander-update.log`. Then he checks both `--version` commands and every enabled desk's dry run. Any failure stops every headless desk. So does a new Codex version, because the Codex permission boundary is proven per version: run `scripts/codex-boundary-test.sh` on it first. A new Claude Code version is only a note.
 
-While the stop file `~/.hogwarts/state/ollivander-stop` exists, or an update is running, no headless desk launches. A launch that has passed its last check also holds off an update until its process has started, so an update never swaps a CLI under a desk that's about to run. If launches keep an update waiting for two minutes, that pass skips the update and the next one tries again. Run `~/.hogwarts/bin/castle ollivander clear` once you've looked. Remove `update-clis` to switch updates off again.
+While the stop file `~/.hogwarts/state/ollivander-stop` exists, or an update is running, no headless desk launches. A run that has passed its last check also holds off an update until its process has exited, so an update never swaps a CLI under a desk that's about to run or still running. If runs keep an update waiting for two minutes, that pass skips the update and the next one tries again. If a pass dies part way through an update, the next pass updates nothing, stops every headless desk and tells you, since the CLIs may have moved with no check run. Run `~/.hogwarts/bin/castle ollivander clear` once you've looked. Remove `update-clis` to switch updates off again.
 
 ## Change a display name or a character
 

@@ -88,13 +88,13 @@ A desk asks for what its job needs, never for a model by name. Its role card, `d
 
 - A Claude desk takes the Claude Code alias for its tier, so it always gets the newest model of that line. A Codex desk takes a model from Codex's own catalog, filed by the wording of its description.
 - He never picks a model that is retiring within 30 days, one the catalog calls older or legacy, or one your organization blocks.
-- A Claude alias is judged by the full model id it last ran as. The office keeps every one it has seen, so once an alias has run as a blocked model, no switch, pin, approval, revert or launch puts a desk back on it.
+- A Claude alias is judged by every full model id a run on it has reported, helper calls included, and a labelled form like `opus[1m]` shares the plain alias's record. Once an alias has run as a blocked model, no switch, pin, approval, revert or launch puts a desk back on it while that model stays blocked.
 - A move to the same tier or a cheaper one applies by itself with a note. A costlier one waits for you, because spend is your call.
-- The first two runs after a switch are a trial. Two failures send the desk back to its previous model. A desk's own model always replaces the one a Codex profile in its `codex.toml` names, so a trial only ever counts the model that ran.
+- The first two runs after a switch are a trial. Two failures send the desk back to its previous model. A desk's own model always replaces the one a Codex profile in its `codex.toml` names, and a run reads its model together with the switch it came from, so a trial only ever counts the model that ran.
 
 **Why family never changes.** The store counts a review pass only when the reviewer's family differs from the author's. If Ollivander could move Harry from Codex to Claude, Claude would end up reviewing Claude, and the rule that makes the fleet safe to trust would quietly stop holding. So the card's family has to match the registry, a Claude desk only ever holds a Claude model and a Codex desk a Codex one, and the registry never lets a desk's family change.
 
-**Why a script.** Picking by tier is a lookup against two lists, so it needs no model, spends no tokens and can't be talked round by anything a desk says. McGonagall's and Snape's models live in agent files that he only reports on. A CLI update that moves the Codex version stops every headless desk until you've re-proved the sandbox on it. An update and a launch never overlap: a launch holds a shared lock from its last stop check until its process has started, and an update holds that lock alone from before it starts until its checks are done.
+**Why a script.** Picking by tier is a lookup against two lists, so it needs no model, spends no tokens and can't be talked round by anything a desk says. McGonagall's and Snape's models live in agent files that he only reports on. A CLI update that moves the Codex version stops every headless desk until you've re-proved the sandbox on it. An update and a run never overlap: a run holds a shared lock from its last stop check until its process has exited, and an update holds that lock alone from before it starts until its checks are done. An update that dies part way leaves a marker behind, and the next pass treats it as a failed update and stops the desks.
 
 ## Caps are guards, not targets
 
@@ -133,7 +133,7 @@ Standard-library Python that runs on the Mac's built-in Python 3.9, with a CLI c
 | Review passes | A pass counts only for that exact commit, only when it is registered on the author's task, and only when the reviewer's family differs from the author's. |
 | Facts | One current fact per subject. Volatile facts need a live lookup or a short expiry. Nightly changes arrive as typed operations applied all or nothing. |
 
-The full contract is in `office/README.md`. 473 store tests and 362 fleet tests pass on the system Python. They include checks that no code reads environment variables and that hostile ids and paths are refused at every entry point.
+The full contract is in `office/README.md`. 475 store tests and 366 fleet tests pass on the system Python. They include checks that no code reads environment variables and that hostile ids and paths are refused at every entry point.
 
 ## Spending fewer tokens
 

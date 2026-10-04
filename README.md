@@ -15,7 +15,7 @@ A Harry Potter themed fleet of single-purpose AI agents for Claude Code and Code
   </tr>
 </table>
 
-**What ships today:** the store and its `castle` CLI, the castle, McGonagall, Snape, the Owl Post and the session hooks, and the review loop: the `fleet` command's worktree, verify, review and push scripts and the push gate. Also built: busy-day caps on runs and spend, review rounds that stop at three, Ollivander - Model Keeper, and a read-only live view of every desk. 473 store tests and 362 fleet tests cover it. The review loop is tested on temp repos but not yet on real tasks. The PR patrol and the nightly memory review are designed, and their desks, briefs, settings and launchd templates are here, but the scripts that drive them come in later stages. [DESIGN.md](docs/DESIGN.md#known-limits) lists the gaps.
+**What ships today:** the store and its `castle` CLI, the castle, McGonagall, Snape, the Owl Post and the session hooks, and the review loop: the `fleet` command's worktree, verify, review and push scripts and the push gate. Also built: busy-day caps on runs and spend, review rounds that stop at three, Ollivander - Model Keeper, and a read-only live view of every desk. 475 store tests and 366 fleet tests cover it. The review loop is tested on temp repos but not yet on real tasks. The PR patrol and the nightly memory review are designed, and their desks, briefs, settings and launchd templates are here, but the scripts that drive them come in later stages. [DESIGN.md](docs/DESIGN.md#known-limits) lists the gaps.
 
 ## Start here
 
