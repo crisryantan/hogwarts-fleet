@@ -1,6 +1,6 @@
 """Busy-day capacity in the fleet: the cap numbers, the cap day, bumps, warnings, refusals and vendor limits.
 
-No process starts: subprocess.run is faked to write the run output a fixture gives. Time is always injected.
+No process starts: the desk process is faked to write the run output a fixture gives. Time is always injected.
 """
 from __future__ import annotations
 
@@ -14,6 +14,7 @@ from hogwarts import capacity, owlery, pensieve
 from tests.support import DAY, NOW
 
 from fleet import config, run_desk
+from tests_fleet.support import fake_children
 from tests_fleet.test_run_desk import RunDeskCase
 
 DAY_START = NOW - NOW % DAY
@@ -90,11 +91,11 @@ class CapCase(RunDeskCase):
             pensieve.add_metric(self.conn, desk, f"run-{ts}-{index}", "model-x", 1, 1, 0, cost, 10, ts=ts)
 
     def fake_output(self, raw: bytes, returncode: int):
-        """subprocess.run that writes raw to the run's stdout file, as the desk would."""
+        """A desk process that writes raw to the run's stdout file, as the desk would."""
         def run(argv, cwd, env, stdin, stdout, stderr, timeout, check, pass_fds=()):
             os.write(stdout, raw)
             return subprocess.CompletedProcess(args=argv, returncode=returncode)
-        return mock.patch.object(subprocess, "run", side_effect=run)
+        return fake_children(run)
 
     def summaries(self, kind: str) -> list:
         return [event["summary"] for event in self.events_of(kind)]

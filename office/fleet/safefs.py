@@ -232,14 +232,15 @@ def move(src_dir_fd: int, name: str, dst_dir_fd: int, new_name: str) -> None:
     os.rename(name, new_name, src_dir_fd=src_dir_fd, dst_dir_fd=dst_dir_fd)
 
 
-def _take_lock(fd: int, blocking: bool, timeout: Optional[float]) -> None:
+def _take_lock(fd: int, blocking: bool, timeout: Optional[float], shared: bool = False) -> None:
+    mode = fcntl.LOCK_SH if shared else fcntl.LOCK_EX
     if blocking and timeout is None:
-        fcntl.flock(fd, fcntl.LOCK_EX)
+        fcntl.flock(fd, mode)
         return
     deadline = time.monotonic() + (timeout or 0)
     while True:
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(fd, mode | fcntl.LOCK_NB)
             return
         except BlockingIOError:
             if not blocking or time.monotonic() >= deadline:
@@ -248,9 +249,11 @@ def _take_lock(fd: int, blocking: bool, timeout: Optional[float]) -> None:
 
 
 @contextlib.contextmanager
-def held_lock(dir_fd: int, name: str, blocking: bool, timeout: Optional[float] = None) -> Iterator[int]:
-    """An exclusive lock, yielding its fd. blocking with a timeout waits at most that long, then raises Busy.
-    A process that inherits the fd keeps the lock held after this one dies without unlocking it."""
+def held_lock(dir_fd: int, name: str, blocking: bool, timeout: Optional[float] = None,
+              shared: bool = False) -> Iterator[int]:
+    """An exclusive lock, or a shared one that only an exclusive holder excludes, yielding its fd. blocking
+    with a timeout waits at most that long, then raises Busy. A process that inherits the fd keeps the lock
+    held after this one dies without unlocking it."""
     check_component(name)
     fd = os.open(name, LOCK_FLAGS, 0o600, dir_fd=dir_fd)
     try:
@@ -258,7 +261,7 @@ def held_lock(dir_fd: int, name: str, blocking: bool, timeout: Optional[float] =
         if not stat.S_ISREG(st.st_mode):
             raise Unsafe("lock is not a regular file")
         _check_owned(st, "lock")
-        _take_lock(fd, blocking, timeout)
+        _take_lock(fd, blocking, timeout, shared)
         try:
             yield fd
         finally:

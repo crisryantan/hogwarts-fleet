@@ -16,6 +16,7 @@ USER_HOME_DIR = "/Users/crisryantan"
 # Absolute binaries. No PATH lookup.
 CLAUDE_BIN = "/Users/crisryantan/.local/bin/claude"
 CODEX_BIN = "/opt/homebrew/bin/codex"
+BREW_BIN = "/opt/homebrew/bin/brew"
 PYTHON_WRAPPER = ("/usr/bin/env", "-i", "/usr/bin/python3", "-I", "-B", "-X", "pycache_prefix=/var/empty")
 GIT_BIN = "/usr/bin/git"
 BASH_BIN = "/bin/bash"
@@ -85,17 +86,26 @@ CAP_WARN_FRACTION = 0.8
 # Review rounds per author task. The next one waits for Ryan's castle task allow-round. Only a reviewer
 # run that recorded a verdict uses up a round; the daily run caps bound retries of runs that did not.
 REVIEW_ROUND_CAP = 3
-# A failed run whose error text matches one of these hit the vendor's own usage or rate limit, not a
-# fleet cap. Matched without case against Claude's result text when is_error is set, and against the
-# message that ended a failed Codex run (its last turn.failed, else its last error event).
+# A failed run whose error text matches one of these hit the vendor's own usage, rate, quota or credit
+# limit, not a fleet cap. Matched without case against Claude's result text when is_error is set, and
+# against the message that ended a failed Codex run (its last turn.failed, else its last error event).
+# When a failed run left no such message, its stderr is read instead. This is the one vendor limit
+# detector: the caps label the run with it, and Ollivander never counts such a run toward a trial.
 CLAUDE_PLAN_LIMIT_PATTERNS = (
     r"usage limit", r"(?:session|weekly|opus|sonnet|[0-9]+[ -]hour) limit reached",
     r"hit your (?:usage |session |weekly )?limit", r"out of (?:extra )?usage",
-    r"rate[ _-]?limit", r"too many requests", r"\b429\b",
+    r"rate[ _-]?limit", r"too many requests", r"\b429\b", r"quota", r"credit balance",
 )
 CODEX_PLAN_LIMIT_PATTERNS = (
     r"usage[ _-]?limit", r"hit your (?:usage )?limit", r"rate[ _-]?limit", r"too many requests", r"\b429\b",
-    r"quota",
+    r"quota", r"credit balance",
+)
+# A failed run's stderr is read only when its output says nothing, and then only its last line, against
+# these narrower words: no bare 429 or quota, which a stack trace or a full disk can print too.
+STDERR_PLAN_LIMIT_PATTERNS = (
+    r"usage[ _-]?limit", r"(?:session|weekly|opus|sonnet|[0-9]+[ -]hour) limit reached",
+    r"hit your (?:usage |session |weekly )?limit", r"out of (?:extra )?usage", r"rate[ _-]?limit",
+    r"too many requests", r"quota exceeded for", r"exceeded your (?:current )?quota", r"credit balance",
 )
 # A run the Owl Post starts waits this long for another run of the same desk to finish. A review never waits.
 DESK_LOCK_WAIT_SECONDS = 1860
@@ -124,7 +134,7 @@ XCRUN_CACHE = "xcrun_db"
 CASTLE_CHARTERS = ("CLAUDE.md", "AGENTS.md")
 # Words that never leave the fleet: in branch names, commit messages and PR text.
 FLEET_WORDS = ("hogwarts", "mcgonagall", "harry", "hermione", "moody", "ron", "snape", "dumbledore",
-               "marauder", "marauders", "gringotts", "owlpost", "headmaster", "pensieve")
+               "marauder", "marauders", "gringotts", "owlpost", "headmaster", "pensieve", "ollivander")
 # The fleet's own public kit, where these names are the product. Commit messages and added lines there
 # skip the fleet-word check. Branch names never do. Set at onboarding with GITHUB_ACCOUNT.
 FLEET_WORDS_ALLOWED_REPOS = (GITHUB_ACCOUNT + "/hogwarts-fleet",)
@@ -160,6 +170,59 @@ CLOSE_PROMPT_MAX_AGE = 30
 # The doorbell carries no text from any desk.
 DOORBELL_KIND = "owl.doorbell"
 DOORBELL_SUMMARY = "An owl is waiting in your inbox."
+
+# Ollivander, the model keeper. Desks pick a model by role (office desks/<desk>/role.json), never by
+# model line, and a desk's family never changes.
+OLLIVANDER_DESK = "ollivander"
+ROLE_FILE = "role.json"
+ROLE_MAX_BYTES = 4096
+# Desks with a role card. run_desk launches the headless ones with Ollivander's pick. The others take
+# their model from an agent file Ollivander only reports on: (root, path inside it).
+ROLE_DESKS = ("mcgonagall", "hermione", "portrait", "snape", "ron", "harry", "moody")
+AGENT_FILE_DESKS = {"mcgonagall": ("castle", ".claude/agents/mcgonagall.md"),
+                    "snape": ("home", ".claude/agents/snape.md")}
+# Claude Code aliases always mean the newest model of their line that the installed Claude Code knows.
+CLAUDE_LINES = {"opus": "frontier", "sonnet": "workhorse", "haiku": "fast"}
+# Codex models are filed by their catalog description. A model in the excluded list is never picked,
+# whatever else it matches. Ryan's "castle model line" filing outranks these words.
+CODEX_LINE_WORDS = {
+    "frontier": ("frontier", "most demanding"),
+    "workhorse": ("workhorse", "coding and everyday"),
+    "fast": ("fast and affordable", "easier tasks"),
+}
+CODEX_EXCLUDED_WORDS = ("previous generation", "older", "legacy")
+# An organisation may forbid some models. Each entry is a lowercase prefix matched against Claude Code
+# aliases, full Claude ids and Codex catalog slugs: to forbid a Claude line, list its alias and its
+# "claude-<alias>-" id prefix. A blocked name is never picked, pinned, filed or launched. Empty in the
+# kit: the live office sets its own.
+BLOCKED_MODEL_PREFIXES: tuple = ()
+# A model that retires within this many days is never picked.
+RETIRING_SOON_SECONDS = 30 * 86400
+# Cost order. A move to the same or a cheaper class applies by itself; a dearer one waits for Ryan.
+COST_ORDER = ("fast", "workhorse", "frontier")
+CATALOG_TIMEOUT_SECONDS = 60
+CATALOG_MAX_BYTES = 16 * 1024 * 1024
+HELP_MAX_BYTES = 1024 * 1024
+# CLI updates run only while Ryan keeps this file in the office desks/ollivander folder.
+UPDATE_MARKER = "update-clis"
+UPDATE_TIMEOUT_SECONDS = 900
+CHECK_TIMEOUT_SECONDS = 60
+# Kept in the office state folder. While it exists run_desk launches no headless desk.
+STATE_DIR = "state"
+STOP_FILE = "ollivander-stop"
+# Also in the state folder, only while a CLI update and its checks run. run_desk honours it like the stop file.
+UPDATING_FILE = "ollivander-updating"
+# In the office locks folder. Ollivander holds it exclusively from before he writes the update marker until
+# the checks after the update end. run_desk holds it shared from its last stop check until the desk's
+# process exists, so launches never wait on each other and never overlap an update. run_desk never waits
+# for it: an update in progress refuses the launch at once. Ollivander waits at most this long for it.
+UPDATE_LOCK = "ollivander-update.lock"
+UPDATE_LOCK_WAIT_SECONDS = 120
+# The Codex sandbox boundary was proven on one Codex version, so a new Codex version stops the headless
+# desks until Ryan re-proves it and clears the stop. A new Claude Code version is reported only.
+VERSION_STOPS = ("codex",)
+VERSION_MAX_CHARS = 120
+RUN_ERROR_MAX_BYTES = 1024 * 1024
 
 
 def office_desk_dir(desk: str) -> str:

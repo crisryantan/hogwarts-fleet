@@ -10,6 +10,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import subprocess
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -17,7 +18,7 @@ from unittest import mock
 from hogwarts import capacity, db, ids, pensieve
 from tests.support import NOW, temp_dir
 
-from fleet import config
+from fleet import config, run_desk
 
 REGISTRY = (
     ("mcgonagall", "claude", "McGonagall - Chief of Staff", "opus"),
@@ -32,6 +33,7 @@ REGISTRY = (
     ("owl-post", "script", "Owl Post - Message Router", None),
     ("map", "script", "Marauder's Map - PR Watcher", None),
     ("gringotts", "script", "Gringotts - Backup", None),
+    ("ollivander", "script", "Ollivander - Model Keeper", None),
 )
 OFFICE_DESKS = ("harry", "hermione", "moody", "ron", "snape", "portrait")
 SCRATCHPAD = "# Scratchpad\n\n## Now\n\n## Notes\n\n## Checkpoint\n"
@@ -70,6 +72,33 @@ inherit = "core"
 TOKEN_SHAPE = r"[A-Za-z0-9_-]{43}"
 
 
+class FakeChild:
+    """A desk process that run_desk.start_child would have started. wait() calls the fake the way
+    subprocess.run would have, with the run's timeout, so a fake can write output, raise TimeoutExpired,
+    or change the store while the desk "runs"."""
+
+    def __init__(self, fake, argv: list, kwargs: dict):
+        self.args, self._fake, self._kwargs, self.returncode = argv, fake, kwargs, None
+
+    def wait(self, timeout=None) -> int:
+        if self.returncode is None:
+            self.returncode = self._fake(self.args, timeout=timeout, check=False, **self._kwargs).returncode
+        return self.returncode
+
+    def kill(self) -> None:
+        if self.returncode is None:
+            self.returncode = -9
+
+
+def fake_children(fake=None, returncode: int = 0):
+    """Patch run_desk.start_child so no desk process starts. Each launch runs fake(argv, **kwargs), which
+    returns a CompletedProcess, or exits with returncode. The patch records each start's arguments."""
+    if fake is None:
+        def fake(argv, **kwargs):
+            return subprocess.CompletedProcess(args=argv, returncode=returncode)
+    return mock.patch.object(run_desk, "start_child", side_effect=lambda argv, **kwargs: FakeChild(fake, argv, kwargs))
+
+
 class FleetCase(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = temp_dir(self)
@@ -94,6 +123,10 @@ class FleetCase(unittest.TestCase):
             patcher = mock.patch.object(config, name, value)
             patcher.start()
             self.addCleanup(patcher.stop)
+        # No desk process ever starts: a test that launches one fakes it with fake_children.
+        never = mock.patch.object(run_desk, "start_child", side_effect=AssertionError("no desk process may start"))
+        never.start()
+        self.addCleanup(never.stop)
         # The cap day follows this Mac's time zone. Tests pin it to UTC unless they set their own.
         zone = mock.patch.object(capacity, "local_utc_offset", return_value=0)
         zone.start()

@@ -232,17 +232,20 @@ def record_launch(conn: Conn, desk: str, run_id: str, model: str, now: Optional[
 
 
 def record_launch_usage(conn: Conn, run_id: str, input_tokens: int, output_tokens: int, cache_read_tokens: int,
-                        cost_usd: float, duration_ms: int, now: Optional[int] = None) -> dict:
-    """The usage of a launched run that ended: its metrics row, tied to the launch in one transaction."""
+                        cost_usd: float, duration_ms: int, model: Optional[str] = None,
+                        now: Optional[int] = None) -> dict:
+    """The usage of a launched run that ended: its metrics row, tied to the launch in one transaction.
+    model is the one that really ran when the run said so, else the one it was launched with."""
     run_id = ids.check("label", run_id, "run id")
+    model = ids.optional("label", model, "model")
     with db.transaction(conn):
         launch = db.fetch_one(conn, "SELECT * FROM run_launches WHERE run_id = ?", (run_id,))
         if launch is None:
             raise NotFoundError("run launch not found")
         if launch["metric_id"] is not None:
             raise ConflictError("that run's usage is already recorded")
-        metric = pensieve.add_metric(conn, launch["desk"], run_id, launch["model"], input_tokens, output_tokens,
-                                     cache_read_tokens, cost_usd, duration_ms, ts=now)
+        metric = pensieve.add_metric(conn, launch["desk"], run_id, model or launch["model"], input_tokens,
+                                     output_tokens, cache_read_tokens, cost_usd, duration_ms, ts=now)
         conn.execute("UPDATE run_launches SET metric_id = ? WHERE run_id = ? AND metric_id IS NULL",
                      (metric["id"], run_id))
     return metric

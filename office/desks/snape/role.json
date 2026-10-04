@@ -1,0 +1,6 @@
+{
+  "family": "claude",
+  "need": "workhorse",
+  "effort": "high",
+  "why": "Accurate SQL at moderate cost"
+}

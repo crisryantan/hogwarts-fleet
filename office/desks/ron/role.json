@@ -1,0 +1,6 @@
+{
+  "family": "claude",
+  "need": "fast",
+  "effort": "low",
+  "why": "Sorts lots of PR and CI updates"
+}

@@ -13,7 +13,7 @@ import sys
 from pathlib import Path
 from typing import Callable, Optional, Sequence
 
-from . import capacity, db, facts, ids, owlery, pensieve
+from . import capacity, db, facts, ids, owlery, pensieve, wands
 from .errors import IntegrityError, NotFoundError, StoreError, ValidationError
 
 _WHOLE = re.compile(r"[0-9]{1,18}")
@@ -246,11 +246,39 @@ def _desk_caps(conn: sqlite3.Connection, args: argparse.Namespace) -> list:
     return [_cap_status(conn, caps, desk, now) for desk in sorted(caps.DAILY_RUN_CAP) if desk in registered]
 
 
+def _blocked_models() -> tuple:
+    # Models the organisation forbids, kept in fleet/config.py with the other fleet settings.
+    from fleet import config as fleet_config
+
+    return fleet_config.BLOCKED_MODEL_PREFIXES
+
+
+def _retiring_window() -> int:
+    from fleet import config as fleet_config
+
+    return fleet_config.RETIRING_SOON_SECONDS
+
+
+def _desk_model(conn: sqlite3.Connection, args: argparse.Namespace) -> dict:
+    if args.approve:
+        return wands.approve(conn, args.desk, blocked=_blocked_models(), retiring_within=_retiring_window())
+    if args.role:
+        return wands.unpin(conn, args.desk)
+    return wands.pin(conn, args.desk, args.value, blocked=_blocked_models(), retiring_within=_retiring_window())
+
+
+def _ollivander_clear(path: Path, args: argparse.Namespace) -> dict:
+    return wands.clear_stop(path)
+
+
 HANDLERS: dict[str, Callable] = {
     "desk add": lambda c, a: pensieve.add_desk(c, a.name, a.family, a.role, a.model),
     "desk list": lambda c, a: pensieve.list_desks(c),
     "desk cap": _desk_cap,
     "desk caps": _desk_caps,
+    "desk model": _desk_model,
+    "desk models": lambda c, a: wands.list_desk_models(c),
+    "model line": lambda c, a: wands.classify(c, a.name, a.line, blocked=_blocked_models()),
     "task create": lambda c, a: pensieve.create_task(
         c, a.desk, a.title, a.intent_path, a.parent, a.request, a.session, a.worktree, a.id),
     "task start": lambda c, a: pensieve.start_task(c, a.task),
@@ -314,7 +342,7 @@ HANDLERS: dict[str, Callable] = {
     "audit": lambda c, a: owlery.audit(c, escalate=a.escalate),
 }
 
-PATH_HANDLERS: dict[str, Callable] = {"init": _init, "doctor": _doctor}
+PATH_HANDLERS: dict[str, Callable] = {"init": _init, "doctor": _doctor, "ollivander clear": _ollivander_clear}
 
 
 # Parser
@@ -357,6 +385,24 @@ def _desk_parsers(commands: argparse._SubParsersAction) -> None:
     amount.add_argument("--runs", type=_plus_whole)
     amount.add_argument("--spend", type=_plus_amount)
     _sub(group, "caps", "desk caps")
+    _desk_model_parsers(group)
+
+
+def _desk_model_parsers(group: argparse._SubParsersAction) -> None:
+    model = _sub(group, "model", "desk model")
+    model.add_argument("desk")
+    choice = model.add_mutually_exclusive_group(required=True)
+    choice.add_argument("value", nargs="?", help="pin to this alias, full claude id or catalog slug")
+    choice.add_argument("--role", action="store_true", help="unpin, so the role picks again")
+    choice.add_argument("--approve", action="store_true", help="switch to the pending pick")
+    _sub(group, "models", "desk models")
+
+
+def _model_parsers(commands: argparse._SubParsersAction) -> None:
+    line = _sub(_group(commands, "model"), "line", "model line")
+    line.add_argument("name")
+    line.add_argument("line", choices=db.MODEL_LINES)
+    _sub(_group(commands, "ollivander"), "clear", "ollivander clear")
 
 
 def _task_parsers(commands: argparse._SubParsersAction) -> None:
@@ -564,7 +610,8 @@ def build_parser() -> argparse.ArgumentParser:
     for name in ("init", "doctor"):
         _sub(commands, name, name)
     for build in (_desk_parsers, _task_parsers, _token_parsers, _owl_parsers, _request_parsers,
-                  _review_parsers, _event_parsers, _pensieve_parsers, _fact_parsers, _metric_parsers):
+                  _review_parsers, _event_parsers, _pensieve_parsers, _fact_parsers, _metric_parsers,
+                  _model_parsers):
         build(commands)
     purge = _sub(commands, "purge", "purge")
     purge.add_argument("--body-days", type=_whole, default=30)

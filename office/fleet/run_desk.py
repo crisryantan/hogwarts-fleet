@@ -3,10 +3,11 @@
 Claude desks (hermione, ron, portrait), run from their own castle desk folder:
   claude -p --restricted --settings <office settings> --strict-mcp-config [--mcp-config <job>]
          [--add-dir <castle tasks or worktrees, read only>]... --tools <list> --permission-mode dontAsk
-         --model <model> --append-system-prompt "<brief>" --output-format json --max-budget-usd <cap>
-         "<owl prompt>"
+         --model <model> [--effort <effort>] --append-system-prompt "<brief>" --output-format json
+         --max-budget-usd <cap> "<owl prompt>"
 Codex desks (harry, moody):
   codex exec --ignore-user-config --ignore-rules -c <key=value from the office codex.toml>...
+         [-c model="<slug>" -c model_reasoning_effort="<effort>"]
          -c permissions.fleet-<desk>={<allowlist>} -c default_permissions="fleet-<desk>"
          -C <own task worktree, or desks/<desk>/work>
          --ephemeral --json --output-last-message <office runs file> "<brief and owl prompt>"
@@ -14,6 +15,33 @@ Codex desks (harry, moody):
 A Codex desk never gets --sandbox: on 0.160.0 its modes let commands read the whole disk. The
 permission profile is an allowlist (see codex_permissions), proven on 0.160.0 by
 codex-boundary-test.sh (scripts/ in the fleet kit): no office, no folder it was not given, no network.
+
+The model and effort are Ollivander's pick for the desk's role, or Ryan's pin (see fleet/ollivander.py).
+A Claude desk with neither runs its registry model. A Codex desk with neither runs the model of the
+profile its codex.toml selects, else its codex.toml model, or keeps the CLI default and records
+"codex-default". When the desk has a model, it always wins: the selected profile's model and reasoning
+effort are replaced with the desk's own (-c profiles.<name>.model and .model_reasoning_effort), so the
+model recorded, and the trial the run counts toward, are the ones that ran. The model, effort and the
+switch they came from are read in one snapshot, so a run never counts toward another model's trial. A
+desk whose model is blocked here (BLOCKED_MODEL_PREFIXES) is never launched, nor a Claude desk whose
+alias (or its bare form, for a label such as opus[1m]) ever ran as a blocked full id: every model in a
+run's modelUsage is kept as a resolution of the alias, across switches and desks, and Ryan hears why.
+While anything is blocked, a Codex desk that would run the CLI default (no pin, no Ollivander pick, no
+profile or codex.toml model) is not launched either, since the fleet cannot name that model to check it:
+Ryan runs fleet ollivander, whose first pass gives each unpinned Codex desk its pick, or pins one. A desk a
+revert pinned to no model is left alone by Ollivander, so the refusal tells Ryan to pin one or hand it back.
+The metrics record the model that did the work: for Claude, the one with the most output tokens in the
+result's modelUsage. While Ollivander's stop file, or the marker of a CLI update in progress, is in
+the office state folder, no headless desk launches. Both are checked again once the desk lock is held,
+and the plan (with the model) is built only then, so a run that waited sees the latest state.
+
+From that last stop check until the desk's process has exited, the run holds Ollivander's update lock
+shared (config.UPDATE_LOCK), and the process inherits it, like the desk lock, so it stays held if this
+process is killed. Launches never wait on each other, and Ollivander, who holds it exclusively for a whole
+CLI update, never replaces a binary that a run has checked, or that a desk is still running. The run never
+waits for it: while an update holds it, the launch is refused like a stop. Lock order is the review lock,
+then the desk lock, then the update lock; since nothing waits for the update lock while holding another,
+and Ollivander takes no desk lock, no deadlock can form.
 
 A desk works in a worktree only when the owl belongs to a request addressed to that desk
 and the request's task is the desk's own. Any other owl runs in the desk's work folder.
@@ -54,7 +82,7 @@ from typing import Callable, Iterator, Optional
 if __name__ == "__main__" and "/Users/crisryantan/.hogwarts" not in sys.path:
     sys.path.insert(0, "/Users/crisryantan/.hogwarts")
 
-from hogwarts import capacity, ids, owlery, pensieve  # noqa: E402
+from hogwarts import capacity, db, ids, owlery, pensieve, wands  # noqa: E402
 from hogwarts.errors import NotFoundError, StoreError  # noqa: E402
 
 from fleet import common, config, gitops, safefs, toolchain  # noqa: E402
@@ -79,6 +107,7 @@ _TOML_SCALAR = rf"(?:{_TOML_STRING}|true|false|-?[0-9]{{1,12}}(?:\.[0-9]{{1,6}})
 _TOML_ARRAY = rf"\[\s*(?:(?:{_TOML_STRING})\s*(?:,\s*(?:{_TOML_STRING})\s*)*,?\s*)?\]"
 _TOML_LINE = re.compile(rf"({_TOML_KEY})\s*=\s*({_TOML_SCALAR}|{_TOML_ARRAY})\s*(?:#.*)?")
 _TOML_TABLE = re.compile(rf"\[\s*({_TOML_KEY})\s*\]\s*(?:#.*)?")
+_PROFILE_NAME = re.compile(r"[A-Za-z0-9_-]{1,64}")
 # The sandbox comes from the permission profile run_desk builds, never from the codex.toml file.
 PROFILE_KEYS_REFUSED = ("sandbox_mode", "sandbox_permissions", "default_permissions")
 PROFILE_PREFIXES_REFUSED = ("permissions", "sandbox_workspace_write")
@@ -93,10 +122,20 @@ CAP_REASONS = {"runs": "daily run cap reached", "spend": "daily spend cap reache
 CAP_FLAGS = {"runs": "--runs +N", "spend": "--spend +X"}
 PLAN_NAMES = {"claude_plan": "Claude plan", "codex_plan": "Codex plan"}
 ERROR_TEXT_MAX = 4096
+# What a Codex run records as its model when it runs the CLI default, which the fleet cannot name.
+CODEX_DEFAULT = "codex-default"
 
 
 class Capped(FleetError):
     """The desk reached a daily cap. The cap event already reached Ryan."""
+
+
+class Stopped(FleetError):
+    """Ollivander's stop file is in place. Ollivander's event already reached Ryan."""
+
+
+class Blocked(FleetError):
+    """The model the desk would launch is one the organisation forbids. The event already reached Ryan."""
 
 
 # Office files
@@ -237,7 +276,22 @@ def work_dir(desk: str) -> str:
     return f"{config.castle_desk_dir(desk)}/{config.CODEX_WORK_DIR}"
 
 
-def _claude_argv(desk: str, row: dict, brief: str, prompt: str, mcp_job: Optional[str]) -> tuple:
+def desk_choice(conn, desk: str) -> dict:
+    """Ollivander's model and effort for this desk, or Ryan's pin. Empty values mean none is set.
+    change_id is the switch this choice came from, read in the same snapshot, so the run counts only
+    toward that switch's trial."""
+    chosen = wands.desk_choice(conn, desk)
+    model, effort = chosen["model"], chosen["effort"]
+    try:
+        model = None if model is None else wands.check_name(model)
+        effort = None if effort is None else ids.check_enum(effort, db.MODEL_EFFORTS, "effort")
+    except StoreError:
+        raise FleetError("the desk's model or effort in the store is not a safe value") from None
+    return {"model": model, "effort": effort, "change_id": chosen["change_id"]}
+
+
+def _claude_argv(desk: str, row: dict, brief: str, prompt: str, mcp_job: Optional[str],
+                 effort: Optional[str] = None) -> tuple:
     model = row.get("model")
     if not model:
         raise FleetError("this Claude desk has no model in the registry")
@@ -263,6 +317,7 @@ def _claude_argv(desk: str, row: dict, brief: str, prompt: str, mcp_job: Optiona
         "--tools", config.CLAUDE_TOOLS[desk],
         "--permission-mode", "dontAsk",
         "--model", model,
+        *(("--effort", effort) if effort else ()),
         "--append-system-prompt", brief,
         "--output-format", "json",
         "--max-budget-usd", config.MAX_BUDGET_USD[desk],
@@ -381,7 +436,8 @@ def codex_permissions(desk: str, git_common_dir: Optional[str], extra_reads: tup
     return ["-c", f"permissions.{name}={table}", "-c", f'default_permissions="{name}"']
 
 
-def _codex_argv(desk: str, task: Optional[dict], brief: str, prompt: str, run_id: str) -> tuple:
+def _codex_argv(desk: str, task: Optional[dict], brief: str, prompt: str, run_id: str,
+                choice: Optional[dict] = None) -> tuple:
     profile = _text(_read_office(desk, config.CODEX_PROFILE_FILE, config.SETTINGS_MAX_BYTES, "codex profile"),
                     "codex profile")
     worktree = None if task is None else task.get("worktree")
@@ -392,7 +448,15 @@ def _codex_argv(desk: str, task: Optional[dict], brief: str, prompt: str, run_id
     if temp is not None:
         tools["env"]["TMPDIR"] = temp
     argv = [config.CODEX_BIN, "exec", "--ignore-user-config", "--ignore-rules"]
-    for override in parse_codex_profile(profile):
+    overrides = parse_codex_profile(profile)
+    selected, top = profile_models(overrides)
+    chosen = model_overrides(choice or {}, selected_profile(overrides))
+    # The desk's own model and effort replace the codex.toml's, top level and in the selected profile alike.
+    taken = {item.split("=", 1)[0] for item in chosen}
+    for override in overrides:
+        if override.split("=", 1)[0] not in taken:
+            argv += ["-c", override]
+    for override in chosen:
         argv += ["-c", override]
     argv += codex_permissions(desk, None if record is None else record["common_dir"],
                               tuple(tools["read"]) + tuple(tools["path"]), temp)
@@ -404,7 +468,53 @@ def _codex_argv(desk: str, task: Optional[dict], brief: str, prompt: str, run_id
         "--output-last-message", f"{config.runs_dir()}/{desk}/{run_id}-last-message.md",
         brief.rstrip("\n") + "\n\n" + prompt,
     ]
-    return argv, cwd, "codex-default", {**tools, "temp": temp}
+    model = (choice or {}).get("model") or selected or top or CODEX_DEFAULT
+    return argv, cwd, model, {**tools, "temp": temp}, selected or top
+
+
+def _profile_text(value: Optional[str], number: str) -> Optional[str]:
+    if value is None:
+        return None
+    if len(value) < 2 or value[0] not in "\"'" or value[-1] != value[0]:
+        raise FleetError(f"codex profile {number} is not a string")
+    text = value[1:-1]
+    if ids.PATTERNS["label"].fullmatch(text) is None:
+        raise FleetError(f"codex profile {number} is not a plain name")
+    return text
+
+
+def selected_profile(overrides: list) -> Optional[str]:
+    """The name of the profile the codex.toml selects, or None. Only a bare TOML key is accepted, so
+    profiles.<name>.model always addresses that profile and the desk's model can replace its own."""
+    name = _profile_text(dict(item.split("=", 1) for item in overrides).get("profile"), "profile")
+    if name is not None and _PROFILE_NAME.fullmatch(name) is None:
+        raise FleetError("codex profile selects a profile whose name is not a bare key, so its model cannot be set")
+    return name
+
+
+def profile_models(overrides: list) -> tuple:
+    """(model of the profile the codex.toml selects, its top-level model), each None when unset. A selected
+    profile's model wins over a top-level model, so without a desk model it is the one that runs."""
+    values = dict(item.split("=", 1) for item in overrides)
+    selected = selected_profile(overrides)
+    in_profile = None if selected is None else values.get(f"profiles.{selected}.model")
+    return _profile_text(in_profile, "profile model"), _profile_text(values.get("model"), "model")
+
+
+def model_overrides(choice: dict, profile: Optional[str] = None) -> list:
+    """The -c values that set a Codex desk's model and effort, and again in the selected profile when there
+    is one, since a profile's own values outrank the top-level ones. None without a model: the CLI default
+    (or the codex.toml's model) stays."""
+    if not choice.get("model"):
+        return []
+    found = [f'model="{choice["model"]}"']
+    if choice.get("effort"):
+        found.append(f'model_reasoning_effort="{choice["effort"]}"')
+    if profile is not None:
+        found.append(f'profiles.{profile}.model="{choice["model"]}"')
+        if choice.get("effort"):
+            found.append(f'profiles.{profile}.model_reasoning_effort="{choice["effort"]}"')
+    return found
 
 
 def guard(argv: list) -> None:
@@ -441,18 +551,23 @@ def build_plan(conn, desk: str, owl_id: Optional[str] = None, mcp_job: Optional[
     brief = _text(_read_office(desk, config.BRIEF_FILE, config.BRIEF_MAX_BYTES, "brief"), "brief")
     run_id = "run-" + secrets.token_hex(8)
     temp = None
+    choice = desk_choice(conn, desk)
     if family == "claude":
-        argv, cwd, model = _claude_argv(desk, row, brief, prompt, mcp_job)
+        default_model = row.get("model")
+        row = {**row, "model": choice["model"] or default_model}
+        argv, cwd, model = _claude_argv(desk, row, brief, prompt, mcp_job, choice["effort"])
         env = child_env()
     else:
         if mcp_job is not None:
             raise FleetError("Codex desks take no MCP job")
-        argv, cwd, model, tools = _codex_argv(desk, task, brief, prompt, run_id)
+        argv, cwd, model, tools, default_model = _codex_argv(desk, task, brief, prompt, run_id, choice)
         env = child_env(tools["path"], tools["env"])
         temp = tools["temp"]
     guard(argv)
     return {"desk": desk, "family": family, "owl_id": owl_id, "run_id": run_id, "model": model,
-            "cwd": cwd, "argv": argv, "env": env, "temp": temp}
+            "effort": choice["effort"] if choice["model"] or family == "claude" else None,
+            "change_id": choice["change_id"], "default_model": default_model, "cwd": cwd, "argv": argv, "env": env,
+            "temp": temp}
 
 
 # Enabling, caps, launching and running
@@ -540,6 +655,16 @@ def report_failure(conn, desk: str, owl_id: Optional[str], now: Optional[int] = 
                            dedupe_key=f"rundesk:failed:{desk}:{key}", now=now)
     except StoreError:
         pass
+
+
+def stop_requested() -> bool:
+    """True while Ollivander's stop file or update marker is in the office state folder, or when that
+    cannot be checked."""
+    try:
+        with safefs.opened_dir(config.OFFICE_ROOT, config.STATE_DIR) as fd:
+            return any(safefs.lstat(fd, name) is not None for name in (config.STOP_FILE, config.UPDATING_FILE))
+    except (FleetError, OSError):
+        return True
 
 
 def is_enabled(desk: str) -> bool:
@@ -703,16 +828,136 @@ def _codex_error_texts(raw: bytes, failed: bool) -> list:
     return [] if message is None else [message[:ERROR_TEXT_MAX]]
 
 
-def plan_limit(family: str, raw: bytes, failed: bool) -> Optional[str]:
-    """claude_plan or codex_plan when the run's own output says the vendor's usage or rate limit stopped it."""
+def _last_line(errors: bytes) -> str:
+    lines = [line for line in errors[-ERROR_TEXT_MAX:].decode("utf-8", "replace").splitlines() if line.strip()]
+    return lines[-1] if lines else ""
+
+
+def plan_limit(family: str, raw: bytes, failed: bool, errors: bytes = b"", timed_out: bool = False) -> Optional[str]:
+    """claude_plan or codex_plan when the run's own output says the vendor's usage, rate, quota or credit
+    limit stopped it. Only a failed run is read. Its stderr is read only when the output holds no message
+    that ended the run (no Claude result event, no Codex turn.failed or error) and the run did not time
+    out, and then only its last line, against the narrower stderr patterns, so a limit the run retried
+    through and logged, a stack trace or a disk quota never labels a run that failed for another reason."""
     if family == "claude":
         texts, patterns, source = _claude_error_texts(raw, failed), config.CLAUDE_PLAN_LIMIT_PATTERNS, "claude_plan"
+        ended = bool(_claude_result_event(raw)) if failed else True
     else:
         texts, patterns, source = _codex_error_texts(raw, failed), config.CODEX_PLAN_LIMIT_PATTERNS, "codex_plan"
+        ended = bool(texts)
     for text in texts:
         if any(re.search(pattern, text, re.IGNORECASE) for pattern in patterns):
             return source
+    if failed and not ended and not timed_out and errors:
+        line = _last_line(errors)
+        if any(re.search(pattern, line, re.IGNORECASE) for pattern in config.STDERR_PLAN_LIMIT_PATTERNS):
+            return source
     return None
+
+
+def claude_models(raw: bytes) -> list:
+    """Every model a claude -p result names in modelUsage, the one with the most output tokens first."""
+    used = _claude_result_event(raw).get("modelUsage")
+    if not isinstance(used, dict):
+        return []
+    ranked = [(_count(counts.get("outputTokens")), name) for name, counts in used.items()
+              if isinstance(counts, dict) and isinstance(name, str) and ids.PATTERNS["label"].fullmatch(name)]
+    return [name for _, name in sorted(ranked, reverse=True)]
+
+
+def parse_claude_model(raw: bytes) -> Optional[str]:
+    """The model that did the work in a claude -p result: the modelUsage key with the most output tokens."""
+    found = claude_models(raw)
+    return found[0] if found else None
+
+
+def full_ids(names: list) -> list:
+    """The full Claude ids among modelUsage keys, each without a trailing label such as [1m], in order."""
+    found = []
+    for name in names:
+        bare = wands.base_alias(name)
+        if wands.CLAUDE_ID.fullmatch(bare) is not None and bare not in found:
+            found.append(bare)
+    return found
+
+
+def after_run(conn, plan: dict, previous: Optional[str], real: Optional[str], exit_code: int,
+              now: Optional[int], cap_source: Optional[str] = None, used: Optional[list] = None) -> None:
+    """Tell Ryan when the real model moved, and count the run toward the trial after a switch.
+
+    real is None when the run did not say which model worked (a Claude run with no modelUsage), and then
+    no move is reported. used is every model the run named, checked against the blocklist; real alone
+    when not given. A run plan_limit labelled with a cap_source stopped at a vendor limit and never
+    counts toward a trial. Never raises, so it cannot hide the run's own result.
+    """
+    desk = plan["desk"]
+    try:
+        display = pensieve.get_desk(conn, desk)["role"] or desk
+        if previous is not None and real is not None and previous != real:
+            pensieve.add_event(conn, desk, "ollivander.moved", "headmaster",
+                               f"{display} moved from {previous} to {real}",
+                               dedupe_key=f"ollivander:moved:{desk}:{plan['run_id']}", now=now)
+        _report_blocked_run(conn, plan, display, used if used is not None else [real] if real else [], now)
+        if cap_source is not None:
+            return  # a vendor limit stopped it
+        outcome = wands.record_outcome(conn, desk, exit_code == 0, plan.get("change_id"), now,
+                                       blocked=config.BLOCKED_MODEL_PREFIXES, default_model=plan.get("default_model"),
+                                       retiring_within=config.RETIRING_SOON_SECONDS)
+        if outcome.get("revert_blocked"):
+            if outcome.get("unchecked"):
+                came = ("it came from no model of its own, the CLI default, which cannot be checked against the"
+                        " models blocked here")
+            elif outcome.get("unavailable"):
+                came = (f"{outcome['previous_model']}, the model it came from, no longer qualifies:"
+                        f" {outcome['unavailable']}")
+            else:
+                barred = "is blocked here" if outcome.get("ran_as") is None \
+                    else f"once ran as {outcome['ran_as']}, which is blocked here"
+                came = f"{outcome['previous_model']}, the model it came from, {barred}"
+            pensieve.add_event(conn, desk, "ollivander.revert-blocked", "headmaster",
+                               f"{display}: the first two runs on {outcome['model']} both failed, but {came}, so it"
+                               f" stays on {outcome['model']}. castle desk model {desk} <model> pins an allowed one.",
+                               dedupe_key=f"ollivander:revert-blocked:{desk}:{outcome['change_id']}", now=now)
+        if outcome.get("held"):
+            back = outcome["previous_model"] or "its install default"
+            pensieve.add_event(conn, desk, "ollivander.trial-failed", "headmaster",
+                               f"{display}: the first two runs on {outcome['model']}, which you chose, both failed. "
+                               f"It stays there. castle desk model {desk} {back} goes back, or --role unpins it.",
+                               dedupe_key=f"ollivander:trial-failed:{desk}:{outcome['change_id']}", now=now)
+        if outcome["reverted"]:
+            back = outcome["to_model"] or "its install default"
+            pensieve.add_event(conn, desk, "ollivander.reverted", "headmaster",
+                               f"{display}: the first two runs on {outcome['from_model']} both failed, so it went "
+                               f"back to {back} and is pinned there. castle desk model {desk} --role unpins it.",
+                               dedupe_key=f"ollivander:reverted:{desk}:{outcome['change_id']}", now=now)
+    except StoreError:
+        pass
+
+
+def _report_blocked_run(conn, plan: dict, display: str, used: list, now: Optional[int]) -> None:
+    """Tell Ryan, once a day, that a run called a blocked model, whether or not it did most of the work.
+    The next run of the desk is refused."""
+    try:
+        real = next((name for name in used if wands.blocked_by(name, config.BLOCKED_MODEL_PREFIXES) is not None),
+                    None)
+        if real is None:
+            return
+        day_start, _ = capacity.day_bounds(common.now_stamp(now), config.CAP_RESET_UTC_SECONDS)
+        pensieve.add_event(conn, plan["desk"], "rundesk.blocked", "headmaster",
+                           f"{display} ran on {real}, which is blocked here: {plan['model']} resolved to it, so its"
+                           f" next runs are refused. castle desk model {plan['desk']} <model> pins an allowed one",
+                           dedupe_key=f"rundesk:blocked-ran:{plan['desk']}:{real}:{day_start}", now=now)
+    except (StoreError, FleetError):
+        pass  # a bad blocklist is reported when the next run is planned; the trial still counts this run
+
+
+def _record_resolution(conn, alias: str, full_id: str, now: Optional[int]) -> None:
+    """Keep what the alias resolved to, so a blocked id is remembered across switches and desks. Never
+    raises, so it cannot hide the run's own result."""
+    try:
+        wands.record_resolution(conn, alias, full_id, now=now)
+    except StoreError:
+        pass
 
 
 def _ack_owl(conn, desk: str, owl_id: str, now: Optional[int]) -> None:
@@ -747,6 +992,77 @@ def desk_lock(desk: str, wait: bool = True) -> Iterator[int]:
         yield lock_fd
 
 
+def blocked_model(plan: dict, conn=None) -> Optional[str]:
+    """The blocked model this plan would launch, else None. A Codex desk with no model of its own, here or
+    in its codex.toml, runs the CLI default, which the fleet cannot name: with any prefix blocked it cannot
+    be checked, so it counts as blocked and comes back as codex-default. With conn, a Claude alias (or its
+    bare form, for a label such as opus[1m]) is also checked by every full id it is known to have resolved
+    to, on any desk, at any time: a switch away and back never forgets it."""
+    model = plan["model"]
+    try:
+        blocked = wands.check_blocklist(config.BLOCKED_MODEL_PREFIXES)
+    except StoreError:
+        raise FleetError("BLOCKED_MODEL_PREFIXES in the fleet config is not a list of lowercase prefixes") from None
+    if not blocked:
+        return None
+    if plan["family"] == "codex" and model == CODEX_DEFAULT:
+        return CODEX_DEFAULT
+    if wands.blocked_by(model, blocked) is not None:
+        return model
+    if conn is None or plan["family"] != "claude" or wands.CLAUDE_ID.fullmatch(model):
+        return None
+    return wands.blocked_resolution(conn, model, blocked)
+
+
+def _refuse_blocked(conn, plan: dict, now: Optional[int]) -> None:
+    model = blocked_model(plan, conn)
+    if model is None:
+        return
+    desk = plan["desk"]
+    day_start, _ = capacity.day_bounds(common.now_stamp(now), config.CAP_RESET_UTC_SECONDS)
+    if plan["family"] == "codex" and model == CODEX_DEFAULT:
+        why = (f"{desk} was not started: it has no model of its own, so it would run the Codex CLI default,"
+               " which cannot be checked against the models blocked here")
+        row = wands.get_desk_model(conn, desk)
+        if row is not None and row["pinned"]:
+            # Only a revert pins a desk to no model, and Ollivander leaves a pinned desk alone, so Ryan must act.
+            fix = (f"It is pinned to no model, so Ollivander leaves it alone: castle desk model {desk} <model>"
+                   f" pins an allowed one, or castle desk model {desk} --role lets fleet ollivander give it its"
+                   " role's pick")
+        else:
+            fix = (f"Run fleet ollivander to give it its role's pick, or castle desk model {desk} <model> pins an"
+                   " allowed one")
+        pensieve.add_event(conn, desk, "rundesk.blocked", "headmaster", f"{why}. {fix}",
+                           dedupe_key=f"rundesk:blocked:{desk}:{CODEX_DEFAULT}:{day_start}", now=now)
+        raise Blocked(why)
+    named = model if model == plan["model"] else f"{plan['model']}, which once resolved to {model},"
+    pensieve.add_event(conn, desk, "rundesk.blocked", "headmaster",
+                       f"{desk} was not started: its model {named} is blocked here. castle desk model {desk}"
+                       f" <model> pins an allowed one, or --role hands it back to Ollivander",
+                       dedupe_key=f"rundesk:blocked:{desk}:{model}:{day_start}", now=now)
+    raise Blocked(f"{desk} was not started: its model {named} is blocked here")
+
+
+def _check_stop() -> None:
+    if stop_requested():
+        raise Stopped("Ollivander's stop file or a CLI update is in place, so no headless desk launches; "
+                      "castle ollivander clear removes a stop")
+
+
+@contextlib.contextmanager
+def launch_gate() -> Iterator[int]:
+    """Ollivander's update lock, held shared, yielding its fd. Never waits: while a CLI update holds it
+    exclusively, the launch is refused like a stop. The desk's process inherits the fd, so no update
+    replaces a binary while a desk still runs it, even if this process is killed."""
+    with contextlib.ExitStack() as held:
+        locks_fd = held.enter_context(safefs.opened_dir(config.OFFICE_ROOT, "locks", create=True))
+        try:
+            lock_fd = held.enter_context(safefs.held_lock(locks_fd, config.UPDATE_LOCK, blocking=False, shared=True))
+        except safefs.Busy:
+            raise Stopped("a CLI update is running, so no headless desk launches until its checks pass") from None
+        yield lock_fd
+
+
 def run(conn, desk: str, owl_id: str, mcp_job: Optional[str] = None, now: Optional[int] = None,
         on_start: Optional[Callable[[], None]] = None, lock_held: bool = False, keep_fds: tuple = ()) -> dict:
     """Run one desk on one owl. on_start is called under the desk lock once the caps allow the run,
@@ -754,20 +1070,29 @@ def run(conn, desk: str, owl_id: str, mcp_job: Optional[str] = None, now: Option
     means the caller already holds this desk's lock (the review script does, from before its round
     opens until its reviewer task closes) and passes its fd in keep_fds. The desk's process inherits
     every fd in keep_fds, so the locks they hold outlive this process if it is killed mid-run."""
+    desk = ids.check("desk", desk)
     if not is_enabled(desk):
         raise FleetError(f"{desk} is not enabled; Ryan enables a headless desk by hand")
-    plan = build_plan(conn, desk, owl_id, mcp_job)
-    if plan["cwd"] == work_dir(plan["desk"]):
-        with safefs.opened_dir(config.CASTLE_ROOT, "desks", plan["desk"], config.CODEX_WORK_DIR, create=True):
-            pass
-    require_castle_dir(plan["cwd"])
+    _check_stop()
+    # Refuse a bad desk or owl, or a blocked model, before waiting on the lock.
+    _refuse_blocked(conn, build_plan(conn, desk, owl_id, mcp_job), now)
     with contextlib.ExitStack() as held:
         if not lock_held:
-            keep_fds = (*keep_fds, held.enter_context(desk_lock(plan["desk"])))
-        cap = over_daily_cap(conn, plan["desk"], now)
+            keep_fds = (*keep_fds, held.enter_context(desk_lock(desk)))
+        # From the last stop check until the process has exited, no CLI update can start (see launch_gate).
+        keep_fds = (*keep_fds, held.enter_context(launch_gate()))
+        # The wait can be long: check the stop again and plan now, so the model is the one chosen last.
+        _check_stop()
+        cap = over_daily_cap(conn, desk, now)
         if cap is not None:
-            report_cap(conn, plan["desk"], now)
+            report_cap(conn, desk, now)
             raise Capped(cap)
+        plan = build_plan(conn, desk, owl_id, mcp_job)
+        _refuse_blocked(conn, plan, now)
+        if plan["cwd"] == work_dir(plan["desk"]):
+            with safefs.opened_dir(config.CASTLE_ROOT, "desks", plan["desk"], config.CODEX_WORK_DIR, create=True):
+                pass
+        require_castle_dir(plan["cwd"])
         if on_start is not None:
             on_start()
         result = _launch(conn, plan, now, keep_fds)
@@ -779,7 +1104,31 @@ def run(conn, desk: str, owl_id: str, mcp_job: Optional[str] = None, now: Option
     return result
 
 
+def start_child(argv: list, cwd: str, env: dict, stdin: int, stdout: int, stderr: int,
+                pass_fds: tuple) -> subprocess.Popen:
+    """Start a desk's process. It returns once the binary has been executed, so a binary replaced after
+    this never affects the run. Only the fds in pass_fds are inherited."""
+    return subprocess.Popen(argv, cwd=cwd, env=env, stdin=stdin, stdout=stdout, stderr=stderr,
+                            pass_fds=pass_fds, close_fds=True)
+
+
+def wait_child(child, timeout: int) -> int:
+    """The process's exit code, or -1 when it ran past the timeout and was killed. Any other way out of
+    the wait (a signal, an interrupt) kills it too, as subprocess.run would."""
+    try:
+        return child.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        child.kill()
+        child.wait()
+        return -1
+    except BaseException:
+        child.kill()
+        child.wait()
+        raise
+
+
 def _launch(conn, plan: dict, now: Optional[int], keep_fds: tuple = ()) -> dict:
+    """Start the planned run and record what it did. The process inherits every fd in keep_fds."""
     desk, run_id = plan["desk"], plan["run_id"]
     # Counted from here, before the process starts: a run killed or interrupted below still uses a run.
     capacity.record_launch(conn, desk, run_id, plan["model"], now=now)
@@ -790,12 +1139,9 @@ def _launch(conn, plan: dict, now: Optional[int], keep_fds: tuple = ()) -> dict:
         err_fd = safefs.create_new(run_fd, f"{run_id}.err")
         started = time.monotonic()
         try:
-            completed = subprocess.run(plan["argv"], cwd=plan["cwd"], env=plan.get("env") or child_env(), stdin=subprocess.DEVNULL,
-                                       stdout=out_fd, stderr=err_fd, timeout=config.RUN_TIMEOUT_SECONDS,
-                                       check=False, pass_fds=tuple(keep_fds))
-            exit_code = completed.returncode
-        except subprocess.TimeoutExpired:
-            exit_code = -1
+            child = start_child(plan["argv"], cwd=plan["cwd"], env=plan.get("env") or child_env(),
+                                stdin=subprocess.DEVNULL, stdout=out_fd, stderr=err_fd, pass_fds=tuple(keep_fds))
+            exit_code = wait_child(child, config.RUN_TIMEOUT_SECONDS)
         finally:
             os.close(out_fd)
             os.close(err_fd)
@@ -804,11 +1150,33 @@ def _launch(conn, plan: dict, now: Optional[int], keep_fds: tuple = ()) -> dict:
             output = safefs.read_regular(run_fd, f"{run_id}.out", RUN_OUTPUT_MAX_BYTES, "run output")
         except FleetError:
             output = b""  # usage then records as zero; the run log keeps the full output
-    usage = parse_claude_usage(output) if plan["family"] == "claude" else parse_codex_usage(output)
+        try:
+            errors = safefs.read_regular(run_fd, f"{run_id}.err", config.RUN_ERROR_MAX_BYTES, "run errors")
+        except FleetError:
+            errors = b""
+    claude = plan["family"] == "claude"
+    usage = parse_claude_usage(output) if claude else parse_codex_usage(output)
+    # A Claude run names its full model ids in modelUsage. One that does not (a timeout or crash) records
+    # the alias it was given, and is left out of the move check on both sides.
+    used = claude_models(output) if claude else [plan["model"]]
+    parsed = used[0] if claude and used else None
+    if claude:
+        real = parsed if parsed is not None and wands.CLAUDE_ID.fullmatch(parsed) else None
+    else:
+        real = plan["model"]
+    previous = wands.last_run_model(conn, desk, claude_ids_only=claude)
     capacity.record_launch_usage(conn, run_id, usage["input_tokens"], usage["output_tokens"],
-                                 usage["cache_read_tokens"], usage["cost_usd"], duration_ms, now=now)
+                                 usage["cache_read_tokens"], usage["cost_usd"], duration_ms,
+                                 model=parsed or plan["model"], now=now)
+    # Every model the run called is kept against the alias, not only the one that did most of the work, so
+    # a blocked model a helper call used is remembered too.
+    if claude and wands.CLAUDE_ID.fullmatch(wands.base_alias(plan["model"])) is None:
+        for full_id in full_ids(used):
+            _record_resolution(conn, plan["model"], full_id, now)
+    cap_source = plan_limit(plan["family"], output, exit_code != 0, errors, timed_out=exit_code == -1)
+    after_run(conn, plan, previous, real, exit_code, now, cap_source, used)
     return {"desk": desk, "run_id": run_id, "exit_code": exit_code, "timed_out": exit_code == -1,
-            "cap_source": plan_limit(plan["family"], output, exit_code != 0), **usage}
+            "cap_source": cap_source, **usage}
 
 
 def main(argv: Optional[list] = None) -> int:
@@ -828,8 +1196,9 @@ def main(argv: Optional[list] = None) -> int:
     try:
         if args.dry_run:
             plan = build_plan(conn, args.desk, args.owl, args.mcp_job)
-            result = {"ok": True, "dry_run": True, "enabled": is_enabled(plan["desk"]),
-                      **{key: plan[key] for key in ("desk", "family", "owl_id", "cwd", "argv")}}
+            result = {"ok": True, "dry_run": True, "enabled": is_enabled(plan["desk"]), "stopped": stop_requested(),
+                      "blocked": blocked_model(plan, conn) is not None,
+                      **{key: plan[key] for key in ("desk", "family", "owl_id", "model", "effort", "cwd", "argv")}}
             sys.stdout.write(json.dumps(result, ensure_ascii=True, indent=2) + "\n")
             return 0
         result = run(conn, args.desk, args.owl, args.mcp_job)
@@ -840,7 +1209,7 @@ def main(argv: Optional[list] = None) -> int:
         return 0 if clean else 1
     except (FleetError, StoreError) as exc:
         sys.stderr.write(json.dumps({"ok": False, "error": common.one_line(exc, 200)}, ensure_ascii=True) + "\n")
-        if not args.dry_run and not isinstance(exc, Capped):
+        if not args.dry_run and not isinstance(exc, (Capped, Stopped, Blocked)):
             report_failure(conn, args.desk, args.owl)
         return 1
     finally:

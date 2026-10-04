@@ -8,6 +8,7 @@
   fleet review own --repo-dir <checkout> --title "<what it does>" [--intent-file <file>] [--base ...] [--no-fetch]
   fleet review own --repo-dir <checkout> --task <task-id>
   fleet push <task-id> [--yes]
+  fleet ollivander [--dry-run]
 
 Output is one JSON object, like castle. Exit 0 on success, 1 on a refusal or error.
 Run it through ~/.hogwarts/bin/fleet, which clears the environment first. No desk can run it:
@@ -30,6 +31,7 @@ if __name__ == "__main__" and "/Users/crisryantan/.hogwarts" not in sys.path:
 from hogwarts.errors import StoreError  # noqa: E402
 
 from fleet import common, config, gitops, push, review, verify, worktree  # noqa: E402
+from fleet import ollivander  # noqa: E402
 from fleet.safefs import FleetError  # noqa: E402
 
 INTENT_MAX_BYTES = 16384
@@ -77,6 +79,7 @@ def build_parser() -> argparse.ArgumentParser:
     pushed = commands.add_parser("push", allow_abbrev=False)
     pushed.add_argument("task")
     pushed.add_argument("--yes", action="store_true")
+    commands.add_parser("ollivander", allow_abbrev=False).add_argument("--dry-run", action="store_true")
     return parser
 
 
@@ -102,6 +105,8 @@ def run(conn, args: argparse.Namespace) -> object:
                                  base=args.base, fetch=not args.no_fetch)
     if args.command == "push":
         return push.push(conn, args.task, confirm=None if args.yes else push.ask_terminal)
+    if args.command == "ollivander":
+        return ollivander.run(conn, dry_run=args.dry_run)
     raise FleetError("unknown command")
 
 
