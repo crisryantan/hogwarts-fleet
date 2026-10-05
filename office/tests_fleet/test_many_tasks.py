@@ -1458,6 +1458,13 @@ class DeskTextTests(unittest.TestCase):
         self.assertIsNotNone(loop)
         self.assertEqual(tuple(loop.group(1).split()), db.MANY_TASK_DESKS_SEED)
 
+    def test_the_installed_office_check_runs_the_installer_with_a_cleared_environment(self):
+        # An inherited GIT_DIR or similar must never reach install.sh, or its git init could land in the real castle.
+        script = self.text("scripts/installed-office-check.sh")
+        runs = [line for line in script.splitlines() if "$REPO_DIR/install.sh" in line and "[ -f" not in line]
+        self.assertEqual(runs, ['/usr/bin/env -i HOME="$FAKE_HOME" PATH=/usr/bin:/bin:/usr/sbin:/sbin'
+                                ' LANG=en_US.UTF-8 /bin/sh "$REPO_DIR/install.sh" \\'])
+
     def test_the_placeholder_scan_skips_test_folders_but_lists_every_real_file(self):
         # Runs only the scan function from install.sh, on a made-up tree. install.sh itself never runs here.
         script = self.text("install.sh")

@@ -377,8 +377,9 @@ def _claude_argv(desk: str, row: dict, brief: str, prompt: str, mcp_job: Optiona
 ENV_VALUE = re.compile(r"[A-Za-z0-9._/=:+-]{1,400}")
 # A command in a Codex sandbox can't read ~/.gitconfig or ~/.config, and git stops with "Operation not
 # permitted" instead of treating them as missing. With these, git reads none of Ryan's settings and
-# behaves as on a fresh account. Set only for the sandboxed commands, never for Codex itself.
-SANDBOX_SHELL_ENV = {"GIT_CONFIG_GLOBAL": "/dev/null", "XDG_CONFIG_HOME": "/dev/null"}
+# behaves as on a fresh account. Set only for the sandboxed commands, never for Codex itself. The core
+# inherit policy drops GIT_NO_LAZY_FETCH, so it is set here again for git inside the sandbox.
+SANDBOX_SHELL_ENV = {"GIT_CONFIG_GLOBAL": "/dev/null", "XDG_CONFIG_HOME": "/dev/null", **config.GIT_NO_LAZY_FETCH_ENV}
 
 
 def sandbox_shell_env(tools_env: dict) -> dict:
@@ -1283,7 +1284,8 @@ def _record_interrupted(conn, plan: dict, run_fd: int, started: float, now: Opti
         usage = run_usage(plan, _run_output(run_fd, plan["run_id"]), -1)  # -1: killed, as a timeout is
         capacity.record_launch_usage(conn, plan["run_id"], usage["input_tokens"], usage["output_tokens"],
                                      usage["cache_read_tokens"], usage["cost_usd"],
-                                     int((time.monotonic() - started) * 1000), model=plan["model"], now=now)
+                                     int((time.monotonic() - started) * 1000), model=plan["model"], now=now,
+                                     spend_unknown=usage.get("spend_unknown") is True)
     except (StoreError, FleetError, OSError):
         pass
 
@@ -1330,7 +1332,8 @@ def _launch(conn, plan: dict, now: Optional[int], keep_fds: tuple = ()) -> dict:
     previous = wands.last_run_model(conn, desk, claude_ids_only=claude)
     capacity.record_launch_usage(conn, run_id, usage["input_tokens"], usage["output_tokens"],
                                  usage["cache_read_tokens"], usage["cost_usd"], duration_ms,
-                                 model=parsed or plan["model"], now=now)
+                                 model=parsed or plan["model"], now=now,
+                                 spend_unknown=usage.get("spend_unknown") is True)
     # Every model the run called is kept against the alias, not only the one that did most of the work, so
     # a blocked model a helper call used is remembered too.
     if claude and wands.CLAUDE_ID.fullmatch(wands.base_alias(plan["model"])) is None:

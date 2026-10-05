@@ -373,7 +373,7 @@ class InputSecurityTests(StoreCase):
         "subject_key": "web-app.comments", "valid_from": None, "lookup": None, "include_history": False, "t": NOW,
         "limit_per_fact": 3, "ops": [{"op": "archive", "fact_id": 1}],
         "amount": 1, "run_cap": 3, "spend_cap": None, "reset_offset": 0, "cap": "runs", "cap_source": "fleet",
-        "max_rounds": 3, "review_locked": False,
+        "max_rounds": 3, "review_locked": False, "spend_unknown": False,
         "need": "workhorse", "line": "workhorse", "effort": None, "value": "model-x", "ok": True, "change_id": None,
         "claude_ids_only": False, "blocked": (), "default_model": None, "retiring_within": DAY,
         "running_window": 3600, "branch": "fix/site",

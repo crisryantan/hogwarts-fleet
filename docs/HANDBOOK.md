@@ -240,7 +240,7 @@ Every headless desk has a daily cap on runs, and the Claude desks have a cap on 
 | Harry - Senior Engineer | 40 | none |
 | Moody - Security Reviewer | 80 | none |
 
-The day resets at local midnight on your Mac, daylight saving included. A run counts the moment it starts, so one that gets killed or crashes still counts. Spend comes from the cost each run records. A Claude run killed before it reports its cost is charged its per-run budget, so the spend cap can run high when a cost is lost, never low.
+The day resets at local midnight on your Mac, daylight saving included. A run counts the moment it starts, so one that gets killed or crashes still counts. Spend comes from the cost each run records. A Claude run killed before it reports its cost is charged its per-run budget, marked in the store as an estimate, so the spend cap can run high when a cost is lost, never low.
 
 - **The warning.** A desk that reaches 80% of a cap sends one note for that cap that day.
 - **The cap event.** At the cap, the desk's next run doesn't start and its request keeps waiting. You get one note that names the cap, how much was used, how many requests are waiting, when it resets and the command that lifts it.

@@ -217,7 +217,7 @@ class CodexDeskTests(RunDeskCase):
         self.assertNotIn('"/private/var/folders/ab/cd/T"=', table)
         policy = next(item for item in argv if item.startswith("shell_environment_policy.set="))
         self.assertEqual(policy, 'shell_environment_policy.set={GIT_CONFIG_GLOBAL="/dev/null", '
-                                 'XDG_CONFIG_HOME="/dev/null"}')
+                                 'GIT_NO_LAZY_FETCH="1", XDG_CONFIG_HOME="/dev/null"}')
         self.assertTrue(argv[-1].startswith("# moody brief"))
         self.assert_no_bypass(argv)
 
@@ -239,6 +239,7 @@ class CodexDeskTests(RunDeskCase):
         self.assertIn('TMPDIR="/private/var/folders/ab/cd/T/hogwarts-harry"', policy)
         self.assertIn('GIT_CONFIG_GLOBAL="/dev/null"', policy)
         self.assertIn('XDG_CONFIG_HOME="/dev/null"', policy)
+        self.assertIn('GIT_NO_LAZY_FETCH="1"', policy)
         self.assertNotIn("GIT_CONFIG_GLOBAL", json.dumps(plan.get("env", {})))
         self.assertIn(f'"{self.castle}/CLAUDE.md"="read"', table)
         self.assertIn(f'"{self.castle}/AGENTS.md"="read"', table)

@@ -403,11 +403,20 @@ class KilledRunSpendTests(CapCase):
         self.assertIsNotNone(launch["metric_id"])
         [metric] = self.conn.execute("SELECT * FROM metrics WHERE desk = 'hermione'").fetchall()
         self.assertEqual((metric["cost_usd"], metric["input_tokens"], metric["output_tokens"]), (2.0, 130, 120))
+        self.assertEqual(self.spend_unknown_markers("hermione"), [f"spend-unknown:{launch['run_id']}"])
 
     def test_a_timed_out_run_is_charged_its_own_desks_ceiling(self):
         result = self.killed("ron", stream_out(self.STREAM), "timeout")
         self.assertEqual((result["timed_out"], result["cost_usd"], result["spend_unknown"]), (True, 0.25, True))
         self.assertEqual(run_desk.cap_status(self.conn, "ron", NOW)["spend_used_usd"], 0.25)
+        [launch] = capacity.list_launches(self.conn, "ron")
+        self.assertEqual(self.spend_unknown_markers("ron"), [f"spend-unknown:{launch['run_id']}"])
+
+    def spend_unknown_markers(self, desk: str) -> list:
+        """The dedupe keys of the stored spend-unknown markers for one desk's runs."""
+        rows = self.conn.execute("SELECT dedupe_key FROM events WHERE kind = ? AND desk = ? ORDER BY id",
+                                 (capacity.SPEND_UNKNOWN_KIND, desk)).fetchall()
+        return [row["dedupe_key"] for row in rows]
 
     def test_killed_runs_can_reach_the_spend_cap(self):
         pensieve.add_metric(self.conn, "ron", "run-earlier", "haiku", 1, 1, 0, config.DAILY_SPEND_CAP_USD["ron"] - 0.2,
@@ -420,6 +429,7 @@ class KilledRunSpendTests(CapCase):
         result = self.killed("hermione", stream_out([CLAUDE_INIT, CLAUDE_OK]), -9)
         self.assertEqual(result["cost_usd"], 0.5)
         self.assertNotIn("spend_unknown", result)
+        self.assertEqual(self.spend_unknown_markers("hermione"), [])
 
     def test_a_run_that_exits_on_its_own_is_not_charged_the_ceiling(self):
         # Only a kill loses the cost: a run that ended itself without a result event reports what it reports.
@@ -461,6 +471,8 @@ class KilledRunSpendTests(CapCase):
         [metric] = self.conn.execute("SELECT * FROM metrics WHERE desk = 'hermione'").fetchall()
         self.assertEqual((metric["cost_usd"], metric["input_tokens"], metric["output_tokens"]), (2.0, 130, 120))
         self.assertEqual(run_desk.cap_status(self.conn, "hermione", NOW)["runs_used"], 1)
+        # The estimate is marked in the store, since the interrupted run never printed a result to carry it.
+        self.assertEqual(self.spend_unknown_markers("hermione"), [f"spend-unknown:{launch['run_id']}"])
         # Both locks are free again, the owl waits for another run, and Ryan is told.
         with run_desk.desk_lock("hermione", wait=False), run_desk.launch_gate():
             pass
