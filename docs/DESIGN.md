@@ -78,7 +78,7 @@ Four scripts use no model. The **Owl Post - Message Router** moves owls between 
 | Owl Post | Script | Whenever an outbox changes, plus a sweep every 5 minutes | None |
 | Ollivander | Script | Daily 06:00 | None |
 | Marauder's Map rounds | Script, then Ron | Every 15 minutes, weekdays 08:00 to 19:00 | None, fast tier on change |
-| Morning lineup | Ron | Weekdays 08:30 | Fast tier |
+| Morning lineup | Ron | Weekdays 08:30; a missed one is written by the next Map round | Fast tier |
 | Keeper's watch | Ron | 09:00, 13:00 and 17:00 on weekdays | None when green, fast tier on red |
 | Weekly scoreboard | Script, then Ron | Mondays 09:00 | None for the numbers, fast tier for the words |
 | Bot pass | Map round, then Hermione | Once a PR is 15 minutes old, and when new review threads land | Frontier tier, drafts only |

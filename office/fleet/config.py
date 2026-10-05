@@ -269,6 +269,10 @@ SHADOW_FILE = "shadow"
 PATROL_SENDER = "map"
 PATROL_LOCK = "patrol.lock"
 PATROL_LOCK_WAIT_SECONDS = 1500
+# The morning lineup's local time and weekdays, as in launchd/com.hogwarts.morning.plist. A Map round after it on a
+# weekday whose lineup file is missing (the Mac slept through 08:30, or GitHub was out of reach) writes it then.
+LINEUP_AT = (8, 30)
+LINEUP_WEEKDAYS = (0, 1, 2, 3, 4)
 PATROL_STATE_MAX_BYTES = 4 * 1024 * 1024
 GH_TIMEOUT_SECONDS = 60
 GH_OUTPUT_MAX_BYTES = 16 * 1024 * 1024

@@ -33,7 +33,9 @@ Run it with the wrapper line:
 """
 from __future__ import annotations
 
+import os
 import sys
+import time
 from typing import Optional
 
 if __name__ == "__main__" and "/Users/crisryantan/.hogwarts" not in sys.path:
@@ -41,7 +43,7 @@ if __name__ == "__main__" and "/Users/crisryantan/.hogwarts" not in sys.path:
 
 from hogwarts.errors import StoreError  # noqa: E402
 
-from fleet import common, config, patrol, run_desk  # noqa: E402
+from fleet import common, config, morning, patrol, run_desk  # noqa: E402
 from fleet.safefs import FleetError  # noqa: E402
 
 SNAPSHOT = "snapshot.json"
@@ -250,6 +252,25 @@ def bot_passes(conn, seen: dict, ts: int, now: Optional[int] = None, shadow: boo
 # The round
 
 
+def lineup_due(ts: int) -> bool:
+    """Whether today's morning lineup should exist by now: a weekday, at or after its time, with no lineup file."""
+    local = time.localtime(ts)
+    if local.tm_wday not in config.LINEUP_WEEKDAYS or (local.tm_hour, local.tm_min) < config.LINEUP_AT:
+        return False
+    return not os.path.lexists(patrol.file_path("lineup", f"{patrol.local_day(ts)}.md"))
+
+
+def catch_up_lineup(conn, ts: int, now: Optional[int]) -> Optional[dict]:
+    """Today's lineup when its own job missed it, written by a round that could read GitHub. Never raises, so a
+    lineup that fails again leaves the round as it was and the next round tries once more."""
+    if not lineup_due(ts):
+        return None
+    try:
+        return morning.lineup(conn, now)
+    except (FleetError, StoreError, OSError) as exc:
+        return {"ok": False, "error": common.one_line(exc, 200)}
+
+
 def run_round(conn, now: Optional[int] = None) -> dict:
     """One Map round. Returns its round row plus what it woke and sent again."""
     ts = patrol.stamp(now)
@@ -295,11 +316,15 @@ def run_round(conn, now: Optional[int] = None) -> dict:
     else:
         passes = bot_passes(conn, seen, ts, now, shadow)
     resent = patrol.resend_pending(conn, shadow, now)
-    model = bool(woke and woke.get("launched")) or any(item.get("launched") for item in passes) or resent["launched"]
+    lineup = catch_up_lineup(conn, ts, now)
+    model = bool(woke and woke.get("launched")) or any(item.get("launched") for item in passes) or resent["launched"] \
+        or bool(lineup and lineup.get("model"))
     row = {"ts": ts, "ok": True, "shadow": shadow, "baseline": baseline, "prs": len(seen["prs"]),
            "asked": len(seen["asked"]), "changes": len(rows), "for_me": len(for_me), "model": model}
+    if lineup is not None:
+        row["lineup"] = "written" if lineup.get("ok") else "failed"
     patrol.append_row("map", ROUNDS, row)
-    return {**row, "woke": woke, "bot_passes": passes, "resent": resent}
+    return {**row, "woke": woke, "bot_passes": passes, "resent": resent, "lineup": lineup}
 
 
 def main(argv: Optional[list] = None) -> int:

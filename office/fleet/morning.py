@@ -34,8 +34,8 @@ from fleet.safefs import FleetError  # noqa: E402
 DAY = 86400
 # The portrait's nightly patch notes: patch-<YYYY-MM-DD>.md in his outbox, or <owl-id>-patch-<date>.md once the
 # Owl Post has moved it to outbox/.sent with his result owl.
-PATCH_NOTE = re.compile(r"(?:owl_[0-9a-f]{16}-)?patch-([0-9]{4}-[0-9]{2}-[0-9]{2})\.md")
-NOTE_HEADING = re.compile(r"#+\s*morning note\b", re.IGNORECASE)
+# The portrait's nightly note, morning-<date>.md in his outbox, as portrait_patch.NOTE_NAME names it.
+MORNING_NOTE = re.compile(r"morning-([0-9]{4}-[0-9]{2}-[0-9]{2})\.md")
 NOTE_MAX_LINES = 10
 
 
@@ -45,13 +45,14 @@ def since_last_morning(ts: int) -> int:
 
 
 def portrait_note(since: int) -> Optional[dict]:
-    """The morning note of the portrait's newest patch file written since a time, at most ten lines."""
+    """The portrait's newest morning note written since a time, at most ten lines. The whole file is the note;
+    heading lines are left out."""
     newest = None
     for parts in (("outbox",), ("outbox", ".sent")):
         try:
             with safefs.opened_dir(config.CASTLE_ROOT, "desks", "portrait", *parts) as fd:
                 for name in os.listdir(fd):
-                    match = PATCH_NOTE.fullmatch(name)
+                    match = MORNING_NOTE.fullmatch(name)
                     info = None if match is None else safefs.lstat(fd, name)
                     if info is None or not stat.S_ISREG(info.st_mode) or info.st_mtime < since:
                         continue
@@ -67,15 +68,8 @@ def portrait_note(since: int) -> Optional[dict]:
             text = safefs.read_regular(fd, name, config.BODY_FILE_MAX_BYTES, "portrait note").decode("utf-8", "replace")
     except (FleetError, OSError):
         return None
-    lines, inside = [], False
-    for line in patrol.clean(text).splitlines():
-        if NOTE_HEADING.match(line.strip()):
-            inside = True
-            continue
-        if inside and line.lstrip().startswith("#"):
-            break
-        if inside and line.strip():
-            lines.append(line.rstrip())
+    lines = [line.rstrip() for line in patrol.clean(text).splitlines()
+             if line.strip() and not line.lstrip().startswith("#")]
     path = "/".join((config.castle_desk_dir("portrait"), *parts, name))
     return {"file": path, "lines": lines[:NOTE_MAX_LINES]} if lines else None
 

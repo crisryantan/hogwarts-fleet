@@ -646,6 +646,44 @@ class BotPassTests(PatrolCase):
         self.assertEqual(self.round(NOW + 900)["bot_passes"], [])
 
 
+class LineupCatchUpTests(PatrolCase):
+    def setUp(self) -> None:
+        super().setUp()
+        self.round(NOW - 3600)  # the baseline
+        self.github.prs = [pr_node()]
+
+    def test_a_round_writes_a_missed_lineup_once(self):
+        with mock.patch.object(patrol_map, "lineup_due", side_effect=lambda ts: not os.path.lexists(
+                patrol.file_path("lineup", f"{patrol.local_day(ts)}.md"))):
+            with self.desk_writes("Lineup words.\n") as started:
+                first = self.round(NOW)
+                second = self.round(NOW + 900)
+        self.assertEqual((first["lineup"]["ok"], first["model"], started.call_count), (True, True, 1))
+        self.assertEqual(json.loads(self.read("map", "rounds.jsonl").splitlines()[-2])["lineup"], "written")
+        self.assertIsNone(second["lineup"])
+        self.assertIn("Lineup words.", read_file(first["lineup"]["file"]))
+
+    def test_a_lineup_that_fails_again_leaves_the_round_ok(self):
+        with mock.patch.object(patrol_map, "lineup_due", return_value=True), \
+                mock.patch.object(morning, "lineup", side_effect=FleetError("gh failed")):
+            result = self.round(NOW)
+        self.assertTrue(result["ok"])
+        self.assertEqual((result["lineup"]["ok"], result["lineup"]["error"]), (False, "gh failed"))
+        self.assertEqual(json.loads(self.read("map", "rounds.jsonl").splitlines()[-1])["lineup"], "failed")
+
+    def test_the_lineup_is_due_only_on_a_weekday_from_its_time_while_its_file_is_missing(self):
+        def at(wday, hour, minute):
+            return time.struct_time((2027, 1, 11 + wday, hour, minute, 0, wday, 11, 0))
+        cases = {(0, 8, 29): False, (0, 8, 30): True, (4, 18, 45): True, (5, 9, 0): False, (6, 9, 0): False}
+        for (wday, hour, minute), due in cases.items():
+            with self.subTest(wday=wday, hour=hour, minute=minute), \
+                    mock.patch.object(patrol_map.time, "localtime", return_value=at(wday, hour, minute)):
+                self.assertEqual(patrol_map.lineup_due(NOW), due)
+        with mock.patch.object(patrol_map.time, "localtime", return_value=at(1, 9, 0)), \
+                mock.patch.object(patrol_map.os.path, "lexists", return_value=True):
+            self.assertFalse(patrol_map.lineup_due(NOW))
+
+
 class LineupTests(PatrolCase):
     def setUp(self) -> None:
         super().setUp()
@@ -670,13 +708,18 @@ class LineupTests(PatrolCase):
 
     def test_the_portrait_note_is_carried_when_there_is_one(self):
         day = time.strftime("%Y-%m-%d", time.localtime(NOW - HOUR))
-        path = self.outbox("portrait") / f"patch-{day}.md"
-        self.write_file(path, "# Patch\n\n## Morning note\n- Two facts went stale.\n- Ron's pad grew.\n\n## Ops\n- x\n")
+        # The note is the file Dumbledore writes, morning-<date>.md; his patch file is never read for it.
+        path = self.outbox("portrait") / f"morning-{day}.md"
+        self.write_file(path, "# Morning note\n\n- Two facts went stale.\n- Ron's pad grew.\n")
         os.utime(path, (NOW - HOUR, NOW - HOUR))
+        patch = self.outbox("portrait") / f"patch-{day}.ops"
+        self.write_file(patch, '{"format": "portrait-patch-1", "ops": ["x"]}\n')
         with self.desk_writes("ok\n"):
             text = read_file(morning.lineup(self.conn, now=NOW)["file"])
-        self.assertIn("- Two facts went stale.\n- Ron's pad grew.\n", text)
-        self.assertNotIn("- x", text.split("## The portrait's note")[1].split("## Ron")[0])
+        note = text.split("## The portrait's note")[1].split("## Ron")[0]
+        self.assertIn("- Two facts went stale.\n- Ron's pad grew.\n", note)
+        self.assertNotIn("Morning note", note)
+        self.assertNotIn("portrait-patch-1", note)
 
     def test_live_mode_points_ryan_at_the_lineup_once_a_day(self):
         self.go_live()
