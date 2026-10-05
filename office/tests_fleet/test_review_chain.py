@@ -167,6 +167,8 @@ class HandoffRefusalTests(ChainCase):
         self.assertIn("awaiting close", self.skipped()[-1]["summary"])
 
     def test_a_handoff_for_a_task_with_no_worktree_starts_nothing_and_says_why(self):
+        # McGonagall holds one task at a time, so the setup's parent closes first (with its Harry task) to make room.
+        pensieve.close_task(self.conn, self.parent, "abandoned")
         _, other, _, _ = self.harry_task()
         pensieve.start_task(self.conn, other["id"])
         text = HANDOFF.format(task_id=other["id"])
