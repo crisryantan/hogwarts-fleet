@@ -190,7 +190,7 @@ def _tags(value: object) -> list:
 def _field(name: str, value: object, kind: str) -> object:
     """One op field, checked by its own rule. Text limits follow the store's own."""
     if name == "scope":
-        return "fleet" if value == "fleet" else ids.check("desk", value, "scope")
+        return "fleet" if value == "fleet" else _unscrubbed(ids.check("desk", value, "scope"), "scope")
     if name == "text":
         limit = pensieve.KEYPOINT_LIMIT if kind == "memory_note_add" else pensieve.FACT_LIMIT
         return _line(value, "text", limit)
@@ -252,8 +252,10 @@ def parse_patch(raw: bytes, date: str) -> dict:
     entries, seen = [], set()
     for index, op in enumerate(ops):
         op_id = op.get("id") if isinstance(op, dict) else None
-        if not isinstance(op_id, str) or OP_ID.fullmatch(op_id) is None:
-            raise ValidationError(f"op {index} needs an id of 1 to 24 lowercase letters, digits and hyphens")
+        if not isinstance(op_id, str) or OP_ID.fullmatch(op_id) is None or pensieve.scrub(op_id) != op_id:
+            # Checked before any message can name it: an id the scrubber would change is never shown.
+            raise ValidationError(f"op {index} needs an id of 1 to 24 lowercase letters, digits and hyphens"
+                                  " that does not look like a secret")
         if op_id in seen:
             raise ValidationError(f"op id {op_id} is used twice")
         seen.add(op_id)

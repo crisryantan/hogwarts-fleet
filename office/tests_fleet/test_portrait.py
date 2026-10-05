@@ -399,6 +399,26 @@ class PatchTests(PortraitCase):
                     portrait_patch.apply(self.conn, DATE, sha, only=only, now=NOW)
         self.assertEqual(self.counts(), before)
 
+    def test_token_like_op_ids_and_scopes_are_never_shown_or_applied(self):
+        token = "xoxb-abcdefghij"
+        sha = self.write_patch(self.ops + [op(token, "archive_move", entry="e", to="t")])
+        for call in (lambda: portrait_patch.show(self.conn, DATE, now=NOW),
+                     lambda: portrait_patch.apply(self.conn, DATE, sha, now=NOW)):
+            with self.assertRaises(ValidationError) as caught:
+                call()
+            self.assertNotIn(token, str(caught.exception))
+        self.assertNotIn(token, json.dumps(portrait_patch.patches(self.conn)))
+        sha = self.write_patch(self.ops + [op("s1", "fact_add", scope=token, text="t", tier="aging")])
+        shown = portrait_patch.show(self.conn, DATE, now=NOW)
+        [entry] = [item for item in shown["ops"] if item["id"] == "s1"]
+        self.assertEqual(entry["status"], "out of schema")
+        self.assertNotIn(token, json.dumps(shown))
+        before = self.counts()
+        with self.assertRaises(ValidationError) as caught:
+            portrait_patch.apply(self.conn, DATE, sha, only=["s1"], now=NOW)
+        self.assertNotIn(token, str(caught.exception))
+        self.assertEqual(self.counts(), before)
+
     def test_unknown_field_names_are_counted_never_shown(self):
         secret = "ghp_" + "a" * 30
         sha = self.write_patch(self.ops + [op("s1", "archive_move", entry="e", to="t", **{secret: "x"})])
