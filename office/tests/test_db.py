@@ -10,7 +10,7 @@ import sys
 import unittest
 from unittest import mock
 
-from hogwarts import capacity, db, owlery, pensieve
+from hogwarts import capacity, db, ids, owlery, pensieve
 from hogwarts.errors import ConflictError, IntegrityError, NotFoundError, StoreError, ValidationError
 from tests.support import NOW, StoreCase, temp_dir
 
@@ -287,7 +287,7 @@ class MigrationV8Tests(unittest.TestCase):
 
     def test_a_v7_database_migrates_to_8_and_its_rounds_record_no_slot(self):
         conn = self.v7_database()
-        self.assertEqual((db.SCHEMA_VERSION, db.schema_version(conn)), (8, 8))
+        self.assertEqual(db.schema_version(conn), db.SCHEMA_VERSION)
         [old] = capacity.review_rounds(conn, self.author)
         self.assertIsNone(old["slot"])
         opened = capacity.open_review_round(conn, self.author, "beta", self.SHA, "review again", slot=1, now=NOW)
@@ -320,6 +320,101 @@ class MigrationV8Tests(unittest.TestCase):
                              " VALUES (?, ?, 'beta', ?, 9, ?, ?)", (spare["request"]["id"], self.author, self.SHA,
                                                                    NOW, bad))
         self.assertEqual([row["slot"] for row in capacity.review_rounds(conn, self.author)], [None, 0])
+
+
+class MigrationV9Tests(unittest.TestCase):
+    DIGEST = "c" * 64
+    DRAFTED = "tk_00000000000000d1"
+
+    def v8_database(self):
+        """A V8 store with a task registered by hand, with its TASK.md, before go specs existed."""
+        path = temp_dir(self) / "state" / "pensieve.db"
+        with mock.patch.object(db, "MIGRATIONS", db.MIGRATIONS[:8]), mock.patch.object(db, "SCHEMA_VERSION", 8):
+            conn = db.connect(path)
+            pensieve.add_desk(conn, "alpha", "claude", now=NOW)
+            pensieve.create_task(conn, "alpha", "drafted by hand", intent_path=ids.intent_path(self.DRAFTED),
+                                 task_id=self.DRAFTED, now=NOW)
+            self.assertIsNone(conn.execute("SELECT name FROM sqlite_master WHERE name = 'task_specs'").fetchone())
+            conn.close()
+        conn = db.connect(path)
+        self.addCleanup(conn.close)
+        return conn
+
+    def drafted(self, conn, task_id: str) -> str:
+        return pensieve.create_task(conn, "alpha", "drafted", intent_path=ids.intent_path(task_id), task_id=task_id,
+                                    now=NOW)["id"]
+
+    def test_a_v8_database_migrates_to_9_and_its_tasks_have_no_spec(self):
+        conn = self.v8_database()
+        self.assertEqual(db.schema_version(conn), db.SCHEMA_VERSION)
+        self.assertIsNone(pensieve.task_spec(conn, self.DRAFTED))
+        spec = pensieve.record_spec(conn, self.DRAFTED, "/private/tmp/checkout", "fix/site", "origin/main", self.DIGEST,
+                                    now=NOW)
+        self.assertEqual({key: spec[key] for key in ("task_id", "repo_dir", "branch", "base", "intent_sha256")},
+                         {"task_id": self.DRAFTED, "repo_dir": "/private/tmp/checkout", "branch": "fix/site",
+                          "base": "origin/main", "intent_sha256": self.DIGEST})
+        self.assertEqual(conn.execute("PRAGMA integrity_check").fetchone()[0], "ok")
+        self.assertEqual(conn.execute("PRAGMA foreign_key_check").fetchall(), [])
+        changes = conn.total_changes
+        self.assertEqual(db.migrate(conn), db.SCHEMA_VERSION)
+        with db.transaction(conn):
+            for statement in db.pending_statements(conn, db.V9):
+                conn.execute(statement)
+        self.assertEqual(conn.total_changes, changes)
+
+    def test_a_spec_never_changes_and_is_never_deleted(self):
+        conn = self.v8_database()
+        pensieve.record_spec(conn, self.DRAFTED, "/private/tmp/checkout", "fix/site", "origin/main", self.DIGEST,
+                             now=NOW)
+        with self.assertRaisesRegex(ConflictError, "never changes"):
+            pensieve.record_spec(conn, self.DRAFTED, "/private/tmp/other", "fix/other", "origin/main", self.DIGEST,
+                                 now=NOW)
+        for column, value in (("repo_dir", "/private/tmp/other"), ("branch", "fix/other"), ("base", "origin/dev"),
+                              ("intent_sha256", "d" * 64), ("recorded_at", NOW + 1)):
+            with self.subTest(column=column), self.assertRaisesRegex(sqlite3.IntegrityError, "keeps the spec"):
+                conn.execute(f"UPDATE task_specs SET {column} = ? WHERE task_id = ?", (value, self.DRAFTED))
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "never deleted"):
+            conn.execute("DELETE FROM task_specs WHERE task_id = ?", (self.DRAFTED,))
+        self.assertEqual(pensieve.task_spec(conn, self.DRAFTED)["branch"], "fix/site")
+
+    def test_a_spec_is_recorded_only_on_a_queued_task_with_its_task_md(self):
+        conn = self.v8_database()
+        bare = pensieve.create_task(conn, "alpha", "no TASK.md", now=NOW)["id"]
+        started = self.drafted(conn, "tk_00000000000000d2")
+        pensieve.start_task(conn, started, now=NOW)
+        for task_id in (bare, started):
+            with self.subTest(task=task_id):
+                with self.assertRaisesRegex(ConflictError, "queued task with its TASK.md"):
+                    pensieve.record_spec(conn, task_id, "/private/tmp/checkout", "fix/site", "origin/main",
+                                         self.DIGEST, now=NOW)
+                with self.assertRaisesRegex(sqlite3.IntegrityError, "queued task with its TASK.md"):
+                    conn.execute("INSERT INTO task_specs(task_id, repo_dir, branch, base, intent_sha256, recorded_at)"
+                                 " VALUES (?, '/private/tmp/checkout', 'fix/site', 'origin/main', ?, ?)",
+                                 (task_id, self.DIGEST, NOW))
+        with self.assertRaises(NotFoundError):
+            pensieve.record_spec(conn, "tk_00000000000000ff", "/private/tmp/checkout", "fix/site", "origin/main",
+                                 self.DIGEST, now=NOW)
+        self.assertEqual(conn.execute("SELECT COUNT(*) FROM task_specs").fetchone()[0], 0)
+
+    def test_a_spec_keeps_plain_shapes(self):
+        conn = self.v8_database()
+        good = {"repo_dir": "/private/tmp/checkout", "branch": "fix/site", "base": "origin/main",
+                "intent_sha256": self.DIGEST}
+        for field, bad in (("repo_dir", "checkout"), ("repo_dir", "/private/tmp/../etc"), ("repo_dir", ids.CASTLE_ROOT),
+                           ("repo_dir", ids.TASKS_ROOT + "/x"), ("repo_dir", ids.OFFICE_ROOT + "/state"),
+                           ("branch", "Fix/Site"), ("branch", "fix site"), ("branch", "fix/../site"), ("branch", ""),
+                           ("base", "origin main"), ("base", "origin/..main"), ("base", "-x"),
+                           ("intent_sha256", "C" * 64), ("intent_sha256", "c" * 63), ("intent_sha256", None)):
+            with self.subTest(field=field, bad=bad), self.assertRaises(ValidationError):
+                pensieve.record_spec(conn, self.DRAFTED, **{**good, field: bad}, now=NOW)
+        for column, bad in (("repo_dir", "checkout"), ("branch", "Fix/Site"), ("branch", "x" * 101),
+                            ("base", "origin main"), ("intent_sha256", "C" * 64)):
+            values = {**good, column: bad}
+            with self.subTest(raw=column), self.assertRaisesRegex(sqlite3.IntegrityError, "CHECK constraint failed"):
+                conn.execute("INSERT INTO task_specs(task_id, repo_dir, branch, base, intent_sha256, recorded_at)"
+                             " VALUES (?, ?, ?, ?, ?, ?)", (self.DRAFTED, values["repo_dir"], values["branch"],
+                                                           values["base"], values["intent_sha256"], NOW))
+        self.assertIsNone(pensieve.task_spec(conn, self.DRAFTED))
 
 
 class TransactionTests(StoreCase):

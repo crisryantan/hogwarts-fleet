@@ -14,7 +14,7 @@ Nothing a desk runs can call the store, and desks (the agents) have no file acce
 - the nightly Pensieve export, which runs Dumbledore after it;
 - the worktree, verify, review and push scripts, and `fleet feed`;
 - the push gate;
-- the castle's session hooks, including the close-token and SessionEnd hooks.
+- the castle's session hooks, including the go, close-token and SessionEnd hooks.
 
 Sender identity is a parameter that the calling script supplies. The Owl Post derives it from the desk outbox directory a file came from. The store still validates every input strictly, as defence in depth.
 
@@ -143,7 +143,7 @@ The CLI reads two kinds of file:
 - CLI output is `json.dumps(ensure_ascii=True)`. List views never include owl bodies.
 - Close tokens and owl bodies never travel on argv. They come from stdin only.
 
-## Schema summary (version 8)
+## Schema summary (version 9)
 
 All tables are STRICT when SQLite supports it. Timestamps are integer unix seconds.
 
@@ -170,6 +170,7 @@ All tables are STRICT when SQLite supports it. Timestamps are integer unix secon
 | `cap_hits` | One row each time a fleet cap refuses a run, or a vendor's own limit stops one. `cap_source` says which: `fleet`, `claude_plan` or `codex_plan`. Immutable. |
 | `review_rounds` | One row per review request of an author task, with its round number, whether a newer commit superseded it, and the review it recorded. That review is stored and tied to its round in one step and never changes, so a round with a verdict counts even if publishing the review afterwards failed. `slot` is the reviewer desk's run slot the review held when the round opened, set once in the row that opens it, so the review script knows whose lock to try before it closes that round's reviewer task. It is NULL for a round queued while every slot was busy and for rounds from before version 8, and the script reads NULL as slot 0. |
 | `run_launches` | One row per headless run, written before its process starts, so the run counts toward the daily run cap even if it is killed before it records usage. Its usage is the `metrics` row tied to it once it ends, set once. `task_id` is the desk's own task the run was for, when it had one, and never changes. Never deleted. |
+| `task_specs` | What your go approved for a task (version 9): the repo folder, branch and base its TASK.md Spec names, and the sha256 of the TASK.md bytes the go read. One row per task, written in the transaction that registers it, only while it is queued and has its TASK.md, and never changed or deleted (triggers). A task registered with `castle task create` has none. The worktree script makes a worktree under that TASK.md only from these values. |
 | `round_allowances` | One row each time you allow another review round with `castle task allow-round`. Immutable. |
 | `model_lines` | How you filed a model name: `frontier`, `workhorse`, `fast` or `ignore`. The latest row per name wins. Immutable. |
 | `model_catalog` | The model names each family offered at Ollivander's last look, with whether the catalog listed each, the tier it was filed under then and when it retires. Each look gets the family's next look number, and the latest look is the one with the highest number, so two looks in the same second never mix. A row's look number only moves forward. `castle desk model --approve`, a pin and a trial revert check against the latest look. |
@@ -188,6 +189,7 @@ Migration 1 creates the base tables. The later ones:
 - Migration 6 adds the catalog look number and numbers the rows already kept by their `seen_at` order in each family.
 - Migration 7 adds `many_task_desks` and its triggers, and grants the seeded desks that already exist. It replaces the one-active-task-per-desk index with a trigger that reads those grants, and adds `run_launches.task_id` and `tasks.review_branch`.
 - Migration 8 adds `review_rounds.slot` and the trigger that keeps a round's slot fixed.
+- Migration 9 adds `task_specs` and its triggers.
 
 Each column is added only while it is missing, so running a migration again changes nothing.
 
@@ -204,7 +206,7 @@ Every function takes a connection from `db.connect(path)` as its first argument.
 - `hogwarts.db`: `connect(path, create=True)`, `connect_readonly(path)`, `migrate(conn)`, `pending_statements(conn, statements)`, `schema_version(conn)`, `transaction(conn)`, `snapshot(conn)`, `doctor(path, code_root=None)`, `stray_bytecode(root)`, `DEFAULT_DB`.
 - `hogwarts.pensieve`
   - Desks: `add_desk`, `get_desk`, `list_desks` (with `many_tasks`), `allow_many_tasks(desk)`, `takes_many_tasks(desk)`, `blocking_task(desk)`.
-  - Tasks: `create_task(desk, title, intent_path=None, parent_task_id=None, request_id=None, session_id=None, worktree=None, task_id=None)`, `start_task`, `mark_awaiting_close(task, repo=None, sha=None)`, `record_commit`, `get_commit`, `task_commits`, `check_review_branch(branch)`, `set_review_branch(task, branch)`, `close_task`, `closed_ancestors`, `get_task`, `list_tasks(desk=None, status=None, open_only=False)`.
+  - Tasks: `create_task(desk, title, intent_path=None, parent_task_id=None, request_id=None, session_id=None, worktree=None, task_id=None)`, `record_spec(task, repo_dir, branch, base, intent_sha256)`, `task_spec(task)`, `start_task`, `mark_awaiting_close(task, repo=None, sha=None)`, `record_commit`, `get_commit`, `task_commits`, `check_review_branch(branch)`, `set_review_branch(task, branch)`, `close_task`, `closed_ancestors`, `get_task`, `list_tasks(desk=None, status=None, open_only=False)`.
   - Events: `add_event`, `drain(max_chars=1500)`, `ack(event_id)`, `events_with_key_prefix(prefix)` (read only, a plain text match on the dedupe key).
   - Memory: `record_session`, `get_session`, `add_extract`, `extracts_between(since, until, limit=2000)` (read only, with each session's desk and project), `add_keypoint`, `find(query, limit)`, `fts_query`, `fts_phrases`, `scrub(text)`.
   - Facts: `add_fact(scope, text, tier, source, expires_at=None, subject_key=None, valid_from=None, lookup=None)` (the same function as `facts.add_fact`), `touch`, `decay`, `archive_stale`, `archive`, `list_facts(scope=None, include_archived=False, include_closed=False)` (open rows, plus archived or closed rows when asked), `context_facts(desk)` (current fleet and desk facts).
@@ -227,6 +229,7 @@ Every function takes a connection from `db.connect(path)` as its first argument.
 
 - Writes run in `BEGIN IMMEDIATE` through `db.transaction`. A write helper nests inside another write transaction as a savepoint, so a nested helper that fails undoes its own changes even when the caller catches the error and commits. It refuses with `StoreError` inside a `snapshot` or a transaction the caller opened, and so does `consume`.
 - `create_task` takes an optional `task_id`, so a fleet script can mint the id (`tk_` and 16 lowercase hex digits), write `tasks/<task_id>/TASK.md`, then register the task. An id that is already taken raises `ConflictError`. An `intent_path` needs that `task_id` and must be exactly `~/hogwarts/tasks/<task_id>/TASK.md`, written as an absolute path. Without a `task_id` the store mints one and the task has no intent path.
+- `record_spec` records a go on a queued task that has its TASK.md, once. It keeps the repo folder absolute, normalised and outside the castle and the office, the branch and base to the plain shapes the fleet makes worktrees from, and the sha256 to 64 lowercase hex digits. The fleet checks them against git first.
 - `start_task` only starts a queued task whose ancestors are all open. A session that already has an active task raises `ConflictError`, and so does a single desk (`blocking_task` names the task in the way). A desk granted many tasks with `allow_many_tasks` starts any number. `allow_many_tasks` refuses `mcgonagall`, `snape`, `portrait` and every human or script desk with `ValidationError`. `mark_awaiting_close` moves the task out of `active`, so a single desk can start its next one, and can record the head commit.
 - `in_flight` lists every active or awaiting-close author task by desk, and any other task with a run going for it (a queued task whose ordinary request run the Owl Post started, shown as `running`).
   - Each entry has its latest round, verdict, rounds used against the cap, whether it needs an allowance, whether a run is going, and its state: `awaiting close`, `HEADMASTER`, `round cap`, `CHANGES`, `review died`, `review queued`, `in review`, `running` or `working`.

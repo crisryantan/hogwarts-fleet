@@ -377,6 +377,7 @@ class InputSecurityTests(StoreCase):
         "need": "workhorse", "line": "workhorse", "effort": None, "value": "model-x", "ok": True, "change_id": None,
         "claude_ids_only": False, "blocked": (), "default_model": None, "retiring_within": DAY,
         "running_window": 3600, "branch": "fix/site", "slot": None,
+        "repo_dir": "/private/tmp/checkout", "base": "origin/main", "intent_sha256": "a" * 64,
     }
     OVERRIDES = {
         ("record_review", "verdict"): "CHANGES", ("record_round_verdict", "verdict"): "CHANGES",
@@ -654,6 +655,9 @@ class TransactionCoverageTests(unittest.TestCase):
         wands.unpin(conn, "alpha", now=NOW)
         wands.record_resolution(conn, "opus", "claude-opus-5-5", now=NOW)
         pensieve.set_worktree(conn, pensieve.create_task(conn, "beta", "wt", now=NOW)["id"], f"{ids.WORKTREES_ROOT}/wt")
+        drafted = pensieve.create_task(conn, "alpha", "go", intent_path=ids.intent_path("tk_00000000000000aa"),
+                                       task_id="tk_00000000000000aa", now=NOW)["id"]
+        pensieve.record_spec(conn, drafted, "/private/tmp/checkout", "fix/site", "origin/main", "a" * 64, now=NOW)
         pensieve.mark_awaiting_close(conn, task, now=NOW)
         owlery.open_request(conn, "alpha", "beta", "child", parent_task_id=task, now=NOW)
         owlery.record_review(conn, REPO, SHA, task, "ryan", "PASS", now=NOW)

@@ -13,7 +13,7 @@ from .errors import ConflictError, IntegrityError, NotFoundError, StoreError, Va
 
 DEFAULT_DB = Path("/Users/crisryantan/.hogwarts/state/pensieve.db")
 CODE_ROOT = Path(os.path.abspath(__file__)).parent.parent
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 WAL_ATTEMPTS = 50
 BYTECODE_SUFFIXES = (".pyc", ".pyo", ".so")
 SIDECARS = ("-wal", "-shm")
@@ -56,6 +56,11 @@ SINGLE_TASK_FAMILIES = ("human", "script")
 REVIEW_BRANCH_MAX = 255
 # The most run slots a desk may have (fleet RUN_SLOTS), so a slot a review round records is 0 to this less one.
 RUN_SLOT_LIMIT = 8
+# A go spec (V9): the longest repo folder path, branch and base a TASK.md's go records. The fleet holds the branch
+# and base to its own stricter rules (fleet/gitops.py) before they get here.
+SPEC_PATH_MAX = 1024
+SPEC_BRANCH_MAX = 100
+SPEC_BASE_MAX = 200
 
 PathLike = Union[str, Path]
 
@@ -738,7 +743,36 @@ V8 = (
            "a review round keeps its slot"),
 )
 
-MIGRATIONS = ((1, V1), (2, V2), (3, V3), (4, V4), (5, V5), (6, V6), (7, V7), (8, V8))
+# Go specs: when Ryan types "go <task-id>" on a drafted TASK.md, the hook registers the task and records, in the
+# same transaction, the repo folder, branch and base its Spec names and the sha256 of the TASK.md bytes it read.
+# The build's worktree is made from these stored values only, never from the file again. One row per registered
+# task, written while the task is queued and has its TASK.md, and never changed or deleted. Tasks registered any
+# other way have none.
+V9 = (
+    _table(
+        f"""CREATE TABLE IF NOT EXISTS task_specs (
+        task_id TEXT PRIMARY KEY NOT NULL REFERENCES tasks(id),
+        repo_dir TEXT NOT NULL CHECK (length(repo_dir) BETWEEN 2 AND {SPEC_PATH_MAX}
+            AND substr(repo_dir, 1, 1) = '/' AND repo_dir NOT GLOB '*[^ -~]*'),
+        branch TEXT NOT NULL CHECK (length(branch) BETWEEN 1 AND {SPEC_BRANCH_MAX}
+            AND branch GLOB '[a-z0-9]*' AND branch NOT GLOB '*[^a-z0-9._/-]*'),
+        base TEXT NOT NULL CHECK (length(base) BETWEEN 1 AND {SPEC_BASE_MAX}
+            AND base GLOB '[A-Za-z0-9]*' AND base NOT GLOB '*[^A-Za-z0-9._/-]*'),
+        intent_sha256 TEXT NOT NULL CHECK (length(intent_sha256) = 64 AND intent_sha256 NOT GLOB '*[^0-9a-f]*'),
+        recorded_at INTEGER NOT NULL
+    )"""
+    ),
+    _guard("task_specs_immutable", "BEFORE UPDATE ON task_specs", "a task keeps the spec it was started with"),
+    _guard("task_specs_no_delete", "BEFORE DELETE ON task_specs", "task specs are never deleted"),
+    _guard(
+        "task_specs_on_a_new_task",
+        "BEFORE INSERT ON task_specs WHEN NOT EXISTS (SELECT 1 FROM tasks WHERE id = NEW.task_id"
+        " AND status = 'queued' AND intent_path IS NOT NULL)",
+        "a spec is recorded on a queued task with its TASK.md",
+    ),
+)
+
+MIGRATIONS = ((1, V1), (2, V2), (3, V3), (4, V4), (5, V5), (6, V6), (7, V7), (8, V8), (9, V9))
 
 
 def _uid() -> int:

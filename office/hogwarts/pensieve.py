@@ -164,6 +164,42 @@ def start_task(conn: Conn, task_id: str, now: Optional[int] = None) -> dict:
     return get_task(conn, task_id)
 
 
+def record_spec(conn: Conn, task_id: str, repo_dir: str, branch: str, base: str, intent_sha256: str,
+                now: Optional[int] = None) -> dict:
+    """Record what Ryan's go approved for a task: the repo folder, branch and base its TASK.md Spec names and
+    the sha256 of the TASK.md bytes read at go. Only on a queued task with its TASK.md, once, and it never
+    changes. The fleet checks the folder, branch and base against git and its own rules first; the store
+    keeps them to plain shapes, with the folder outside the castle and the office."""
+    task_id = ids.check("task", task_id)
+    repo_dir = ids.check_absolute(repo_dir, "repo folder")
+    for root in (ids.CASTLE_ROOT, ids.OFFICE_ROOT):
+        if repo_dir == root or repo_dir.startswith(root + "/"):
+            raise ValidationError("the repo folder must be outside the castle and the office")
+    branch = ids.check("branch", branch)
+    base = ids.check("ref", base, "base")
+    if ".." in branch or ".." in base:
+        raise ValidationError("a branch or base never holds two dots in a row")
+    intent_sha256 = ids.check("sha256", intent_sha256, "TASK.md sha256")
+    ts = ids.stamp(now)
+    with db.transaction(conn):
+        task = get_task(conn, task_id)
+        if task["status"] != "queued" or task["intent_path"] is None:
+            raise ConflictError("a spec is recorded on a queued task with its TASK.md")
+        if task_spec(conn, task_id) is not None:
+            raise ConflictError("this task already has its spec, and it never changes")
+        conn.execute(
+            "INSERT INTO task_specs(task_id, repo_dir, branch, base, intent_sha256, recorded_at)"
+            " VALUES (?, ?, ?, ?, ?, ?)",
+            (task_id, repo_dir, branch, base, intent_sha256, ts),
+        )
+    return task_spec(conn, task_id)
+
+
+def task_spec(conn: Conn, task_id: str) -> Optional[dict]:
+    """The repo folder, branch, base and TASK.md sha256 a go recorded on this task, or None."""
+    return db.fetch_one(conn, "SELECT * FROM task_specs WHERE task_id = ?", (ids.check("task", task_id),))
+
+
 def set_worktree(conn: Conn, task_id: str, worktree: str) -> dict:
     """Attach a worktree to a queued or active task that has none. Write once: it never changes."""
     task_id = ids.check("task", task_id)

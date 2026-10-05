@@ -1,6 +1,11 @@
 """The worktree script: give a build task its own git worktree, then start the desk.
 
-Ryan runs it from his terminal, after the Owl Post says a build task is waiting for its worktree:
+Most builds never need the command. When Ryan types "go <task-id>" on a drafted TASK.md, the UserPromptSubmit
+hook registers the task, routes it to Harry and calls create here with the repo folder, branch and base it
+stored from the TASK.md Spec, then start_desk once its store transaction has committed (see
+fleet/hooks/user_prompt_submit.py). Every check below runs for it the same way. The command is the fallback,
+for a go the hook could not confirm or a build task McGonagall routed by owl. Ryan runs it from his terminal,
+after the Owl Post says a build task is waiting for its worktree:
   fleet worktree <task-id> --repo-dir <main checkout> --branch <name> [--base origin/main] [--no-fetch]
 It refuses rather than guesses:
 - the task must be a queued task of a build desk (Harry) with no worktree yet, and the desk must be free
@@ -12,7 +17,8 @@ It refuses rather than guesses:
   single-task Harry started a task under another TASK.md meanwhile, or McGonagall closed the parent, the
   command takes back the worktree, its new branch and its record before it says why;
 - the repo must be a main checkout in Ryan's home, outside the office and the castle, with a GitHub origin;
-- the branch must be new, plain and free of fleet words.
+- the branch must be new, plain and free of fleet words;
+- under a TASK.md that a go started, the repo folder, branch and base must be the ones the go stored.
 Then it fetches the base (unless --no-fetch), adds ~/hogwarts/worktrees/<task-id> on a new branch,
 writes the office record, attaches the worktree to the task, starts the task and its request, and
 starts the desk's run if Ryan has enabled the desk.
@@ -63,6 +69,25 @@ def _request_owl(conn, task: dict) -> str:
     raise FleetError("the request owl for this task was not found")
 
 
+def _fetch(common_dir: str, base: str) -> None:
+    if base.startswith("origin/"):
+        gitops.git(["fetch", "--no-tags", "origin", base[len("origin/"):]], common_dir)
+
+
+def fetch_base(repo_dir: str, base: str) -> None:
+    """The fetch add_worktree makes, after the same checks of the checkout and its GitHub origin. The go hook
+    runs it before it opens its store transaction, so no network wait holds the store, then calls create with
+    fetch=False, which checks everything again."""
+    repo_dir = gitops.check_repo_dir(repo_dir)
+    base = gitops.check_ref(base, "base")
+    common_dir = f"{repo_dir}/.git"
+    origin = gitops.git(["config", "--get", "remote.origin.url"], common_dir, check=False)
+    if not origin.strip():
+        raise FleetError("the repo has no origin remote")
+    gitops.repo_slug(origin)
+    _fetch(common_dir, base)
+
+
 def add_worktree(conn, task_id: str, repo_dir: str, base: str, branch: Optional[str], fetch: bool,
                  detach_at: Optional[str] = None) -> dict:
     """Add ~/hogwarts/worktrees/<task-id> and write its office record. Shared with the review script."""
@@ -73,8 +98,8 @@ def add_worktree(conn, task_id: str, repo_dir: str, base: str, branch: Optional[
     if os.path.lexists(path):
         raise FleetError("a worktree folder for this task already exists")
     slug = gitops.repo_slug(gitops.git(["config", "--get", "remote.origin.url"], common_dir))
-    if fetch and base.startswith("origin/"):
-        gitops.git(["fetch", "--no-tags", "origin", base[len("origin/"):]], common_dir)
+    if fetch:
+        _fetch(common_dir, base)
     # The record keeps the commit the base names now, not the name: a branch like main moves on, and a review's
     # diff against a moved name shows the wrong change, or nothing at all.
     base_sha = gitops.git(["rev-parse", "--verify", "--end-of-options", f"{base}^{{commit}}"], common_dir).strip()
@@ -109,6 +134,15 @@ def _holder(conn, task_id: str) -> str:
     except FleetError:
         return task_id
     return holder
+
+
+def _check_spec(conn, holder: str, repo_dir: str, branch: str, base: str) -> None:
+    """A task under a TASK.md that Ryan's go started gets its worktree only from the repo folder, branch and
+    base the go stored, whichever command asks for it."""
+    spec = pensieve.task_spec(conn, holder)
+    if spec is not None and (repo_dir, branch, base) != (spec["repo_dir"], spec["branch"], spec["base"]):
+        raise FleetError(f"the TASK.md of {holder} was started with go, so its worktree takes only the repo folder,"
+                         " branch and base stored at go")
 
 
 def _check_startable(conn, task: dict) -> None:
@@ -188,15 +222,20 @@ def start_desk(conn, task: dict) -> str:
 
 
 def create(conn, task_id: str, repo_dir: str, branch: str, base: str = config.DEFAULT_BASE,
-           fetch: bool = True) -> dict:
+           fetch: bool = True, start: bool = True) -> dict:
+    """Give a queued build task its worktree and start it, then start the desk's run. With start=False the run
+    is left to the caller, which starts it with start_desk once its own store transaction has committed, so the
+    run never reads a store that has not got its task yet (the go hook)."""
     task = pensieve.get_task(conn, ids.check("task", task_id))
     if task["desk"] not in config.WORKTREE_DESKS:
         raise FleetError("only a build desk's task gets a worktree from this script")
     branch = gitops.check_branch(branch)
-    with holder_lock(_holder(conn, task["id"])):
+    holder = _holder(conn, task["id"])
+    with holder_lock(holder):
         task = pensieve.get_task(conn, task["id"])  # read again under the lock
         if task["status"] != "queued" or task["worktree"] is not None:
             raise FleetError("the task must be queued and have no worktree yet")
+        _check_spec(conn, holder, repo_dir, branch, base)
         _check_startable(conn, task)
         record = add_worktree(conn, task["id"], repo_dir, base, branch, fetch)
         made_at = None
@@ -213,9 +252,21 @@ def create(conn, task_id: str, repo_dir: str, branch: str, base: str = config.DE
     if task["request_id"] is not None:
         owlery.advance(conn, task["request_id"], "claimed", detail="worktree attached")
         owlery.advance(conn, task["request_id"], "running", detail="build desk started")
-    started = start_desk(conn, task)
+    started = start_desk(conn, task) if start else None
     return {"task_id": task["id"], "worktree": record["path"], "branch": record["branch"], "base": record["base"],
             "repo": record["repo"], "desk": started}
+
+
+def take_back(task_id: str, exc: BaseException) -> None:
+    """Undo create for a caller whose own store transaction failed, so the store never kept the task or its
+    worktree: the worktree, its new branch (while it still sits at the base it was made at) and the record go.
+    A task with no record has nothing to take back: create refused before it made one, or took it back itself.
+    If the undo fails, the FleetError says what is left to remove by hand."""
+    try:
+        record = gitops.read_record(ids.check("task", task_id))
+    except safefs.Missing:
+        return
+    _take_back(record, record["base"], exc)
 
 
 def build(conn, task_id: str) -> dict:
