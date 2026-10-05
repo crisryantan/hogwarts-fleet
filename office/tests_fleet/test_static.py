@@ -16,6 +16,8 @@ ROOT = Path(__file__).resolve().parents[1]
 FLEET = ROOT / "fleet"
 SOURCES = sorted(FLEET.rglob("*.py"))
 TESTS = sorted((ROOT / "tests_fleet").glob("*.py"))
+# The parallel suite runner, which starts one test process per module.
+RUNNER = ROOT / "run_suites.py"
 LAUNCHD = ROOT / "launchd"
 PENDING = ROOT / "pending"
 ENV_NAMES = {
@@ -99,7 +101,7 @@ def imported_modules(tree: ast.AST) -> set:
 class EnvironmentTests(unittest.TestCase):
     def test_fleet_reads_no_environment_variables(self):
         self.assertGreater(len(SOURCES), 10)
-        for path in SOURCES + TESTS:
+        for path in SOURCES + TESTS + [RUNNER]:
             with self.subTest(path=str(path.relative_to(ROOT))):
                 self.assertEqual(env_problems(path.read_text()), [])
 
@@ -147,14 +149,13 @@ class ProcessTests(unittest.TestCase):
                     self.assertEqual((sorted(modules), calls), ([], []))
 
     def test_no_process_module_uses_a_shell_keyword(self):
-        for name in PROCESS_MODULES_ALLOWED:
-            path = FLEET / name
+        for path in [FLEET / name for name in PROCESS_MODULES_ALLOWED] + [RUNNER]:
             if not path.exists():
                 continue
             for node in ast.walk(ast.parse(path.read_text())):
                 if isinstance(node, ast.Call):
                     for keyword in node.keywords:
-                        with self.subTest(path=name, line=node.lineno):
+                        with self.subTest(path=path.name, line=node.lineno):
                             self.assertNotEqual(keyword.arg, "shell")
 
     def test_nothing_is_evaluated(self):

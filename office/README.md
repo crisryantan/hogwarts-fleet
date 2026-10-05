@@ -46,6 +46,7 @@ File modes (0700 directories, 0600 files) keep other users out. They do not stop
                                         (the nightly export and Dumbledore's run), portrait_patch.py (his
                                         patches, behind castle portrait) and their helpers
   tests/                                unittest suite
+  run_suites.py                         runs both test suites fast, one process per test module
   state/pensieve.db                     the real database, created by castle init
   patrol/shadow                         while it is here, the patrol and Gringotts only write files (shadow mode)
   patrol/<job>/                         the Map's snapshot and rows, lineups, keeper's watches, scoreboards, bot passes
@@ -332,6 +333,16 @@ Each weeknight `fleet/portrait.py` exports the day into the portrait's inbox, sc
 
 ## Running tests
 
+The fast way runs both suites, `tests` and `tests_fleet`, with every test module in its own process, up to six at a time, from any folder:
+
+```
+/usr/bin/env -i /usr/bin/python3 -I -B -X pycache_prefix=/var/empty /Users/crisryantan/.hogwarts/run_suites.py
+```
+
+Name one suite to run only that one, and add `--jobs N` to change how many modules run at once. Each module runs the hardened discover line below, narrowed to that module with `-p`, in the office folder with an empty environment, and the slowest modules start first. The runner prints the full output of every module that failed, then one line per suite with its test count, and exits 1 if any module failed, timed out or ended without a unittest summary. A full run takes about as long as the slowest module, `tests_fleet/test_many_tasks.py`.
+
+The reference form runs one suite in one process:
+
 ```
 cd /Users/crisryantan/.hogwarts && /usr/bin/python3 -I -B -m unittest discover -s tests -t . -v
 ```
@@ -342,7 +353,7 @@ The hardened form uses the wrapper's interpreter line:
 cd /Users/crisryantan/.hogwarts && /usr/bin/env -i /usr/bin/python3 -I -B -X pycache_prefix=/var/empty -m unittest discover -s tests -t . -v
 ```
 
-`discover -t .` puts the repo root on `sys.path`, which `-I` would otherwise drop. Discover is the only supported way to run the suite. Running one module by dotted name fails under `-I`, so use `-p test_tasks.py` instead.
+`discover -t .` puts the repo root on `sys.path`, which `-I` would otherwise drop. Discover is the only supported way to run a suite, and the runner uses it for every module. Running one module by dotted name fails under `-I`, so use `-p test_tasks.py` instead.
 
 Tests make their temporary directories under the constant `/private/tmp`, so `tempfile` never reads `TMPDIR`. They never touch `state/` and never read environment variables.
 

@@ -15,6 +15,8 @@ Everything here is an edit you make yourself, in your own terminal. No desk can 
   ~/.hogwarts/bin/castle doctor
   ```
 
+  `/usr/bin/env -i /usr/bin/python3 -I -B -X pycache_prefix=/var/empty run_suites.py`, run in the same folder, runs the same tests of both suites faster, every test module in its own process, and exits 1 if any module fails.
+
 - The desk registry in the database is append-only by design. A desk's family, display name (its role) and model can't be updated or deleted once registered. So a registry change means either a new desk name or a fresh install. `./install.sh --force` moves the old office and castle aside, with their database, and installs fresh from the repo.
 - If you want a change to survive the next install, make it in your clone of the repo too, and commit it there.
 
