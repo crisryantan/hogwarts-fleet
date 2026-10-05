@@ -488,7 +488,9 @@ def fetch_prs() -> dict:
     login = account()
     mine, mine_whole = search_all("prs", "mine", {"mine": f"is:pr is:open author:{login} archived:false"})
     asked, asked_whole = search_all("asked", "asked",
-                                    {"asked": f"is:pr is:open review-requested:{login} archived:false"})
+                                    # Only requests to Ryan by name: review-requested also matches every
+                                    # team he is on, which on a busy org is hundreds of code-owner requests.
+                                    {"asked": f"is:pr is:open user-review-requested:{login} archived:false"})
     seen: dict = {"prs": {}, "asked": {}, "complete": mine_whole and asked_whole}
     for found, build, kind in ((mine, pr_record, "prs"), (asked, asked_record, "asked")):
         for node in found:

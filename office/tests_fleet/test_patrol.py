@@ -296,6 +296,12 @@ class MapRoundTests(PatrolCase):
         snapshot = json.loads(self.read("map", "snapshot.json"))
         self.assertEqual((snapshot["account"], list(snapshot["prs"])), ("octo", [f"{REPO}#12"]))
 
+    def test_review_requests_are_only_those_to_ryan_by_name(self):
+        self.round(NOW)
+        [asked] = [variables["asked"] for name, variables in self.github.calls if name == "asked"]
+        self.assertIn("user-review-requested:octo", asked)
+        self.assertNotIn(" review-requested:", asked)
+
     def test_no_change_and_routine_changes_run_no_model(self):
         self.github.prs = [pr_node(rollup="PENDING")]
         self.round(NOW - 900)
