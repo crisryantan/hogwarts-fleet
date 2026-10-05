@@ -155,6 +155,7 @@ set_bin() {
 }
 set_bin CLAUDE_BIN "$HOME/.local/bin/claude" /opt/homebrew/bin/claude /usr/local/bin/claude
 set_bin CODEX_BIN /opt/homebrew/bin/codex /usr/local/bin/codex
+set_bin GH_BIN /opt/homebrew/bin/gh /usr/local/bin/gh
 
 # --- The castle is a local git repo with no remote --------------------------
 

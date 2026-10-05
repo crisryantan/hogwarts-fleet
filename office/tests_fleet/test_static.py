@@ -53,14 +53,17 @@ KNOWN_FLAGS = {
     "-A", "-P", "--no-tags", "-U0",
     # Ollivander: claude --effort, the CLI version and help probes, and brew upgrade --cask codex
     "--effort", "--version", "--help", "--cask",
+    # Gringotts' restore drill
+    "--drill",
 }
 # Modules whose flag-shaped constants describe commands they read and refuse, never ones they run.
 FLAG_TABLE_MODULES = {"push_gate.py"}
 # Modules allowed to start processes, and the only module each may use for it.
-# ollivander.py reads the CLI catalogs and help, and runs the CLI updates and their checks.
+# ollivander.py reads the CLI catalogs and help, and runs the CLI updates and their checks. patrol.py runs gh
+# api graphql with its fixed read-only queries.
 PROCESS_MODULES_ALLOWED = {"run_desk.py": {"subprocess"}, "gitops.py": {"subprocess"}, "verify.py": {"subprocess"},
-                           "ollivander.py": {"subprocess"}}
-PLISTS = ("owlpost", "map", "morning", "keeper", "portrait", "gringotts", "ollivander")
+                           "ollivander.py": {"subprocess"}, "patrol.py": {"subprocess"}}
+PLISTS = ("owlpost", "map", "morning", "keeper", "scoreboard", "portrait", "gringotts", "ollivander")
 REAL_OFFICE = "/Users/crisryantan/.hogwarts"
 REAL_CASTLE = "/Users/crisryantan/hogwarts"
 

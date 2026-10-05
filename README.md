@@ -15,7 +15,7 @@ A Harry Potter themed fleet of single-purpose AI agents for Claude Code and Code
   </tr>
 </table>
 
-**What ships today:** the store and its `castle` CLI, the castle, McGonagall, Snape, the Owl Post and the session hooks, and the review loop: the `fleet` command's worktree, verify, review and push scripts and the push gate. Also built: busy-day caps on runs and spend, review rounds that stop at three, Ollivander - Model Keeper, and a read-only live view of every desk. The store and fleet test suites cover it. The review loop is tested on temp repos but not yet on real tasks. The PR patrol and the nightly memory review are designed, and their desks, briefs, settings and launchd templates are here, but the scripts that drive them come in later stages. [DESIGN.md](docs/DESIGN.md#known-limits) lists the gaps.
+**What ships today:** the store and its `castle` CLI, the castle, McGonagall, Snape, the Owl Post and the session hooks, and the review loop: the `fleet` command's worktree, verify, review and push scripts and the push gate. Also built: busy-day caps on runs and spend, review rounds that stop at three, Ollivander - Model Keeper, a read-only live view of every desk, and the PR patrol in shadow mode: the Marauder's Map, Ron's morning lineup, keeper's watch and weekly scoreboard, Hermione's draft-only bot pass, and Gringotts' nightly backup with its restore drill. Until you delete one shadow file, the patrol only writes files. The store and fleet test suites cover it. The review loop is tested on temp repos but not yet on real tasks, and the patrol on faked GitHub but not yet on real PRs. The nightly memory review is designed, and its desk, brief, settings and launchd template are here, but its script comes in a later stage. [DESIGN.md](docs/DESIGN.md#known-limits) lists the gaps.
 
 ## Start here
 
@@ -31,7 +31,7 @@ A Harry Potter themed fleet of single-purpose AI agents for Claude Code and Code
 
 **The desks.** McGonagall - Chief of Staff, Harry - Senior Engineer, Hermione - Staff Engineer, Moody - Security Reviewer, Ron - Release Engineer, Snape - Data Analyst and Dumbledore - Knowledge Manager. The name after the dash is the job.
 
-**The scripts.** Owl Post - Message Router and Ollivander - Model Keeper (built), Marauder's Map - PR Watcher and Gringotts - Backup (later stages). None of them uses a model. Ollivander reads each desk's role card and keeps the desk on the newest model of the tier its job needs, inside its own model family.
+**The scripts.** Owl Post - Message Router, Ollivander - Model Keeper, Marauder's Map - PR Watcher and Gringotts - Backup. None of them uses a model. Ollivander reads each desk's role card and keeps the desk on the newest model of the tier its job needs, inside its own model family.
 
 **Busy days and the live view.** Every headless desk has a daily run cap, and the Claude desks a spend cap too. They guard against runaway loops, they don't ration a normal day, and they reset at local midnight. A desk still runs one owl at a time, while its other tasks wait without blocking it, and `fleet feed` plus one herdr space per desk lets you watch them work without typing into anything.
 
@@ -61,6 +61,7 @@ A Harry Potter themed fleet of single-purpose AI agents for Claude Code and Code
 | `claude-agents/snape.md` | Snape's user-level agent file | `~/.claude/agents/snape.md`, only if absent |
 | `install.sh` | Installs the two homes, creates the database, registers the desks and runs the tests | |
 | `scripts/owlpost-setup.sh` | Your one command to switch on the Owl Post and send a test owl (onboarding stage 3) | |
+| `scripts/patrol-setup.sh` | Your one command for the shadow stage: checks gh, runs one Map round, a backup and a restore drill, switches Ron on and loads the Map, lineup, keeper's watch, scoreboard and Gringotts jobs in shadow mode | |
 | `scripts/codex-boundary-test.sh` | Proves the Codex desks' permission profile on your Mac: no office, no folder it isn't given, no network. Run it before enabling Harry or Moody, and after every Codex upgrade | |
 | `scripts/codex-exec-boundary-test.py` | Proves the boundary again under real `codex exec` runs for Harry and Moody, launched exactly the way the desk launcher does: the folders, temp folders and network above, a borrowed folder, quiet Xcode tools, and none of your own Codex hooks or MCP servers. Sends a short prompt to OpenAI and costs a few cents | |
 | `uninstall.sh` | A dry run by default. With `--yes` it removes the fleet and keeps an archive | |

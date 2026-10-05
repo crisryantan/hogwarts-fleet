@@ -7,7 +7,7 @@ Seven single-purpose agents, named after the Harry Potter characters who fit eac
 - **One desk, one job.** Seven agents, each with one role. A desk runs one model process at a time, so each run is short and single-threaded. Harry, Hermione, Moody, Ron and your own sessions can each keep many tasks in flight between runs, so a task waiting for fixes never blocks another. McGonagall, Snape and Dumbledore keep one task at a time.
 - **No agent pushes without a review from the other model family.** When Codex writes code, Claude reviews it. When Claude writes code, including in your own sessions, Codex reviews it. The pass is tied to the exact commit, and a push gate checks for it.
 - **The controls sit where no agent can change them.** The store, review passes, close tokens, hooks and desk settings live in a folder no desk can write and Claude desks can't read. A desk can only post to its own outbox, so it can't pretend to be another desk.
-- **Scripts patrol and models only judge.** Plain scripts check PRs and CI and move messages at zero tokens. A fast model wakes only when something changed. A frontier model is kept for review and the nightly memory pass.
+- **Scripts patrol and models only judge.** Plain scripts check PRs and CI and move messages at zero tokens. A fast model wakes only when a change may need you. A frontier model is kept for review and the nightly memory pass.
 - **Desks ask for a tier, not a model.** Each desk's role card says what the job needs, and Ollivander picks the model. A desk never changes model family, so the review rule holds.
 - **Caps guard against runaways.** Every headless desk has a daily run cap, and the Claude desks a spend cap. They're sized for a busy day, so they only bite when something loops.
 - **Memory knows when a fact changes.** Replacing a fact closes the old one and keeps it with its dates. Normal reads see only current facts. Volatile state like PR status carries a live lookup or a short expiry.
@@ -55,7 +55,7 @@ The Bash sandbox covers shell commands and everything they start. Each desk's sa
 
 The tier is each desk's role card, and Ollivander turns it into a model, as in [Models by role](#models-by-role).
 
-Four scripts use no model. The **Owl Post - Message Router** moves owls between desks and stamps the sender. The **Marauder's Map - PR Watcher** diffs PR and CI state every 15 minutes on weekdays and wakes Ron only on change. **Gringotts - Backup** takes a nightly local backup with credentials left out. **Ollivander - Model Keeper** reads each desk's role card every morning and keeps the desk on the model it needs.
+Four scripts use no model. The **Owl Post - Message Router** moves owls between desks and stamps the sender. The **Marauder's Map - PR Watcher** diffs PR and CI state every 15 minutes on weekdays and wakes Ron only for a change that may need you. **Gringotts - Backup** takes a nightly local backup with credentials left out. **Ollivander - Model Keeper** reads each desk's role card every morning and keeps the desk on the model it needs.
 
 ## How a task moves
 
@@ -77,10 +77,12 @@ Four scripts use no model. The **Owl Post - Message Router** moves owls between 
 | Marauder's Map rounds | Script, then Ron | Every 15 minutes, weekdays 08:00 to 19:00 | None, fast tier on change |
 | Morning lineup | Ron | Weekdays 08:30 | Fast tier |
 | Keeper's watch | Ron | 09:00, 13:00 and 17:00 on weekdays | None when green, fast tier on red |
+| Weekly scoreboard | Script, then Ron | Mondays 09:00 | None for the numbers, fast tier for the words |
+| Bot pass | Map round, then Hermione | Once a PR is 15 minutes old, and when new review threads land | Frontier tier, drafts only |
 | The Pensieve review | The portrait | Weekdays 22:30 | Frontier tier |
 | Gringotts | Script | Daily 23:30 | None |
 
-The launchd templates for all seven sit in `office/launchd/`. Only the Owl Post's and Ollivander's modules exist today.
+The launchd templates for all eight jobs sit in `office/launchd/`. Every module they call exists except the portrait's. The patrol jobs and Gringotts start in shadow mode: while `~/.hogwarts/patrol/shadow` is there they only write files under the office, and Ryan deletes it to let their rows reach him.
 
 ## Models by role
 
@@ -117,7 +119,7 @@ The herdr spaces follow from risk 1. Any herdr pane can type into any other pane
 
 ## Two homes and the memory
 
-- **The office, `~/.hogwarts`.** The store package, `bin/castle`, the database at `state/pensieve.db`, the fleet scripts and hooks, each desk's brief and settings, launchd templates, pending settings snippets and the avatars. No desk can read or write it.
+- **The office, `~/.hogwarts`.** The store package, `bin/castle`, the database at `state/pensieve.db`, the fleet scripts and hooks, each desk's brief and settings, launchd templates, pending settings snippets, the avatars, the patrol's files in `patrol/` and Gringotts' archives in `backups/`. No desk can read or write it.
 - **The castle, `~/hogwarts`.** The charter (`CLAUDE.md`), `PLAN.md`, `standing-orders.md`, a folder per desk with `scratchpad.md`, `inbox/` and `outbox/` (Hermione and Ron also keep one pad per task in `pads/`), `tasks/<id>/` and `worktrees/`. It is a local git repo with no remote.
 - **The Pensieve.** One SQLite file with full-text search. A SessionEnd hook stores a capped extract of each castle session at zero tokens: your prompts and the final replies, never tool output, scrubbed of emails, IPs, tokens and long hashes.
 - **Facts know when they change.** Each fact can carry a subject key, and only one fact per key is current. Replacing a fact closes the old one and keeps its dates. You can ask what was true, or what the fleet believed, on any past date. A fact that looks like PR status, build colour or a rollout percentage is refused unless it carries the command that fetches the live value, or expires within a week.
@@ -169,11 +171,11 @@ The only pre-approvals are the ones you write in `standing-orders.md`.
 | 0 Clean up | Prerequisites, sign-ins, deny rules for your own sessions, idle connectors off | Your own settings reviewed and the office denied to your sessions |
 | 1 The front desk | The castle, the Owl Post, McGonagall, Snape and the hooks | An owl round trip works, a forged sender is refused, a second active task for McGonagall is refused |
 | 2 Review loop | Worktree, verify, review and push scripts, the push gate, Harry, Hermione and Moody | Three PRs went out with passes tied to their commits, and the gate blocked a push with no pass |
-| 3 Shadow | The Map and Ron's jobs writing to files only, Hermione's bot pass in draft mode, Gringotts with a restore drill | The morning lineup matched `gh` three days running |
-| 4 Memory loop | The nightly export and the portrait in proposals-only mode, the weekly scoreboard, an RTK number | Two nightly patches reviewed and an RTK go or no-go |
+| 3 Shadow | The Map and Ron's jobs (lineup, keeper's watch, weekly scoreboard) writing to files only, Hermione's bot pass in draft mode, Gringotts with a restore drill | The morning lineup matched `gh` three days running |
+| 4 Memory loop | The nightly export and the portrait in proposals-only mode, an RTK number | Two nightly patches reviewed and an RTK go or no-go |
 | 5 After that | The RTK hook and standing orders, if the numbers say so | A normal week where you only answered what needed you |
 
-Stages 0 and 1 are built and installed by this repo. Stages 2 to 5 need code that is not written yet. [ONBOARDING.md](ONBOARDING.md) stage 5 says what each one needs.
+Stages 0 to 3 are built. The install sets up stages 0 and 1, you switch on stages 2 and 3 by hand, and stage 3 starts in shadow mode with `scripts/patrol-setup.sh`. Stages 4 and 5 need code that is not written yet. [ONBOARDING.md](ONBOARDING.md) stage 5 says what each one needs.
 
 ## Known limits
 
@@ -182,7 +184,15 @@ These are honest gaps in what ships today.
 - **Codex desks rely on a beta feature for their read boundary.** On Codex 0.160.0 the `--sandbox` modes let commands read the whole disk. So `run_desk` never passes `--sandbox` to Harry or Moody. It passes a fleet permission profile instead: an allowlist with the desk's working folder, its own castle folder, the castle tasks and its repo's `.git` folder, a private temp folder for a desk that writes, no network, and `~/.hogwarts` and `/private/tmp` denied by name. `scripts/codex-boundary-test.sh` proves that kind of profile through `codex sandbox`, with no model and no tokens. Permission profiles are marked beta, so rerun that test after every Codex upgrade, and confirm it once under a real `codex exec` run before enabling Harry.
 - **No hook field says a person typed the prompt.** Claude Code's hook input does not separate an interactive session from `claude -p`. So the close hook also checks the session transcript: every entry must name the `cli` or `claude-desktop` entrypoint, and the prompt's own entry must be a typed human prompt from the last 30 seconds. If it can't confirm that, it refuses and prints the `castle` commands to close the task from your terminal.
 - **McGonagall asks you each time.** Her outbox writes and TASK.md edits are on the castle's ask list, so Claude asks you before every owl she posts and every TASK.md she writes. That is deliberate friction, and you can't pre-approve it from inside a session.
-- **The review loop has only run on this kit so far.** Its first real tasks were this repo's own changes: Harry built and Hermione reviewed two, and Moody reviewed the rest, which came from Claude sessions. `office/pending/README.md` (g) walks through a task. The Marauder's Map, Ron's jobs, the portrait's nightly export and Gringotts do not exist yet, and their launchd templates are placeholders for those stages.
+- **The review loop has only run on this kit so far.** Its first real tasks were this repo's own changes: Harry built and Hermione reviewed two, and Moody reviewed the rest, which came from Claude sessions. `office/pending/README.md` (g) walks through a task. The portrait's nightly export does not exist yet, and its launchd template is a placeholder for the memory stage.
+- **The patrol hasn't met real GitHub traffic yet.** Its tests fake GitHub and the desks. What to know before it goes live:
+  - It reads GitHub with `gh api graphql`, which is always an HTTP POST, because only GraphQL says whether a review thread is resolved. A guard lets through only the patrol's fixed queries, none of them a mutation, with checked variables.
+  - One query sees 50 open PRs, 100 review threads per PR and 100 checks per commit. Past that the lists are cut, and the round's row says so.
+  - Shadow mode covers what the patrol itself writes. If Ron or Hermione hits a fleet cap or a vendor limit, run_desk's own cap rows still reach the digest.
+  - Ron reads a failing log with `gh run view`, but his sandbox allows only `api.github.com`, so a log GitHub serves from another host may not load, and then his call is UNSURE.
+  - Hermione's bot pass sees each thread's diff hunk, not the whole code, unless the PR has a worktree in the castle.
+  - A gate shows only when CI reports it to GitHub as a check run that waits for approval or asks for action. A gate GitHub only sees as a pending status looks like any pending check.
+  - Gringotts scrubs `config.toml` line by line. A secret-named key whose value spans lines leaves that file out of the backup whole.
 - **The push gate is a guardrail, not a wall.** It reads the Bash command as text, so a git alias or a push through the GitHub API gets past it. It stops an agent pushing by habit or mistake. Desks get their real boundary from a sandbox with no network.
 - **Harry never commits.** A commit in a git worktree writes into the main repo's `.git` folder, and write access there would let a desk plant a hook or config that later runs outside any sandbox. So his profile only reads `.git`, and the review script commits his work for him, pointing git at the repo the office recorded and running no hooks.
 - **Deny rules for Bash match the usual command form only.** They are not a wall around a program. The sandbox stays the real boundary for desks.

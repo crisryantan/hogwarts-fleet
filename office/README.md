@@ -40,9 +40,13 @@ File modes (0700 directories, 0600 files) keep other users out. They do not stop
   hogwarts/watch.py                     read-only queries behind fleet feed
   hogwarts/cli.py                       argparse CLI, JSON output
   fleet/                                the fleet scripts and hooks: run_desk.py, review.py, push.py, owl_post.py,
-                                        ollivander.py, feed.py, tools.py (the fleet command) and their helpers
+                                        ollivander.py, feed.py, tools.py (the fleet command), the patrol (patrol.py,
+                                        map.py, morning.py, keeper.py, scoreboard.py), gringotts.py and their helpers
   tests/                                unittest suite
   state/pensieve.db                     the real database, created by castle init
+  patrol/shadow                         while it is here, the patrol and Gringotts only write files (shadow mode)
+  patrol/<job>/                         the Map's snapshot and rows, lineups, keeper's watches, scoreboards, bot passes
+  backups/                              Gringotts' archives, mode 0600, kept 14 days, never synced anywhere
 ```
 
 `bin/castle` is exactly:

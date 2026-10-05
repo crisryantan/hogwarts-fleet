@@ -2,3 +2,6 @@ state/
 logs/
 runs/
 locks/
+backups/
+patrol/*
+!patrol/shadow

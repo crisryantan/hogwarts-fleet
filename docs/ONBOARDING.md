@@ -118,7 +118,7 @@ If it printed a note that `CLAUDE_BIN` or `CODEX_BIN` was not found, fix that no
    | `<observability-mcp>` | The name of your metrics, logs and traces MCP server | the same four files |
    | `<chat-mcp>` | The name of your team chat MCP server | `~/hogwarts/.claude/settings.json`, `~/hogwarts/.claude/agents/mcgonagall.md`, `~/.hogwarts/desks/mcgonagall/live-tools.json`, and the settings for Hermione, Ron, Snape and the portrait in `~/.hogwarts/desks/` |
    | `<github-account>` | The GitHub account the fleet's scripts should use | `~/.hogwarts/fleet/config.py` |
-   | `<repos-to-watch>` | The repos the later-stage PR watcher should follow, as `owner/repo` | `~/.hogwarts/fleet/config.py` |
+   | `<repos-to-watch>` | The repos whose main branch the keeper's watch and the weekly scoreboard read, as `owner/repo`. The Map follows every open PR your GitHub account authored. | `~/.hogwarts/fleet/config.py` |
 
    If you don't have a server of one kind, use the name `none`. A rule for a server you don't have matches nothing.
 
@@ -277,7 +277,7 @@ These checks prove the store, the Owl Post and the task flow work before any des
 
 ## Stage 5: Switch on the later stages, one at a time
 
-The fleet grows in the same order as its published rollout. Each later stage needs scripts that are not built yet. The launchd templates for them already sit in `~/.hogwarts/launchd/`, but the modules they call (`fleet.map`, `fleet.morning`, `fleet.keeper`, `fleet.portrait` and `fleet.gringotts`) do not exist, so don't load those plists until each stage ships its code and tests.
+The fleet grows in the same order as its published rollout. The patrol is built: the Map, Ron's morning lineup, keeper's watch and weekly scoreboard, Hermione's bot pass and Gringotts (`fleet.map`, `fleet.morning`, `fleet.keeper`, `fleet.scoreboard` and `fleet.gringotts`). It starts in shadow mode, writing only to files, and `scripts/patrol-setup.sh` loads its launchd jobs one step at a time. The portrait's module (`fleet.portrait`) does not exist yet, so don't load its plist until that stage ships its code and tests.
 
 5.5 and 5.6 are the exception: Ollivander and the live view are built, and you can switch them on any time after stage 4.
 

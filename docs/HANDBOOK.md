@@ -159,9 +159,9 @@ What each piece looks like once onboarding is done, and what switches on next.
 | Owl Post - Message Router | Live after onboarding stage 3 | Nothing more. It wakes whenever a desk writes to its outbox. `scripts/owlpost-setup.sh` switches it on and sends a test owl to Hermione. |
 | Hermione - Staff Engineer | Installed, off | `claude auth login` (stage 2), then the review stage's scripts (5.1). |
 | Harry - Senior Engineer and Moody - Security Reviewer | Installed, off | Codex approved for your organization's source code, then the review stage (5.1). |
-| Ron - Release Engineer and the Marauder's Map | Ron installed and off. The Map is not built yet | `claude auth login`, then the shadow stage (5.2). |
+| Ron - Release Engineer, the Marauder's Map and Hermione's bot pass | Installed, off. They start in shadow mode, writing files only | `sh scripts/patrol-setup.sh` (the shadow stage, 5.2). Deleting `~/.hogwarts/patrol/shadow` takes them live. |
 | Dumbledore - Knowledge Manager | Installed, off | `claude auth login`, then the memory stage (5.3). |
-| Gringotts - Backup | Not built yet | The shadow stage (5.2). |
+| Gringotts - Backup | Installed, off | `sh scripts/patrol-setup.sh` loads its nightly job and runs a first backup and restore drill. |
 | Ollivander - Model Keeper | Installed, off | Load his daily job (5.5). Until then every desk runs the model it was registered with. |
 | The live view: `fleet feed` and the herdr spaces | Installed, off | Run `hogwarts-spaces` (5.6). `fleet feed` itself works any time. |
 | Busy-day caps and review rounds | Live once installed | Nothing. They guard every headless run, so they matter once a desk is on. `castle desk caps` shows today's numbers. |
@@ -249,6 +249,27 @@ The day resets at local midnight on your Mac, daylight saving included. A run co
 - **Three rounds per task.** A task gets three review rounds. Only a round where the reviewer recorded a verdict counts. A crash, a timeout, a cap refusal or a vendor limit doesn't use one up. If a review gets killed partway, its reviewer keeps going until it finishes, and until then that task can't be reviewed again and the reviewer counts as busy. After that the round doesn't count, and the next review that finds that reviewer free cleans up after it. Until then, and once any review ends without a verdict, `castle task board` and the digest show the task as review died, so run its review again. The next round waits for you: `castle task allow-round <task-id>` allows exactly one more, and a queued round doesn't use it up. `castle task rounds <task-id>` lists every round and whether it counts. A review from your own sessions follows the branch your checkout has out and the commits it has reviewed, so check out the branch first: a detached HEAD is refused. Any name git takes for a branch works, capitals, `@` and dots included, up to 255 characters of plain ASCII with no spaces. The lowercase rule is only for branches the fleet makes and pushes. A fix commit goes on its open task with `--task`, so leaving out `--task` is refused and never starts a fresh count, and past three rounds that task needs an allow-round or a close. That holds for a fix on the same branch, and also for any commit built on a commit that an open task of yours has recorded, in the same repo (an origin URL spelled in other letter case is still that repo): a branch made off a capped one (even with the old branch kept), a renamed branch, or a branch in a second clone. `--task` then carries that task onto the branch you have out, and the refusal names the task. From a second clone it tells you to bring the commit back to the checkout the task was opened on. Work that doesn't build on any open task's commits is a new task with its own title and its own three rounds, which is how one checkout carries several PRs in flight. A branch stacked on an open task's commits goes on that task or waits until it passes. Once a task is awaiting close it blocks nothing. If you rename or delete a branch while its task is open, new reviews on that checkout are refused until you go on with that task using `--task` or close it, and `--task` on some other task never takes on work built on an open task's commits. A shallow clone can't always tell whether you built on a task's commits, so it's refused until you run `git fetch --unshallow`, and so is a clone cut short whose shallow file was deleted. A full clone that simply doesn't have a task's commits is fine. The fleet reads the parents your commits really name, the ones a push sends, so replace refs and grafts don't hide a task's commits. The checkout is the folder itself, so the same checkout typed in other letter case is still that checkout. What the fleet can't follow is rewritten history: a rebase, squash or cherry-pick makes new commits, so moving the work that way onto a new branch name starts a new task at round one. It trusts you not to route around the cap like that: keep a PR's fixes building on the commits its review started with, and close a task rather than work past its cap.
 - **Which limit hit.** The note says whether it was the fleet's cap or the vendor's own limit: `cap_source fleet`, or `claude_plan` or `codex_plan` when your Claude or Codex plan's own usage or rate limit stopped the run. A bump can't lift a plan limit. It clears on the vendor's own reset.
 
+## The patrol and the backups
+
+Plain scripts patrol your PRs, and Ron and Hermione only judge what the scripts found. All of it reads GitHub and never writes to it, and nothing is ever posted to a PR or a chat.
+
+| Job | When | What it writes |
+| --- | --- | --- |
+| Marauder's Map - PR Watcher | Every 15 minutes, weekdays 08:00 to 19:00 | `patrol/map/`: a snapshot of your open PRs and the reviews asked of you, one row per change marked routine or for-me, and one row per round. A round with a for-me row wakes Ron. Any other round runs no model. |
+| Ron's morning lineup | Weekdays 08:30 | `patrol/lineup/<date>.md`: your PRs with checks, approvals, unresolved threads and age, the reviews waiting on you, overnight reds and the portrait's note, then Ron's words. |
+| Ron's keeper's watch | 09:00, 13:00 and 17:00 on weekdays | `patrol/keeper/`: no model while everything is green. A new red gets Ron's REAL, FLAKY, INFRA or UNSURE call and a fix brief for a real failure. A gate waiting on a person is a row for you. |
+| Ron's weekly scoreboard | Mondays 09:00 | `patrol/scoreboard/<date>.md`: PRs merged, time to first review, review rounds, red rate on main, cost per desk and the share of Map rounds that ran no model, all from a script. Ron writes only the words. |
+| Hermione's bot pass | A Map round, once a PR is 15 minutes old and has review threads she hasn't seen | `patrol/bot-pass/`: a triage table and a reply draft per thread. Drafts only. |
+| Gringotts - Backup | Daily 23:30 | `backups/gringotts-<date>.tar.gz`, mode 0600, 14 days kept and never synced anywhere: your Claude, Codex and fleet setup with credentials, tokens, auth files and settings `env` values left out. |
+
+The folders are in the office, `~/.hogwarts`. Read them in the Terminal, since your own Claude sessions are denied the office.
+
+**Shadow mode.** While `~/.hogwarts/patrol/shadow` is there, which it is from install, those files are all the patrol writes: no rows in McGonagall's digest and no owls to anyone. Compare each morning's lineup with `gh`. After three weekdays that match, delete the file to go live. Then each for-me row, each gate, each keeper's watch Ron marked headmaster and each day's lineup and scoreboard also reach you as a row. Put the file back to return to shadow mode.
+
+**A desk that didn't run.** If Ron or Hermione didn't pick a run up, because the desk was off, at its cap or busy, the next Map round half an hour later sends it again, twice at most, then gives you a row.
+
+**The restore drill.** `fleet gringotts --drill` restores the newest archive into a fresh folder inside `~/.hogwarts/backups`, checks every file against the archive's manifest, that nothing credential-shaped is inside and that the database copy is sound, then removes the folder. It never touches your live folders. `fleet gringotts` takes a backup now.
+
 ## Watch live, run short
 
 Desks run short. A headless desk takes one owl, does the job and exits, one run at a time, so there's no long session to sit inside. A desk can still have many tasks in flight. Harry, Hermione, Moody, Ron and your own sessions keep each task open until its review passes, and a task waiting for fixes blocks nothing. `castle task board` shows every open task by desk: its round, its verdict and whether a run is going. Filter it to a reviewer such as Moody and it also lists the tasks that reviewer is reviewing or has queued, under their own desks, so a reviewer mid-review never shows an empty board. Hermione and Ron keep one pad per task in `~/hogwarts/desks/<desk>/pads/`, and every review round of a task shares that task's pad, so two tasks never mix their notes. You can still watch every desk work, without typing into anything.
@@ -328,6 +349,8 @@ Everything `castle` prints is JSON. If you added the shortcut in one-time setup,
 | `fleet feed --desk <name>` | Watch one desk, read-only |
 | `fleet feed --all` | Watch every desk, read-only |
 | `fleet ollivander --dry-run` | See Ollivander's plan without changing anything |
+| `fleet gringotts` | Take a backup now |
+| `fleet gringotts --drill` | Restore the newest backup into a temp folder and check it |
 | `fleet review <task-id>` | Review a build desk's newest commit, or run a queued review again |
 | `fleet review own --repo-dir <checkout> --task <task-id>` | The same for a task from your own Claude sessions |
 | `~/.hogwarts/bin/hogwarts-spaces` | Open one herdr space per desk |
@@ -370,7 +393,7 @@ Six things only you do.
 | You see | Do this |
 | --- | --- |
 | Spotlight can't find herdr, castle or codex | They're command-line tools. Open Terminal and type the name there. |
-| `owlpost-setup.sh` prints FAILED | It stopped at that step and changed nothing after it. The lines above say why. Fix that, then run it again; steps that already passed are safe to repeat. |
+| `owlpost-setup.sh` or `patrol-setup.sh` prints FAILED | It stopped at that step and changed nothing after it. The lines above say why. Fix that, then run it again; steps that already passed are safe to repeat. |
 | `command not found: castle` | Use the full path `~/.hogwarts/bin/castle`, or add the shortcut from one-time setup and open a new Terminal window. |
 | `install.sh` says a folder already exists | Nothing was changed. The fleet is already installed. Use `./install.sh --force` only if you want a fresh copy; it moves the old folders aside first. |
 | A tool name with `<warehouse-mcp>`, `<observability-mcp>` or `<chat-mcp>` in it | A placeholder was never filled. See onboarding stage 2. |

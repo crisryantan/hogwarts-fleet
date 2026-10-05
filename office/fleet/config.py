@@ -23,8 +23,11 @@ BASH_BIN = "/bin/bash"
 CHILD_PATH = "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin"
 
 # Filled in at onboarding (docs/ONBOARDING.md stage 2). Later-stage scripts such as the Map read these.
+# The Map watches every open PR GITHUB_ACCOUNT authored. WATCHED_REPOS names the repos whose main branch
+# the keeper's watch and the scoreboard read; left as the placeholder, they read the repos of those PRs.
 GITHUB_ACCOUNT = "<github-account>"
 WATCHED_REPOS = ("<repos-to-watch>",)
+GH_BIN = "/opt/homebrew/bin/gh"
 
 # Desks with a folder in the castle (desks/<name>/inbox, outbox, scratchpad.md, and pads/ for TASK_PAD_DESKS).
 CASTLE_DESKS = ("mcgonagall", "harry", "hermione", "moody", "ron", "snape", "portrait")
@@ -231,6 +234,34 @@ UPDATE_LOCK_WAIT_SECONDS = 120
 VERSION_STOPS = ("codex",)
 VERSION_MAX_CHARS = 120
 RUN_ERROR_MAX_BYTES = 1024 * 1024
+
+# The patrol: the Marauder's Map, Ron's scheduled jobs and Hermione's bot pass (fleet/patrol.py). Each job
+# writes its files under the office patrol folder. While the plain file patrol/shadow is there, those files
+# are all it writes: no headmaster event and no owl to McGonagall. Ryan removes the file to go live.
+PATROL_DIR = "patrol"
+SHADOW_FILE = "shadow"
+# The script desk the patrol speaks as when it wakes Ron or Hermione.
+PATROL_SENDER = "map"
+PATROL_LOCK = "patrol.lock"
+PATROL_LOCK_WAIT_SECONDS = 1500
+PATROL_STATE_MAX_BYTES = 4 * 1024 * 1024
+GH_TIMEOUT_SECONDS = 60
+GH_OUTPUT_MAX_BYTES = 16 * 1024 * 1024
+# A patrol owl whose run did not end cleanly is sent again by a later Map round this long after its last
+# try, at most this many times. Then it goes to Ryan as a row.
+PATROL_RESEND_AFTER_SECONDS = 1800
+PATROL_MAX_RESENDS = 2
+# Hermione's bot pass waits this long after a PR opens, so the review bots have posted, and takes at
+# most this many PRs in one Map round.
+BOT_PASS_DELAY_SECONDS = 900
+BOT_PASS_MAX_PER_ROUND = 2
+
+# Gringotts, the nightly backup, kept in the office backups folder and never synced anywhere.
+CLAUDE_CONFIG_DIR = "/Users/crisryantan/.claude"
+CODEX_CONFIG_DIR = "/Users/crisryantan/.codex"
+BACKUP_DIR = "backups"
+BACKUP_KEEP_DAYS = 14
+BACKUP_FILE_MAX_BYTES = 64 * 1024 * 1024
 
 
 def office_desk_dir(desk: str) -> str:

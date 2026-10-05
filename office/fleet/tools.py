@@ -10,6 +10,7 @@
   fleet feed --desk <name> | --all
   fleet push <task-id> [--yes]
   fleet ollivander [--dry-run]
+  fleet gringotts [--drill [ARCHIVE]]
 
 Output is one JSON object, like castle. Exit 0 on success, 1 on a refusal or error. fleet feed
 is the exception: it prints a live, read-only text feed until Ctrl+C (see fleet/feed.py).
@@ -34,7 +35,7 @@ from hogwarts import ids  # noqa: E402
 from hogwarts.errors import StoreError  # noqa: E402
 
 from fleet import common, config, gitops, push, review, verify, worktree  # noqa: E402
-from fleet import ollivander  # noqa: E402
+from fleet import gringotts, ollivander  # noqa: E402
 from fleet.safefs import FleetError  # noqa: E402
 from fleet import feed  # noqa: E402
 
@@ -88,6 +89,8 @@ def build_parser() -> argparse.ArgumentParser:
     pushed.add_argument("task")
     pushed.add_argument("--yes", action="store_true")
     commands.add_parser("ollivander", allow_abbrev=False).add_argument("--dry-run", action="store_true")
+    banked = commands.add_parser("gringotts", allow_abbrev=False)
+    banked.add_argument("--drill", nargs="?", const="newest", default=None, metavar="ARCHIVE")
     return parser
 
 
@@ -115,7 +118,21 @@ def run(conn, args: argparse.Namespace) -> object:
         return push.push(conn, args.task, confirm=None if args.yes else push.ask_terminal)
     if args.command == "ollivander":
         return ollivander.run(conn, dry_run=args.dry_run)
+    if args.command == "gringotts":
+        return run_gringotts(args.drill)
     raise FleetError("unknown command")
+
+
+def run_gringotts(drill: Optional[str]) -> dict:
+    """A backup now, or a restore drill of the newest archive or the one named. A drill that found a problem
+    is a refusal, so the command exits 1 and names the first problems."""
+    with gringotts.locked():
+        if drill is None:
+            return gringotts.backup()
+        result = gringotts.drill(None if drill == "newest" else drill)
+    if not result["ok"]:
+        raise FleetError("the restore drill found problems: " + "; ".join(result["problems"][:3]))
+    return result
 
 
 @contextlib.contextmanager
