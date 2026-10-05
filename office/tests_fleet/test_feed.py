@@ -338,6 +338,62 @@ class FeedTests(FeedCase):
             f"run end {RUN_A}: model codex, 0.5s, tokens in 1 out 2 cache 3, $0.00, status completed"])
         self.assertIsNone(follow.tails["harry"].earlier)
 
+    def test_two_runs_going_at_once_on_a_desk_with_two_run_slots_show_each_line_once(self):
+        self.assertEqual(config.RUN_SLOTS["moody"], 2)
+        follow = feed.Feed(self.reader, "moody")
+        follow.poll(NOW)
+
+        def wrote(path: str, events: list, when: int) -> None:
+            self.append(path, jsonl(events))
+            os.utime(path, (when, when))
+
+        first = self.run_file("moody", RUN_A, jsonl(CODEX_STREAM[:1]), mtime=NOW)
+        self.assertEqual(texts(follow.poll(NOW + 1)), [f"run start {RUN_A}", "codex started"])
+        second = self.run_file("moody", RUN_B, jsonl(CODEX_STREAM[:1]), mtime=NOW + 2)
+        self.assertEqual(texts(follow.poll(NOW + 3)), [f"run start {RUN_B}", "codex started"])
+        wrote(first, CODEX_STREAM[3:4], NOW + 4)
+        self.assertEqual(texts(follow.poll(NOW + 5)), ["command (exit 0): bash -lc ls"])
+        wrote(second, CODEX_STREAM[3:4], NOW + 6)
+        self.assertEqual(texts(follow.poll(NOW + 7)), ["command (exit 0): bash -lc ls"])
+        # The first run writes its last line in the same second the second run writes again, then ends.
+        wrote(first, CODEX_STREAM[6:], NOW + 8)
+        wrote(second, CODEX_STREAM[4:5], NOW + 9)
+        self.assertEqual(texts(follow.poll(NOW + 9)), ["files: update /w/app.py, add /w/new.py"])
+        pensieve.add_metric(self.conn, "moody", RUN_A, "codex", 1, 2, 3, 0.0, 500, ts=NOW + 10)
+        self.assertEqual(texts(follow.poll(NOW + 10)), [
+            "says: Done, tests pass.",
+            f"run end {RUN_A}: model codex, 0.5s, tokens in 1 out 2 cache 3, $0.00, status completed"])
+        wrote(second, CODEX_STREAM[6:], NOW + 11)
+        pensieve.add_metric(self.conn, "moody", RUN_B, "codex", 4, 5, 6, 0.0, 700, ts=NOW + 12)
+        self.assertEqual(texts(follow.poll(NOW + 12)), [
+            "says: Done, tests pass.",
+            f"run end {RUN_B}: model codex, 0.7s, tokens in 4 out 5 cache 6, $0.00, status completed"])
+        self.assertEqual((follow.poll(NOW + 13), follow.paused["moody"]), ([], {}))
+
+    def test_two_runs_of_a_two_slot_desk_that_end_together_each_end_once(self):
+        follow = feed.Feed(self.reader, "moody")
+        follow.poll(NOW)
+        first = self.run_file("moody", RUN_A, jsonl(CODEX_STREAM[:1]), mtime=NOW)
+        follow.poll(NOW + 1)
+        second = self.run_file("moody", RUN_B, jsonl(CODEX_STREAM[:1]), mtime=NOW + 2)
+        follow.poll(NOW + 3)
+        self.append(first, jsonl(CODEX_STREAM[3:4]))
+        os.utime(first, (NOW + 4, NOW + 4))
+        self.assertEqual(texts(follow.poll(NOW + 5)), ["command (exit 0): bash -lc ls"])
+        # Before the next poll both runs write their last line and end, the second one last.
+        self.append(first, jsonl(CODEX_STREAM[6:]))
+        os.utime(first, (NOW + 6, NOW + 6))
+        self.append(second, jsonl(CODEX_STREAM[6:]))
+        os.utime(second, (NOW + 7, NOW + 7))
+        pensieve.add_metric(self.conn, "moody", RUN_A, "codex", 1, 2, 3, 0.0, 500, ts=NOW + 8)
+        pensieve.add_metric(self.conn, "moody", RUN_B, "codex", 4, 5, 6, 0.0, 700, ts=NOW + 8)
+        self.assertEqual(texts(follow.poll(NOW + 9)), [
+            "says: Done, tests pass.",
+            f"run end {RUN_A}: model codex, 0.5s, tokens in 1 out 2 cache 3, $0.00, status completed",
+            "says: Done, tests pass.",
+            f"run end {RUN_B}: model codex, 0.7s, tokens in 4 out 5 cache 6, $0.00, status completed"])
+        self.assertEqual(follow.poll(NOW + 10), [])
+
     def test_metric_fields_a_later_migration_adds_are_shown(self):
         self.conn.execute("ALTER TABLE metrics ADD COLUMN exit_code INTEGER")
         self.conn.execute("ALTER TABLE metrics ADD COLUMN cap_label TEXT")

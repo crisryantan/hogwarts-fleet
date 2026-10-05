@@ -1,7 +1,7 @@
 """Many tasks per desk: Harry, Hermione, Moody, Ron and Ryan's own sessions each hold many tasks in flight.
 
-Only a running model process stays one at a time per desk (the desk lock). A task waiting for fixes blocks
-nothing, a reviewer is busy only while its desk lock is held, and each pad desk keeps one pad per task.
+Only running model processes stay bounded per desk (its run slots). A task waiting for fixes blocks
+nothing, a reviewer is busy only while every run slot of it is held, and each pad desk keeps one pad per task.
 Reviewer and desk runs are faked at run_desk.run or run_desk.start_child; no model ever runs.
 """
 from __future__ import annotations
@@ -26,7 +26,7 @@ from tests.support import NOW, temp_dir
 from fleet import config, gitops, owl_post, push, review, run_desk, verify, worktree
 from fleet.hooks import pre_compact, session_start
 from fleet.safefs import FleetError
-from tests_fleet.support import IN_KIT, MANY_TASK_DESKS, ONLY_IN_KIT, fake_children
+from tests_fleet.support import IN_KIT, MANY_TASK_DESKS, ONLY_IN_KIT, every_slot, fake_children
 from tests_fleet.test_hooks import HookCase
 from tests_fleet.test_push import GateCase
 from tests_fleet.test_review_loop import HANDOFF, ORIGIN, TASK_MD, LoopCase
@@ -227,7 +227,7 @@ class OwnSessionGuardTests(ManyCase):
     def test_a_new_review_of_a_commit_another_task_holds_is_refused_before_anything_is_made(self):
         self.commit("site")
         self.enable("moody")
-        with run_desk.desk_lock("moody", wait=False):
+        with every_slot("moody"):
             queued = review.review_own(self.conn, str(self.repo), title="site", fetch=False)
         first = queued["task_id"]
         self.assertEqual(queued["queued"], queued_text(first))
@@ -833,16 +833,16 @@ class ParallelAuthorTests(ManyCase):
         not_run = mock.patch.object(run_desk, "run", side_effect=AssertionError("ran while moody was busy"))
         self.on_branch("a")
         self.commit("a two")
-        with run_desk.desk_lock("moody", wait=False), not_run:
+        with every_slot("moody"), not_run:
             queued_a = review.review_own(self.conn, str(self.repo), task_id=a, fetch=False)
         self.on_branch("b")
         self.commit("b two")
-        with run_desk.desk_lock("moody", wait=False), not_run:
+        with every_slot("moody"), not_run:
             queued_b = review.review_own(self.conn, str(self.repo), task_id=b, fetch=False)
         self.assertEqual((queued_a["round"], queued_b["round"], queued_b["superseded"]), (2, 2, []))
         self.assertTrue(capacity.review_rounds(self.conn, a)[-1]["waiting"])
         # A second review of A while one runs is refused by A's review lock; B only queues on the desk lock.
-        with review.task_review_lock(a), run_desk.desk_lock("moody", wait=False), not_run:
+        with review.task_review_lock(a), every_slot("moody"), not_run:
             with self.assertRaisesRegex(FleetError, review.REVIEW_RUNNING):
                 review.review_own(self.conn, str(self.repo), task_id=a, fetch=False)
             self.on_branch("b")
@@ -1284,7 +1284,7 @@ class RunDeskPadTests(RunDeskCase):
     def test_a_run_that_gives_up_on_the_desk_lock_says_so(self):
         self.enable("hermione")
         owl_id, _ = self.request("hermione")
-        with mock.patch.object(config, "DESK_LOCK_WAIT_SECONDS", 0), run_desk.desk_lock("hermione", wait=False), \
+        with mock.patch.object(config, "DESK_LOCK_WAIT_SECONDS", 0), every_slot("hermione"), \
                 fake_children() as started:
             code, _, _ = self.main("hermione", "--owl", owl_id)
         self.assertEqual(code, 1)

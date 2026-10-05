@@ -14,8 +14,8 @@ One review of an author task runs at a time. Before anything changes, the review
 review lock without waiting; if another review of the task holds it, this one is refused at once and
 changes nothing. Under the lock the checkout, the evidence, the round, the reviewer's run and the
 verdict all belong to the one sha this review asked for. The reviewer's own process inherits this lock
-and the reviewer's desk lock, so a review killed mid-run (SIGKILL, a crash) still holds both until its
-reviewer's process ends too. Then, for either:
+and the reviewer desk's run slot this review holds, so a review killed mid-run (SIGKILL, a crash) still
+holds both until its reviewer's process ends too. Then, for either:
 1. verify runs the acceptance checks and writes evidence for this sha;
 2. the commit is recorded on the author's task;
 3. a review request goes from the author's task to the reviewer of the other family
@@ -26,28 +26,36 @@ reviewer's process ends too. Then, for either:
    run caps bound those retries. A request of this task still queued for its reviewer is superseded,
    so only the newest commit is reviewed;
 4. nothing waits in line. A busy reviewer leaves the request queued, and the review returns "queued".
-   Busy means another run holds the reviewer's desk lock, since a desk runs one process at a time. A
-   reviewer takes many tasks, so its other active tasks never make it busy; only a reviewer desk that
-   takes one task at a time and has an active one is busy too. A reviewer at its daily cap leaves the
-   request queued as well, and Ryan hears which cap and when it resets. Running the review again later
-   supersedes the queued request of that task only. Otherwise run_desk runs the reviewer, which needs
-   Ryan's enabled file for that desk;
+   Busy means other runs hold every one of the reviewer desk's run slots (config.RUN_SLOTS): Moody and
+   Hermione have two, so reviews of two different tasks run at once and a third is queued, while a desk
+   with one slot runs one process at a time as before. A reviewer takes many tasks, so its other active
+   tasks never make it busy; only a reviewer desk that takes one task at a time and has an active one is
+   busy too. A reviewer at its daily cap leaves the request queued as well, and Ryan hears which cap and
+   when it resets. Running the review again later supersedes the queued request of that task only.
+   Otherwise run_desk runs the reviewer in the slot this review holds, which needs Ryan's enabled file
+   for that desk;
 5. the last REVIEW block in the reviewer's own output must name this task and this sha. Its verdict
    is recorded with the review file in the office, where no desk can change it;
 6. on PASS the author's task moves to awaiting_close, which is what the push gate checks.
    CHANGES leaves it active for a fix round. HEADMASTER leaves it active and tells Ryan.
 
 The verdict is recorded on its round in the same transaction that stores it, so the round counts even
-if publishing the review afterwards fails. A review holds the reviewer's desk lock from before its round
-opens until its reviewer task is closed as superseded, once its verdict is recorded or its run fails, and
-the reviewer's process holds it too while it runs. So a reviewer task still active while that lock is free
-was left by a review that died (killed, or its cleanup failed) and whose reviewer is gone: the next review
-that takes the lock closes it, and a round with no verdict stops counting. Only review-round tasks are
-closed this way, never the reviewer's other active tasks, and only the start() in run_review starts a
-review-round task, so under the lock every active one was left by a dead review. A reviewer task is never
-closed while its desk lock is held. A review that finds its reviewer busy does not count such a round of
-its own task either, since it holds the task's review lock, but leaves closing it to a review that can take
-the desk lock. Only Ryan closes a task as complete.
+if publishing the review afterwards fails. A review holds one run slot of the reviewer desk from before its
+round opens until its reviewer task is closed as superseded, once its verdict is recorded or its run fails,
+and the reviewer's process holds that slot too while it runs. The round records its slot in the row that
+opens it, before its reviewer task can start. So a reviewer task still active while its round's own slot is
+free was left by a review that died (killed, or its cleanup failed) and whose reviewer is gone: the next
+review that holds that slot closes it, and a round with no verdict stops counting. That is the slot the
+review took for itself, or another it takes without waiting just while it closes the task, so for that moment
+the desk can look busy to a third review. A slot it cannot take belongs to a live review, or to the reviewer
+a killed review left running, in another slot, and that round's task is left alone. A round that records no
+slot (opened while every slot was busy, or before slots were recorded) counts as slot 0, the desk lock of
+old. Only review-round tasks are closed this way, never the reviewer's other active tasks, and only the
+start() in run_review starts a review-round task, so under its slot every active one was left by a dead
+review. A reviewer task is never closed while its round's slot is held by anyone but the review that
+closes it. A review that finds its reviewer busy does not count such a round of its own task either, since
+it holds the task's review lock, but leaves closing it to a review that can take that round's slot. Only
+Ryan closes a task as complete.
 
 Author tasks run side by side: Harry, Hermione, Moody, Ron and Ryan's own sessions may each hold many active tasks,
 so a task waiting for a fix round blocks nothing. A review of Ryan's own sessions follows the branch his checkout
@@ -247,27 +255,43 @@ def task_review_lock(task_id: str) -> Iterator[int]:
         yield lock_fd
 
 
-def _recover_stranded(conn, reviewer: str, now: Optional[int]) -> None:
-    """Close the reviewer tasks a review left active when it died (killed, or its cleanup failed), so the
-    desk is free and a round with no verdict stops counting. Only called under the reviewer's desk lock,
-    which every live review holds until its reviewer task is closed, and its reviewer's process while it runs."""
+def _recover_stranded(conn, reviewer: str, slot: run_desk.Slot, now: Optional[int]) -> None:
+    """Close the reviewer tasks a review left active when it died (killed, or its cleanup failed), so a round
+    with no verdict stops counting. Called under slot, a run slot of the reviewer desk. A round's task is closed
+    only while its own slot is held here: slot itself, or the round's slot taken without waiting for just this
+    close. Every live review holds its round's slot until its reviewer task is closed, and its reviewer's process
+    holds it while it runs, so a slot that cannot be taken means that round may be live, and it is left alone.
+    A round with no slot recorded counts as slot 0, whose lock is the desk lock of old."""
     for row in capacity.stranded_rounds(conn, reviewer):
-        _finish_reviewer_task(conn, row["request_id"], row["reviewer_task_id"])
-        counted = ("its recorded verdict still counts" if row["has_verdict"]
-                   else "it recorded no verdict, so its round does not count")
-        pensieve.add_event(conn, reviewer, "review.recovered", "routine",
-                           f"an earlier review of task {row['task_id']} ended without closing {reviewer}'s task"
-                           f" {row['reviewer_task_id']}, so the next review closed it; {counted}",
-                           task_id=row["task_id"], dedupe_key=f"review:recovered:{row['request_id']}", now=now)
+        index = 0 if row["slot"] is None else row["slot"]
+        with contextlib.ExitStack() as held:
+            if index != slot.index:
+                try:
+                    held.enter_context(run_desk.slot_lock(reviewer, index))
+                except safefs.Busy:
+                    continue
+            # Read again under the round's slot: its own review may have closed the task since the list was read.
+            if pensieve.get_task(conn, row["reviewer_task_id"])["status"] != "active":
+                continue
+            _finish_reviewer_task(conn, row["request_id"], row["reviewer_task_id"])
+            counted = ("its recorded verdict still counts" if row["has_verdict"]
+                       else "it recorded no verdict, so its round does not count")
+            pensieve.add_event(conn, reviewer, "review.recovered", "routine",
+                               f"an earlier review of task {row['task_id']} ended without closing {reviewer}'s task"
+                               f" {row['reviewer_task_id']}, so the next review closed it; {counted}",
+                               task_id=row["task_id"], dedupe_key=f"review:recovered:{row['request_id']}", now=now)
 
 
-def _open_round(conn, task: dict, reviewer: str, sha: str, body: str, now: Optional[int]) -> dict:
-    """The review request as the task's next round. A refused round tells Ryan the task and the count."""
+def _open_round(conn, task: dict, reviewer: str, sha: str, body: str, now: Optional[int],
+                slot: Optional[int] = None) -> dict:
+    """The review request as the task's next round, recording the reviewer's run slot this review holds, None
+    for a round queued while every slot is busy. A refused round tells Ryan the task and the count."""
     try:
         return capacity.open_review_round(
             conn, task["id"], reviewer, sha, f"review {task['id']} @ {sha[:12]}", body=body,
             max_rounds=config.REVIEW_ROUND_CAP,
-            idempotency_key=f"review:{task['id']}:{sha[:12]}:{secrets.token_hex(4)}", review_locked=True, now=now)
+            idempotency_key=f"review:{task['id']}:{sha[:12]}:{secrets.token_hex(4)}", review_locked=True,
+            slot=slot, now=now)
     except capacity.RoundCapReached as exc:
         pensieve.add_event(conn, task["desk"], "review.round-cap", "headmaster",
                            f"task {task['id']} asked for review round {exc.round}, past the cap of"
@@ -277,16 +301,17 @@ def _open_round(conn, task: dict, reviewer: str, sha: str, body: str, now: Optio
         raise FleetError(str(exc)) from None
 
 
-def _open_and_deliver(conn, task: dict, reviewer: str, sha: str, body: str, now: Optional[int]) -> dict:
-    opened = _open_round(conn, task, reviewer, sha, body, now)
+def _open_and_deliver(conn, task: dict, reviewer: str, sha: str, body: str, now: Optional[int],
+                      slot: Optional[int] = None) -> dict:
+    opened = _open_round(conn, task, reviewer, sha, body, now, slot)
     _deliver(conn, opened["owl"]["id"], reviewer, body)
     pensieve.set_worktree(conn, opened["task"]["id"], task["worktree"])
     return opened
 
 
 def _queued(conn, task: dict, reviewer: str, sha: str, body: str, now: Optional[int], result: dict) -> dict:
-    """The reviewer is busy (its desk lock is held, or a single-task reviewer has an active task): the request
-    is queued, no round is used, and nothing waits."""
+    """The reviewer is busy (every one of its run slots is held, or a single-task reviewer has an active task):
+    the request is queued, holding no slot, no round is used, and nothing waits."""
     opened = _open_and_deliver(conn, task, reviewer, sha, body, now)
     return {**result, "verdict": None, "round": opened["round"], "request_id": opened["request"]["id"],
             "superseded": [item["request_id"] for item in opened["superseded"]], "review": None,
@@ -301,9 +326,11 @@ def _again(task: dict) -> str:
 
 
 def _review_and_record(conn, task: dict, record: dict, sha: str, holder_id: str, reviewer: str,
-                       request_id: str, reviewer_task_id: str, owl_id: str, start, keep_fds: tuple) -> tuple:
-    """Run the reviewer and record its verdict on the round, then publish the review. (verdict, castle path)"""
-    result = run_desk.run(conn, reviewer, owl_id, on_start=start, lock_held=True, keep_fds=keep_fds)
+                       request_id: str, reviewer_task_id: str, owl_id: str, start, slot: run_desk.Slot,
+                       keep_fds: tuple) -> tuple:
+    """Run the reviewer in the run slot this review holds and record its verdict on the round, then publish the
+    review. (verdict, castle path)"""
+    result = run_desk.run(conn, reviewer, owl_id, on_start=start, lock_held=slot, keep_fds=keep_fds)
     if result.get("cap_source") is not None:
         raise FleetError(f"the {reviewer} run stopped at the vendor's own usage limit (cap_source"
                          f" {result['cap_source']}); a fleet cap bump does not lift it")
@@ -347,13 +374,13 @@ def run_review(conn, task: dict, record: dict, sha: str, holder_id: str, handoff
               "evidence": evidence["evidence"]["castle"], "failed_checks": evidence["failed"]}
     with contextlib.ExitStack() as held:
         try:
-            desk_lock_fd = held.enter_context(run_desk.desk_lock(reviewer, wait=False))
+            slot = held.enter_context(run_desk.desk_lock(reviewer, wait=False))
         except safefs.Busy:
             return _queued(conn, task, reviewer, sha, body, now, result)
-        _recover_stranded(conn, reviewer, now)
+        _recover_stranded(conn, reviewer, slot, now)
         if pensieve.blocking_task(conn, reviewer) is not None:
             return _queued(conn, task, reviewer, sha, body, now, result)
-        opened = _open_and_deliver(conn, task, reviewer, sha, body, now)
+        opened = _open_and_deliver(conn, task, reviewer, sha, body, now, slot.index)
         request_id, reviewer_task_id, owl_id = opened["request"]["id"], opened["task"]["id"], opened["owl"]["id"]
         if run_desk.over_daily_cap(conn, reviewer, now) is not None:
             run_desk.report_cap(conn, reviewer, now)
@@ -371,11 +398,12 @@ def run_review(conn, task: dict, record: dict, sha: str, holder_id: str, handoff
 
         try:
             verdict, castle_review = _review_and_record(conn, task, record, sha, holder_id, reviewer, request_id,
-                                                        reviewer_task_id, owl_id, start, (task_lock_fd, desk_lock_fd))
+                                                        reviewer_task_id, owl_id, start, slot,
+                                                        (task_lock_fd, slot.fd))
         except BaseException:
             if started:
-                # A cleanup that fails here must not hide why the review failed; the next review that takes
-                # this reviewer's desk lock closes the task instead.
+                # A cleanup that fails here must not hide why the review failed; the next review that holds
+                # this round's run slot closes the task instead.
                 with contextlib.suppress(Exception):
                     _finish_reviewer_task(conn, request_id, reviewer_task_id)
             raise

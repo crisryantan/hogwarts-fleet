@@ -378,8 +378,8 @@ class LockInheritanceTests(FleetCase):
                   "sys.path.insert(0, sys.argv[1])\n"
                   "from fleet import config, run_desk\n"
                   "config.OFFICE_ROOT = sys.argv[2]\n"
-                  "with run_desk.desk_lock('ron', wait=False) as lock_fd:\n"
-                  "    child = subprocess.Popen(['/bin/sleep', '60'], pass_fds=(lock_fd,),\n"
+                  "with run_desk.desk_lock('ron', wait=False) as slot:\n"
+                  "    child = subprocess.Popen(['/bin/sleep', '60'], pass_fds=(slot.fd,),\n"
                   "                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\n"
                   "    print(child.pid, flush=True)\n"
                   "    os.kill(os.getpid(), 9)\n")

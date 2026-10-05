@@ -13,7 +13,7 @@ from .errors import ConflictError, IntegrityError, NotFoundError, StoreError, Va
 
 DEFAULT_DB = Path("/Users/crisryantan/.hogwarts/state/pensieve.db")
 CODE_ROOT = Path(os.path.abspath(__file__)).parent.parent
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 WAL_ATTEMPTS = 50
 BYTECODE_SUFFIXES = (".pyc", ".pyo", ".so")
 SIDECARS = ("-wal", "-shm")
@@ -54,6 +54,8 @@ SINGLE_TASK_FAMILIES = ("human", "script")
 # The longest branch name, in bytes, an own-session review task records. The name is Ryan's own branch, any name
 # git takes in printable ASCII, so it is not held to the fleet's rule for the branches it makes and pushes.
 REVIEW_BRANCH_MAX = 255
+# The most run slots a desk may have (fleet RUN_SLOTS), so a slot a review round records is 0 to this less one.
+RUN_SLOT_LIMIT = 8
 
 PathLike = Union[str, Path]
 
@@ -724,7 +726,19 @@ V7 = (
     ),
 )
 
-MIGRATIONS = ((1, V1), (2, V2), (3, V3), (4, V4), (5, V5), (6, V6), (7, V7))
+# Run slots: a desk may run as many model processes at once as it has run slots (fleet RUN_SLOTS), each holding
+# one slot's lock. A review round records the slot its review held when it opened, in the row that opens it, so a
+# review that later finds the round's reviewer task still active knows whose lock to try before it closes that task.
+# It is NULL for a round opened while every slot was busy and for every round from before V8, and the review script
+# reads NULL as slot 0, whose lock is the desk lock of old. A round keeps its slot.
+V8 = (
+    ("review_rounds", "slot", "ALTER TABLE review_rounds ADD COLUMN slot INTEGER CHECK (slot IS NULL OR slot BETWEEN 0"
+     f" AND {RUN_SLOT_LIMIT - 1})"),
+    _guard("review_rounds_slot_fixed", "BEFORE UPDATE OF slot ON review_rounds WHEN OLD.slot IS NOT NEW.slot",
+           "a review round keeps its slot"),
+)
+
+MIGRATIONS = ((1, V1), (2, V2), (3, V3), (4, V4), (5, V5), (6, V6), (7, V7), (8, V8))
 
 
 def _uid() -> int:

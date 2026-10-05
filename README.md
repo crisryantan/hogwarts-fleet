@@ -1,6 +1,6 @@
 # Hogwarts fleet
 
-A Harry Potter themed fleet of single-purpose AI agents for Claude Code and Codex. Seven desks each do one job. A desk runs one model process at a time, but Harry, Hermione, Moody, Ron and your own sessions each keep many tasks in flight, so a task waiting for fixes blocks nothing. Four plain scripts move messages, watch PRs, take backups and keep each desk on the model its job needs, all at zero tokens. A reviewer from the other model family checks every change before it leaves the laptop. You are the Headmaster: merges, deploys, credentials, settings and anything sent to a person always come back to you. Everything that controls the fleet lives in a folder no desk can write.
+A Harry Potter themed fleet of single-purpose AI agents for Claude Code and Codex. Seven desks each do one job. A desk runs one model process at a time, two for the reviewers, and Harry, Hermione, Moody, Ron and your own sessions each keep many tasks in flight, so a task waiting for fixes blocks nothing. Four plain scripts move messages, watch PRs, take backups and keep each desk on the model its job needs, all at zero tokens. A reviewer from the other model family checks every change before it leaves the laptop. You are the Headmaster: merges, deploys, credentials, settings and anything sent to a person always come back to you. Everything that controls the fleet lives in a folder no desk can write.
 
 <table>
   <tr>
@@ -33,7 +33,7 @@ A Harry Potter themed fleet of single-purpose AI agents for Claude Code and Code
 
 **The scripts.** Owl Post - Message Router, Ollivander - Model Keeper, Marauder's Map - PR Watcher and Gringotts - Backup. None of them uses a model. Ollivander reads each desk's role card and keeps the desk on the newest model of the tier its job needs, inside its own model family.
 
-**Busy days and the live view.** Every headless desk has a daily run cap, and the Claude desks a spend cap too. They guard against runaway loops, they don't ration a normal day, and they reset at local midnight. A desk still runs one owl at a time, while its other tasks wait without blocking it, and `fleet feed` plus one herdr space per desk lets you watch them work without typing into anything.
+**Busy days and the live view.** Every headless desk has a daily run cap, and the Claude desks a spend cap too. They guard against runaway loops, they don't ration a normal day, and they reset at local midnight. A desk still runs one owl at a time, or two for the reviewers, while its other tasks wait without blocking it, and `fleet feed` plus one herdr space per desk lets you watch them work without typing into anything.
 
 **The Headmaster gate.** You. No desk merges, deploys, signs in, changes settings or sends anything to a person. A task closes only when you type `Mischief managed <task-id>`.
 

@@ -16,10 +16,10 @@ One pass:
    process has exited, and hands it to that process, so no launch can pass its check and then start a
    binary that an update is replacing, and no update replaces a binary while a desk still runs it.
    Lock order: Ollivander takes ollivander.lock, then the update lock, and never a desk lock; run_desk
-   takes the desk lock (after the review lock, in a review), then the update lock without waiting. No
-   holder of the update lock ever waits for another lock, so no deadlock can form. When runs hold it
-   for longer than UPDATE_LOCK_WAIT_SECONDS, the pass skips the update (updates.busy) and tries again
-   next time.
+   takes a run slot of the desk (after the review lock, in a review), then the desk's launch lock, then
+   the update lock without waiting. No holder of the update lock ever waits for another lock, so no
+   deadlock can form. When runs hold it for longer than UPDATE_LOCK_WAIT_SECONDS, the pass skips the
+   update (updates.busy) and tries again next time.
    A marker already there when a pass starts is an update that never finished: the binaries may have
    moved with no check run. The pass then updates nothing, writes the stop file, tells Ryan, and leaves
    the marker for castle ollivander clear.

@@ -78,7 +78,8 @@ TASK_PAD_DESKS = ("hermione", "ron")
 PADS_DIR = "pads"
 # Reviewer for each author family. A pass needs the other family.
 REVIEWER_FOR_FAMILY = {"codex": "hermione", "claude": "moody"}
-# A Codex desk with no worktree of its own runs here, never in its desk folder.
+# A Codex desk with no worktree of its own runs here, never in its desk folder: work for run slot 0, and
+# work.slot<n> for run slot n.
 CODEX_WORK_DIR = "work"
 # Castle folders each Claude desk may read through --add-dir. Writes there are denied by its settings.
 CLAUDE_READ_DIRS = {"hermione": ("tasks", "worktrees"), "ron": ("tasks",), "portrait": ()}
@@ -120,8 +121,15 @@ STDERR_PLAN_LIMIT_PATTERNS = (
     r"hit your (?:usage |session |weekly )?limit", r"out of (?:extra )?usage", r"rate[ _-]?limit",
     r"too many requests", r"quota exceeded for", r"exceeded your (?:current )?quota", r"credit balance",
 )
-# A run the Owl Post starts waits this long for another run of the same desk to finish. A review never waits.
+# How many model processes each headless desk may run at once. Each run holds one run slot, and every slot of a
+# desk has its own lock, Codex work folder and private temp folder (slot 0 keeps the names a desk had before
+# slots). The reviewers take two, so two reviews of different tasks run at once; a desk left out has one. Caps,
+# the launch gate and a desk's spend are shared by all its slots. At most hogwarts.db.RUN_SLOT_LIMIT.
+RUN_SLOTS = {"hermione": 2, "ron": 1, "portrait": 1, "harry": 1, "moody": 2}
+# A run the Owl Post starts waits this long for a free run slot of its desk. A review never waits.
 DESK_LOCK_WAIT_SECONDS = 1860
+# A run waits at most this long while another run of its desk checks the caps and records its launch.
+DESK_LAUNCH_WAIT_SECONDS = 120
 RUN_TIMEOUT_SECONDS = 1800
 # A launch with no usage yet counts as running for this long, so a run killed before it recorded usage
 # stops showing as running once its timeout has surely passed.
@@ -142,7 +150,8 @@ DEFAULT_BASE = "origin/main"
 # profile denies it outright: it holds other sessions' scratch files.
 SHARED_TEMP_ROOT = "/private/tmp"
 # Each Codex desk that writes, and each verify run, gets its own temp folder instead, set as TMPDIR,
-# inside the per-user temp folder: <user temp>/hogwarts-<name>. Nothing else in that folder is granted
+# inside the per-user temp folder: <user temp>/hogwarts-<name>, and hogwarts-<desk>.slot<n> for a desk's
+# run slot n. Nothing else in that folder is granted
 # except xcrun's lookup cache, read-only, so /usr/bin shims resolve without trying to write it.
 DESK_TEMP_PREFIX = "hogwarts-"
 XCRUN_CACHE = "xcrun_db"

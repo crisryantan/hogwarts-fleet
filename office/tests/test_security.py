@@ -376,7 +376,7 @@ class InputSecurityTests(StoreCase):
         "max_rounds": 3, "review_locked": False, "spend_unknown": False,
         "need": "workhorse", "line": "workhorse", "effort": None, "value": "model-x", "ok": True, "change_id": None,
         "claude_ids_only": False, "blocked": (), "default_model": None, "retiring_within": DAY,
-        "running_window": 3600, "branch": "fix/site",
+        "running_window": 3600, "branch": "fix/site", "slot": None,
     }
     OVERRIDES = {
         ("record_review", "verdict"): "CHANGES", ("record_round_verdict", "verdict"): "CHANGES",

@@ -17,7 +17,7 @@ from tests.support import NOW
 
 from fleet import config, review, run_desk, tools
 from fleet.safefs import FleetError
-from tests_fleet.support import fake_children
+from tests_fleet.support import every_slot, fake_children
 from tests_fleet.test_review_loop import LoopCase, REPO_ID
 
 
@@ -316,7 +316,7 @@ class ReviewRoundTests(LoopCase):
     def test_a_review_while_the_reviewer_is_busy_is_queued_then_superseded_by_the_next_review(self):
         first_sha = self.commit("first try")
         not_run = mock.patch.object(run_desk, "run", side_effect=AssertionError("ran while moody was busy"))
-        with run_desk.desk_lock("moody", wait=False), not_run:  # another review's run holds moody's desk
+        with every_slot("moody"), not_run:  # another review's run holds moody's desk
             queued = review.review_own(self.conn, str(self.repo), title="my own fix", fetch=False)
         self.assertEqual(queued["queued"], queued_text(queued["task_id"]))
         self.assertEqual((queued["sha"], queued["round"], queued["verdict"], queued["review"]), (first_sha, 1, None, None))
@@ -325,7 +325,7 @@ class ReviewRoundTests(LoopCase):
         self.assertEqual((row["request_id"], row["waiting"], row["has_verdict"]), (queued["request_id"], True, False))
         self.assertEqual([item["id"] for item in capacity.waiting_requests(self.conn, "moody")], [queued["request_id"]])
         second_sha = self.commit("second try")
-        with run_desk.desk_lock("moody", wait=False), not_run:  # still busy
+        with every_slot("moody"), not_run:  # still busy
             again = review.review_own(self.conn, str(self.repo), task_id=task_id, fetch=False)
         self.assertEqual((again["sha"], again["round"], again["superseded"], again["queued"]),
                          (second_sha, 1, [queued["request_id"]], queued["queued"]))
@@ -392,7 +392,7 @@ class ReviewRoundTests(LoopCase):
         [stranded] = self.moody_active()
         [task] = pensieve.list_tasks(self.conn, desk="ryan-claude-1")
         self.commit("second try")
-        with run_desk.desk_lock("moody", wait=False), \
+        with every_slot("moody"), \
                 mock.patch.object(run_desk, "run", side_effect=AssertionError("ran under a held desk lock")):
             queued = review.review_own(self.conn, str(self.repo), task_id=task["id"], fetch=False)
         self.assertEqual(queued["queued"], queued_text(task["id"]))
@@ -420,7 +420,7 @@ class ReviewRoundTests(LoopCase):
             self.failed_run(task_id)
         [stranded] = self.moody_active()
         self.commit("round three again")
-        with run_desk.desk_lock("moody", wait=False), \
+        with every_slot("moody"), \
                 mock.patch.object(run_desk, "run", side_effect=AssertionError("ran under a held desk lock")):
             queued = review.review_own(self.conn, str(self.repo), task_id=task_id, fetch=False)
         self.assertEqual((queued["round"], queued["queued"]), (3, queued_text(task_id)))
@@ -440,7 +440,7 @@ class ReviewRoundTests(LoopCase):
             self.own_review(task_id)
         allowance = capacity.allow_round(self.conn, task_id)
         self.commit("round four")
-        with run_desk.desk_lock("moody", wait=False):
+        with every_slot("moody"):
             queued = review.review_own(self.conn, str(self.repo), task_id=task_id, fetch=False)
         self.assertEqual((queued["round"], queued["queued"] is not None), (4, True))
         again = capacity.allow_round(self.conn, task_id)

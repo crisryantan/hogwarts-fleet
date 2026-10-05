@@ -273,6 +273,16 @@ def list_launches(conn: Conn, desk: Optional[str] = None) -> list[dict]:
                         (desk, desk))
 
 
+def running_launches(conn: Conn, desk: str, since: int) -> int:
+    """How many of the desk's launches since that time have no usage recorded yet: runs still going, or killed
+    before they could record it. A desk with several run slots holds their cost against its spend cap until then."""
+    desk = pensieve.get_desk(conn, ids.check("desk", desk))["name"]
+    since = ids.check_int(since, "since", maximum=ids.MAX_TIME)
+    row = db.fetch_one(conn, "SELECT COUNT(*) AS found FROM run_launches WHERE desk = ? AND metric_id IS NULL"
+                             " AND launched_at > ?", (desk, since))
+    return row["found"]
+
+
 def waiting_requests(conn: Conn, desk: str) -> list[dict]:
     """Requests addressed to desk that are still queued: delivered, but no run of the desk has taken them."""
     desk = pensieve.get_desk(conn, desk)["name"]
@@ -346,15 +356,16 @@ def review_rounds(conn: Conn, task_id: str) -> list[dict]:
 
 
 def stranded_rounds(conn: Conn, reviewer_desk: str) -> list[dict]:
-    """Review rounds addressed to reviewer_desk whose reviewer task is still active. A review holds the
-    reviewer's desk lock until its reviewer task is closed, so whoever holds that lock and finds one here
-    has found a task left by a review that died. Only review-round tasks are listed: the reviewer's other
-    active tasks are not stranded, since the desk may hold many."""
+    """Review rounds addressed to reviewer_desk whose reviewer task is still active, each with the run slot its
+    review held (slot, None for a round opened while every slot was busy or before slots were recorded). A review
+    holds its slot of the reviewer desk until its reviewer task is closed, so whoever holds a round's own slot and
+    finds it here has found a task left by a review that died. Only review-round tasks are listed: the reviewer's
+    other active tasks are not stranded, since the desk may hold many."""
     reviewer_desk = pensieve.get_desk(conn, ids.check("desk", reviewer_desk, "reviewer desk"))["name"]
     rows = db.fetch_all(
         conn,
         "SELECT review_rounds.request_id, review_rounds.task_id, requests.task_id AS reviewer_task_id,"
-        " review_rounds.review_id IS NOT NULL AS has_verdict"
+        " review_rounds.review_id IS NOT NULL AS has_verdict, review_rounds.slot"
         " FROM review_rounds JOIN requests ON requests.id = review_rounds.request_id"
         " JOIN tasks ON tasks.id = requests.task_id"
         " WHERE review_rounds.reviewer = ? AND tasks.status = 'active'"
@@ -394,7 +405,7 @@ def _ack_request_owl(conn: Conn, request_id: str, reviewer: str, ts: int) -> Non
 
 def open_review_round(conn: Conn, task_id: str, reviewer_desk: str, sha: str, title: str,
                       body: Optional[str] = None, max_rounds: int = 3, idempotency_key: Optional[str] = None,
-                      review_locked: bool = False, now: Optional[int] = None) -> dict:
+                      review_locked: bool = False, slot: Optional[int] = None, now: Optional[int] = None) -> dict:
     """Open the review request for one commit of an author task, as its next round.
 
     A review of this task still waiting for its reviewer's run is superseded by this one: its request
@@ -406,13 +417,18 @@ def open_review_round(conn: Conn, task_id: str, reviewer_desk: str, sha: str, ti
 
     review_locked means the caller holds this task's review lock, which every live review of the task
     and its reviewer's own process hold. A round whose reviewer task is still active with no verdict was
-    then left by a review that died, so it does not count, even before the next review that can take the
-    reviewer's desk lock closes that task.
+    then left by a review that died, so it does not count, even before the next review that can take that
+    round's run slot closes that task.
+
+    slot is the reviewer desk's run slot the caller's review holds, recorded on the round when it opens, so a
+    later review knows whose lock to try before closing a reviewer task this round leaves active. None when the
+    caller holds no slot, as for a round queued while every slot was busy.
     """
     task_id = ids.check("task", task_id)
     reviewer_desk = ids.check("desk", reviewer_desk, "reviewer desk")
     sha = ids.check("sha", sha)
     max_rounds = ids.check_int(max_rounds, "max rounds", minimum=1, maximum=MAX_ROUNDS_LIMIT)
+    slot = ids.optional_int(slot, "run slot", maximum=db.RUN_SLOT_LIMIT - 1)
     idempotency_key = ids.optional("key", idempotency_key)
     ts = ids.stamp(now)
     with db.transaction(conn):
@@ -447,9 +463,9 @@ def open_review_round(conn: Conn, task_id: str, reviewer_desk: str, sha: str, ti
             _ack_request_owl(conn, old_id, reviewer_desk, ts)
             superseded.append({"request_id": old_id, "sha": row["sha"], "round": row["round"]})
         conn.execute(
-            "INSERT INTO review_rounds(request_id, task_id, reviewer, sha, round, allowance_id, created_at)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (request_id, task_id, reviewer_desk, sha, round_no, allowance_id, ts),
+            "INSERT INTO review_rounds(request_id, task_id, reviewer, sha, round, allowance_id, created_at, slot)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (request_id, task_id, reviewer_desk, sha, round_no, allowance_id, ts, slot),
         )
     return {**opened, "round": round_no, "max_rounds": max_rounds, "allowance_id": allowance_id,
             "superseded": superseded}

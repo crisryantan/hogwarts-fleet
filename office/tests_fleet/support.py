@@ -8,6 +8,7 @@ castle and office are never touched.
 from __future__ import annotations
 
 import ast
+import contextlib
 import io
 import json
 import os
@@ -116,6 +117,15 @@ def fake_children(fake=None, returncode: int = 0):
         def fake(argv, **kwargs):
             return subprocess.CompletedProcess(args=argv, returncode=returncode)
     return mock.patch.object(run_desk, "start_child", side_effect=lambda argv, **kwargs: FakeChild(fake, argv, kwargs))
+
+
+@contextlib.contextmanager
+def every_slot(desk: str):
+    """Hold every run slot of desk, as other runs in all of them would, so the desk is busy."""
+    with contextlib.ExitStack() as held:
+        for index in range(run_desk.run_slots(desk)):
+            held.enter_context(run_desk.slot_lock(desk, index))
+        yield
 
 
 class FleetCase(unittest.TestCase):

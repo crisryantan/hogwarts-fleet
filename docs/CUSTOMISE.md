@@ -179,6 +179,7 @@ All in `~/.hogwarts/fleet/config.py`:
 | `CAP_RESET_UTC_SECONDS` | When the cap day starts. `None` is local midnight on your Mac, daylight saving included. A number fixes the reset that many seconds after UTC midnight instead |
 | `CAP_WARN_FRACTION` | The share of a cap, 0.8, at which a desk sends one warning that day |
 | `REVIEW_ROUND_CAP` | Review rounds per author task, 3. The next one waits for `castle task allow-round <task-id>` |
+| `RUN_SLOTS` | How many runs a desk may have going at once: Moody 2, Hermione 2 and every other desk 1, so two reviews of different tasks run at once. Each slot has its own lock, Codex work folder and temp folder, and the caps stay per desk across all of them. Raise it only for a desk whose runs never write the same file, at most 8 |
 | `RUN_TIMEOUT_SECONDS` | How long one run may take |
 | `TEMPUS_THRESHOLD` | Context size that triggers the Tempus warning |
 | `SCRATCHPAD_BUDGET_BYTES` | The scratchpad size the PreCompact hook respects |

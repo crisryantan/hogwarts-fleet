@@ -6,7 +6,9 @@
 About once a second it prints what is new, one line each, stamped with local HH:MM:SS:
 owls to or from the desk (kind and subject, never the body), the start and end of each run,
 the desk's headmaster events, and the live output of its current run, read from that run's
-.out file in the office runs folder (Claude stream-json or Codex exec --json).
+.out file in the office runs folder (Claude stream-json or Codex exec --json). A desk with more
+than one run slot (config.RUN_SLOTS) can have several runs going: the feed follows whichever wrote
+last and keeps its place in the others, so each line of each run is shown once.
 
 The store is opened with db.connect_readonly and nothing is ever written. Every printed line
 goes through sanitize first, so nothing a desk writes can drive the terminal. Ctrl+C stops it.
@@ -220,6 +222,9 @@ class Feed:
         self.desk = None if desk is None else ids.check("desk", desk)
         self.marks = watch.marks(conn)
         self.tails: dict = {}
+        # Per desk, the runs still going that the feed left when another run of the same desk wrote later, by
+        # file name. Only a desk with more than one run slot has any.
+        self.paused: dict = {}
         self.first = True
 
     def target(self) -> str:
@@ -278,9 +283,13 @@ class Feed:
             self.marks["metrics"] = row["id"]
             ended = None
             tail = self.tails.get(row["desk"])
+            paused = self.paused.get(row["desk"], {}).pop(f"{row['run_id']}.out", None)
             if tail is not None and tail.name == f"{row['run_id']}.out":
                 lines += self._drain(row["desk"], tail, row["ts"])  # its output first, then its end
                 ended = tail.outcome
+            elif paused is not None:
+                lines += self._drain(row["desk"], paused, row["ts"])
+                ended = paused.outcome
             elif tail is not None and tail.earlier is not None and tail.earlier[0] == row["run_id"]:
                 ended, tail.earlier = tail.earlier[1], None
             cost = row["cost_usd"] if isinstance(row["cost_usd"], (int, float)) else 0.0
@@ -335,6 +344,17 @@ class Feed:
             return False
         return not self._store_rows(lambda: [True] if watch.run_recorded(self.conn, run_id) else [])
 
+    @staticmethod
+    def _slots(desk: str) -> int:
+        """How many runs the desk may have going at once (config.RUN_SLOTS), one when that is not a count."""
+        count = config.RUN_SLOTS.get(desk, 1)
+        return count if type(count) is int and count > 0 else 1
+
+    def _going(self, fd: int, name: str, now: int) -> bool:
+        info = safefs.lstat(fd, name)
+        return info is not None and stat.S_ISREG(info.st_mode) and \
+            self._running(RUN_OUT.fullmatch(name).group(1), info, now)
+
     def _follow(self, fd: int, desk: str, now: int) -> list:
         newest = self._newest(fd)
         if newest is None:
@@ -342,6 +362,11 @@ class Feed:
         name, info = newest
         run_id = RUN_OUT.fullmatch(name).group(1)
         tail = self.tails.setdefault(desk, RunTail())
+        paused = self.paused.setdefault(desk, {})
+        for left in [item for item in paused if item != name]:
+            gone = safefs.lstat(fd, left)
+            if gone is None or gone.st_mtime < now - config.RUN_TIMEOUT_SECONDS - 60:
+                del paused[left]  # killed before its end was recorded: nothing more will come
         lines = []
         if name != tail.name:
             if tail.name is None and self.first:
@@ -350,12 +375,29 @@ class Feed:
                     tail.switch(name, info.st_size)
                     return []
                 lines.append(line(now, self._prefix(desk) + f"run in progress {run_id}, shown from its start"))
+                tail.switch(name, 0)
             else:
-                if tail.name is not None:
+                earlier, was_paused = None, name in paused
+                if tail.name is not None and self._slots(desk) > 1 and self._going(fd, tail.name, now):
+                    # Another run of this desk wrote later while this one still goes in its own run slot: keep
+                    # this one's place, and carry on from there when it writes again.
+                    paused[tail.name] = tail
+                    tail = self.tails[desk] = RunTail()
+                elif tail.name is not None:
                     lines += self._read(fd, desk, tail, now, final=True)
                     lines += self._metrics()  # the old run's end before the new run's start
-                lines.append(line(now, self._prefix(desk) + f"run start {run_id}"))
-            tail.switch(name, 0)
+                    earlier = (RUN_OUT.fullmatch(tail.name).group(1), tail.outcome)
+                again = paused.pop(name, None)
+                if again is not None:
+                    again.earlier = earlier or again.earlier
+                    tail = self.tails[desk] = again  # its start was shown when the feed first followed it
+                elif was_paused:
+                    # Its end came in with the old run's, and the rest of its output was shown with it.
+                    ended = safefs.lstat(fd, name)
+                    tail.switch(name, info.st_size if ended is None else ended.st_size)
+                else:
+                    lines.append(line(now, self._prefix(desk) + f"run start {run_id}"))
+                    tail.switch(name, 0)
         return lines + self._read(fd, desk, tail, now)
 
     def _read(self, fd: int, desk: str, tail: RunTail, now: int, final: bool = False) -> list:

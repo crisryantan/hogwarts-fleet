@@ -10,7 +10,7 @@ import sys
 import unittest
 from unittest import mock
 
-from hogwarts import db, pensieve
+from hogwarts import capacity, db, owlery, pensieve
 from hogwarts.errors import ConflictError, IntegrityError, NotFoundError, StoreError, ValidationError
 from tests.support import NOW, StoreCase, temp_dir
 
@@ -204,7 +204,7 @@ class MigrationV7Tests(unittest.TestCase):
 
     def test_a_v6_database_migrates_to_7_and_grants_only_the_seed_desks_it_has(self):
         conn = self.v6_database()
-        self.assertEqual((db.SCHEMA_VERSION, db.schema_version(conn)), (7, 7))
+        self.assertEqual(db.schema_version(conn), db.SCHEMA_VERSION)
         granted = [row[0] for row in conn.execute("SELECT desk FROM many_task_desks ORDER BY desk")]
         self.assertEqual(granted, ["harry", "moody"])
         self.assertTrue(set(granted) <= set(db.MANY_TASK_DESKS_SEED))
@@ -218,7 +218,7 @@ class MigrationV7Tests(unittest.TestCase):
         with self.assertRaises(ConflictError):
             pensieve.start_task(conn, third["id"], now=NOW)
         changes = conn.total_changes
-        self.assertEqual(db.migrate(conn), 7)
+        self.assertEqual(db.migrate(conn), db.SCHEMA_VERSION)
         self.assertEqual(conn.total_changes, changes)
 
     def test_a_raw_write_never_moves_an_active_task_onto_a_single_desk(self):
@@ -260,6 +260,66 @@ class MigrationV7Tests(unittest.TestCase):
         with self.assertRaisesRegex(sqlite3.IntegrityError, "a task of its own desk"):
             conn.execute("INSERT INTO run_launches(run_id, desk, model, launched_at, task_id)"
                          " VALUES ('run-3', 'harry', 'm', 1, 'tk_0000000000000002')")
+
+
+class MigrationV8Tests(unittest.TestCase):
+    SHA = "a" * 40
+
+    def v7_database(self):
+        """A V7 store with one review round opened before rounds recorded a run slot."""
+        path = temp_dir(self) / "state" / "pensieve.db"
+        with mock.patch.object(db, "MIGRATIONS", db.MIGRATIONS[:7]), mock.patch.object(db, "SCHEMA_VERSION", 7):
+            conn = db.connect(path)
+            for name, family in (("alpha", "claude"), ("beta", "codex")):
+                pensieve.add_desk(conn, name, family, now=NOW)
+            pensieve.allow_many_tasks(conn, "beta", now=NOW)
+            self.author = pensieve.start_task(conn, pensieve.create_task(conn, "alpha", "build", now=NOW)["id"],
+                                              now=NOW)["id"]
+            opened = owlery.open_request(conn, "alpha", "beta", "review it", parent_task_id=self.author, now=NOW)
+            self.old_request = opened["request"]["id"]
+            conn.execute("INSERT INTO review_rounds(request_id, task_id, reviewer, sha, round, created_at)"
+                         " VALUES (?, ?, 'beta', ?, 1, ?)", (self.old_request, self.author, self.SHA, NOW))
+            self.assertNotIn("slot", [row[1] for row in conn.execute("PRAGMA table_info(review_rounds)")])
+            conn.close()
+        conn = db.connect(path)
+        self.addCleanup(conn.close)
+        return conn
+
+    def test_a_v7_database_migrates_to_8_and_its_rounds_record_no_slot(self):
+        conn = self.v7_database()
+        self.assertEqual((db.SCHEMA_VERSION, db.schema_version(conn)), (8, 8))
+        [old] = capacity.review_rounds(conn, self.author)
+        self.assertIsNone(old["slot"])
+        opened = capacity.open_review_round(conn, self.author, "beta", self.SHA, "review again", slot=1, now=NOW)
+        rows = {row["request_id"]: row["slot"] for row in capacity.review_rounds(conn, self.author)}
+        self.assertEqual(rows, {self.old_request: None, opened["request"]["id"]: 1})
+        self.assertEqual(conn.execute("PRAGMA integrity_check").fetchone()[0], "ok")
+        changes = conn.total_changes
+        self.assertEqual(db.migrate(conn), db.SCHEMA_VERSION)
+        with db.transaction(conn):
+            for statement in db.pending_statements(conn, db.V8):
+                conn.execute(statement)
+        self.assertEqual(conn.total_changes, changes)
+
+    def test_a_round_keeps_the_slot_it_opened_with_and_a_slot_is_in_range(self):
+        conn = self.v7_database()
+        opened = capacity.open_review_round(conn, self.author, "beta", self.SHA, "review again", slot=0, now=NOW)
+        request_id = opened["request"]["id"]
+        for value in (1, None):
+            with self.subTest(value=value), self.assertRaisesRegex(sqlite3.IntegrityError, "keeps its slot"):
+                conn.execute("UPDATE review_rounds SET slot = ? WHERE request_id = ?", (value, request_id))
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "keeps its slot"):
+            conn.execute("UPDATE review_rounds SET slot = 0 WHERE request_id = ?", (self.old_request,))
+        for bad in (-1, db.RUN_SLOT_LIMIT, True, "1", 1.5):
+            with self.subTest(bad=bad), self.assertRaises(ValidationError):
+                capacity.open_review_round(conn, self.author, "beta", self.SHA, "review", slot=bad, now=NOW)
+        spare = owlery.open_request(conn, "alpha", "beta", "spare", parent_task_id=self.author, now=NOW)
+        for bad in (-1, db.RUN_SLOT_LIMIT):
+            with self.subTest(raw=bad), self.assertRaisesRegex(sqlite3.IntegrityError, "CHECK constraint failed"):
+                conn.execute("INSERT INTO review_rounds(request_id, task_id, reviewer, sha, round, created_at, slot)"
+                             " VALUES (?, ?, 'beta', ?, 9, ?, ?)", (spare["request"]["id"], self.author, self.SHA,
+                                                                   NOW, bad))
+        self.assertEqual([row["slot"] for row in capacity.review_rounds(conn, self.author)], [None, 0])
 
 
 class TransactionTests(StoreCase):

@@ -663,6 +663,31 @@ class ManyTaskCapacityTests(RoundCase):
         self.assertNotIn(own, [row["reviewer_task_id"] for row in capacity.stranded_rounds(self.conn, "beta")])
 
 
+class RunSlotCapacityTests(RoundCase):
+    def test_a_stranded_round_names_the_run_slot_its_review_held(self):
+        pensieve.allow_many_tasks(self.conn, "beta", now=NOW)
+        held = self.round(SHAS[0], slot=1)
+        pensieve.start_task(self.conn, held["task"]["id"], now=NOW)
+        queued = self.round(SHAS[1])  # opened while every slot was busy, then started by hand
+        pensieve.start_task(self.conn, queued["task"]["id"], now=NOW)
+        rows = {row["reviewer_task_id"]: row["slot"] for row in capacity.stranded_rounds(self.conn, "beta")}
+        self.assertEqual(rows, {held["task"]["id"]: 1, queued["task"]["id"]: None})
+        self.assertEqual(self.row(held)["slot"], 1)
+
+    def test_running_launches_are_those_with_no_usage_since_a_time(self):
+        capacity.record_launch(self.conn, "alpha", "run-old", "model-x", now=NOW - 7200)
+        capacity.record_launch(self.conn, "alpha", "run-going", "model-x", now=NOW - 60)
+        capacity.record_launch(self.conn, "alpha", "run-done", "model-x", now=NOW - 30)
+        capacity.record_launch_usage(self.conn, "run-done", 1, 1, 0, 0.1, 10, now=NOW)
+        capacity.record_launch(self.conn, "beta", "run-other", "model-y", now=NOW - 60)
+        self.assertEqual(capacity.running_launches(self.conn, "alpha", NOW - 3600), 1)
+        self.assertEqual(capacity.running_launches(self.conn, "alpha", NOW - 9000), 2)
+        self.assertEqual(capacity.running_launches(self.conn, "alpha", NOW), 0)
+        for bad in (-1, "1", None):
+            with self.subTest(bad=bad), self.assertRaises(ValidationError):
+                capacity.running_launches(self.conn, "alpha", bad)
+
+
 class MigrationV4Tests(StoreCase):
     def test_a_v3_database_gains_the_capacity_tables(self):
         path = temp_dir(self) / "state" / "pensieve.db"

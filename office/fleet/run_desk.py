@@ -32,40 +32,52 @@ Ryan runs fleet ollivander, whose first pass gives each unpinned Codex desk its 
 revert pinned to no model is left alone by Ollivander, so the refusal tells Ryan to pin one or hand it back.
 The metrics record the model that did the work: for Claude, the one with the most output tokens in the
 result's modelUsage. While Ollivander's stop file, or the marker of a CLI update in progress, is in
-the office state folder, no headless desk launches. Both are checked again once the desk lock is held,
+the office state folder, no headless desk launches. Both are checked again once the run holds its run slot,
 and the plan (with the model) is built only then, so a run that waited sees the latest state.
 
+A desk runs as many model processes at once as it has run slots (config.RUN_SLOTS): one for most desks, two
+for the reviewers. Each run holds one slot's lock, the desk lock, from before its caps are checked until its
+usage is recorded, and the desk's process inherits it, so a slot stays held while its process runs even if
+this process is killed. A run takes any free slot. Slot 0's lock, work folder and temp folder keep the names
+every desk had before slots; slot n adds .slot<n>. Each slot has its own Codex work folder and private temp
+folder, and the Codex permission profile grants a run only its own, so two runs of a desk never share one.
+The caps belong to the desk, not to a slot: a run holds the desk's launch lock (desk-<desk>.launch.lock, a
+short wait) from its last stop check until its launch row is recorded, so two runs in two slots never both
+pass a cap that only one of them fits under. A desk with more than one slot holds each of its runs still
+going at its per-run budget against its spend cap, since their cost is not in yet.
+
 From that last stop check until the desk's process has exited, the run holds Ollivander's update lock
-shared (config.UPDATE_LOCK), and the process inherits it, like the desk lock, so it stays held if this
-process is killed. Launches never wait on each other, and Ollivander, who holds it exclusively for a whole
-CLI update, never replaces a binary that a run has checked, or that a desk is still running. The run never
-waits for it: while an update holds it, the launch is refused like a stop. Lock order is the review lock,
-then the desk lock, then the update lock; since nothing waits for the update lock while holding another,
-and Ollivander takes no desk lock, no deadlock can form.
+shared (config.UPDATE_LOCK), and the process inherits it, like its slot, so it stays held if this
+process is killed. Launches never wait on each other for it, and Ollivander, who holds it exclusively for a
+whole CLI update, never replaces a binary that a run has checked, or that a desk is still running. The run
+never waits for it: while an update holds it, the launch is refused like a stop. Lock order is the review
+lock, then a run slot, then the desk's launch lock, then the update lock. A run never holds one slot while it
+waits for another, nothing waits for the update lock while holding another lock, and Ollivander takes no slot
+or launch lock, so no deadlock can form.
 
 A desk works in a worktree only when the owl belongs to a request addressed to that desk
-and the request's task is the desk's own. Any other owl runs in the desk's work folder. That task
+and the request's task is the desk's own. Any other owl runs in its slot's work folder. That task
 is the run's task, never "the desk's active task": its launch row names it, and a run whose task
-is closed is refused before it waits for the lock. A desk may hold many tasks, but its runs take
-turns on its desk lock, so its work folder and its private temp folder never serve two processes.
+is closed is refused before it waits for a slot. A desk may hold many tasks, and its runs share its slots,
+so a slot's work folder and private temp folder never serve two processes at once.
 Hermione and Ron (TASK_PAD_DESKS) keep one pad per task, desks/<desk>/pads/<key>.md, keyed by the
-run's task, or for a review round by its author task, so the rounds of one review share a pad. The
-run makes it under the desk lock just before launch, never on a dry run, and the prompt names it in
-one trusted line.
-A run that gives up waiting for its desk lock raises its own event, not a failed-run one.
+run's task, or for a review round by its author task, so the rounds of one review share a pad, and one
+review of a task runs at a time. The run makes it under its slot just before launch, never on a dry run, and
+the prompt names it in one trusted line.
+A run that gives up waiting for a free slot raises its own event, not a failed-run one.
 SIGTERM or SIGHUP, sent to a real run the Owl Post started, ends it through its finally blocks: the desk's
 process is killed, a Claude run records its usage as a killed run, the locks are released, the owl stays in
 the inbox and Ryan gets the failed-run event.
 
 --dry-run prints the argv as JSON and runs nothing. A real run needs the desk to be
 enabled (a plain file named "enabled" in its office folder, made by Ryan), stays under
-the desk's daily run and spend caps plus any bump Ryan made today, and holds the per-desk
-lock (it waits for it, unless its caller already holds it). Under that lock, before the process
-starts, it records a launch that counts toward the daily run cap at once, so a run that is killed or
-interrupted still counts; when the process ends its usage and cost are recorded against that launch. A
-Claude run killed (a timeout or a signal) before its result event has no cost to record, so it is charged its
-per-run budget ceiling (MAX_BUDGET_USD), with the tokens its streamed messages counted: a spend cap may run
-high, never low.
+the desk's daily run and spend caps plus any bump Ryan made today, and holds a run slot of the
+desk (it waits for one, unless its caller already holds one). Under its slot and the desk's launch
+lock, before the process starts, it records a launch that counts toward the daily run cap at once, so a
+run that is killed or interrupted still counts; when the process ends its usage and cost are recorded
+against that launch. A Claude run killed (a timeout or a signal) before its result event has no cost to
+record, so it is charged its per-run budget ceiling (MAX_BUDGET_USD), with the tokens its streamed messages
+counted: a spend cap may run high, never low.
 A refusal by a cap tells Ryan which cap, how
 many requests wait and when it resets, once per cap and effective limit a day; a desk at 80% of
 a cap gets one warning per effective limit a day. A run that exits 0 reads and acks its owl.
@@ -93,7 +105,7 @@ import shutil
 import subprocess
 import sys
 import time
-from typing import Callable, Iterator, Optional
+from typing import Callable, Iterator, NamedTuple, Optional
 
 if __name__ == "__main__" and "/Users/crisryantan/.hogwarts" not in sys.path:
     sys.path.insert(0, "/Users/crisryantan/.hogwarts")
@@ -322,8 +334,37 @@ def ensure_pad(plan: dict) -> None:
             raise safefs.Unsafe("the run's pad is a link or not a plain file")
 
 
-def work_dir(desk: str) -> str:
-    return f"{config.castle_desk_dir(desk)}/{config.CODEX_WORK_DIR}"
+class Slot(NamedTuple):
+    """One run slot of a desk, held: the desk, the slot's number and the fd of its lock."""
+    desk: str
+    index: int
+    fd: int
+
+
+def run_slots(desk: str) -> int:
+    """How many model processes the desk may run at once (config.RUN_SLOTS, one when it is not listed)."""
+    count = config.RUN_SLOTS.get(desk, 1)
+    if type(count) is not int or not 1 <= count <= db.RUN_SLOT_LIMIT:
+        raise FleetError(f"RUN_SLOTS in the fleet config must give each desk 1 to {db.RUN_SLOT_LIMIT} run slots")
+    return count
+
+
+def check_slot(slot: object) -> int:
+    """A run slot number: a whole number from 0 to below db.RUN_SLOT_LIMIT, whatever the desk has now."""
+    if type(slot) is not int or not 0 <= slot < db.RUN_SLOT_LIMIT:
+        raise FleetError("invalid run slot")
+    return slot
+
+
+def slot_name(base: str, slot: int) -> str:
+    """The name of a slot's own lock, work folder or temp folder: base for slot 0, which keeps the name every desk
+    had before run slots, and base.slot<n> for slot n. No desk or temp name has a dot, so no two names meet."""
+    return base if check_slot(slot) == 0 else f"{base}.slot{slot}"
+
+
+def work_dir(desk: str, slot: int = 0) -> str:
+    """The work folder of one run slot of a Codex desk, for a run with no worktree of its own."""
+    return f"{config.castle_desk_dir(desk)}/{slot_name(config.CODEX_WORK_DIR, slot)}"
 
 
 def desk_choice(conn, desk: str) -> dict:
@@ -424,14 +465,16 @@ def xcrun_cache() -> Optional[str]:
     return None if base is None else gitops.check_safe_path(f"{base}/{config.XCRUN_CACHE}", "the xcrun cache")
 
 
-def desk_temp_dir(name: str) -> str:
-    """<user temp>/hogwarts-<name>: the private temp folder for one desk or verify run."""
+def desk_temp_dir(name: str, slot: int = 0) -> str:
+    """<user temp>/hogwarts-<name>: the private temp folder for one desk or verify run, and for run slot n of a
+    desk <user temp>/hogwarts-<name>.slot<n>, so two runs of one desk never share one."""
     if re.fullmatch(r"[a-z0-9][a-z0-9-]{0,63}", name) is None:
         raise FleetError("invalid temp folder name")
     base = user_temp_dir()
     if base is None:
         raise FleetError("macOS reported no per-user temp folder, so no private temp folder can be made")
-    return gitops.check_safe_path(f"{base}/{config.DESK_TEMP_PREFIX}{name}", "a private temp folder")
+    folder = slot_name(f"{config.DESK_TEMP_PREFIX}{name}", slot)
+    return gitops.check_safe_path(f"{base}/{folder}", "a private temp folder")
 
 
 def fresh_temp(path: str) -> str:
@@ -455,7 +498,10 @@ def codex_permissions(desk: str, git_common_dir: Optional[str], extra_reads: tup
 
     Overlapping entries resolve deny, then write, then read. So the outbox stays writable inside the
     readable desk folder, and the office stays denied whatever else is granted. A desk that writes
-    must be given its own temp folder (desk_temp_dir), which becomes its only writable temp.
+    must be given its own temp folder (desk_temp_dir), which becomes its only writable temp. A run's
+    working folder (".") and temp folder are those of its own run slot, so the folders of the desk's other
+    slots are never writable to it: the others' work folders are only read with the desk folder, and their
+    temp folders are not granted at all.
     """
     name = f"fleet-{desk}"
     access = config.CODEX_ACCESS[desk]
@@ -488,13 +534,13 @@ def codex_permissions(desk: str, git_common_dir: Optional[str], extra_reads: tup
 
 
 def _codex_argv(desk: str, task: Optional[dict], brief: str, prompt: str, run_id: str,
-                choice: Optional[dict] = None) -> tuple:
+                choice: Optional[dict] = None, slot: int = 0) -> tuple:
     profile = _text(_read_office(desk, config.CODEX_PROFILE_FILE, config.SETTINGS_MAX_BYTES, "codex profile"),
                     "codex profile")
     worktree = None if task is None else task.get("worktree")
-    cwd = _castle_path(worktree) if worktree else work_dir(desk)
+    cwd = _castle_path(worktree) if worktree else work_dir(desk, slot)
     record = gitops.find_record(cwd) if worktree else None
-    temp = desk_temp_dir(desk) if config.CODEX_ACCESS[desk] == "write" else None
+    temp = desk_temp_dir(desk, slot) if config.CODEX_ACCESS[desk] == "write" else None
     tools = toolchain.for_record(record, temp)
     if temp is not None:
         tools["env"]["TMPDIR"] = temp
@@ -581,10 +627,13 @@ def guard(argv: list) -> None:
         raise FleetError("the binary must be an absolute path")
 
 
-def build_plan(conn, desk: str, owl_id: Optional[str] = None, mcp_job: Optional[str] = None) -> dict:
+def build_plan(conn, desk: str, owl_id: Optional[str] = None, mcp_job: Optional[str] = None, slot: int = 0) -> dict:
+    """The run's plan: its command, folder, environment and model. slot is the run slot it will hold, which picks
+    a Codex desk's work and temp folders; a dry run plans for slot 0."""
     desk = ids.check("desk", desk)
     if desk not in config.HEADLESS_DESKS:
         raise FleetError("run_desk only launches headless desks")
+    check_slot(slot)
     family = "claude" if desk in config.HEADLESS_CLAUDE else "codex"
     row = pensieve.get_desk(conn, desk)
     if row["family"] != family:
@@ -611,14 +660,14 @@ def build_plan(conn, desk: str, owl_id: Optional[str] = None, mcp_job: Optional[
     else:
         if mcp_job is not None:
             raise FleetError("Codex desks take no MCP job")
-        argv, cwd, model, tools, default_model = _codex_argv(desk, task, brief, prompt, run_id, choice)
+        argv, cwd, model, tools, default_model = _codex_argv(desk, task, brief, prompt, run_id, choice, slot)
         env = child_env(tools["path"], tools["env"])
         temp = tools["temp"]
     guard(argv)
     return {"desk": desk, "family": family, "owl_id": owl_id, "run_id": run_id, "model": model,
             "effort": choice["effort"] if choice["model"] or family == "claude" else None,
             "change_id": choice["change_id"], "default_model": default_model, "cwd": cwd, "argv": argv, "env": env,
-            "temp": temp, "task_id": None if task is None else task["id"],
+            "temp": temp, "slot": slot, "task_id": None if task is None else task["id"],
             "task_status": None if task is None else task["status"], "pad": pad, "pad_key": key}
 
 
@@ -626,9 +675,25 @@ def build_plan(conn, desk: str, owl_id: Optional[str] = None, mcp_job: Optional[
 
 
 def cap_status(conn, desk: str, now: Optional[int] = None) -> dict:
-    """This cap day's runs and spend for one desk against its caps plus Ryan's bumps."""
-    return capacity.cap_status(conn, desk, config.DAILY_RUN_CAP[desk], config.DAILY_SPEND_CAP_USD.get(desk),
-                               common.now_stamp(now), config.CAP_RESET_UTC_SECONDS)
+    """This cap day's runs and spend for one desk against its caps plus Ryan's bumps.
+
+    A desk with more than one run slot can have runs going in its other slots whose cost is not in yet. Each
+    launch with no usage that is still inside the running window is held at the desk's per-run budget
+    (spend_held_usd), the most it can cost, and counts toward the spend cap with what was spent, so two slots
+    never pass a spend cap that one run at a time would have stopped. Read in one snapshot with the rest."""
+    ts = common.now_stamp(now)
+    budget = config.MAX_BUDGET_USD.get(desk)
+    with db.snapshot(conn):
+        status = capacity.cap_status(conn, desk, config.DAILY_RUN_CAP[desk], config.DAILY_SPEND_CAP_USD.get(desk),
+                                     ts, config.CAP_RESET_UTC_SECONDS)
+        going = 0
+        if status["spend_limit_usd"] is not None and budget is not None and run_slots(desk) > 1:
+            going = capacity.running_launches(conn, desk, ts - config.RUNNING_WINDOW_SECONDS)
+    held = round(going * float(budget), 6) if going else 0.0
+    status["spend_held_usd"] = held
+    if status["reached"] is None and held and status["spend_used_usd"] + held >= status["spend_limit_usd"]:
+        status["reached"] = "spend"
+    return status
 
 
 def over_daily_cap(conn, desk: str, now: Optional[int] = None) -> Optional[str]:
@@ -638,10 +703,17 @@ def over_daily_cap(conn, desk: str, now: Optional[int] = None) -> Optional[str]:
     return None if reached is None else CAP_REASONS[reached]
 
 
+def _spent(status: dict) -> float:
+    """What a spend cap counts: the recorded spend plus what runs still going in other slots hold."""
+    return round(status["spend_used_usd"] + status.get("spend_held_usd", 0.0), 6)
+
+
 def _used_text(status: dict, cap: str) -> str:
     if cap == "runs":
         return f"{status['runs_used']} of {status['runs_limit']} runs"
-    return f"${status['spend_used_usd']:.2f} of ${status['spend_limit_usd']:.2f}"
+    held = status.get("spend_held_usd", 0.0)
+    going = f", ${held:.2f} of it held for runs still going" if held else ""
+    return f"${_spent(status):.2f} of ${status['spend_limit_usd']:.2f}{going}"
 
 
 def _limit_key(status: dict, cap: str) -> str:
@@ -677,7 +749,7 @@ def warn_near_cap(conn, desk: str, now: Optional[int] = None, held: Optional[lis
     status = cap_status(conn, desk, now)
     caps = [("runs", status["runs_used"], status["runs_limit"])]
     if status["spend_limit_usd"] is not None:
-        caps.append(("spend", status["spend_used_usd"], status["spend_limit_usd"]))
+        caps.append(("spend", _spent(status), status["spend_limit_usd"]))
     warned = []
     for cap, used, limit in caps:
         if limit <= 0 or used < round(config.CAP_WARN_FRACTION * limit, 6):
@@ -1121,16 +1193,64 @@ def require_castle_dir(path: str) -> None:
         pass
 
 
+def slot_lock_name(desk: str, slot: int) -> str:
+    """The lock file of one run slot: desk-<desk>.lock for slot 0, the desk lock of old, desk-<desk>.slot<n>.lock
+    for slot n."""
+    return slot_name(f"desk-{ids.check('desk', desk)}", slot) + ".lock"
+
+
 @contextlib.contextmanager
-def desk_lock(desk: str, wait: bool = True) -> Iterator[int]:
-    """The per-desk lock a run holds from its cap check until its usage is recorded, yielding its fd. The
-    desk's process inherits that fd, so the lock stays held while it runs even if this process is killed.
-    wait=False raises safefs.Busy at once when someone else holds it, instead of waiting for them."""
-    desk = ids.check("desk", desk)
+def slot_lock(desk: str, slot: int) -> Iterator[Slot]:
+    """One named run slot of the desk, taken without waiting, yielding the Slot; safefs.Busy when another
+    process holds it, or this one through another fd. The slot may be one the desk no longer has (RUN_SLOTS made
+    smaller), since a slot a review round recorded is tried by its own lock, never by today's count."""
+    name = slot_lock_name(desk, slot)
     with safefs.opened_dir(config.OFFICE_ROOT, "locks", create=True) as locks_fd, \
-            safefs.held_lock(locks_fd, f"desk-{desk}.lock", blocking=wait,
-                             timeout=config.DESK_LOCK_WAIT_SECONDS if wait else None) as lock_fd:
-        yield lock_fd
+            safefs.held_lock(locks_fd, name, blocking=False) as lock_fd:
+        yield Slot(desk, slot, lock_fd)
+
+
+@contextlib.contextmanager
+def desk_lock(desk: str, wait: bool = True) -> Iterator[Slot]:
+    """Any free run slot of the desk, held by a run from its cap check until its usage is recorded, yielding
+    the Slot. The desk's process inherits its fd, so the slot stays held while it runs even if this process is
+    killed. Slots are tried in order, so a desk with one slot takes the desk lock of old. wait=False raises
+    safefs.Busy at once when every slot is held; otherwise the run tries again every half second for at most
+    DESK_LOCK_WAIT_SECONDS. It never holds one slot while it waits for another."""
+    desk = ids.check("desk", desk)
+    count = run_slots(desk)
+    deadline = time.monotonic() + config.DESK_LOCK_WAIT_SECONDS
+    with contextlib.ExitStack() as stack:
+        held = None
+        while held is None:
+            for index in range(count):
+                try:
+                    held = stack.enter_context(slot_lock(desk, index))
+                    break
+                except safefs.Busy:
+                    continue
+            if held is None:
+                if not wait or time.monotonic() >= deadline:
+                    raise safefs.Busy(f"every run slot of {desk} is held")
+                time.sleep(0.5)
+        yield held
+
+
+@contextlib.contextmanager
+def launch_lock(desk: str) -> Iterator[None]:
+    """The desk's launch lock, held by a run from its last stop check until its launch row is recorded, never
+    while its process runs. Runs in the desk's other slots wait for it, at most DESK_LAUNCH_WAIT_SECONDS, so two
+    of them never both read the caps before either launch counts. Its fd is never handed to a process."""
+    desk = ids.check("desk", desk)
+    with contextlib.ExitStack() as stack:
+        locks_fd = stack.enter_context(safefs.opened_dir(config.OFFICE_ROOT, "locks", create=True))
+        try:
+            stack.enter_context(safefs.held_lock(locks_fd, f"desk-{desk}.launch.lock", blocking=True,
+                                                 timeout=config.DESK_LAUNCH_WAIT_SECONDS))
+        except safefs.Busy:
+            raise FleetError(f"another run of {desk} took more than {config.DESK_LAUNCH_WAIT_SECONDS} seconds to"
+                             " launch, so this one did not start") from None
+        yield
 
 
 def blocked_model(plan: dict, conn=None) -> Optional[str]:
@@ -1210,46 +1330,55 @@ def launch_gate() -> Iterator[int]:
 
 
 def run(conn, desk: str, owl_id: str, mcp_job: Optional[str] = None, now: Optional[int] = None,
-        on_start: Optional[Callable[[], None]] = None, lock_held: bool = False, keep_fds: tuple = (),
+        on_start: Optional[Callable[[], None]] = None, lock_held: Optional[Slot] = None, keep_fds: tuple = (),
         shadow: bool = False) -> dict:
-    """Run one desk on one owl. on_start is called under the desk lock once the caps allow the run,
-    just before it launches, so a caller's own bookkeeping never runs for a refused run. lock_held
-    means the caller already holds this desk's lock (the review script does, from before its round
-    opens until its reviewer task closes) and passes its fd in keep_fds. The desk's process inherits
-    every fd in keep_fds, so the locks they hold outlive this process if it is killed mid-run. shadow is
-    the patrol's shadow mode: the cap, near-cap and vendor-limit notes go in the result's held list, not
-    to Ryan (a cap refusal's own reason is the Capped error), and the caps and accounting are unchanged."""
+    """Run one desk on one owl. on_start is called under the run's slot and the desk's launch lock once the
+    caps allow the run, just before its launch is recorded, so a caller's own bookkeeping never runs for a
+    refused run. lock_held is the Slot of this desk the caller already holds (the review script holds one, from
+    before its round opens until its reviewer task closes); without it the run takes a free slot itself. The
+    desk's process inherits every fd in keep_fds and its slot's, so the locks they hold outlive this process if
+    it is killed mid-run. shadow is the patrol's shadow mode: the cap, near-cap and vendor-limit notes go in the
+    result's held list, not to Ryan (a cap refusal's own reason is the Capped error), and the caps and accounting
+    are unchanged."""
     notes = [] if shadow else None
     desk = ids.check("desk", desk)
+    if lock_held is not None and (not isinstance(lock_held, Slot) or lock_held.desk != desk):
+        raise FleetError("lock_held must be the run slot of this desk that the caller holds")
     if not is_enabled(desk):
         raise FleetError(f"{desk} is not enabled; Ryan enables a headless desk by hand")
     _check_stop()
-    # Refuse a bad desk or owl, a closed task, or a blocked model, before waiting on the lock.
+    # Refuse a bad desk or owl, a closed task, or a blocked model, before waiting for a slot.
     early = build_plan(conn, desk, owl_id, mcp_job)
     _refuse_closed(early)
     _refuse_blocked(conn, early, now)
     with contextlib.ExitStack() as held:
-        if not lock_held:
-            keep_fds = (*keep_fds, held.enter_context(desk_lock(desk)))
-        # From the last stop check until the process has exited, no CLI update can start (see launch_gate).
-        keep_fds = (*keep_fds, held.enter_context(launch_gate()))
-        # The wait can be long: check the stop again and plan now, so the model is the one chosen last.
-        _check_stop()
-        cap = over_daily_cap(conn, desk, now)
-        if cap is not None:
-            report_cap(conn, desk, now, notes)
-            raise Capped(cap)
-        plan = build_plan(conn, desk, owl_id, mcp_job)
-        _refuse_closed(plan)
-        _refuse_blocked(conn, plan, now)
-        if plan["cwd"] == work_dir(plan["desk"]):
-            with safefs.opened_dir(config.CASTLE_ROOT, "desks", plan["desk"], config.CODEX_WORK_DIR, create=True):
-                pass
-        require_castle_dir(plan["cwd"])
-        if plan["pad"] is not None:
-            ensure_pad(plan)
-        if on_start is not None:
-            on_start()
+        slot = lock_held if lock_held is not None else held.enter_context(desk_lock(desk))
+        # The process always inherits its slot, even from a caller that left the fd out of keep_fds.
+        keep_fds = tuple(dict.fromkeys((*keep_fds, slot.fd)))
+        with launch_lock(desk):
+            # From the last stop check until the process has exited, no CLI update can start (see launch_gate).
+            keep_fds = (*keep_fds, held.enter_context(launch_gate()))
+            # The wait can be long: check the stop again and plan now, so the model is the one chosen last.
+            _check_stop()
+            cap = over_daily_cap(conn, desk, now)
+            if cap is not None:
+                report_cap(conn, desk, now, notes)
+                raise Capped(cap)
+            plan = build_plan(conn, desk, owl_id, mcp_job, slot.index)
+            _refuse_closed(plan)
+            _refuse_blocked(conn, plan, now)
+            if plan["cwd"] == work_dir(plan["desk"], slot.index):
+                with safefs.opened_dir(config.CASTLE_ROOT, "desks", plan["desk"],
+                                       slot_name(config.CODEX_WORK_DIR, slot.index), create=True):
+                    pass
+            require_castle_dir(plan["cwd"])
+            if plan["pad"] is not None:
+                ensure_pad(plan)
+            if on_start is not None:
+                on_start()
+            # Counted from here, before the process starts: a run killed or interrupted below still uses a run.
+            # The launch lock ends here, so the next run of the desk reads the caps with this launch in them.
+            capacity.record_launch(conn, desk, plan["run_id"], plan["model"], task_id=plan.get("task_id"), now=now)
         result = _launch(conn, plan, now, keep_fds)
     warn_near_cap(conn, plan["desk"], now, notes)
     if result["cap_source"] is not None:
@@ -1312,12 +1441,11 @@ def _record_interrupted(conn, plan: dict, run_fd: int, started: float, now: Opti
 
 
 def _launch(conn, plan: dict, now: Optional[int], keep_fds: tuple = ()) -> dict:
-    """Start the planned run and record what it did. The process inherits every fd in keep_fds."""
+    """Start the planned run, whose launch run() has recorded, and record what it did. The process inherits every
+    fd in keep_fds."""
     desk, run_id = plan["desk"], plan["run_id"]
-    # Counted from here, before the process starts: a run killed or interrupted below still uses a run.
-    capacity.record_launch(conn, desk, run_id, plan["model"], task_id=plan.get("task_id"), now=now)
     if plan.get("temp"):
-        fresh_temp(plan["temp"])  # here, not in build_plan, so a dry run never empties a live run's folder
+        fresh_temp(plan["temp"])  # here, under its slot, not in build_plan: a dry run never empties a live run's folder
     with safefs.opened_dir(config.OFFICE_ROOT, "runs", desk, create=True) as run_fd:
         out_fd = safefs.create_new(run_fd, f"{run_id}.out")
         err_fd = safefs.create_new(run_fd, f"{run_id}.err")

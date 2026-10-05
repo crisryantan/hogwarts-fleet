@@ -15,7 +15,7 @@ from hogwarts import capacity, owlery, pensieve
 from tests.support import DAY, NOW
 
 from fleet import config, run_desk
-from tests_fleet.support import FakeChild, fake_children
+from tests_fleet.support import FakeChild, every_slot, fake_children
 from tests_fleet.test_run_desk import RunDeskCase
 
 DAY_START = NOW - NOW % DAY
@@ -518,7 +518,7 @@ class KilledRunSpendTests(CapCase):
         # The estimate is marked in the store, since the interrupted run never printed a result to carry it.
         self.assertEqual(self.spend_unknown_markers("hermione"), [f"spend-unknown:{launch['run_id']}"])
         # Both locks are free again, the owl waits for another run, and Ryan is told.
-        with run_desk.desk_lock("hermione", wait=False), run_desk.launch_gate():
+        with every_slot("hermione"), run_desk.launch_gate():
             pass
         self.assertEqual([owl["id"] for owl in owlery.inbox(self.conn, "hermione")], [owl_id])
         self.assertEqual(len(self.events_of("rundesk.failed")), 1)
