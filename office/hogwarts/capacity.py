@@ -273,14 +273,12 @@ def list_launches(conn: Conn, desk: Optional[str] = None) -> list[dict]:
                         (desk, desk))
 
 
-def running_launches(conn: Conn, desk: str, since: int) -> int:
-    """How many of the desk's launches since that time have no usage recorded yet: runs still going, or killed
-    before they could record it. A desk with several run slots holds their cost against its spend cap until then."""
+def open_launches(conn: Conn, desk: str) -> list[dict]:
+    """The desk's launches with no usage recorded yet, oldest first: runs still going, or ended before they could
+    record it. A desk with several run slots holds their cost against its spend cap until it is recorded."""
     desk = pensieve.get_desk(conn, ids.check("desk", desk))["name"]
-    since = ids.check_int(since, "since", maximum=ids.MAX_TIME)
-    row = db.fetch_one(conn, "SELECT COUNT(*) AS found FROM run_launches WHERE desk = ? AND metric_id IS NULL"
-                             " AND launched_at > ?", (desk, since))
-    return row["found"]
+    return db.fetch_all(conn, "SELECT run_id, launched_at FROM run_launches WHERE desk = ? AND metric_id IS NULL"
+                              " ORDER BY launched_at, rowid", (desk,))
 
 
 def waiting_requests(conn: Conn, desk: str) -> list[dict]:
@@ -514,6 +512,13 @@ def review_task_ids(conn: Conn) -> set:
     rows = db.fetch_all(conn, "SELECT requests.task_id FROM review_rounds JOIN requests"
                               " ON requests.id = review_rounds.request_id WHERE requests.task_id IS NOT NULL")
     return {row["task_id"] for row in rows}
+
+
+def request_round(conn: Conn, request_id: str) -> Optional[dict]:
+    """The review round a request opened, with its author task and the run slot its review recorded, or None for
+    any other request."""
+    return db.fetch_one(conn, "SELECT request_id, task_id, reviewer, slot FROM review_rounds WHERE request_id = ?",
+                        (ids.check("request", request_id),))
 
 
 def round_author(conn: Conn, reviewer_task_id: str) -> Optional[str]:

@@ -9,20 +9,27 @@ the real run_desk.run; no model ever runs.
 """
 from __future__ import annotations
 
+import contextlib
+import fcntl
+import io
 import json
 import os
 import re
+import signal
 import subprocess
 import threading
+import time
 import unittest
+from pathlib import Path
 from unittest import mock
 
-from hogwarts import capacity, db, pensieve
+from hogwarts import capacity, cli, db, owlery, pensieve
+from hogwarts.errors import StoreError
 from tests.support import NOW
 
 from fleet import config, review, run_desk, safefs
 from fleet.safefs import FleetError
-from tests_fleet.support import IN_KIT, ONLY_IN_KIT, every_slot, fake_children, kit_setting
+from tests_fleet.support import IN_KIT, ONLY_IN_KIT, FleetCase, every_slot, fake_children, kit_setting
 from tests_fleet.test_many_tasks import ManyCase
 from tests_fleet.test_review_rounds import queued_text
 from tests_fleet.test_run_desk import RunDeskCase
@@ -236,6 +243,40 @@ class ConcurrentReviewTests(ManyCase):
         review.review_own(self.conn, str(self.repo), title="i", fetch=False)
         self.assertEqual(pensieve.get_task(self.conn, hand["reviewer_task_id"])["close_reason"], "superseded")
 
+    def round_owl(self, task_id: str) -> str:
+        """The request owl of the task's last review round, delivered to Moody's inbox."""
+        [owl] = [owl for owl in owlery.request_owls(self.conn, self.round_of(task_id)["request_id"])
+                 if owl["kind"] == "request"]
+        return owl["id"]
+
+    def test_a_rounds_owl_runs_only_from_its_own_review_in_its_rounds_slot(self):
+        live_sha = self.new_commit("a", held=True)
+        live = self.review_in_background("a")
+        live_task = self.task_of(live_sha)
+        owl_id = self.round_owl(live_task)
+        self.assertEqual(self.round_of(live_task)["slot"], 0)
+        # By hand, the way the Owl Post's spawn runs it too: refused before it waits for a slot, with no event.
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = run_desk.main(["moody", "--owl", owl_id])
+        self.assertEqual(code, 1)
+        self.assertIn(f"is a round of the review of task {live_task}, and only that review runs it", err.getvalue())
+        # The way a patrol or the portrait calls run, and with slot 1, free and held, which is not the round's.
+        with run_desk.slot_lock("moody", 1) as other:
+            for held in (None, other):
+                with self.subTest(held=held), self.assertRaisesRegex(run_desk.ReviewOwl, live_task):
+                    run_desk.run(self.conn, "moody", owl_id, now=NOW, lock_held=held)
+        self.assertEqual(len(capacity.list_launches(self.conn, "moody")), 1)
+        self.assertEqual([event for event in self.events() if event["kind"].startswith("rundesk.")], [])
+        self.assertEqual(self.finish(live_sha, live)["verdict"], "CHANGES")
+        # A round queued while every slot was busy recorded no slot, so even a caller holding slot 0 never runs it.
+        self.new_commit("q")
+        with every_slot("moody"):
+            queued = review.review_own(self.conn, str(self.repo), title="q", fetch=False)
+        with run_desk.slot_lock("moody", 0) as slot, self.assertRaises(run_desk.ReviewOwl):
+            run_desk.run(self.conn, "moody", self.round_owl(queued["task_id"]), now=NOW, lock_held=slot)
+        self.assertEqual(len(capacity.list_launches(self.conn, "moody")), 1)
+
     def test_a_reviewer_task_is_never_closed_while_its_slot_is_held(self):
         # The live review holds slot 0. Every review that starts meanwhile, in slot 1, finds its task active with
         # no verdict, and leaves it alone each time.
@@ -342,6 +383,192 @@ class SlotCapTests(RunDeskCase):
         capacity.record_launch(self.conn, "ron", "run-" + "e" * 16, "haiku", now=NOW - 60)
         status = run_desk.cap_status(self.conn, "ron", NOW)
         self.assertEqual((status["spend_held_usd"], status["reached"]), (0.0, None))
+        # It takes no run lock either, and a lock file left beside its runs is never read or charged.
+        self.orphan("run-" + "f" * 16, self.reported(0.3), desk="ron")
+        owl_id, _ = self.request("ron")
+        self.enable("ron")
+        with fake_children(self.locks_seen("ron")):
+            run_desk.run(self.conn, "ron", owl_id, now=NOW)
+        self.assertEqual(self.seen_locks, [("run-" + "f" * 16 + ".lock", False, False)])
+        self.assertEqual(run_desk.reconcile_launches(self.conn, "ron", NOW), [])
+        self.assertEqual(self.run_locks("ron"), ["run-" + "f" * 16 + ".lock"])
+        self.assertEqual(run_desk.cap_status(self.conn, "ron", NOW)["spend_held_usd"], 0.0)
+
+    @staticmethod
+    def reported(cost: float) -> bytes:
+        return json.dumps({"type": "result", "subtype": "success", "is_error": False, "total_cost_usd": cost,
+                           "result": "done"}).encode() + b"\n"
+
+    @staticmethod
+    def streamed() -> bytes:
+        """What a Claude run killed before its result event wrote: one assistant message and its usage."""
+        usage = {"input_tokens": 7, "output_tokens": 3}
+        return json.dumps({"type": "assistant", "message": {"id": "m1", "usage": usage}}).encode() + b"\n"
+
+    def run_locks(self, desk: str = "hermione") -> list:
+        folder = self.office / "runs" / desk
+        return sorted(name for name in os.listdir(folder) if name.endswith(".lock")) if folder.exists() else []
+
+    def orphan(self, run_id: str, output: bytes, desk: str = "hermione",
+               launched_at: int = NOW - config.RUNNING_WINDOW_SECONDS - 600) -> Path:
+        """A run whose launcher was killed and whose process has ended since: its launch has no usage, and its
+        output and its run lock file, which no process holds now, are left in the runs folder."""
+        capacity.record_launch(self.conn, desk, run_id, "opus" if desk == "hermione" else "haiku", now=launched_at)
+        folder = self.office / "runs" / desk
+        folder.mkdir(parents=True, exist_ok=True, mode=0o700)
+        self.write_file(folder / f"{run_id}.out", output)
+        return self.write_file(folder / run_desk.run_lock_name(run_id), "")
+
+    def locks_seen(self, desk: str, cost: float = 0.25):
+        """A desk process that notes the run lock files it inherited and whether each is held, then reports cost."""
+        self.seen_locks = []
+
+        def desk_process(argv, **kwargs):
+            inherited = {os.fstat(fd).st_ino for fd in kwargs["pass_fds"]}
+            for name in self.run_locks(desk):
+                path = self.office / "runs" / desk / name
+                with open(path, "rb") as probe:
+                    try:
+                        fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        held = False
+                    except BlockingIOError:
+                        held = True
+                self.seen_locks.append((name, os.stat(path).st_ino in inherited, held))
+            os.write(kwargs["stdout"], self.reported(cost))
+            return subprocess.CompletedProcess(argv, 0)
+
+        return desk_process
+
+    def test_each_run_holds_its_own_lock_and_hands_it_to_its_process_until_its_usage_is_in(self):
+        owl_id, _ = self.request("hermione")
+        with fake_children(self.locks_seen("hermione")):
+            result = run_desk.run(self.conn, "hermione", owl_id, now=NOW)
+        self.assertEqual(self.seen_locks, [(f"{result['run_id']}.lock", True, True)])
+        self.assertEqual((result["cost_usd"], self.run_locks()), (0.25, []))
+        # A run killed by a signal records its usage at its budget, so its lock goes as well.
+        second, _ = self.request("hermione")
+
+        def interrupted(argv, **kwargs):
+            os.write(kwargs["stdout"], self.streamed())
+            raise KeyboardInterrupt
+
+        with fake_children(interrupted), self.assertRaises(KeyboardInterrupt):
+            run_desk.run(self.conn, "hermione", second, now=NOW)
+        self.assertEqual(self.run_locks(), [])
+        self.assertEqual([launch["metric_id"] is not None for launch in capacity.list_launches(self.conn, "hermione")],
+                         [True, True])
+        # A run whose process never started spent nothing: no lock is left, and only the running window holds it.
+        third, _ = self.request("hermione")
+        with mock.patch.object(run_desk, "start_child", side_effect=OSError("no such binary")), \
+                self.assertRaises(OSError):
+            run_desk.run(self.conn, "hermione", third, now=NOW)
+        self.assertEqual(self.run_locks(), [])
+        later = NOW + config.RUNNING_WINDOW_SECONDS + 1
+        self.assertEqual(run_desk.reconcile_launches(self.conn, "hermione", later), [])
+        self.assertEqual(run_desk.cap_status(self.conn, "hermione", later)["spend_held_usd"], 0.0)
+
+    def test_a_run_whose_usage_was_not_recorded_holds_its_budget_until_the_next_cap_check_records_it(self):
+        budget = float(config.MAX_BUDGET_USD["hermione"])
+        owl_id, _ = self.request("hermione")
+        with fake_children(self.locks_seen("hermione", 0.25)), self.assertRaises(StoreError), \
+                mock.patch.object(capacity, "record_launch_usage", side_effect=StoreError("the store is busy")):
+            run_desk.run(self.conn, "hermione", owl_id, now=NOW)
+        [launch] = capacity.list_launches(self.conn, "hermione")
+        self.assertEqual(self.run_locks(), [f"{launch['run_id']}.lock"])
+        # Long past the running window its budget is still held, and the next launch decision records what it said.
+        later = NOW + config.RUNNING_WINDOW_SECONDS + 600
+        self.assertEqual(run_desk.cap_status(self.conn, "hermione", later)["spend_held_usd"], budget)
+        self.assertIsNone(run_desk.over_daily_cap(self.conn, "hermione", later))
+        status = run_desk.cap_status(self.conn, "hermione", later)
+        self.assertEqual((status["spend_used_usd"], status["spend_held_usd"], self.run_locks()), (0.25, 0.0, []))
+
+    def test_an_ended_orphan_holds_its_budget_until_its_spend_is_recorded(self):
+        limit = config.DAILY_SPEND_CAP_USD["hermione"]
+        budget = float(config.MAX_BUDGET_USD["hermione"])
+        pensieve.add_metric(self.conn, "hermione", "run-earlier", "opus", 1, 1, 0, limit - 3.0, 10, ts=NOW - 60)
+        cut_short, finished, going = ("run-" + digit * 16 for digit in "abc")
+        self.orphan(cut_short, self.streamed())
+        self.orphan(finished, self.reported(0.3))
+        still = self.orphan(going, self.streamed())
+        # All three are long past the running window. Each lock file left holds its run's budget.
+        status = run_desk.cap_status(self.conn, "hermione", NOW)
+        self.assertEqual((status["spend_held_usd"], status["reached"]), (3 * budget, "spend"))
+        with open(still, "rb") as process:
+            fcntl.flock(process, fcntl.LOCK_EX)  # the third run's process still holds its lock
+            self.assertEqual(run_desk.over_daily_cap(self.conn, "hermione", NOW), "daily spend cap reached")
+            status = run_desk.cap_status(self.conn, "hermione", NOW)
+            self.assertEqual((status["spend_used_usd"], status["spend_held_usd"]),
+                             (round(limit - 3.0 + budget + 0.3, 6), budget))
+            self.assertEqual(self.run_locks(), [f"{going}.lock"])
+        # The run cut short is charged its budget as an estimate; the one that finished, what it reported.
+        costs = {row["run_id"]: row["cost_usd"] for row in self.conn.execute("SELECT run_id, cost_usd FROM metrics")}
+        self.assertEqual((costs[cut_short], costs[finished]), (budget, 0.3))
+        [unknown] = [event for event in self.events() if event["kind"] == capacity.SPEND_UNKNOWN_KIND]
+        self.assertIn(cut_short, unknown["summary"])
+        # Once its process ends, the next launch decision records the third too, and nothing is held.
+        self.assertEqual(run_desk.reconcile_launches(self.conn, "hermione", NOW), [going])
+        status = run_desk.cap_status(self.conn, "hermione", NOW)
+        self.assertEqual((status["spend_used_usd"], status["spend_held_usd"], status["reached"]),
+                         (round(limit - 3.0 + 2 * budget + 0.3, 6), 0.0, "spend"))
+        self.assertEqual((self.run_locks(), capacity.open_launches(self.conn, "hermione")), ([], []))
+
+    def test_castle_desk_caps_and_a_bump_count_what_runs_still_going_hold(self):
+        limit = config.DAILY_SPEND_CAP_USD["hermione"]
+        budget = float(config.MAX_BUDGET_USD["hermione"])
+        pensieve.add_metric(self.conn, "hermione", "run-earlier", "opus", 1, 1, 0, limit - budget + 0.5, 10,
+                            ts=NOW - 60)
+        capacity.record_launch(self.conn, "hermione", "run-" + "d" * 16, "opus", now=NOW - 60)  # going in a slot
+        launcher = run_desk.cap_status(self.conn, "hermione", NOW)
+        with mock.patch.object(cli, "_clock", return_value=NOW):
+            rows = {row["desk"]: row for row in cli._desk_caps(self.conn, mock.Mock())}
+            bumped = cli._desk_cap(self.conn, mock.Mock(desk="hermione", runs=None, spend=5.0))
+        self.assertEqual(rows["hermione"], launcher)
+        self.assertEqual((launcher["spend_held_usd"], launcher["reached"]), (budget, "spend"))
+        self.assertEqual((rows["ron"]["spend_held_usd"], rows["ron"]["reached"]), (0.0, None))
+        caps = bumped["caps"]
+        self.assertEqual((caps["spend_limit_usd"], caps["spend_held_usd"], caps["reached"]),
+                         (limit + 5.0, budget, None))
+
+
+class OrphanRunTests(FleetCase):
+    """A launcher killed outright leaves its desk process running, holding the run's own lock it inherited. Real
+    processes: a Python holder and /bin/sleep, never a desk CLI."""
+
+    def test_a_killed_launchers_run_holds_its_budget_while_its_process_runs_then_its_spend_is_recorded(self):
+        run_id = "run-" + "c" * 16
+        capacity.record_launch(self.conn, "hermione", run_id, "opus", now=NOW - config.RUNNING_WINDOW_SECONDS - 600)
+        holder = ("import os, subprocess, sys\n"
+                  "sys.path.insert(0, sys.argv[1])\n"
+                  "from fleet import config, run_desk\n"
+                  "config.OFFICE_ROOT = sys.argv[2]\n"
+                  "with run_desk.run_lock('hermione', sys.argv[3]) as own:\n"
+                  "    own.keep = True\n"
+                  "    child = subprocess.Popen(['/bin/sleep', '60'], pass_fds=(own.fd,),\n"
+                  "                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\n"
+                  "    print(child.pid, flush=True)\n"
+                  "    os.kill(os.getpid(), 9)\n")
+        root = str(Path(__file__).resolve().parents[1])
+        done = subprocess.run(["/usr/bin/env", "-i", "/usr/bin/python3", "-I", "-B", "-X", "pycache_prefix=/var/empty",
+                               "-c", holder, root, config.OFFICE_ROOT, run_id], capture_output=True, timeout=60,
+                              check=False)
+        self.assertEqual(done.returncode, -signal.SIGKILL, done.stderr)
+        process = int(done.stdout.decode().strip())
+        budget = float(config.MAX_BUDGET_USD["hermione"])
+        try:
+            # Its process still runs, long past the running window: its budget stays held and nothing is recorded.
+            self.assertEqual(run_desk.reconcile_launches(self.conn, "hermione", NOW), [])
+            self.assertEqual(run_desk.cap_status(self.conn, "hermione", NOW)["spend_held_usd"], budget)
+            result = {"type": "result", "subtype": "success", "is_error": False, "total_cost_usd": 0.4, "result": "ok"}
+            self.write_file(self.office / "runs" / "hermione" / f"{run_id}.out", json.dumps(result) + "\n")
+        finally:
+            os.kill(process, signal.SIGKILL)
+        deadline = time.monotonic() + 30
+        while not run_desk.reconcile_launches(self.conn, "hermione", NOW):
+            self.assertLess(time.monotonic(), deadline, "the run's lock was never freed after its process ended")
+            time.sleep(0.1)
+        status = run_desk.cap_status(self.conn, "hermione", NOW)
+        self.assertEqual((status["spend_used_usd"], status["spend_held_usd"]), (0.4, 0.0))
+        self.assertEqual(os.listdir(self.office / "runs" / "hermione"), [f"{run_id}.out"])
 
 
 class SlotFolderTests(RunDeskCase):

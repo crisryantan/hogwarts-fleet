@@ -674,18 +674,24 @@ class RunSlotCapacityTests(RoundCase):
         self.assertEqual(rows, {held["task"]["id"]: 1, queued["task"]["id"]: None})
         self.assertEqual(self.row(held)["slot"], 1)
 
-    def test_running_launches_are_those_with_no_usage_since_a_time(self):
-        capacity.record_launch(self.conn, "alpha", "run-old", "model-x", now=NOW - 7200)
+    def test_open_launches_are_the_desks_launches_with_no_usage_oldest_first(self):
         capacity.record_launch(self.conn, "alpha", "run-going", "model-x", now=NOW - 60)
+        capacity.record_launch(self.conn, "alpha", "run-old", "model-x", now=NOW - 7200)
         capacity.record_launch(self.conn, "alpha", "run-done", "model-x", now=NOW - 30)
         capacity.record_launch_usage(self.conn, "run-done", 1, 1, 0, 0.1, 10, now=NOW)
         capacity.record_launch(self.conn, "beta", "run-other", "model-y", now=NOW - 60)
-        self.assertEqual(capacity.running_launches(self.conn, "alpha", NOW - 3600), 1)
-        self.assertEqual(capacity.running_launches(self.conn, "alpha", NOW - 9000), 2)
-        self.assertEqual(capacity.running_launches(self.conn, "alpha", NOW), 0)
-        for bad in (-1, "1", None):
-            with self.subTest(bad=bad), self.assertRaises(ValidationError):
-                capacity.running_launches(self.conn, "alpha", bad)
+        self.assertEqual(capacity.open_launches(self.conn, "alpha"), [{"run_id": "run-old", "launched_at": NOW - 7200},
+                                                                      {"run_id": "run-going", "launched_at": NOW - 60}])
+        self.assertEqual(capacity.open_launches(self.conn, "beta"), [{"run_id": "run-other", "launched_at": NOW - 60}])
+
+    def test_request_round_names_the_round_a_request_opened(self):
+        opened = self.round(SHAS[0], slot=1)
+        self.assertEqual(capacity.request_round(self.conn, opened["request"]["id"]),
+                         {"request_id": opened["request"]["id"], "task_id": self.author, "reviewer": "beta", "slot": 1})
+        other = owlery.open_request(self.conn, "alpha", "beta", "something else", body="not a review")
+        self.assertIsNone(capacity.request_round(self.conn, other["request"]["id"]))
+        with self.assertRaises(ValidationError):
+            capacity.request_round(self.conn, "tk_" + "0" * 16)
 
 
 class MigrationV4Tests(StoreCase):

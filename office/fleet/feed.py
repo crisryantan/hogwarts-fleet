@@ -7,8 +7,11 @@ About once a second it prints what is new, one line each, stamped with local HH:
 owls to or from the desk (kind and subject, never the body), the start and end of each run,
 the desk's headmaster events, and the live output of its current run, read from that run's
 .out file in the office runs folder (Claude stream-json or Codex exec --json). A desk with more
-than one run slot (config.RUN_SLOTS) can have several runs going: the feed follows whichever wrote
-last and keeps its place in the others, so each line of each run is shown once.
+than one run slot (config.RUN_SLOTS) can have several runs going: the feed takes a place in every
+run file that appears, follows whichever run wrote last and keeps its place in the others, and reads
+the rest of a run once it ends, so each line of each run is shown once. A run that ended without its
+end being recorded is read to its end before the feed lets it go, and a run whose output cannot be
+read yet keeps its place, and its end waits, until it can.
 
 The store is opened with db.connect_readonly and nothing is ever written. Every printed line
 goes through sanitize first, so nothing a desk writes can drive the terminal. Ctrl+C stops it.
@@ -207,6 +210,7 @@ class RunTail:
         self.skipping = False
         self.outcome: Optional[str] = None
         self.earlier: Optional[tuple] = None  # (run id, outcome) of the run before, for its run end line
+        self.done = False  # its run end was shown (a desk with several run slots)
 
     def switch(self, name: str, offset: int) -> None:
         if self.name is not None and name != self.name:
@@ -222,9 +226,12 @@ class Feed:
         self.desk = None if desk is None else ids.check("desk", desk)
         self.marks = watch.marks(conn)
         self.tails: dict = {}
-        # Per desk, the runs still going that the feed left when another run of the same desk wrote later, by
-        # file name. Only a desk with more than one run slot has any.
+        # Only a desk with more than one run slot has these. Per desk, the runs the feed has a place in besides the
+        # one that wrote last, by file name, and every run file it has taken a place in or passed over, so a new
+        # one is told from an old one. Then the run ends whose output could not be read yet, tried each poll.
         self.paused: dict = {}
+        self.seen: dict = {}
+        self.ending: list = []
         self.first = True
 
     def target(self) -> str:
@@ -277,33 +284,64 @@ class Feed:
         return lines
 
     def _metrics(self) -> list:
-        rows = self._store_rows(lambda: watch.metrics_after(self.conn, self.marks["metrics"], self.desk))
+        waiting, self.ending = self.ending, []
         lines = []
+        for row in waiting:
+            lines += self._slot_end(row)
+        rows = self._store_rows(lambda: watch.metrics_after(self.conn, self.marks["metrics"], self.desk))
         for row in rows:
             self.marks["metrics"] = row["id"]
+            if self._slots(row["desk"]) > 1:
+                lines += self._slot_end(row)
+                continue
             ended = None
             tail = self.tails.get(row["desk"])
-            paused = self.paused.get(row["desk"], {}).pop(f"{row['run_id']}.out", None)
             if tail is not None and tail.name == f"{row['run_id']}.out":
                 lines += self._drain(row["desk"], tail, row["ts"])  # its output first, then its end
                 ended = tail.outcome
-            elif paused is not None:
-                lines += self._drain(row["desk"], paused, row["ts"])
-                ended = paused.outcome
             elif tail is not None and tail.earlier is not None and tail.earlier[0] == row["run_id"]:
                 ended, tail.earlier = tail.earlier[1], None
-            cost = row["cost_usd"] if isinstance(row["cost_usd"], (int, float)) else 0.0
-            text = (f"run end {row['run_id']}: model {clip(row['model'], NAME_MAX_CHARS)}, "
-                    f"{duration(row['duration_ms'])}, tokens in {row['input_tokens']} out {row['output_tokens']}"
-                    f" cache {row['cache_read_tokens']}, ${cost:.2f}")
-            if ended is not None:
-                text += f", status {ended}"
-            # Columns a later migration adds, such as an exit code or a cap or failure label.
-            for key, value in row.items():
-                if key not in METRIC_FIELDS and value is not None:
-                    text += f", {clip(key, NAME_MAX_CHARS)} {clip(value, NAME_MAX_CHARS)}"
-            lines.append(line(row["ts"], self._prefix(row["desk"]) + text))
+            lines.append(self._end_line(row, ended))
         return lines
+
+    def _end_line(self, row: dict, ended: Optional[str]) -> str:
+        cost = row["cost_usd"] if isinstance(row["cost_usd"], (int, float)) else 0.0
+        text = (f"run end {row['run_id']}: model {clip(row['model'], NAME_MAX_CHARS)}, "
+                f"{duration(row['duration_ms'])}, tokens in {row['input_tokens']} out {row['output_tokens']}"
+                f" cache {row['cache_read_tokens']}, ${cost:.2f}")
+        if ended is not None:
+            text += f", status {ended}"
+        # Columns a later migration adds, such as an exit code or a cap or failure label.
+        for key, value in row.items():
+            if key not in METRIC_FIELDS and value is not None:
+                text += f", {clip(key, NAME_MAX_CHARS)} {clip(value, NAME_MAX_CHARS)}"
+        return line(row["ts"], self._prefix(row["desk"]) + text)
+
+    def _slot_end(self, row: dict) -> list:
+        """The end of a run of a desk with several run slots: the rest of its output, then its run end line. A run
+        the feed has no place in yet, one that started and ended between two polls, is shown from its start. When
+        its output cannot be read, its place and its end are kept and tried again on the next poll."""
+        desk, name = row["desk"], f"{row['run_id']}.out"
+        tail, paused, seen = self.tails.get(desk), self.paused.setdefault(desk, {}), self.seen.setdefault(desk, set())
+        lines = []
+        if tail is not None and tail.name == name and not tail.done:
+            cursor = tail
+        elif name in paused:
+            cursor = paused[name]
+        elif name not in seen:
+            seen.add(name)
+            cursor = paused[name] = RunTail()
+            cursor.switch(name, 0)
+            lines.append(line(row["ts"], self._prefix(desk) + f"run start {row['run_id']}"))
+        else:
+            return [self._end_line(row, None)]  # passed over when the feed started, or already let go
+        rest = self._drained(desk, cursor, row["ts"])
+        if rest is None:
+            self.ending.append(row)
+            return lines
+        paused.pop(name, None)
+        cursor.done = True
+        return lines + rest + [self._end_line(row, cursor.outcome)]
 
     # run files
 
@@ -322,13 +360,14 @@ class Feed:
         for desk in self._run_desks():
             try:
                 with safefs.opened_dir(config.OFFICE_ROOT, "runs", desk) as fd:
-                    lines += self._follow(fd, desk, now)
+                    lines += (self._follow_slots if self._slots(desk) > 1 else self._follow)(fd, desk, now)
             except (FleetError, OSError):
                 continue  # no runs yet, or the folder is not safe to read
         return lines
 
     @staticmethod
-    def _newest(fd: int) -> Optional[tuple]:
+    def _run_files(fd: int) -> list:
+        """Every run file in the folder as (mtime_ns, name, stat), the one written last at the end."""
         found = []
         for name in os.listdir(fd):
             if RUN_OUT.fullmatch(name) is None:
@@ -336,7 +375,11 @@ class Feed:
             info = safefs.lstat(fd, name)
             if info is not None and stat.S_ISREG(info.st_mode):
                 found.append((info.st_mtime_ns, name, info))
-        return max(found, key=lambda item: item[:2])[1:] if found else None
+        return sorted(found, key=lambda item: item[:2])
+
+    def _newest(self, fd: int) -> Optional[tuple]:
+        found = self._run_files(fd)
+        return found[-1][1:] if found else None
 
     def _running(self, run_id: str, info: os.stat_result, now: int) -> bool:
         """A run is still going while its file is fresh and run_desk has not recorded its end."""
@@ -362,11 +405,6 @@ class Feed:
         name, info = newest
         run_id = RUN_OUT.fullmatch(name).group(1)
         tail = self.tails.setdefault(desk, RunTail())
-        paused = self.paused.setdefault(desk, {})
-        for left in [item for item in paused if item != name]:
-            gone = safefs.lstat(fd, left)
-            if gone is None or gone.st_mtime < now - config.RUN_TIMEOUT_SECONDS - 60:
-                del paused[left]  # killed before its end was recorded: nothing more will come
         lines = []
         if name != tail.name:
             if tail.name is None and self.first:
@@ -375,43 +413,96 @@ class Feed:
                     tail.switch(name, info.st_size)
                     return []
                 lines.append(line(now, self._prefix(desk) + f"run in progress {run_id}, shown from its start"))
-                tail.switch(name, 0)
             else:
-                earlier, was_paused = None, name in paused
-                if tail.name is not None and self._slots(desk) > 1 and self._going(fd, tail.name, now):
-                    # Another run of this desk wrote later while this one still goes in its own run slot: keep
-                    # this one's place, and carry on from there when it writes again.
-                    paused[tail.name] = tail
-                    tail = self.tails[desk] = RunTail()
-                elif tail.name is not None:
+                if tail.name is not None:
                     lines += self._read(fd, desk, tail, now, final=True)
                     lines += self._metrics()  # the old run's end before the new run's start
-                    earlier = (RUN_OUT.fullmatch(tail.name).group(1), tail.outcome)
-                again = paused.pop(name, None)
-                if again is not None:
-                    again.earlier = earlier or again.earlier
-                    tail = self.tails[desk] = again  # its start was shown when the feed first followed it
-                elif was_paused:
-                    # Its end came in with the old run's, and the rest of its output was shown with it.
-                    ended = safefs.lstat(fd, name)
-                    tail.switch(name, info.st_size if ended is None else ended.st_size)
-                else:
-                    lines.append(line(now, self._prefix(desk) + f"run start {run_id}"))
-                    tail.switch(name, 0)
+                lines.append(line(now, self._prefix(desk) + f"run start {run_id}"))
+            tail.switch(name, 0)
         return lines + self._read(fd, desk, tail, now)
+
+    def _follow_slots(self, fd: int, desk: str, now: int) -> list:
+        """_follow for a desk with more than one run slot, whose runs can go at once. Every run file that appears
+        gets its own place, even when another run wrote later in the same poll, so no run goes unread. The run that
+        wrote last is read as it goes; the others carry on from their place when they write last again, or are read
+        to their end when it comes, or when they stop with no end recorded."""
+        files = self._run_files(fd)
+        if not files:
+            return []
+        tail = self.tails.setdefault(desk, RunTail())
+        paused, seen = self.paused.setdefault(desk, {}), self.seen.setdefault(desk, set())
+        starting = self.first and tail.name is None and not seen
+        lines = []
+        for _, name, info in files:
+            if name in seen:
+                continue
+            seen.add(name)
+            run_id = RUN_OUT.fullmatch(name).group(1)
+            if starting and not self._running(run_id, info, now):
+                continue  # it ended before the feed started
+            text = f"run in progress {run_id}, shown from its start" if starting else f"run start {run_id}"
+            lines.append(line(now, self._prefix(desk) + text))
+            paused[name] = RunTail()
+            paused[name].switch(name, 0)
+        lines += self._let_go(desk, fd, now)
+        name = files[-1][1]
+        try:
+            if name != tail.name:
+                if tail.name is not None and not tail.done:
+                    self.tails[desk] = RunTail()
+                    paused[tail.name] = tail  # it keeps its place until its end, or until it writes last again
+                    if not self._going(fd, tail.name, now):
+                        # It has ended: the rest of it and its end come before the run that wrote last.
+                        lines += self._read(fd, desk, tail, now, final=True)
+                        lines += self._metrics()
+                if name in paused:
+                    self.tails[desk] = paused.pop(name)
+            tail = self.tails[desk]
+            if tail.name is not None:
+                lines += self._read(fd, desk, tail, now)
+        except OSError:
+            pass  # read again on the next poll, from the place kept; what was read so far is shown now
+        return lines
+
+    def _let_go(self, desk: str, fd: int, now: int) -> list:
+        """Each run the feed has a place in besides the one that wrote last, whose file is gone or was last written
+        longer ago than a run may take, ended with no end recorded: it is read to its end, its last line
+        included, and then let go. One that cannot be read keeps its place for the next poll, and so does one
+        whose end is waiting to be shown."""
+        paused = self.paused.get(desk, {})
+        waiting = {f"{row['run_id']}.out" for row in self.ending if row["desk"] == desk}
+        lines = []
+        for name in [item for item in paused if item not in waiting]:
+            try:
+                info = safefs.lstat(fd, name)
+            except OSError:
+                continue
+            if info is not None and info.st_mtime >= now - config.RUN_TIMEOUT_SECONDS - 60:
+                continue
+            rest = self._drained(desk, paused[name], now)
+            if rest is not None:
+                lines += rest
+                del paused[name]
+        return lines
 
     def _read(self, fd: int, desk: str, tail: RunTail, now: int, final: bool = False) -> list:
         """New complete lines of the run file. A partial last line waits for its newline, unless the
         run is over (final), when it is all there will be."""
+        return self._read_state(fd, desk, tail, now, final)[0]
+
+    def _read_state(self, fd: int, desk: str, tail: RunTail, now: int, final: bool = False) -> tuple:
+        """_read's lines, and how the read went: "ok", "gone" when the file is not there, or "error"."""
         lines = []
         for _ in range(FINAL_READ_CHUNKS if final else 1):
             try:
                 data, size = safefs.read_range(fd, tail.name, tail.offset, READ_CHUNK_BYTES, "run output")
+            except safefs.Missing:
+                return lines, "gone"
             except FleetError:
-                return lines
+                return lines, "error"
             if size < tail.offset:
                 tail.switch(tail.name, 0)  # the file was cut short; read it again from the top
-                return lines
+                return lines, "ok"
             tail.offset += len(data)
             parts = (tail.pending + data).split(b"\n")
             tail.pending = parts.pop()
@@ -427,7 +518,7 @@ class Feed:
                 tail.pending, tail.skipping = b"", True
             if not data:
                 break
-        return lines
+        return lines, "ok"
 
     def _drain(self, desk: str, tail: RunTail, now: int) -> list:
         """The rest of a run that has ended. A run far behind skips to its last chunk, where its result is."""
@@ -443,6 +534,34 @@ class Feed:
                 return lines + self._read(fd, desk, tail, now, final=True)
         except (FleetError, OSError):
             return []
+
+    def _drained(self, desk: str, tail: RunTail, now: int) -> Optional[list]:
+        """The rest of a run that has ended, read as _drain reads it, or None when its file could not be read: then
+        its place is put back as it was before, so the next try shows the same lines once. A file that is gone has
+        nothing more, and what of it was waiting for its newline is shown."""
+        before = (tail.offset, tail.pending, tail.skipping, tail.outcome)
+        try:
+            with safefs.opened_dir(config.OFFICE_ROOT, "runs", desk) as fd:
+                lines, state = self._read_state(fd, desk, tail, now, final=True)
+                info = safefs.lstat(fd, tail.name) if state == "ok" else None
+                if info is not None and tail.offset < info.st_size:
+                    start = max(tail.offset, info.st_size - READ_CHUNK_BYTES)
+                    lines.append(line(now, self._prefix(desk) + f"skipped {start - tail.offset} bytes of run output"))
+                    tail.offset, tail.pending, tail.skipping = start, b"", True  # the cut first line is dropped
+                    more, state = self._read_state(fd, desk, tail, now, final=True)
+                    lines += more
+        except safefs.Missing:
+            lines, state = [], "gone"
+        except (FleetError, OSError):
+            lines, state = [], "error"
+        if state == "error":
+            tail.offset, tail.pending, tail.skipping, tail.outcome = before
+            return None
+        if state == "gone" and tail.pending and not tail.skipping:
+            lines += self._render(tail.pending, desk, tail, now)
+        if state == "gone":
+            tail.pending = b""
+        return lines
 
     def _render(self, raw: bytes, desk: str, tail: RunTail, now: int) -> list:
         try:

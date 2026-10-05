@@ -424,7 +424,8 @@ class RealRunTests(RunDeskCase):
         code, _, err, started = self.real_run("hermione", owl_id, 0)
         self.assertEqual(code, 0, err)
         self.assertEqual(started.call_args.kwargs["cwd"], f"{self.castle}/desks/hermione")
-        self.assertEqual(len(started.call_args.kwargs["pass_fds"]), 2)  # its desk and update locks, held while it runs
+        # Its slot and update locks, and its own run lock (Hermione holds spend), held while it runs.
+        self.assertEqual(len(started.call_args.kwargs["pass_fds"]), 3)
         self.assertEqual(owlery.inbox(self.conn, "hermione"), [])
         self.assertEqual([row["runs"] for row in pensieve.summary(self.conn)], [1])
         [launch] = capacity.list_launches(self.conn, "hermione")

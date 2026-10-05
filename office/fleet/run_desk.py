@@ -44,7 +44,12 @@ folder, and the Codex permission profile grants a run only its own, so two runs 
 The caps belong to the desk, not to a slot: a run holds the desk's launch lock (desk-<desk>.launch.lock, a
 short wait) from its last stop check until its launch row is recorded, so two runs in two slots never both
 pass a cap that only one of them fits under. A desk with more than one slot holds each of its runs still
-going at its per-run budget against its spend cap, since their cost is not in yet.
+going at its per-run budget against its spend cap, since their cost is not in yet. Each such run also holds a
+run lock of its own (runs/<desk>/<run_id>.lock) from before its launch counts, and its process inherits it,
+so a run whose launcher is killed keeps its budget held for as long as its process lives, past the running
+window. Before the caps are read, a run whose lock is left with no process holding it has its usage read from
+its output and recorded, a run with no result event at its budget (reconcile_launches), and only then is its
+budget let go. A desk with one slot has no run lock and holds nothing, as before slots.
 
 From that last stop check until the desk's process has exited, the run holds Ollivander's update lock
 shared (config.UPDATE_LOCK), and the process inherits it, like its slot, so it stays held if this
@@ -62,8 +67,10 @@ is closed is refused before it waits for a slot. A desk may hold many tasks, and
 so a slot's work folder and private temp folder never serve two processes at once.
 Hermione and Ron (TASK_PAD_DESKS) keep one pad per task, desks/<desk>/pads/<key>.md, keyed by the
 run's task, or for a review round by its author task, so the rounds of one review share a pad, and one
-review of a task runs at a time. The run makes it under its slot just before launch, never on a dry run, and
-the prompt names it in one trusted line.
+review of a task runs at a time. An owl of a review round runs only from the review that opened it, which
+holds the author task's review lock and passes the run slot the round recorded; any other launch of it (by
+hand, the Owl Post or a patrol) is refused before it waits for a slot. The run makes the pad under its slot
+just before launch, never on a dry run, and the prompt names it in one trusted line.
 A run that gives up waiting for a free slot raises its own event, not a failed-run one.
 SIGTERM or SIGHUP, sent to a real run the Owl Post started, ends it through its finally blocks: the desk's
 process is killed, a Claude run records its usage as a killed run, the locks are released, the owl stays in
@@ -111,7 +118,7 @@ if __name__ == "__main__" and "/Users/crisryantan/.hogwarts" not in sys.path:
     sys.path.insert(0, "/Users/crisryantan/.hogwarts")
 
 from hogwarts import capacity, db, ids, owlery, pensieve, wands  # noqa: E402
-from hogwarts.errors import NotFoundError, StoreError  # noqa: E402
+from hogwarts.errors import ConflictError, NotFoundError, StoreError  # noqa: E402
 
 from fleet import common, config, gitops, safefs, toolchain  # noqa: E402
 from fleet.safefs import FleetError  # noqa: E402
@@ -175,6 +182,10 @@ class Blocked(FleetError):
 
 class TaskClosed(FleetError):
     """The owl's task was closed before the run started, so the run would do nothing for anyone."""
+
+
+class ReviewOwl(FleetError):
+    """The owl belongs to a review round, which only the review that opened it runs, so it was not started."""
 
 
 # Office files
@@ -645,6 +656,8 @@ def build_plan(conn, desk: str, owl_id: Optional[str] = None, mcp_job: Optional[
         if owl is None:
             raise FleetError("that owl is not addressed to this desk")
     task = _own_task(conn, desk, owl)
+    request_id = None if owl is None else owl["request_id"]
+    review_round = None if request_id is None else capacity.request_round(conn, request_id)
     key = pad_key(conn, task) if task is not None and desk in config.TASK_PAD_DESKS else None
     pad = None if key is None else pad_path(desk, key)
     prompt = DRY_RUN_PROMPT if owl_id is None else _owl_prompt(desk, owl_id, task, pad)
@@ -668,28 +681,56 @@ def build_plan(conn, desk: str, owl_id: Optional[str] = None, mcp_job: Optional[
             "effort": choice["effort"] if choice["model"] or family == "claude" else None,
             "change_id": choice["change_id"], "default_model": default_model, "cwd": cwd, "argv": argv, "env": env,
             "temp": temp, "slot": slot, "task_id": None if task is None else task["id"],
-            "task_status": None if task is None else task["status"], "pad": pad, "pad_key": key}
+            "task_status": None if task is None else task["status"], "pad": pad, "pad_key": key,
+            "review_round": review_round}
 
 
 # Enabling, caps, launching and running
 
 
+def holds_spend(desk: str) -> bool:
+    """Whether the desk holds its runs still going against its spend cap: it has more than one run slot, a spend
+    cap and a per-run budget. Only such a desk's runs take a run lock (run_lock)."""
+    return (run_slots(desk) > 1 and config.DAILY_SPEND_CAP_USD.get(desk) is not None
+            and config.MAX_BUDGET_USD.get(desk) is not None)
+
+
+def run_lock_name(run_id: str) -> str:
+    """The file of a run's own lock, in its desk's office runs folder next to its output."""
+    return safefs.check_component(f"{run_id}.lock")
+
+
+def _run_lock_left(desk: str, run_id: str) -> bool:
+    """Whether the run's lock file is still there: its process may still run, or it ended with its usage not yet
+    recorded. A runs folder that cannot be read safely counts as yes, so a spend cap runs high, never low."""
+    try:
+        with safefs.opened_dir(config.OFFICE_ROOT, "runs", desk) as fd:
+            return safefs.lstat(fd, run_lock_name(run_id)) is not None
+    except safefs.Missing:
+        return False
+    except (FleetError, OSError):
+        return True
+
+
 def cap_status(conn, desk: str, now: Optional[int] = None) -> dict:
     """This cap day's runs and spend for one desk against its caps plus Ryan's bumps.
 
-    A desk with more than one run slot can have runs going in its other slots whose cost is not in yet. Each
-    launch with no usage that is still inside the running window is held at the desk's per-run budget
-    (spend_held_usd), the most it can cost, and counts toward the spend cap with what was spent, so two slots
-    never pass a spend cap that one run at a time would have stopped. Read in one snapshot with the rest."""
+    A desk that holds spend (holds_spend) can have runs going in its other slots whose cost is not in yet. Each
+    of its launches with no usage is held at the desk's per-run budget (spend_held_usd), the most it can cost,
+    while it is inside the running window or its run lock file is still there, and counts toward the spend cap
+    with what was spent, so two slots never pass a spend cap that one run at a time would have stopped. A run
+    whose launcher was killed keeps its lock file, so its budget stays held for as long as its process runs and
+    until reconcile_launches records what it spent. Read in one snapshot with the rest."""
     ts = common.now_stamp(now)
-    budget = config.MAX_BUDGET_USD.get(desk)
     with db.snapshot(conn):
         status = capacity.cap_status(conn, desk, config.DAILY_RUN_CAP[desk], config.DAILY_SPEND_CAP_USD.get(desk),
                                      ts, config.CAP_RESET_UTC_SECONDS)
         going = 0
-        if status["spend_limit_usd"] is not None and budget is not None and run_slots(desk) > 1:
-            going = capacity.running_launches(conn, desk, ts - config.RUNNING_WINDOW_SECONDS)
-    held = round(going * float(budget), 6) if going else 0.0
+        if holds_spend(desk):
+            since = ts - config.RUNNING_WINDOW_SECONDS
+            going = sum(1 for row in capacity.open_launches(conn, desk)
+                        if row["launched_at"] > since or _run_lock_left(desk, row["run_id"]))
+    held = round(going * float(config.MAX_BUDGET_USD[desk]), 6) if going else 0.0
     status["spend_held_usd"] = held
     if status["reached"] is None and held and status["spend_used_usd"] + held >= status["spend_limit_usd"]:
         status["reached"] = "spend"
@@ -698,7 +739,10 @@ def cap_status(conn, desk: str, now: Optional[int] = None) -> dict:
 
 def over_daily_cap(conn, desk: str, now: Optional[int] = None) -> Optional[str]:
     """Why this desk may not start another run this cap day, or None. Runs are read from the store's launch
-    rows, so a killed run counts, and spend from the cost its runs recorded."""
+    rows, so a killed run counts, and spend from the cost its runs recorded. Every launch decision reads the caps
+    here, so first the usage of any run that ended with no one left to record it is recorded (reconcile_launches),
+    and the budget it held is let go only then."""
+    reconcile_launches(conn, desk, now)
     reached = cap_status(conn, desk, now)["reached"]
     return None if reached is None else CAP_REASONS[reached]
 
@@ -1253,6 +1297,33 @@ def launch_lock(desk: str) -> Iterator[None]:
         yield
 
 
+class RunLock:
+    """A run's own lock, held: its fd, and keep, which is true from just before its process starts until its usage
+    is recorded. A run that unwinds with keep set leaves the lock file for reconcile_launches."""
+
+    def __init__(self, fd: int) -> None:
+        self.fd, self.keep = fd, False
+
+
+@contextlib.contextmanager
+def run_lock(desk: str, run_id: str) -> Iterator[RunLock]:
+    """The run's own lock, runs/<desk>/<run_id>.lock, taken without waiting by a run of a desk that holds spend
+    (holds_spend) before its launch counts, and handed to its process, so it is held while the run or its
+    process lives, even after this process is killed. When the run ends here its file is removed, unless its
+    usage was never recorded (keep): then the file stays, and once no process holds it any more,
+    reconcile_launches records the run's usage and removes it. A launcher killed outright leaves the file too."""
+    name = run_lock_name(run_id)
+    with safefs.opened_dir(config.OFFICE_ROOT, "runs", ids.check("desk", desk), create=True) as run_fd, \
+            safefs.held_lock(run_fd, name, blocking=False) as lock_fd:
+        lock = RunLock(lock_fd)
+        try:
+            yield lock
+        finally:
+            if not lock.keep:
+                with contextlib.suppress(FileNotFoundError):
+                    os.unlink(name, dir_fd=run_fd)
+
+
 def blocked_model(plan: dict, conn=None) -> Optional[str]:
     """The blocked model this plan would launch, else None. A Codex desk with no model of its own, here or
     in its codex.toml, runs the CLI default, which the fleet cannot name: with any prefix blocked it cannot
@@ -1304,6 +1375,18 @@ def _refuse_blocked(conn, plan: dict, now: Optional[int]) -> None:
     raise Blocked(f"{desk} was not started: its model {named} is blocked here")
 
 
+def _refuse_review_round(plan: dict, lock_held: Optional[Slot]) -> None:
+    """Refuse an owl of a review round unless the review that opened the round runs it, holding the run slot the
+    round recorded. Only the review script passes a slot it holds (lock_held), and it holds the author task's
+    review lock as well, so a launch by hand, by the Owl Post or by a patrol holds no review lock: it could share
+    the author task's pad with the review running now, or run in a slot other than its round's."""
+    found = plan["review_round"]
+    if found is None or (lock_held is not None and found["slot"] == lock_held.index):
+        return
+    raise ReviewOwl(f"owl {plan['owl_id']} is a round of the review of task {found['task_id']}, and only that review"
+                    f" runs it, so {plan['desk']} was not started; run the review of {found['task_id']} again")
+
+
 def _refuse_closed(plan: dict) -> None:
     if plan["task_status"] == "closed":
         raise TaskClosed(f"task {plan['task_id']} is closed, so {plan['desk']} was not started on it")
@@ -1335,11 +1418,13 @@ def run(conn, desk: str, owl_id: str, mcp_job: Optional[str] = None, now: Option
     """Run one desk on one owl. on_start is called under the run's slot and the desk's launch lock once the
     caps allow the run, just before its launch is recorded, so a caller's own bookkeeping never runs for a
     refused run. lock_held is the Slot of this desk the caller already holds (the review script holds one, from
-    before its round opens until its reviewer task closes); without it the run takes a free slot itself. The
-    desk's process inherits every fd in keep_fds and its slot's, so the locks they hold outlive this process if
-    it is killed mid-run. shadow is the patrol's shadow mode: the cap, near-cap and vendor-limit notes go in the
-    result's held list, not to Ryan (a cap refusal's own reason is the Capped error), and the caps and accounting
-    are unchanged."""
+    before its round opens until its reviewer task closes); without it the run takes a free slot itself. Only the
+    review script passes it, and an owl of a review round runs only with the slot its round recorded, so every
+    other launch of a round's owl is refused (ReviewOwl) before it waits for a slot. The desk's process inherits
+    every fd in keep_fds, its slot's and, on a desk that holds spend, its own run lock's, so the locks they hold
+    outlive this process if it is killed mid-run. shadow is the patrol's shadow mode: the cap, near-cap and
+    vendor-limit notes go in the result's held list, not to Ryan (a cap refusal's own reason is the Capped error),
+    and the caps and accounting are unchanged."""
     notes = [] if shadow else None
     desk = ids.check("desk", desk)
     if lock_held is not None and (not isinstance(lock_held, Slot) or lock_held.desk != desk):
@@ -1347,8 +1432,10 @@ def run(conn, desk: str, owl_id: str, mcp_job: Optional[str] = None, now: Option
     if not is_enabled(desk):
         raise FleetError(f"{desk} is not enabled; Ryan enables a headless desk by hand")
     _check_stop()
-    # Refuse a bad desk or owl, a closed task, or a blocked model, before waiting for a slot.
+    # Refuse a bad desk or owl, a review round's owl outside its review, a closed task, or a blocked model,
+    # before waiting for a slot.
     early = build_plan(conn, desk, owl_id, mcp_job)
+    _refuse_review_round(early, lock_held)
     _refuse_closed(early)
     _refuse_blocked(conn, early, now)
     with contextlib.ExitStack() as held:
@@ -1376,10 +1463,15 @@ def run(conn, desk: str, owl_id: str, mcp_job: Optional[str] = None, now: Option
                 ensure_pad(plan)
             if on_start is not None:
                 on_start()
+            own = None
+            if holds_spend(desk):
+                # Held before the launch counts, so no launch of this desk is ever without its lock.
+                own = held.enter_context(run_lock(desk, plan["run_id"]))
+                keep_fds = (*keep_fds, own.fd)
             # Counted from here, before the process starts: a run killed or interrupted below still uses a run.
             # The launch lock ends here, so the next run of the desk reads the caps with this launch in them.
             capacity.record_launch(conn, desk, plan["run_id"], plan["model"], task_id=plan.get("task_id"), now=now)
-        result = _launch(conn, plan, now, keep_fds)
+        result = _launch(conn, plan, now, keep_fds, own)
     warn_near_cap(conn, plan["desk"], now, notes)
     if result["cap_source"] is not None:
         report_plan_limit(conn, plan["desk"], result["cap_source"], run_id=result["run_id"], now=now, held=notes)
@@ -1423,13 +1515,13 @@ def _run_output(run_fd: int, run_id: str) -> bytes:
     return output
 
 
-def _record_interrupted(conn, plan: dict, run_fd: int, started: float, now: Optional[int]) -> None:
+def _record_interrupted(conn, plan: dict, run_fd: int, started: float, now: Optional[int]) -> bool:
     """A Claude run cut short by SIGTERM, SIGHUP or an interrupt, once its process is killed, still records what
     it used, as a killed run, so its spend is not lost with the signal. It does not count toward a model trial:
     the desk did not fail. A Codex run has no spend to lose, and its launch already counts toward the run cap.
-    Never raises, so it cannot hide the interrupt."""
+    Whether it recorded the usage. Never raises, so it cannot hide the interrupt."""
     if plan["family"] != "claude":
-        return
+        return False
     try:
         usage = run_usage(plan, _run_output(run_fd, plan["run_id"]), -1)  # -1: killed, as a timeout is
         capacity.record_launch_usage(conn, plan["run_id"], usage["input_tokens"], usage["output_tokens"],
@@ -1437,12 +1529,80 @@ def _record_interrupted(conn, plan: dict, run_fd: int, started: float, now: Opti
                                      int((time.monotonic() - started) * 1000), model=plan["model"], now=now,
                                      spend_unknown=usage.get("spend_unknown") is True)
     except (StoreError, FleetError, OSError):
-        pass
+        return False
+    return True
 
 
-def _launch(conn, plan: dict, now: Optional[int], keep_fds: tuple = ()) -> dict:
+def reconcile_launches(conn, desk: str, now: Optional[int] = None) -> list:
+    """Record the usage of each run of the desk that ended with no one left to record it, so the budget it held
+    against the spend cap is let go only once what it spent is in. Only a desk that holds spend (holds_spend) has
+    run locks to look at, so any other desk is left exactly as before. A launch whose run lock file is still there
+    while no process holds the lock any more had its launcher killed, and its process has ended since: its usage
+    is read from its output the way a killed run's is, so a run with no result event is charged its per-run
+    budget, marked as an estimate, and then its lock file is removed. A lock still held is a run still going, so
+    its budget stays held. Returns the run ids it recorded. Never waits and never raises: a launch it could not
+    record keeps its lock file and its budget held for the next try."""
+    if not holds_spend(desk):
+        return []
+    try:
+        launches = capacity.open_launches(conn, desk)
+        if not launches:
+            return []
+        run_fd = safefs.open_dir(config.OFFICE_ROOT, "runs", desk)
+    except (StoreError, FleetError, OSError):
+        return []
+    plan = {"desk": desk, "family": "claude" if desk in config.HEADLESS_CLAUDE else "codex"}
+    recorded = []
+    try:
+        for row in launches:
+            try:
+                name = run_lock_name(row["run_id"])
+                left = safefs.lstat(run_fd, name)
+                if left is None:
+                    continue
+                # Busy while its process, or its launcher, still holds it: its budget stays held.
+                with safefs.held_lock(run_fd, name, blocking=False) as lock_fd:
+                    taken = os.fstat(lock_fd)
+                    if taken.st_ino != left.st_ino:
+                        os.unlink(name, dir_fd=run_fd)  # its launcher settled it and removed its file meanwhile
+                        continue
+                    if taken.st_nlink == 0:
+                        continue  # removed by its launcher, which settled it, just before this took it
+                    try:
+                        _record_orphan(conn, plan, run_fd, row, now)
+                        recorded.append(row["run_id"])
+                    except ConflictError:
+                        pass  # its launcher recorded it after all
+                    os.unlink(name, dir_fd=run_fd)
+            except (StoreError, FleetError, OSError):
+                continue  # tried again next time, its lock file kept
+    finally:
+        os.close(run_fd)
+    return recorded
+
+
+def _record_orphan(conn, plan: dict, run_fd: int, row: dict, now: Optional[int]) -> None:
+    """The usage of a run whose launcher was killed, read from its output once its process has ended: its own result
+    event when it wrote one, else a killed run's (killed_claude_usage). Its time is from its launch to the last
+    write to its output."""
+    run_id = row["run_id"]
+    output = _run_output(run_fd, run_id)
+    usage = run_usage(plan, output, -1)
+    used = claude_models(output) if plan["family"] == "claude" else []
+    info = safefs.lstat(run_fd, f"{run_id}.out")
+    ended = row["launched_at"] if info is None else int(info.st_mtime)
+    duration_ms = max(0, ended - row["launched_at"]) * 1000
+    capacity.record_launch_usage(conn, run_id, usage["input_tokens"], usage["output_tokens"],
+                                 usage["cache_read_tokens"], usage["cost_usd"], duration_ms,
+                                 model=used[0] if used else None, now=now,
+                                 spend_unknown=usage.get("spend_unknown") is True)
+
+
+def _launch(conn, plan: dict, now: Optional[int], keep_fds: tuple = (), own: Optional[RunLock] = None) -> dict:
     """Start the planned run, whose launch run() has recorded, and record what it did. The process inherits every
-    fd in keep_fds."""
+    fd in keep_fds. own is the run's own lock on a desk that holds spend: its file is kept from just before the
+    process starts until the run's usage is recorded, so a run that unwinds without recording it leaves its lock
+    for reconcile_launches."""
     desk, run_id = plan["desk"], plan["run_id"]
     if plan.get("temp"):
         fresh_temp(plan["temp"])  # here, under its slot, not in build_plan: a dry run never empties a live run's folder
@@ -1452,12 +1612,17 @@ def _launch(conn, plan: dict, now: Optional[int], keep_fds: tuple = ()) -> dict:
         started = time.monotonic()
         child = None
         try:
+            if own is not None:
+                own.keep = True
             child = start_child(plan["argv"], cwd=plan["cwd"], env=plan.get("env") or child_env(),
                                 stdin=subprocess.DEVNULL, stdout=out_fd, stderr=err_fd, pass_fds=tuple(keep_fds))
             exit_code = wait_child(child, config.RUN_TIMEOUT_SECONDS)
         except BaseException:
+            settled = child is None  # it never started, so it spent nothing
             if child is not None:  # started, and wait_child has killed it: record what it did, then keep unwinding
-                _record_interrupted(conn, plan, run_fd, started, now)
+                settled = _record_interrupted(conn, plan, run_fd, started, now)
+            if own is not None and settled:
+                own.keep = False
             raise
         finally:
             os.close(out_fd)
@@ -1483,6 +1648,8 @@ def _launch(conn, plan: dict, now: Optional[int], keep_fds: tuple = ()) -> dict:
                                  usage["cache_read_tokens"], usage["cost_usd"], duration_ms,
                                  model=parsed or plan["model"], now=now,
                                  spend_unknown=usage.get("spend_unknown") is True)
+    if own is not None:
+        own.keep = False
     # Every model the run called is kept against the alias, not only the one that did most of the work, so
     # a blocked model a helper call used is remembered too.
     if claude and wands.CLAUDE_ID.fullmatch(wands.base_alias(plan["model"])) is None:
@@ -1530,7 +1697,7 @@ def main(argv: Optional[list] = None) -> int:
         sys.stderr.write(json.dumps({"ok": False, "error": common.one_line(exc, 200)}, ensure_ascii=True) + "\n")
         if not args.dry_run and isinstance(exc, safefs.Busy):
             report_lock_wait(conn, args.desk, args.owl)
-        elif not args.dry_run and not isinstance(exc, (Capped, Stopped, Blocked, TaskClosed)):
+        elif not args.dry_run and not isinstance(exc, (Capped, Stopped, Blocked, TaskClosed, ReviewOwl)):
             report_failure(conn, args.desk, args.owl)
         return 1
     except SystemExit:

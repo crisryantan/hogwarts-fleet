@@ -220,9 +220,12 @@ def _fleet_caps():
     return fleet_config
 
 
-def _cap_status(conn: sqlite3.Connection, caps, desk: str, now: int) -> dict:
-    return capacity.cap_status(conn, desk, caps.DAILY_RUN_CAP[desk], caps.DAILY_SPEND_CAP_USD.get(desk), now,
-                               caps.CAP_RESET_UTC_SECONDS)
+def _cap_status(conn: sqlite3.Connection, desk: str, now: int) -> dict:
+    """One desk's caps as the launcher reads them (fleet/run_desk.py next to this package), with the spend its runs
+    still going hold (spend_held_usd), so these numbers agree with the launcher's refusals."""
+    from fleet import run_desk as fleet_run_desk
+
+    return fleet_run_desk.cap_status(conn, desk, now)
 
 
 def _desk_cap(conn: sqlite3.Connection, args: argparse.Namespace) -> dict:
@@ -236,14 +239,14 @@ def _desk_cap(conn: sqlite3.Connection, args: argparse.Namespace) -> dict:
     now = _clock()
     _, resets_at = capacity.day_bounds(now, caps.CAP_RESET_UTC_SECONDS)
     bump = capacity.add_bump(conn, desk, kind, amount, resets_at, now=now)
-    return {"bump": bump, "caps": _cap_status(conn, caps, desk, now)}
+    return {"bump": bump, "caps": _cap_status(conn, desk, now)}
 
 
 def _desk_caps(conn: sqlite3.Connection, args: argparse.Namespace) -> list:
     caps = _fleet_caps()
     now = _clock()
     registered = {desk["name"] for desk in pensieve.list_desks(conn)}
-    return [_cap_status(conn, caps, desk, now) for desk in sorted(caps.DAILY_RUN_CAP) if desk in registered]
+    return [_cap_status(conn, desk, now) for desk in sorted(caps.DAILY_RUN_CAP) if desk in registered]
 
 
 def _blocked_models() -> tuple:

@@ -11,7 +11,7 @@ from unittest import mock
 from hogwarts import db, owlery, pensieve
 from tests.support import NOW
 
-from fleet import config, feed, tools
+from fleet import config, feed, safefs, tools
 from tests_fleet.support import FleetCase
 
 RUN_A = "run-0123456789abcdef"
@@ -393,6 +393,106 @@ class FeedTests(FeedCase):
             "says: Done, tests pass.",
             f"run end {RUN_B}: model codex, 0.7s, tokens in 4 out 5 cache 6, $0.00, status completed"])
         self.assertEqual(follow.poll(NOW + 10), [])
+
+    def wrote(self, path: str, events: list, when: int) -> None:
+        self.append(path, jsonl(events))
+        os.utime(path, (when, when))
+
+    def two_runs(self, desk: str = "moody") -> tuple:
+        """A feed of a two-slot desk following two runs: the second wrote last, and the first keeps its place."""
+        follow = feed.Feed(self.reader, desk)
+        follow.poll(NOW)
+        first = self.run_file(desk, RUN_A, jsonl(CODEX_STREAM[:1]), mtime=NOW)
+        follow.poll(NOW + 1)
+        second = self.run_file(desk, RUN_B, jsonl(CODEX_STREAM[:1]), mtime=NOW + 2)
+        follow.poll(NOW + 3)
+        self.assertEqual((follow.tails[desk].name, list(follow.paused[desk])), (f"{RUN_B}.out", [f"{RUN_A}.out"]))
+        return follow, first, second
+
+    def test_a_run_that_never_writes_last_is_still_followed_and_read_at_its_end(self):
+        follow = feed.Feed(self.reader, "moody")
+        follow.poll(NOW)
+        # Both runs start before the next poll, and the second always writes after the first.
+        first = self.run_file("moody", RUN_A, jsonl(CODEX_STREAM[:1]), mtime=NOW + 1)
+        second = self.run_file("moody", RUN_B, jsonl(CODEX_STREAM[:1]), mtime=NOW + 2)
+        self.assertEqual(texts(follow.poll(NOW + 3)), [f"run start {RUN_A}", f"run start {RUN_B}", "codex started"])
+        self.wrote(first, CODEX_STREAM[3:5], NOW + 4)
+        self.wrote(second, CODEX_STREAM[3:4], NOW + 5)
+        self.assertEqual(texts(follow.poll(NOW + 6)), ["command (exit 0): bash -lc ls"])
+        self.wrote(first, CODEX_STREAM[6:], NOW + 7)
+        self.wrote(second, CODEX_STREAM[4:5], NOW + 8)
+        pensieve.add_metric(self.conn, "moody", RUN_A, "codex", 1, 2, 3, 0.0, 500, ts=NOW + 9)
+        self.assertEqual(texts(follow.poll(NOW + 9)), ["files: update /w/app.py, add /w/new.py"] + CODEX_LINES + [
+            f"run end {RUN_A}: model codex, 0.5s, tokens in 1 out 2 cache 3, $0.00, status completed"])
+        self.assertEqual((follow.poll(NOW + 10), list(follow.paused["moody"])), ([], []))
+
+    def test_a_run_first_met_through_its_end_is_shown_from_its_start(self):
+        follow = feed.Feed(self.reader, None)
+        follow.poll(NOW)
+        self.run_file("harry", RUN_A, jsonl(CODEX_STREAM[:1]), mtime=NOW)
+        self.assertEqual(texts(follow.poll(NOW + 1)), [f"harry: run start {RUN_A}", "harry: codex started"])
+        # Before the next poll a Moody run starts and ends, and Harry starts another. Harry's switch shows the ends
+        # recorded so far before Moody's folder is looked at, so the feed meets Moody's run through its end.
+        self.run_file("moody", RUN_B, jsonl(CODEX_STREAM), mtime=NOW + 2)
+        pensieve.add_metric(self.conn, "moody", RUN_B, "codex", 4, 5, 6, 0.0, 700, ts=NOW + 3)
+        later = "run-" + "c" * 16
+        self.run_file("harry", later, jsonl(CODEX_STREAM[:1]), mtime=NOW + 4)
+        self.assertEqual(texts(follow.poll(NOW + 5)), [f"moody: run start {RUN_B}"]
+                         + [f"moody: {text}" for text in CODEX_LINES]
+                         + [f"moody: run end {RUN_B}: model codex, 0.7s, tokens in 4 out 5 cache 6, $0.00,"
+                            " status completed", f"harry: run start {later}", "harry: codex started"])
+        self.assertEqual(follow.poll(NOW + 6), [])
+
+    def test_a_left_run_that_stops_with_no_end_is_read_to_its_last_line_before_it_is_let_go(self):
+        follow, first, second = self.two_runs()
+        # The first writes more, its last line with no newline, then is killed before its end is recorded, while
+        # the second keeps writing after it.
+        self.append(first, jsonl(CODEX_STREAM[3:4]) + json.dumps(CODEX_STREAM[6]).encode())
+        os.utime(first, (NOW + 4, NOW + 4))
+        self.wrote(second, CODEX_STREAM[3:4], NOW + 5)
+        self.assertEqual(texts(follow.poll(NOW + 6)), ["command (exit 0): bash -lc ls"])
+        stale = NOW + 4 + config.RUN_TIMEOUT_SECONDS + 61
+        self.wrote(second, CODEX_STREAM[4:5], stale - 1)
+        self.assertEqual(texts(follow.poll(stale)), ["command (exit 0): bash -lc ls", "says: Done, tests pass.",
+                                                     "files: update /w/app.py, add /w/new.py"])
+        self.assertEqual(follow.paused["moody"], {})
+
+    def test_a_left_run_whose_file_is_gone_shows_the_last_line_it_had_read(self):
+        follow = feed.Feed(self.reader, "moody")
+        follow.poll(NOW)
+        first = self.run_file("moody", RUN_A, jsonl(CODEX_STREAM[:1]) + json.dumps(CODEX_STREAM[6]).encode(),
+                              mtime=NOW)
+        self.assertEqual(texts(follow.poll(NOW + 1)), [f"run start {RUN_A}", "codex started"])
+        self.run_file("moody", RUN_B, jsonl(CODEX_STREAM[:1]), mtime=NOW + 2)
+        self.assertEqual(texts(follow.poll(NOW + 3)), [f"run start {RUN_B}", "codex started"])
+        os.unlink(first)
+        self.assertEqual(texts(follow.poll(NOW + 4)), ["says: Done, tests pass."])
+        self.assertEqual((follow.paused["moody"], follow.poll(NOW + 5)), ({}, []))
+
+    def test_a_left_run_whose_end_cannot_be_read_yet_keeps_its_place_and_its_end_waits(self):
+        follow, first, second = self.two_runs()
+        # The first writes the rest of its run, the second is written after it again, and the first's end is in.
+        self.append(first, jsonl(CODEX_STREAM[1:]))
+        os.utime(first, (NOW + 4, NOW + 4))
+        os.utime(second, (NOW + 5, NOW + 5))
+        pensieve.add_metric(self.conn, "moody", RUN_A, "codex", 1, 2, 3, 0.0, 500, ts=NOW + 6)
+        real, reads = feed.safefs.read_range, []
+
+        def read_range(fd, name, offset, max_bytes, label="file"):
+            if name == f"{RUN_A}.out":
+                reads.append(offset)
+                if len(reads) == 2:  # the drain has read its first chunk when the next read fails
+                    raise safefs.Unsafe("run output cannot be opened")
+            return real(fd, name, offset, max_bytes, label)
+
+        with mock.patch.object(feed, "READ_CHUNK_BYTES", 128), \
+                mock.patch.object(feed.safefs, "read_range", side_effect=read_range):
+            self.assertEqual(follow.poll(NOW + 6), [])
+        self.assertEqual((len(reads), list(follow.paused["moody"]), [row["run_id"] for row in follow.ending]),
+                         (2, [f"{RUN_A}.out"], [RUN_A]))
+        self.assertEqual(texts(follow.poll(NOW + 7)), CODEX_LINES[1:] + [
+            f"run end {RUN_A}: model codex, 0.5s, tokens in 1 out 2 cache 3, $0.00, status completed"])
+        self.assertEqual((follow.poll(NOW + 8), follow.paused["moody"], follow.ending), ([], {}, []))
 
     def test_metric_fields_a_later_migration_adds_are_shown(self):
         self.conn.execute("ALTER TABLE metrics ADD COLUMN exit_code INTEGER")
