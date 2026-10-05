@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 import sqlite3
 
-from hogwarts import db, owlery, pensieve, watch
+from hogwarts import capacity, db, owlery, pensieve, watch
 from hogwarts.errors import IntegrityError, NotFoundError, ValidationError
 from tests.support import NOW, StoreCase
 
@@ -95,9 +95,20 @@ class WatchQueryTests(StoreCase):
         self.assertTrue(watch.run_recorded(self.reader, "run-0123456789abcdef"))
         self.assertFalse(watch.run_recorded(self.reader, "run-0000000000000000"))
 
+    def test_open_runs_are_the_desks_launches_with_no_usage_yet(self):
+        going, ended, other = "run-" + "a" * 16, "run-" + "b" * 16, "run-" + "c" * 16
+        capacity.record_launch(self.conn, "alpha", going, "opus", now=NOW)
+        capacity.record_launch(self.conn, "alpha", ended, "opus", now=NOW)
+        capacity.record_launch(self.conn, "beta", other, "codex", now=NOW)
+        capacity.record_launch_usage(self.conn, ended, 1, 2, 3, 0.5, 10, now=NOW + 1)
+        self.assertEqual((watch.open_runs(self.reader, "alpha"), watch.open_runs(self.reader, "beta")),
+                         ({going}, {other}))
+        self.assertEqual(self.reader.total_changes, 0)
+
     def test_inputs_are_validated(self):
         for call in (lambda: watch.owls_after(self.reader, -1), lambda: watch.owls_after(self.reader, 0, "Bad Desk"),
                      lambda: watch.metrics_after(self.reader, "0"), lambda: watch.run_recorded(self.reader, "../x"),
+                     lambda: watch.open_runs(self.reader, "Bad Desk"),
                      lambda: watch.headmaster_events_after(self.reader, 0, limit=0)):
             with self.assertRaises(ValidationError):
                 call()

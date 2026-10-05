@@ -49,16 +49,23 @@ run lock of its own (runs/<desk>/<run_id>.lock) from before its launch counts, a
 so a run whose launcher is killed keeps its budget held for as long as its process lives, past the running
 window. Before the caps are read, a run whose lock is left with no process holding it has its usage read from
 its output and recorded, a run with no result event at its budget (reconcile_launches), and only then is its
-budget let go. A desk with one slot has no run lock and holds nothing, as before slots.
+budget let go. That settling happens only under the desk's launch lock, right before the caps are read under it,
+so no cap decision overlaps it: a launch settles under the launch lock it already holds, and a check made before a
+launch (the Owl Post's, a review's, a new worktree's) takes the lock without waiting and leaves the settling to the
+launch while a launch holds it. Every read of the caps looks at the run lock files before the store, and a run's
+lock file goes only once its usage is in (or its process never started), so a run settled meanwhile, by whoever
+settles it, is held at its budget or counted at its cost, never missed. A desk with one slot has no run lock and
+holds nothing, as before slots.
 
 From that last stop check until the desk's process has exited, the run holds Ollivander's update lock
 shared (config.UPDATE_LOCK), and the process inherits it, like its slot, so it stays held if this
 process is killed. Launches never wait on each other for it, and Ollivander, who holds it exclusively for a
 whole CLI update, never replaces a binary that a run has checked, or that a desk is still running. The run
 never waits for it: while an update holds it, the launch is refused like a stop. Lock order is the review
-lock, then a run slot, then the desk's launch lock, then the update lock. A run never holds one slot while it
-waits for another, nothing waits for the update lock while holding another lock, and Ollivander takes no slot
-or launch lock, so no deadlock can form.
+lock, then a run slot, then the desk's launch lock, then the update lock, then a run's own lock. A run never holds
+one slot while it waits for another, the update lock and a run's own lock are only ever tried without waiting, a
+check before a launch tries the launch lock without waiting too, and Ollivander takes no slot or launch lock, so
+no deadlock can form.
 
 A desk works in a worktree only when the owl belongs to a request addressed to that desk
 and the request's task is the desk's own. Any other owl runs in its slot's work folder. That task
@@ -700,16 +707,17 @@ def run_lock_name(run_id: str) -> str:
     return safefs.check_component(f"{run_id}.lock")
 
 
-def _run_lock_left(desk: str, run_id: str) -> bool:
-    """Whether the run's lock file is still there: its process may still run, or it ended with its usage not yet
-    recorded. A runs folder that cannot be read safely counts as yes, so a spend cap runs high, never low."""
+def _run_locks_left(desk: str) -> Optional[set]:
+    """The names of the run lock files still in the desk's office runs folder: each is a run whose process may still
+    run, or that ended with its usage not yet recorded. None when the folder cannot be read safely, and then every
+    launch with no usage counts as held, so a spend cap runs high, never low."""
     try:
         with safefs.opened_dir(config.OFFICE_ROOT, "runs", desk) as fd:
-            return safefs.lstat(fd, run_lock_name(run_id)) is not None
+            return {name for name in os.listdir(fd) if name.endswith(".lock")}
     except safefs.Missing:
-        return False
+        return set()
     except (FleetError, OSError):
-        return True
+        return None
 
 
 def cap_status(conn, desk: str, now: Optional[int] = None) -> dict:
@@ -720,16 +728,21 @@ def cap_status(conn, desk: str, now: Optional[int] = None) -> dict:
     while it is inside the running window or its run lock file is still there, and counts toward the spend cap
     with what was spent, so two slots never pass a spend cap that one run at a time would have stopped. A run
     whose launcher was killed keeps its lock file, so its budget stays held for as long as its process runs and
-    until reconcile_launches records what it spent. Read in one snapshot with the rest."""
+    until reconcile_launches records what it spent. The lock files are read before the store snapshot begins:
+    a run's lock file goes only once its usage is recorded (by its launcher or reconcile_launches) or its process
+    never started, so a run settled at any moment is either held, its lock file read, or in the snapshot's spend,
+    never neither. Call it outside any transaction, so its snapshot begins after that read."""
     ts = common.now_stamp(now)
+    spending = holds_spend(desk)
+    left = _run_locks_left(desk) if spending else set()
     with db.snapshot(conn):
         status = capacity.cap_status(conn, desk, config.DAILY_RUN_CAP[desk], config.DAILY_SPEND_CAP_USD.get(desk),
                                      ts, config.CAP_RESET_UTC_SECONDS)
         going = 0
-        if holds_spend(desk):
+        if spending:
             since = ts - config.RUNNING_WINDOW_SECONDS
             going = sum(1 for row in capacity.open_launches(conn, desk)
-                        if row["launched_at"] > since or _run_lock_left(desk, row["run_id"]))
+                        if row["launched_at"] > since or left is None or f"{row['run_id']}.lock" in left)
     held = round(going * float(config.MAX_BUDGET_USD[desk]), 6) if going else 0.0
     status["spend_held_usd"] = held
     if status["reached"] is None and held and status["spend_used_usd"] + held >= status["spend_limit_usd"]:
@@ -737,13 +750,22 @@ def cap_status(conn, desk: str, now: Optional[int] = None) -> dict:
     return status
 
 
-def over_daily_cap(conn, desk: str, now: Optional[int] = None) -> Optional[str]:
+def over_daily_cap(conn, desk: str, now: Optional[int] = None, launch_held: bool = False) -> Optional[str]:
     """Why this desk may not start another run this cap day, or None. Runs are read from the store's launch
     rows, so a killed run counts, and spend from the cost its runs recorded. Every launch decision reads the caps
     here, so first the usage of any run that ended with no one left to record it is recorded (reconcile_launches),
-    and the budget it held is let go only then."""
-    reconcile_launches(conn, desk, now)
-    reached = cap_status(conn, desk, now)["reached"]
+    and the budget it held is let go only then. Both happen under the desk's launch lock, the settling first, so
+    no other cap decision reads the caps while a settlement is half done. The launch holds that lock already and
+    passes launch_held. A check made before a launch (the Owl Post's, a review's, a new worktree's) takes it without
+    waiting when the desk holds spend, and while a launch holds it reads the caps without settling, which the
+    launch then does under its lock; an unsettled run is still held at its budget, so that read runs high, never
+    low. A desk that does not hold spend has nothing to settle and reads its caps as before."""
+    with contextlib.ExitStack() as stack:
+        if not launch_held and holds_spend(desk):
+            launch_held = stack.enter_context(launch_lock_if_free(desk))
+        if launch_held:
+            reconcile_launches(conn, desk, now, launch_held=True)
+        reached = cap_status(conn, desk, now)["reached"]
     return None if reached is None else CAP_REASONS[reached]
 
 
@@ -1280,6 +1302,10 @@ def desk_lock(desk: str, wait: bool = True) -> Iterator[Slot]:
         yield held
 
 
+def launch_lock_name(desk: str) -> str:
+    return f"desk-{ids.check('desk', desk)}.launch.lock"
+
+
 @contextlib.contextmanager
 def launch_lock(desk: str) -> Iterator[None]:
     """The desk's launch lock, held by a run from its last stop check until its launch row is recorded, never
@@ -1289,12 +1315,29 @@ def launch_lock(desk: str) -> Iterator[None]:
     with contextlib.ExitStack() as stack:
         locks_fd = stack.enter_context(safefs.opened_dir(config.OFFICE_ROOT, "locks", create=True))
         try:
-            stack.enter_context(safefs.held_lock(locks_fd, f"desk-{desk}.launch.lock", blocking=True,
+            stack.enter_context(safefs.held_lock(locks_fd, launch_lock_name(desk), blocking=True,
                                                  timeout=config.DESK_LAUNCH_WAIT_SECONDS))
         except safefs.Busy:
             raise FleetError(f"another run of {desk} took more than {config.DESK_LAUNCH_WAIT_SECONDS} seconds to"
                              " launch, so this one did not start") from None
         yield
+
+
+@contextlib.contextmanager
+def launch_lock_if_free(desk: str) -> Iterator[bool]:
+    """The desk's launch lock taken without waiting, yielding True, or yielding False while a launch holds it or when
+    the locks folder cannot be opened safely. Only a settling of runs (reconcile_launches) and the cap read after it
+    happen under it here, never a launch, and it is never handed to a process."""
+    desk = ids.check("desk", desk)
+    with contextlib.ExitStack() as stack:
+        try:
+            locks_fd = stack.enter_context(safefs.opened_dir(config.OFFICE_ROOT, "locks", create=True))
+            stack.enter_context(safefs.held_lock(locks_fd, launch_lock_name(desk), blocking=False))
+        except (FleetError, OSError):
+            taken = False
+        else:
+            taken = True
+        yield taken
 
 
 class RunLock:
@@ -1447,7 +1490,7 @@ def run(conn, desk: str, owl_id: str, mcp_job: Optional[str] = None, now: Option
             keep_fds = (*keep_fds, held.enter_context(launch_gate()))
             # The wait can be long: check the stop again and plan now, so the model is the one chosen last.
             _check_stop()
-            cap = over_daily_cap(conn, desk, now)
+            cap = over_daily_cap(conn, desk, now, launch_held=True)
             if cap is not None:
                 report_cap(conn, desk, now, notes)
                 raise Capped(cap)
@@ -1533,17 +1576,27 @@ def _record_interrupted(conn, plan: dict, run_fd: int, started: float, now: Opti
     return True
 
 
-def reconcile_launches(conn, desk: str, now: Optional[int] = None) -> list:
+def reconcile_launches(conn, desk: str, now: Optional[int] = None, launch_held: bool = False) -> list:
     """Record the usage of each run of the desk that ended with no one left to record it, so the budget it held
     against the spend cap is let go only once what it spent is in. Only a desk that holds spend (holds_spend) has
     run locks to look at, so any other desk is left exactly as before. A launch whose run lock file is still there
     while no process holds the lock any more had its launcher killed, and its process has ended since: its usage
     is read from its output the way a killed run's is, so a run with no result event is charged its per-run
     budget, marked as an estimate, and then its lock file is removed. A lock still held is a run still going, so
-    its budget stays held. Returns the run ids it recorded. Never waits and never raises: a launch it could not
-    record keeps its lock file and its budget held for the next try."""
+    its budget stays held. It settles only under the desk's launch lock, so no launch reads the caps meanwhile: a
+    caller that holds it passes launch_held, and any other takes it without waiting and settles nothing while a
+    launch holds it. Returns the run ids it recorded. Never waits and never raises: a launch it could not record
+    keeps its lock file and its budget held for the next try."""
     if not holds_spend(desk):
         return []
+    if not launch_held:
+        with launch_lock_if_free(desk) as taken:
+            return _settle_launches(conn, desk, now) if taken else []
+    return _settle_launches(conn, desk, now)
+
+
+def _settle_launches(conn, desk: str, now: Optional[int]) -> list:
+    """reconcile_launches' settling, called under the desk's launch lock."""
     try:
         launches = capacity.open_launches(conn, desk)
         if not launches:

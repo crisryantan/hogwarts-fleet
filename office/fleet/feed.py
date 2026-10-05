@@ -9,9 +9,13 @@ the desk's headmaster events, and the live output of its current run, read from 
 .out file in the office runs folder (Claude stream-json or Codex exec --json). A desk with more
 than one run slot (config.RUN_SLOTS) can have several runs going: the feed takes a place in every
 run file that appears, follows whichever run wrote last and keeps its place in the others, and reads
-the rest of a run once it ends, so each line of each run is shown once. A run that ended without its
-end being recorded is read to its end before the feed lets it go, and a run whose output cannot be
-read yet keeps its place, and its end waits, until it can.
+the rest of a run once it ends, so each line of each run is shown once. The feed lets a run go only once
+it knows the run ended: its usage is recorded, its file is gone, or its run lock file (runs/<desk>/<run>.lock,
+on a desk whose runs take one) is gone. However long ago a run last wrote, it may still be going after its
+launcher was killed, so until then its place is kept, what it wrote is shown up to its last complete line,
+and whatever it writes later, and its end, still follow. A run whose output cannot be read yet keeps its
+place, and its end waits, until it can, and a read that fails part way shows nothing of it until the
+next try reads it again from the same place.
 
 The store is opened with db.connect_readonly and nothing is ever written. Every printed line
 goes through sanitize first, so nothing a desk writes can drive the terminal. Ctrl+C stops it.
@@ -30,7 +34,7 @@ from typing import Callable, Optional
 from hogwarts import db, ids, watch
 from hogwarts.errors import StoreError
 
-from . import config, safefs
+from . import config, run_desk, safefs
 from .safefs import FleetError
 
 POLL_SECONDS = 1.0
@@ -232,6 +236,8 @@ class Feed:
         self.paused: dict = {}
         self.seen: dict = {}
         self.ending: list = []
+        # How each run the feed let go before its run end was shown said it ended, by file name, for that end.
+        self.let_go: dict = {}
         self.first = True
 
     def target(self) -> str:
@@ -333,8 +339,8 @@ class Feed:
             cursor = paused[name] = RunTail()
             cursor.switch(name, 0)
             lines.append(line(row["ts"], self._prefix(desk) + f"run start {row['run_id']}"))
-        else:
-            return [self._end_line(row, None)]  # passed over when the feed started, or already let go
+        else:  # passed over when the feed started, or let go once it was known to have ended
+            return [self._end_line(row, self.let_go.pop(name, None))]
         rest = self._drained(desk, cursor, row["ts"])
         if rest is None:
             self.ending.append(row)
@@ -393,11 +399,6 @@ class Feed:
         count = config.RUN_SLOTS.get(desk, 1)
         return count if type(count) is int and count > 0 else 1
 
-    def _going(self, fd: int, name: str, now: int) -> bool:
-        info = safefs.lstat(fd, name)
-        return info is not None and stat.S_ISREG(info.st_mode) and \
-            self._running(RUN_OUT.fullmatch(name).group(1), info, now)
-
     def _follow(self, fd: int, desk: str, now: int) -> list:
         newest = self._newest(fd)
         if newest is None:
@@ -425,13 +426,14 @@ class Feed:
         """_follow for a desk with more than one run slot, whose runs can go at once. Every run file that appears
         gets its own place, even when another run wrote later in the same poll, so no run goes unread. The run that
         wrote last is read as it goes; the others carry on from their place when they write last again, or are read
-        to their end when it comes, or when they stop with no end recorded."""
+        to their end once the feed knows they ended (_end_known), never because their file is old."""
         files = self._run_files(fd)
         if not files:
             return []
         tail = self.tails.setdefault(desk, RunTail())
         paused, seen = self.paused.setdefault(desk, {}), self.seen.setdefault(desk, set())
         starting = self.first and tail.name is None and not seen
+        running = self._open_runs(desk) if starting else None
         lines = []
         for _, name, info in files:
             if name in seen:
@@ -439,7 +441,12 @@ class Feed:
             seen.add(name)
             run_id = RUN_OUT.fullmatch(name).group(1)
             if starting and not self._running(run_id, info, now):
-                continue  # it ended before the feed started
+                if running is not None and run_id in running and not self._end_known(fd, desk, run_id, running):
+                    # Its file is old but its usage is not in, so it may still be going after its launcher was
+                    # killed: a place at its end, so what it writes from now on, and its end, still follow.
+                    paused[name] = RunTail()
+                    paused[name].switch(name, info.st_size)
+                continue  # it ended before the feed started, or is followed only from here
             text = f"run in progress {run_id}, shown from its start" if starting else f"run start {run_id}"
             lines.append(line(now, self._prefix(desk) + text))
             paused[name] = RunTail()
@@ -451,9 +458,11 @@ class Feed:
                 if tail.name is not None and not tail.done:
                     self.tails[desk] = RunTail()
                     paused[tail.name] = tail  # it keeps its place until its end, or until it writes last again
-                    if not self._going(fd, tail.name, now):
-                        # It has ended: the rest of it and its end come before the run that wrote last.
-                        lines += self._read(fd, desk, tail, now, final=True)
+                    if self._ended(fd, desk, tail.name):
+                        # It has ended: the rest of it and its end come before the run that wrote last. A rest that
+                        # cannot be read now is not shown, and its place stays where it was, so its end, or _let_go,
+                        # reads it from there.
+                        lines += self._drained(desk, tail, now) or []
                         lines += self._metrics()
                 if name in paused:
                     self.tails[desk] = paused.pop(name)
@@ -465,13 +474,16 @@ class Feed:
         return lines
 
     def _let_go(self, desk: str, fd: int, now: int) -> list:
-        """Each run the feed has a place in besides the one that wrote last, whose file is gone or was last written
-        longer ago than a run may take, ended with no end recorded: it is read to its end, its last line
-        included, and then let go. One that cannot be read keeps its place for the next poll, and so does one
-        whose end is waiting to be shown."""
+        """Each run the feed has a place in besides the one that wrote last, and that has written nothing for longer
+        than a run may take. One whose file is gone, or that is known to have ended (_end_known), is read to its end,
+        its last line included, and let go, and its run end, if it comes later, keeps the status it read. Any other
+        may still be going, however old its file, since its launcher may have been killed while its process runs
+        on: what it wrote is shown up to its last complete line and its place is kept, so whatever it writes later,
+        and its end, still follow. One that cannot be read keeps its place for the next poll, and so does one whose
+        end is waiting to be shown."""
         paused = self.paused.get(desk, {})
         waiting = {f"{row['run_id']}.out" for row in self.ending if row["desk"] == desk}
-        lines = []
+        lines, running, read = [], None, False
         for name in [item for item in paused if item not in waiting]:
             try:
                 info = safefs.lstat(fd, name)
@@ -479,11 +491,73 @@ class Feed:
                 continue
             if info is not None and info.st_mtime >= now - config.RUN_TIMEOUT_SECONDS - 60:
                 continue
-            rest = self._drained(desk, paused[name], now)
+            cursor = paused[name]
+            if info is not None:
+                if not read:
+                    running, read = self._open_runs(desk), True
+                if not self._end_known(fd, desk, RUN_OUT.fullmatch(name).group(1), running):
+                    if info.st_size != cursor.offset:
+                        lines += self._caught_up(fd, desk, cursor, now)
+                    continue
+            rest = self._drained(desk, cursor, now)
             if rest is not None:
                 lines += rest
+                self.let_go[name] = cursor.outcome
                 del paused[name]
         return lines
+
+    def _open_runs(self, desk: str) -> Optional[set]:
+        """The run ids of the desk's launches with no usage recorded yet (watch.open_runs), or None when the store
+        cannot be read now."""
+        found = self._store_rows(lambda: [watch.open_runs(self.conn, desk)])
+        return found[0] if found else None
+
+    def _recorded(self, run_id: str) -> bool:
+        return bool(self._store_rows(lambda: [True] if watch.run_recorded(self.conn, run_id) else []))
+
+    @staticmethod
+    def _takes_run_locks(desk: str) -> bool:
+        """Whether each run of the desk takes a run lock of its own (run_desk.holds_spend), whose file run_desk
+        removes only once the run's usage is recorded or its process never started. False when the config cannot
+        say."""
+        try:
+            return run_desk.holds_spend(desk)
+        except FleetError:
+            return False
+
+    def _end_known(self, fd: int, desk: str, run_id: str, running: Optional[set]) -> bool:
+        """Whether a run of a desk with several run slots is known to have ended: its usage is recorded, or its desk
+        gives each run a lock of its own and that lock's file is gone. running is the desk's launches with no usage
+        recorded (_open_runs), None when the store could not be read, and then only the lock file can say. The age
+        of a run's file never says that it ended: a run whose launcher was killed can go on writing long after. The
+        feed never takes a lock: run_desk removes a run lock's file only once no process holds it and the run's
+        usage is in, or its process never started, so a file that is gone is a lock no longer held."""
+        if self._takes_run_locks(desk):
+            try:
+                if safefs.lstat(fd, f"{run_id}.lock") is None:
+                    return True
+            except OSError:
+                pass
+        return running is not None and run_id not in running and self._recorded(run_id)
+
+    def _ended(self, fd: int, desk: str, name: str) -> bool:
+        """Whether a run of a desk with several run slots is known to have ended: its file is gone or not a plain file,
+        or _end_known says so."""
+        info = safefs.lstat(fd, name)
+        if info is None or not stat.S_ISREG(info.st_mode):
+            return True
+        return self._end_known(fd, desk, RUN_OUT.fullmatch(name).group(1), self._open_runs(desk))
+
+    def _caught_up(self, fd: int, desk: str, tail: RunTail, now: int) -> list:
+        """The complete lines a run that may still be going wrote after its place, as _read reads them; a partial last
+        line waits for its newline. When the read fails its place is put back, so the next try shows the same lines
+        once."""
+        before = (tail.name, tail.offset, tail.pending, tail.skipping, tail.outcome)
+        try:
+            return self._read(fd, desk, tail, now)
+        except OSError:
+            tail.name, tail.offset, tail.pending, tail.skipping, tail.outcome = before
+            return []
 
     def _read(self, fd: int, desk: str, tail: RunTail, now: int, final: bool = False) -> list:
         """New complete lines of the run file. A partial last line waits for its newline, unless the

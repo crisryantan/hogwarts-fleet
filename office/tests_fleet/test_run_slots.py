@@ -315,10 +315,10 @@ class SlotCapTests(RunDeskCase):
         inside, checked, seen = threading.Event(), threading.Event(), {}
         real_over = run_desk.over_daily_cap
 
-        def over(conn, desk, now=None):
+        def over(conn, desk, now=None, **kwargs):
             if threading.current_thread().name == "second":
                 checked.set()
-            return real_over(conn, desk, now)
+            return real_over(conn, desk, now, **kwargs)
 
         def first_launching() -> None:
             # Called inside the first run's launch section, before its launch counts. The second run, in the other
@@ -511,6 +511,98 @@ class SlotCapTests(RunDeskCase):
         self.assertEqual((status["spend_used_usd"], status["spend_held_usd"], status["reached"]),
                          (round(limit - 3.0 + 2 * budget + 0.3, 6), 0.0, "spend"))
         self.assertEqual((self.run_locks(), capacity.open_launches(self.conn, "hermione")), ([], []))
+
+    def test_runs_are_settled_only_under_the_desks_launch_lock(self):
+        budget = float(config.MAX_BUDGET_USD["hermione"])
+        orphan = "run-" + "c" * 16
+        self.orphan(orphan, self.reported(0.3))
+        with run_desk.launch_lock("hermione"):
+            # A launch of Hermione holds it, reading the caps: nothing is settled under it, and its budget stays held.
+            self.assertEqual(run_desk.reconcile_launches(self.conn, "hermione", NOW), [])
+            self.assertIsNone(run_desk.over_daily_cap(self.conn, "hermione", NOW))
+            status = run_desk.cap_status(self.conn, "hermione", NOW)
+            self.assertEqual((status["spend_used_usd"], status["spend_held_usd"]), (0.0, budget))
+            self.assertEqual(self.run_locks(), [f"{orphan}.lock"])
+        self.assertEqual(run_desk.reconcile_launches(self.conn, "hermione", NOW), [orphan])
+        status = run_desk.cap_status(self.conn, "hermione", NOW)
+        self.assertEqual((status["spend_used_usd"], status["spend_held_usd"], self.run_locks()), (0.3, 0.0, []))
+
+    def test_a_check_before_a_launch_never_settles_a_run_while_the_launch_reads_the_caps(self):
+        limit = config.DAILY_SPEND_CAP_USD["hermione"]
+        budget = float(config.MAX_BUDGET_USD["hermione"])
+        owl_id, _ = self.request("hermione")
+        pensieve.add_metric(self.conn, "hermione", "run-earlier", "opus", 1, 1, 0, limit - 1.0, 10, ts=NOW - 60)
+        orphan = "run-" + "a" * 16
+        lock = self.orphan(orphan, self.streamed())  # cut short, so it is charged its budget, which passes the cap
+        settling, go = threading.Event(), threading.Event()
+        real_record, real_open = run_desk._record_orphan, capacity.open_launches
+
+        def record(conn, plan, run_fd, row, now):
+            # The Owl Post's check holds the orphan's lock and is about to record what it spent.
+            settling.set()
+            go.wait(3)
+            return real_record(conn, plan, run_fd, row, now)
+
+        def open_launches(conn, desk):
+            found = real_open(conn, desk)
+            if threading.current_thread().name == "launch" and conn.in_transaction:
+                # The launch's cap snapshot has begun: the check finishes settling before the launch looks for locks.
+                go.set()
+                deadline = time.monotonic() + 10
+                while lock.exists() and time.monotonic() < deadline:
+                    time.sleep(0.05)
+            return found
+
+        with fake_children(self.held_desk) as started, \
+                mock.patch.object(run_desk, "_record_orphan", side_effect=record), \
+                mock.patch.object(capacity, "open_launches", side_effect=open_launches):
+            check = Background(self.db_path, lambda conn: run_desk.over_daily_cap(conn, "hermione", NOW),
+                               name="check")
+            self.assertTrue(settling.wait(60))
+            self.release.set()
+            launch = Background(self.db_path, lambda conn: run_desk.run(conn, "hermione", owl_id, now=NOW),
+                                name="launch").join()
+            check.join()
+        self.assertIsNone(check.error)
+        self.assertIsInstance(launch.error, run_desk.Capped)
+        self.assertEqual(str(launch.error), "daily spend cap reached")
+        self.assertEqual(started.call_count, 0)
+        status = run_desk.cap_status(self.conn, "hermione", NOW)
+        self.assertEqual((status["spend_used_usd"], status["spend_held_usd"], status["reached"]),
+                         (round(limit - 1.0 + budget, 6), 0.0, "spend"))
+
+    def test_the_caps_never_miss_a_run_settled_while_they_are_read(self):
+        limit = config.DAILY_SPEND_CAP_USD["hermione"]
+        budget = float(config.MAX_BUDGET_USD["hermione"])
+        pensieve.add_metric(self.conn, "hermione", "run-earlier", "opus", 1, 1, 0, limit - 1.0, 10, ts=NOW - 60)
+        run_id = "run-" + "b" * 16  # still going, long past the running window, its lock file there
+        lock = self.orphan(run_id, b"")
+        settled = []
+        real_open = capacity.open_launches
+
+        def open_launches(conn, desk):
+            found = real_open(conn, desk)
+            if conn.in_transaction and not settled:
+                # Its launcher records its usage and removes its lock file after this snapshot began.
+                other = db.connect(self.db_path)
+                try:
+                    capacity.record_launch_usage(other, run_id, 1, 1, 0, 1.5, 10, now=NOW)
+                finally:
+                    other.close()
+                os.unlink(lock)
+                settled.append(run_id)
+            return found
+
+        with mock.patch.object(capacity, "open_launches", side_effect=open_launches), \
+                mock.patch.object(cli, "_clock", return_value=NOW):
+            rows = {row["desk"]: row for row in cli._desk_caps(self.conn, mock.Mock())}
+        self.assertEqual(settled, [run_id])
+        status = rows["hermione"]
+        self.assertEqual((status["spend_used_usd"], status["spend_held_usd"], status["reached"]),
+                         (round(limit - 1.0, 6), budget, "spend"))
+        status = run_desk.cap_status(self.conn, "hermione", NOW)
+        self.assertEqual((status["spend_used_usd"], status["spend_held_usd"], status["reached"]),
+                         (round(limit + 0.5, 6), 0.0, "spend"))
 
     def test_castle_desk_caps_and_a_bump_count_what_runs_still_going_hold(self):
         limit = config.DAILY_SPEND_CAP_USD["hermione"]

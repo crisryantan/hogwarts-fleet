@@ -72,3 +72,11 @@ def run_recorded(conn: Conn, run_id: str) -> bool:
     """True once run_desk has written the metrics row that ends this run."""
     run_id = ids.check("label", run_id, "run id")
     return db.fetch_one(conn, "SELECT 1 AS found FROM metrics WHERE run_id = ? LIMIT 1", (run_id,)) is not None
+
+
+def open_runs(conn: Conn, desk: str) -> set:
+    """The run ids of the desk's launches whose usage is not recorded yet: runs still going, or ended with no one left
+    to record them."""
+    desk = ids.check("desk", desk)
+    rows = db.fetch_all(conn, "SELECT run_id FROM run_launches WHERE desk = ? AND metric_id IS NULL", (desk,))
+    return {row["run_id"] for row in rows}

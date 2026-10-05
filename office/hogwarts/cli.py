@@ -222,7 +222,9 @@ def _fleet_caps():
 
 def _cap_status(conn: sqlite3.Connection, desk: str, now: int) -> dict:
     """One desk's caps as the launcher reads them (fleet/run_desk.py next to this package), with the spend its runs
-    still going hold (spend_held_usd), so these numbers agree with the launcher's refusals."""
+    still going hold (spend_held_usd), so these numbers agree with the launcher's refusals. It settles nothing: a
+    run that ended with no one left to record it stays held at its budget until the next launch decision records
+    it, so these numbers run high, never low."""
     from fleet import run_desk as fleet_run_desk
 
     return fleet_run_desk.cap_status(conn, desk, now)

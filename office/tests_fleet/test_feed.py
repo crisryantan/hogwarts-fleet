@@ -8,7 +8,7 @@ import sqlite3
 import unittest
 from unittest import mock
 
-from hogwarts import db, owlery, pensieve
+from hogwarts import capacity, db, owlery, pensieve
 from tests.support import NOW
 
 from fleet import config, feed, safefs, tools
@@ -443,19 +443,103 @@ class FeedTests(FeedCase):
                             " status completed", f"harry: run start {later}", "harry: codex started"])
         self.assertEqual(follow.poll(NOW + 6), [])
 
-    def test_a_left_run_that_stops_with_no_end_is_read_to_its_last_line_before_it_is_let_go(self):
+    def test_a_left_run_that_stops_with_no_end_known_keeps_its_place_however_old_its_file(self):
+        capacity.record_launch(self.conn, "moody", RUN_A, "codex", now=NOW)
         follow, first, second = self.two_runs()
-        # The first writes more, its last line with no newline, then is killed before its end is recorded, while
-        # the second keeps writing after it.
-        self.append(first, jsonl(CODEX_STREAM[3:4]) + json.dumps(CODEX_STREAM[6]).encode())
+        # The first writes more, then half an event, and stops writing with no end recorded: its launcher was killed
+        # and its process waits. The second keeps writing after it.
+        said = json.dumps(CODEX_STREAM[6]).encode()
+        self.append(first, jsonl(CODEX_STREAM[3:4]) + said[:20])
         os.utime(first, (NOW + 4, NOW + 4))
         self.wrote(second, CODEX_STREAM[3:4], NOW + 5)
         self.assertEqual(texts(follow.poll(NOW + 6)), ["command (exit 0): bash -lc ls"])
+        # Long past the running window its complete lines are shown, and its place is kept, half event and all.
         stale = NOW + 4 + config.RUN_TIMEOUT_SECONDS + 61
         self.wrote(second, CODEX_STREAM[4:5], stale - 1)
-        self.assertEqual(texts(follow.poll(stale)), ["command (exit 0): bash -lc ls", "says: Done, tests pass.",
+        self.assertEqual(texts(follow.poll(stale)), ["command (exit 0): bash -lc ls",
                                                      "files: update /w/app.py, add /w/new.py"])
-        self.assertEqual(follow.paused["moody"], {})
+        self.assertEqual(list(follow.paused["moody"]), [f"{RUN_A}.out"])
+        self.assertEqual(follow.poll(stale + 600), [])
+        # Its process goes on: the rest of the event and more, while the second still writes last. Then its usage.
+        later = stale + 3600
+        self.append(first, said[20:] + b"\n" + jsonl(CODEX_STREAM[4:5]))
+        os.utime(first, (later, later))
+        self.wrote(second, CODEX_STREAM[6:7], later + 1)
+        self.assertEqual(texts(follow.poll(later + 2)), ["says: Done, tests pass."])
+        capacity.record_launch_usage(self.conn, RUN_A, 1, 2, 3, 0.0, 500, now=later + 3)
+        self.assertEqual(texts(follow.poll(later + 3)), [
+            "says: Done, tests pass.", "files: update /w/app.py, add /w/new.py",
+            f"run end {RUN_A}: model codex, 0.5s, tokens in 1 out 2 cache 3, $0.00"])
+        self.assertEqual((follow.poll(later + 4), list(follow.paused["moody"])), ([], []))
+
+    def test_a_stale_run_with_its_run_lock_left_is_followed_until_the_lock_file_goes(self):
+        # Hermione's runs each take a run lock, whose file goes only once the run's usage is in.
+        capacity.record_launch(self.conn, "hermione", RUN_A, "opus", now=NOW)
+        lock = self.office / "runs" / "hermione" / f"{RUN_A}.lock"
+        follow, first, second = self.two_runs("hermione")
+        self.write_file(lock, "")
+        stale = NOW + config.RUN_TIMEOUT_SECONDS + 61
+        self.assertEqual(follow.poll(stale), [])
+        self.assertEqual(list(follow.paused["hermione"]), [f"{RUN_A}.out"])
+        self.wrote(first, CODEX_STREAM[3:4], stale + 5)
+        self.wrote(second, CODEX_STREAM[4:5], stale + 6)
+        self.assertEqual(texts(follow.poll(stale + 7)), ["files: update /w/app.py, add /w/new.py"])
+        # Its process ended and nobody recorded its usage yet: its place stays while the lock file does.
+        far = stale + 2 * config.RUN_TIMEOUT_SECONDS
+        self.assertEqual(texts(follow.poll(far)), ["command (exit 0): bash -lc ls"])
+        self.assertEqual(list(follow.paused["hermione"]), [f"{RUN_A}.out"])
+        # Settled with no usage (its process never started, say): its lock file goes and the feed lets it go.
+        os.unlink(lock)
+        self.assertEqual((follow.poll(far + 1), follow.paused["hermione"]), ([], {}))
+
+    def test_a_feed_started_after_a_run_went_quiet_follows_what_it_writes_next(self):
+        capacity.record_launch(self.conn, "moody", RUN_A, "codex", now=NOW)
+        capacity.record_launch(self.conn, "moody", RUN_B, "codex", now=NOW)
+        capacity.record_launch_usage(self.conn, RUN_B, 1, 1, 0, 0.0, 10, now=NOW + 1)
+        quiet = self.run_file("moody", RUN_A, jsonl(CODEX_STREAM[:4]), mtime=NOW)
+        self.run_file("moody", RUN_B, jsonl(CODEX_STREAM), mtime=NOW + 1)
+        start = NOW + config.RUN_TIMEOUT_SECONDS + 61
+        follow = feed.Feed(self.reader, "moody")
+        # Both are old. The finished one is passed over; the quiet one's usage is not in, so a place is kept at its
+        # end and nothing it wrote before is shown.
+        self.assertEqual(follow.poll(start), [])
+        self.assertEqual(list(follow.paused["moody"]), [f"{RUN_A}.out"])
+        self.append(quiet, jsonl(CODEX_STREAM[6:]))
+        os.utime(quiet, (start + 5, start + 5))
+        self.assertEqual(texts(follow.poll(start + 6)), ["says: Done, tests pass."])
+        capacity.record_launch_usage(self.conn, RUN_A, 4, 5, 6, 0.0, 700, now=start + 7)
+        self.assertEqual(texts(follow.poll(start + 7)), [
+            f"run end {RUN_A}: model codex, 0.7s, tokens in 4 out 5 cache 6, $0.00, status completed"])
+        self.assertEqual((follow.poll(start + 8), follow.paused["moody"]), ([], {}))
+
+    def test_a_drain_on_switching_away_from_an_ended_run_that_fails_part_way_loses_nothing(self):
+        follow = feed.Feed(self.reader, "moody")
+        follow.poll(NOW)
+        first = self.run_file("moody", RUN_A, jsonl(CODEX_STREAM[:1]), mtime=NOW)
+        self.assertEqual(texts(follow.poll(NOW + 1)), [f"run start {RUN_A}", "codex started"])
+        # The first writes the rest of its run and ends; then the second starts, so the feed switches away from it.
+        self.append(first, jsonl(CODEX_STREAM[3:]))
+        os.utime(first, (NOW + 2, NOW + 2))
+        pensieve.add_metric(self.conn, "moody", RUN_A, "codex", 1, 2, 3, 0.0, 500, ts=NOW + 3)
+        self.run_file("moody", RUN_B, jsonl(CODEX_STREAM[:1]), mtime=NOW + 4)
+        real, reads = feed.safefs.read_range, []
+
+        def read_range(fd, name, offset, max_bytes, label="file"):
+            if name == f"{RUN_A}.out":
+                reads.append(offset)
+                if len(reads) == 2:  # the drain has read its first chunk when the next read fails
+                    raise OSError(5, "Input/output error")
+            return real(fd, name, offset, max_bytes, label)
+
+        # Its first chunk holds a whole line to show.
+        with mock.patch.object(feed, "READ_CHUNK_BYTES", len(jsonl(CODEX_STREAM[3:4])) + 8), \
+                mock.patch.object(feed.safefs, "read_range", side_effect=read_range):
+            shown = texts(follow.poll(NOW + 5)) + texts(follow.poll(NOW + 6))
+        self.assertGreater(len(reads), 3)
+        self.assertEqual(shown, [f"run start {RUN_B}"] + CODEX_LINES[1:] + [
+            f"run end {RUN_A}: model codex, 0.5s, tokens in 1 out 2 cache 3, $0.00, status completed",
+            "codex started"])
+        self.assertEqual((follow.poll(NOW + 7), follow.paused["moody"], follow.ending), ([], {}, []))
 
     def test_a_left_run_whose_file_is_gone_shows_the_last_line_it_had_read(self):
         follow = feed.Feed(self.reader, "moody")
