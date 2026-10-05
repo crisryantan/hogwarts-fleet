@@ -171,7 +171,7 @@ All in `~/.hogwarts/fleet/config.py`:
 
 | Constant | What it limits |
 | --- | --- |
-| `MAX_BUDGET_USD` | The most one headless Claude run may spend, passed as `--max-budget-usd` |
+| `MAX_BUDGET_USD` | The most one headless Claude run may spend, passed as `--max-budget-usd`. A run killed before it reports its cost is charged this much |
 | `DAILY_RUN_CAP` | Runs per desk in one cap day. The kit sizes it for a busy day: Hermione 80, Ron 120, the portrait 3, Harry 40 and Moody 80 |
 | `DAILY_SPEND_CAP_USD` | Spend per Claude desk in one cap day, read from the store's metrics: Hermione $60, Ron $10 and the portrait $4. The Codex desks have no spend cap |
 | `CAP_RESET_UTC_SECONDS` | When the cap day starts. `None` is local midnight on your Mac, daylight saving included. A number fixes the reset that many seconds after UTC midnight instead |
@@ -183,6 +183,8 @@ All in `~/.hogwarts/fleet/config.py`:
 | `TASK_PAD_DESKS` | The desks that get one pad per task, `desks/<desk>/pads/<key>.md`: Hermione and Ron |
 | `RUNNING_WINDOW_SECONDS` | How long a launch with no usage yet counts as running in the digest and `castle task board` |
 | `DIGEST_MAX_LINES` | The length of McGonagall's startup digest |
+| `PORTRAIT_EXPORT_MAX_BYTES`, `PORTRAIT_EXPORT_MAX_FACTS` | How much of the day the nightly export hands Dumbledore: 512KB of extracts and 300 current facts |
+| `PORTRAIT_MCP_JOB` | `None` in the kit, so Dumbledore runs with no MCP server. For read-only chat, put an MCP job file naming your chat server at `~/.hogwarts/desks/portrait/mcp-chat.json` and set it to `"chat"`. His settings allow only that server's list and search tools and deny `send_message`, and his runs refuse every tool they don't allow |
 
 The caps guard against runaway loops, so keep them well above a normal day. A cap day resets all at once, so a desk that is busy on both sides of the reset can use up to two days' cap within hours.
 

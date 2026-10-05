@@ -218,6 +218,9 @@ def list_cap_hits(conn: Conn, desk: Optional[str] = None, since: int = 0) -> lis
 # Run launches
 
 
+SPEND_UNKNOWN_KIND = "rundesk.spend_unknown"
+
+
 def record_launch(conn: Conn, desk: str, run_id: str, model: str, task_id: Optional[str] = None,
                   now: Optional[int] = None) -> dict:
     """A headless run about to start. It counts toward the desk's daily run cap from now, however it ends.
@@ -240,9 +243,11 @@ def record_launch(conn: Conn, desk: str, run_id: str, model: str, task_id: Optio
 
 def record_launch_usage(conn: Conn, run_id: str, input_tokens: int, output_tokens: int, cache_read_tokens: int,
                         cost_usd: float, duration_ms: int, model: Optional[str] = None,
-                        now: Optional[int] = None) -> dict:
+                        now: Optional[int] = None, spend_unknown: bool = False) -> dict:
     """The usage of a launched run that ended: its metrics row, tied to the launch in one transaction.
-    model is the one that really ran when the run said so, else the one it was launched with."""
+    model is the one that really ran when the run said so, else the one it was launched with. spend_unknown
+    marks a cost that is an estimate (a run killed before it reported one): a routine event keyed to the run
+    is stored in the same transaction, so the marker outlives the process that recorded it."""
     run_id = ids.check("label", run_id, "run id")
     model = ids.optional("label", model, "model")
     with db.transaction(conn):
@@ -255,6 +260,10 @@ def record_launch_usage(conn: Conn, run_id: str, input_tokens: int, output_token
                                      output_tokens, cache_read_tokens, cost_usd, duration_ms, ts=now)
         conn.execute("UPDATE run_launches SET metric_id = ? WHERE run_id = ? AND metric_id IS NULL",
                      (metric["id"], run_id))
+        if spend_unknown:
+            pensieve.add_event(conn, launch["desk"], SPEND_UNKNOWN_KIND, "routine",
+                               f"run {run_id} was killed before it reported a cost; charged ${cost_usd:.2f},"
+                               " the most it could spend", dedupe_key=f"spend-unknown:{run_id}", now=now)
     return metric
 
 

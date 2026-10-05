@@ -67,8 +67,10 @@ checkout no longer has (renamed or deleted), or that names none, also refuses a 
 this same work under a new name. --task <id> moves the task to the branch now out when HEAD builds on its commits
 or its own branch is gone; it never moves a task onto a branch another task follows, and never takes on work
 built on another open task's commits. A shallow checkout, whose history may stop short of a recorded commit, is
-refused rather than guessed about; in a full clone a recorded commit it lacks is no ancestor, since git keeps
-every commit its branches reach. A checkout is matched as a folder (device and inode), not by how its path is
+refused rather than guessed about, and told to fetch its full history; in a full clone a recorded commit it lacks
+is no ancestor, since git keeps every commit its branches reach. A full clone whose own history is missing or
+damaged also cannot tell, and is told to fetch the missing commits or clone again, since git refuses --unshallow
+on it. A checkout is matched as a folder (device and inode), not by how its path is
 spelled. These choices are made under one short lock, so two reviews started at once on one branch never both
 make a task. Rewritten commits (a rebase, squash or cherry-pick onto a new branch name) are new commits, so they
 start a fresh task, and the handbook asks Ryan not to route around his cap that way. A new task that fails before
@@ -643,8 +645,8 @@ def _check_new_own(conn, repo_dir: str, common_dir: str, repo: str, sha: str, br
     # still that task's work. A task awaiting close is done, so work built on it starts anew.
     owner, recorded, known = _lineage_owner(conn, common_dir, repo, sha)
     if owner is not None and not known:
-        raise FleetError(_shallow_text(owner, recorded) + f", run {_continue_text(owner)} if it is that task's"
-                         f" work, or close that task first")
+        raise FleetError(_unknown_text(common_dir, owner, recorded) + f", run {_continue_text(owner)} if it is that"
+                         f" task's work, or close that task first")
     if owner is not None:
         raise FleetError(f"HEAD builds on commit {recorded[:12]} of task {owner['id']}, so it is that task's work"
                          f" and goes on its round count: run {_continue_text(owner)}{_rounds_hint(conn, owner)}"
@@ -666,9 +668,16 @@ def _lineage_owner(conn, common_dir: str, repo: str, sha: str, skip: Optional[st
     return unsure
 
 
-def _shallow_text(task: dict, recorded: str) -> str:
-    return (f"this checkout is shallow, so the review cannot tell whether HEAD builds on commit {recorded[:12]} of"
-            f" task {task['id']}: fetch its full history (git fetch --unshallow) and run this again")
+def _unknown_text(common_dir: str, task: dict, recorded: str) -> str:
+    """Why the review cannot tell whether HEAD builds on a task's commit, and what to do about it. Only a shallow
+    checkout is cured by fetching its full history, since git refuses --unshallow on a full clone. A full clone
+    that cannot tell has missing or damaged history, so it is told to fetch what is missing or clone again."""
+    cannot = f"the review cannot tell whether HEAD builds on commit {recorded[:12]} of task {task['id']}"
+    if gitops.is_shallow(common_dir):
+        return (f"this checkout is shallow, so {cannot}: fetch its full history (git fetch --unshallow) and run"
+                f" this again")
+    return (f"this checkout's history is incomplete or unreadable, so {cannot}: fetch the missing commits (git fetch"
+            f" origin), or clone the repository again, and run this again")
 
 
 def _continue_own(conn, task: dict, repo_dir: str, common_dir: str, repo: str, sha: str, branch: str) -> dict:
@@ -682,7 +691,7 @@ def _continue_own(conn, task: dict, repo_dir: str, common_dir: str, repo: str, s
                              f" run {_continue_text(other)}, or check out task {task['id']}'s branch")
     owner, recorded, known = _lineage_owner(conn, common_dir, repo, sha, skip=task["id"])
     if owner is not None and not known:
-        raise FleetError(_shallow_text(owner, recorded) + f", or close task {owner['id']} first")
+        raise FleetError(_unknown_text(common_dir, owner, recorded) + f", or close task {owner['id']} first")
     if owner is not None:
         raise FleetError(f"HEAD builds on commit {recorded[:12]} of task {owner['id']}, not task {task['id']}, so it"
                          f" goes on that task's round count: run {_continue_text(owner)}"
@@ -692,8 +701,8 @@ def _continue_own(conn, task: dict, repo_dir: str, common_dir: str, repo: str, s
     if task["review_branch"] is not None and gitops.has_branch(common_dir, task["review_branch"]):
         recorded, known = _built_on(conn, common_dir, task, repo, sha)
         if recorded is not None and not known:
-            raise FleetError(_shallow_text(task, recorded) + f", or check out branch {task['review_branch']} to"
-                             f" go on with that task")
+            raise FleetError(_unknown_text(common_dir, task, recorded) + f", or check out branch"
+                             f" {task['review_branch']} to go on with that task")
         if recorded is None:
             raise FleetError(f"task {task['id']} follows branch {task['review_branch']}, which this checkout still"
                              f" has: check it out to go on with that task, or leave out --task to start a new task"

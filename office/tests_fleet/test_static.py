@@ -55,6 +55,8 @@ KNOWN_FLAGS = {
     "--effort", "--version", "--help", "--cask",
     # Gringotts' restore drill
     "--drill",
+    # Dumbledore's nightly job: the export alone, with no owl and no run
+    "--export-only",
 }
 # Modules whose flag-shaped constants describe commands they read and refuse, never ones they run.
 FLAG_TABLE_MODULES = {"push_gate.py"}

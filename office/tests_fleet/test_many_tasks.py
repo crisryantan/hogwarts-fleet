@@ -11,6 +11,7 @@ import os
 import contextlib
 import io
 import re
+import shlex
 import stat
 import subprocess
 import threading
@@ -18,9 +19,9 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from hogwarts import capacity, db, ids, owlery, pensieve
+from hogwarts import capacity, cli, db, ids, owlery, pensieve
 from hogwarts.errors import ConflictError, ValidationError
-from tests.support import NOW
+from tests.support import NOW, temp_dir
 
 from fleet import config, gitops, owl_post, push, review, run_desk, verify, worktree
 from fleet.hooks import pre_compact, session_start
@@ -714,9 +715,9 @@ class OwnLineageAncestryTests(ManyCase):
         self.assertEqual(self.own_tasks(), [capped])
         common = str(other / ".git")
         head = self.git("rev-parse", "HEAD", cwd=other)
+        self.assertTrue(gitops.is_shallow(common))
         self.assertIsNone(gitops.is_ancestor(common, last, head))
         self.assertTrue(gitops.is_ancestor(common, head, head))
-
 
     def test_an_origin_url_in_another_letter_case_is_still_that_repository(self):
         # GitHub takes a slug in any letter case, so an origin respelled in capitals is the same repository.
@@ -770,9 +771,15 @@ class OwnLineageAncestryTests(ManyCase):
         self.git("commit", "-q", "-m", "other work", cwd=other)
         head = self.git("rev-parse", "HEAD", cwd=other)
         self.assertIsNone(gitops.is_ancestor(str(other / ".git"), last, head))
-        with self.not_made(), self.assertRaisesRegex(FleetError, re.escape(
-                f"cannot tell whether HEAD builds on commit {last[:12]} of task {capped}")):
+        self.assertFalse(gitops.is_shallow(str(other / ".git")))
+        with self.not_made(), self.assertRaises(FleetError) as caught:
             self.review_in(other)
+        # Git refuses --unshallow on a full clone, so this one is not told to run it.
+        text = str(caught.exception)
+        self.assertIn(f"cannot tell whether HEAD builds on commit {last[:12]} of task {capped}", text)
+        self.assertIn("this checkout's history is incomplete or unreadable", text)
+        self.assertIn("git fetch origin", text)
+        self.assertNotIn("unshallow", text)
         self.assertEqual(self.own_tasks(), [capped])
 
     def test_a_new_tasks_commit_is_its_lineage_before_its_checks_run(self):
@@ -959,6 +966,52 @@ class BuildDeskTests(ManyCase):
         self.assertFalse(os.path.lexists(config.worktree_dir(second["id"])))
         self.assertEqual(pensieve.get_task(self.conn, second["id"])["status"], "queued")
         self.assertNotIn("fix/other", self.git("branch", "--list", "fix/other"))
+
+    def run_castle(self, *argv) -> tuple:
+        """castle <argv> against the test store: (exit code, the JSON it printed)."""
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = cli.main(list(argv), db_path=self.db_path)
+        return code, json.loads(out.getvalue() or err.getvalue())
+
+    def test_castle_task_start_makes_the_same_task_md_check_as_fleet_worktree(self):
+        parent = self.queued_parent()
+        first, _, _ = self.built("fix/widget", parent)
+        second, _ = self.harry_request(parent, subject="build the other half")
+        code, out = self.run_castle("task", "start", second["id"])
+        self.assertEqual((code, out["error"]["type"]), (3, "ConflictError"))
+        self.assertIn(f"task {first['id']} of harry is still open under the same TASK.md", out["error"]["message"])
+        self.assertEqual(pensieve.get_task(self.conn, second["id"])["status"], "queued")
+        # A worktree command for a task under this TASK.md that is still running refuses the start too.
+        with worktree.holder_lock(parent):
+            code, out = self.run_castle("task", "start", second["id"])
+        self.assertEqual((code, out["error"]["message"]), (3, worktree.WORKTREE_RUNNING))
+        self.assertEqual(pensieve.get_task(self.conn, second["id"])["status"], "queued")
+        # Once the first is closed the same command starts the second.
+        pensieve.close_task(self.conn, first["id"], "abandoned")
+        code, out = self.run_castle("task", "start", second["id"])
+        self.assertEqual((code, out["ok"], out["data"]["status"]), (0, True, "active"))
+        # A task that is already active gets the store's own refusal, not the check's.
+        code, out = self.run_castle("task", "start", second["id"])
+        self.assertEqual((code, out["error"]["message"]), (3, "only queued tasks can start"))
+
+    def test_castle_task_start_leaves_other_desks_to_the_store(self):
+        parent = self.queued_parent()
+        code, out = self.run_castle("task", "start", parent)
+        self.assertEqual((code, out["data"]["status"]), (0, "active"))
+        # Hermione's tasks may share a TASK.md, so a second one under it still starts.
+        for subject in ("review the first change", "review the second change"):
+            self.enable("hermione")
+            self.owls += 1
+            self.write_owl("mcgonagall", f"review-{self.owls}.json", {"to": "hermione", "kind": "request",
+                                                                     "subject": subject, "body": "see TASK.md",
+                                                                     "task_id": parent})
+            with mock.patch.object(run_desk, "spawn"):
+                [delivered] = owl_post.run_pass(self.conn)["delivered"]
+            owl = next(item for item in owlery.inbox(self.conn, "hermione") if item["id"] == delivered["owl_id"])
+            task_id = owlery.get_request(self.conn, owl["request_id"])["task_id"]
+            code, out = self.run_castle("task", "start", task_id)
+            self.assertEqual((code, out["data"]["status"]), (0, "active"))
 
     def test_two_worktree_commands_under_one_task_md_race_and_exactly_one_starts(self):
         parent = self.queued_parent()
@@ -1355,6 +1408,21 @@ class DigestTests(HookCase):
                       (self.castle / "desks" / "mcgonagall" / "scratchpad.md").read_text())
 
 
+class CastleGitTests(ManyCase):
+    @unittest.skipUnless(IN_KIT, ONLY_IN_KIT)
+    def test_the_castles_git_ignores_task_pads_but_not_scratchpads(self):
+        folder = self.tmp / "castle-git"
+        for desk in config.TASK_PAD_DESKS:
+            (folder / "desks" / desk / "pads").mkdir(parents=True)
+            self.write_file(folder / "desks" / desk / "pads" / "tk_0123456789abcdef.md", "# Pad\n")
+            self.write_file(folder / "desks" / desk / "scratchpad.md", "# Scratchpad\n")
+        self.write_file(folder / ".gitignore", (KIT / "castle" / ".gitignore").read_text())
+        self.git("init", "-q", "-b", "main", cwd=folder)
+        status = self.git("status", "--porcelain", "--untracked-files=all", cwd=folder).splitlines()
+        self.assertEqual(sorted(line[3:] for line in status),
+                         [".gitignore"] + sorted(f"desks/{desk}/scratchpad.md" for desk in config.TASK_PAD_DESKS))
+
+
 # The kit's briefs, settings, charter and install.sh; an installed office keeps its own desk files.
 @unittest.skipUnless(IN_KIT, ONLY_IN_KIT)
 class DeskTextTests(unittest.TestCase):
@@ -1389,6 +1457,37 @@ class DeskTextTests(unittest.TestCase):
         loop = re.search(r"for desk in ([a-z0-9 -]+); do\n\t\"\$CASTLE_CLI\" desk many-tasks", self.text("install.sh"))
         self.assertIsNotNone(loop)
         self.assertEqual(tuple(loop.group(1).split()), db.MANY_TASK_DESKS_SEED)
+
+    def test_the_installed_office_check_runs_the_installer_with_a_cleared_environment(self):
+        # An inherited GIT_DIR or similar must never reach install.sh, or its git init could land in the real castle.
+        script = self.text("scripts/installed-office-check.sh")
+        runs = [line for line in script.splitlines() if "$REPO_DIR/install.sh" in line and "[ -f" not in line]
+        self.assertEqual(runs, ['/usr/bin/env -i HOME="$FAKE_HOME" PATH=/usr/bin:/bin:/usr/sbin:/sbin'
+                                ' LANG=en_US.UTF-8 /bin/sh "$REPO_DIR/install.sh" \\'])
+
+    def test_the_placeholder_scan_skips_test_folders_but_lists_every_real_file(self):
+        # Runs only the scan function from install.sh, on a made-up tree. install.sh itself never runs here.
+        script = self.text("install.sh")
+        scan = re.search(r"^unfilled_placeholders\(\) \{\n.*?^\}\n", script, re.DOTALL | re.MULTILINE)
+        placeholders = re.search(r"^PLACEHOLDERS='([^']+)'$", script, re.MULTILINE)
+        self.assertIsNotNone(scan)
+        self.assertIsNotNone(placeholders)
+        root = temp_dir(self)
+        office, castle = root / "office", root / "castle"
+        real = [office / "fleet" / "config.py", office / "desks" / "ron" / "settings.json",
+                castle / ".claude" / "settings.json", castle / "tests" / "notes.md"]
+        fixtures = [office / "tests" / "test_a.py", office / "tests_fleet" / "test_b.py",
+                    office / "tests_fleet" / "fixtures" / "live-tools" / "snape.json"]
+        for path in real + fixtures:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("a placeholder: <chat-mcp>\n")
+        (office / "fleet" / "filled.py").write_text("nothing left to fill in\n")
+        shell = (f"OFFICE={shlex.quote(str(office))}\nCASTLE={shlex.quote(str(castle))}\n"
+                 f"PLACEHOLDERS={shlex.quote(placeholders.group(1))}\n{scan.group(0)}\n"
+                 'unfilled_placeholders "$OFFICE" "$CASTLE" "$OFFICE/missing-agent.md"\n')
+        done = subprocess.run(["/bin/sh", "-c", shell], capture_output=True, check=True,
+                              env={"PATH": config.CHILD_PATH})
+        self.assertEqual(sorted(done.stdout.decode().splitlines()), sorted(str(path) for path in real))
 
 
 class SeedTests(unittest.TestCase):

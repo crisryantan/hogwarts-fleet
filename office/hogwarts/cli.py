@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Callable, Optional, Sequence
 
 from . import capacity, db, facts, ids, owlery, pensieve, wands
-from .errors import IntegrityError, NotFoundError, StoreError, ValidationError
+from .errors import ConflictError, IntegrityError, NotFoundError, StoreError, ValidationError
 
 _WHOLE = re.compile(r"[0-9]{1,18}")
 _SHA256 = re.compile(r"[0-9a-f]{64}")
@@ -266,6 +266,22 @@ def _task_board(conn: sqlite3.Connection, args: argparse.Namespace) -> dict:
     return capacity.in_flight(conn, _clock(), caps.RUNNING_WINDOW_SECONDS, args.desk, caps.REVIEW_ROUND_CAP)
 
 
+def _task_start(conn: sqlite3.Connection, args: argparse.Namespace) -> dict:
+    """Start a queued task. A build desk's task gets the TASK.md check that fleet worktree makes before it starts
+    one (kept in fleet/worktree.py next to this package), so this command is no way round it. Every other desk's
+    task starts as the store allows."""
+    task = pensieve.get_task(conn, args.task)
+    if task["desk"] not in _fleet_caps().WORKTREE_DESKS:
+        return pensieve.start_task(conn, task["id"])
+    from fleet import worktree as fleet_worktree
+    from fleet.safefs import FleetError
+
+    try:
+        return fleet_worktree.start_task(conn, task["id"])
+    except FleetError as exc:
+        raise ConflictError(str(exc)) from None
+
+
 def _desk_model(conn: sqlite3.Connection, args: argparse.Namespace) -> dict:
     if args.approve:
         return wands.approve(conn, args.desk, blocked=_blocked_models(), retiring_within=_retiring_window())
@@ -276,6 +292,14 @@ def _desk_model(conn: sqlite3.Connection, args: argparse.Namespace) -> dict:
 
 def _ollivander_clear(path: Path, args: argparse.Namespace) -> dict:
     return wands.clear_stop(path)
+
+
+def _portrait():
+    # Dumbledore's patches are castle files. The fleet's patch module next to this package reads them through
+    # safefs, checks them against its schema and applies accepted ops through this package's own APIs.
+    from fleet import portrait_patch
+
+    return portrait_patch
 
 
 HANDLERS: dict[str, Callable] = {
@@ -289,7 +313,7 @@ HANDLERS: dict[str, Callable] = {
     "model line": lambda c, a: wands.classify(c, a.name, a.line, blocked=_blocked_models()),
     "task create": lambda c, a: pensieve.create_task(
         c, a.desk, a.title, a.intent_path, a.parent, a.request, a.session, a.worktree, a.id),
-    "task start": lambda c, a: pensieve.start_task(c, a.task),
+    "task start": _task_start,
     "task await-close": lambda c, a: pensieve.mark_awaiting_close(c, a.task, a.repo, a.sha),
     "task commit": lambda c, a: pensieve.record_commit(c, a.task, a.repo, a.sha),
     "task worktree": lambda c, a: pensieve.set_worktree(c, a.task, a.path),
@@ -343,6 +367,9 @@ HANDLERS: dict[str, Callable] = {
     "fact history": lambda c, a: facts.history(c, a.scope, a.subject_key),
     "fact candidates": lambda c, a: facts.contradiction_candidates(c, a.since, a.limit_per_fact),
     "fact apply": lambda c, a: facts.apply_ops(c, _ops(a)),
+    "portrait patches": lambda c, a: _portrait().patches(c),
+    "portrait show": lambda c, a: _portrait().show(c, a.date),
+    "portrait apply": lambda c, a: _portrait().apply(c, a.date, a.sha256, a.only),
     "metric add": lambda c, a: pensieve.add_metric(
         c, a.desk, a.run_id, a.model, a.input_tokens, a.output_tokens, a.cache_read_tokens,
         a.cost_usd, a.duration_ms, a.ts),
@@ -604,6 +631,16 @@ def _temporal_fact_parsers(group: argparse._SubParsersAction) -> None:
     apply.add_argument("--sha256")
 
 
+def _portrait_parsers(commands: argparse._SubParsersAction) -> None:
+    group = _group(commands, "portrait")
+    _sub(group, "patches", "portrait patches")
+    _sub(group, "show", "portrait show").add_argument("date")
+    apply = _sub(group, "apply", "portrait apply")
+    apply.add_argument("date")
+    apply.add_argument("--sha256", required=True, help="the hash castle portrait show printed")
+    apply.add_argument("--only", nargs="+", help="op ids to apply, the rest left out")
+
+
 def _metric_parsers(commands: argparse._SubParsersAction) -> None:
     group = _group(commands, "metric")
     add = _sub(group, "add", "metric add")
@@ -624,7 +661,7 @@ def build_parser() -> argparse.ArgumentParser:
         _sub(commands, name, name)
     for build in (_desk_parsers, _task_parsers, _token_parsers, _owl_parsers, _request_parsers,
                   _review_parsers, _event_parsers, _pensieve_parsers, _fact_parsers, _metric_parsers,
-                  _model_parsers):
+                  _model_parsers, _portrait_parsers):
         build(commands)
     purge = _sub(commands, "purge", "purge")
     purge.add_argument("--body-days", type=_whole, default=30)

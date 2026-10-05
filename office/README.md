@@ -10,6 +10,7 @@ Nothing a desk runs can call the store, and desks (the agents) have no file acce
 
 - the Owl Post;
 - the Map;
+- the nightly Pensieve export, which runs the portrait after it;
 - the worktree, verify and review scripts;
 - the push gate;
 - the close-token and SessionEnd hooks.
@@ -41,7 +42,9 @@ File modes (0700 directories, 0600 files) keep other users out. They do not stop
   hogwarts/cli.py                       argparse CLI, JSON output
   fleet/                                the fleet scripts and hooks: run_desk.py, review.py, push.py, owl_post.py,
                                         ollivander.py, feed.py, tools.py (the fleet command), the patrol (patrol.py,
-                                        map.py, morning.py, keeper.py, scoreboard.py), gringotts.py and their helpers
+                                        map.py, morning.py, keeper.py, scoreboard.py), gringotts.py, portrait.py
+                                        (the nightly export and Dumbledore's run), portrait_patch.py (his
+                                        patches, behind castle portrait) and their helpers
   tests/                                unittest suite
   state/pensieve.db                     the real database, created by castle init
   patrol/shadow                         while it is here, the patrol and Gringotts only write files (shadow mode)
@@ -79,7 +82,7 @@ The first three sit in the castle (`/Users/crisryantan/hogwarts`), where desks w
 
 Paths must be absolute and already normalised, with no control characters, so `..`, `.` and repeated slashes are refused. Whoever later opens one of these files (a fleet script or a desk) must open it with `O_NOFOLLOW` and check that the resolved path is still under its root.
 
-The only file the CLI reads is the ops file for `castle fact apply --file PATH`. The path must be absolute and normalised. Every directory above it, up to `/`, must be a real directory (not a symlink) owned by root or the current user, and must not be group or world writable unless it has the sticky bit, like `/private/tmp`. The file is opened with `O_NOFOLLOW` and `O_NONBLOCK`, so a symlink or a FIFO is refused without blocking. It must be a regular file owned by the current user, not group or world writable, and at most 256KB. It must be UTF-8 JSON with no repeated keys inside an object and no `NaN` or `Infinity`. With `--sha256 HEX`, the bytes read must hash to that value, or nothing is applied. Pass the hash taken when the file was reviewed, so the reviewed bytes are the applied bytes.
+The CLI reads two kinds of file. `castle portrait show` and `apply` read Dumbledore's dated patch from his castle outbox through `fleet/portrait_patch.py`, which opens it with no link anywhere on the way and holds it to a strict schema (see Dumbledore's patches below). The other is the ops file for `castle fact apply --file PATH`. The path must be absolute and normalised. Every directory above it, up to `/`, must be a real directory (not a symlink) owned by root or the current user, and must not be group or world writable unless it has the sticky bit, like `/private/tmp`. The file is opened with `O_NOFOLLOW` and `O_NONBLOCK`, so a symlink or a FIFO is refused without blocking. It must be a regular file owned by the current user, not group or world writable, and at most 256KB. It must be UTF-8 JSON with no repeated keys inside an object and no `NaN` or `Infinity`. With `--sha256 HEX`, the bytes read must hash to that value, or nothing is applied. Pass the hash taken when the file was reviewed, so the reviewed bytes are the applied bytes.
 
 ## Security rules
 
@@ -151,8 +154,8 @@ Every function takes a connection from `db.connect(path)` as its first argument.
 - `hogwarts.pensieve`
   - Desks: `add_desk`, `get_desk`, `list_desks` (with `many_tasks`), `allow_many_tasks(desk)`, `takes_many_tasks(desk)`, `blocking_task(desk)`.
   - Tasks: `create_task(desk, title, intent_path=None, parent_task_id=None, request_id=None, session_id=None, worktree=None, task_id=None)`, `start_task`, `mark_awaiting_close(task, repo=None, sha=None)`, `record_commit`, `get_commit`, `task_commits`, `check_review_branch(branch)`, `set_review_branch(task, branch)`, `close_task`, `closed_ancestors`, `get_task`, `list_tasks(desk=None, status=None, open_only=False)`.
-  - Events: `add_event`, `drain(max_chars=1500)`, `ack(event_id)`.
-  - Memory: `record_session`, `get_session`, `add_extract`, `add_keypoint`, `find(query, limit)`, `fts_query`, `fts_phrases`, `scrub(text)`.
+  - Events: `add_event`, `drain(max_chars=1500)`, `ack(event_id)`, `events_with_key_prefix(prefix)` (read only, a plain text match on the dedupe key).
+  - Memory: `record_session`, `get_session`, `add_extract`, `extracts_between(since, until, limit=2000)` (read only, with each session's desk and project), `add_keypoint`, `find(query, limit)`, `fts_query`, `fts_phrases`, `scrub(text)`.
   - Facts: `add_fact(scope, text, tier, source, expires_at=None, subject_key=None, valid_from=None, lookup=None)` (the same function as `facts.add_fact`), `touch`, `decay`, `archive_stale`, `archive`, `list_facts(scope=None, include_archived=False, include_closed=False)` (open rows, plus archived or closed rows when asked), `context_facts(desk)` (current fleet and desk facts).
   - Metrics: `add_metric`, `summary(since)`.
 - `hogwarts.facts`
@@ -270,6 +273,9 @@ castle fact as-of (--world T | --belief T) [--scope S]
 castle fact history --scope S --subject-key K
 castle fact candidates --since N [--limit-per-fact N]
 castle fact apply --file PATH [--sha256 HEX]
+castle portrait patches
+castle portrait show DATE
+castle portrait apply DATE --sha256 HEX [--only ID [ID ...]]
 castle metric add --desk D --run-id R --model M --input-tokens N --output-tokens N --cache-read-tokens N --cost-usd X --duration-ms N [--ts N]
 castle metric summary [--since N]
 castle purge [--body-days N] [--extract-days N]
@@ -292,6 +298,25 @@ Every command except `init` and `doctor` needs an existing database. `init` is s
 `desk cap` raises one desk's runs or spend cap until the next cap reset, which is local midnight unless `CAP_RESET_UTC_SECONDS` in the fleet's config says otherwise. `desk model DESK MODEL` pins a desk to a model of its own family, `--role` unpins it and `--approve` takes a pending costlier pick, once it has checked the pick still qualifies. `ollivander clear` removes Ollivander's stop file. `desk many-tasks` lets a desk hold many active tasks at once, for good, and refuses McGonagall, Snape, Dumbledore, Ryan and the scripts. `task list --open` lists queued, active and awaiting-close tasks, and refuses `--status` with it. `task board` prints `in_flight`. The cap numbers, the review round cap, the running window and the blocklist are the fleet's settings, kept in `fleet/config.py` next to this package.
 
 `token mint` prints the raw token once. Never send its stdout to a log file, and never set a launchd `StandardOutPath` for a job that mints tokens.
+
+### Dumbledore's patches
+
+Each weeknight `fleet/portrait.py` exports the day into the portrait's inbox, scrubbing every string it takes from the store, and runs him. A patch's subject keys and tags must pass the same scrubber as its text, and an error never shows a field name the schema does not know. He writes `~/hogwarts/desks/portrait/outbox/patch-<YYYY-MM-DD>.ops`, one JSON object:
+
+```
+{"format": "portrait-patch-1", "date": "2027-01-15", "ops": [
+  {"id": "f1", "type": "fact_add", "reason": "...", "source": "extract 1234",
+   "scope": "fleet", "text": "the store runs on the system python", "tier": "pinned", "subject_key": "store.python"},
+  {"id": "f2", "type": "fact_retire", "reason": "...", "source": "fact 12", "fact_id": 12, "how": "archive"},
+  {"id": "f3", "type": "fact_edit", "reason": "...", "source": "extract 1240", "fact_id": 14, "text": "..."},
+  {"id": "n1", "type": "memory_note_add", "reason": "...", "source": "extract 1250", "text": "...", "tags": ["charter"]},
+  {"id": "m1", "type": "archive_move", "reason": "...", "source": "...", "entry": "...", "to": "memory archive"}
+]}
+```
+
+`fact_add` also takes `lookup` and `expires_at`, `fact_edit` takes `tier`, `lookup`, `expires_at` and `subject_key` (only for a fact without one), and `fact_retire` takes `how` as `archive` or `withdraw`. Every op needs its own id, a reason and a source, and exactly its type's fields. The checks and their limits are in the docstring of `fleet/portrait_patch.py`: a malformed file is refused whole, an op out of schema can never be applied, and no text may hold anything the scrubber would change.
+
+`portrait show` lists each op as ready, applied, out of schema or refused by the store, which it learns by running the ops in a transaction it always rolls back, and prints the exact apply command with the file's sha256. `portrait apply` needs that hash, so the bytes you read are the bytes applied. It runs the chosen ops in patch order in one transaction through `facts.add_fact`, `facts.set_key`, `facts.supersede`, `facts.withdraw`, `pensieve.archive` and `pensieve.add_keypoint`, so one refusal applies none. An archive move is never carried out: it comes back under `for_you`. Each applied op is a routine `portrait.applied` event on the portrait desk with dedupe key `portrait:applied:<date>:<op id>`, so no op applies twice. Facts it writes carry the source `portrait:<date>:<op id>`, and key points the tag `portrait`. `portrait patches` lists the newest 30 with the ops each holds, those out of schema and those applied.
 
 ## Exit codes
 
@@ -320,6 +345,8 @@ cd /Users/crisryantan/.hogwarts && /usr/bin/env -i /usr/bin/python3 -I -B -X pyc
 `discover -t .` puts the repo root on `sys.path`, which `-I` would otherwise drop. Discover is the only supported way to run the suite. Running one module by dotted name fails under `-I`, so use `-p test_tasks.py` instead.
 
 Tests make their temporary directories under the constant `/private/tmp`, so `tempfile` never reads `TMPDIR`. They never touch `state/` and never read environment variables.
+
+A clone of the kit can also run both suites against an installed copy whose private values are made up: `sh scripts/installed-office-check.sh` installs into a throwaway home, fills the GitHub account, watched repos, blocked models and MCP names with fake values, and runs the suites there, so a test that quietly depends on your own private values fails. It never reads or writes your real `~/.hogwarts` or `~/hogwarts`.
 
 ## Mapping from the teammate's modules
 

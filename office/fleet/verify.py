@@ -95,7 +95,8 @@ def sandbox_argv(record: dict, scratch: str, command: str) -> list:
 def child_env(scratch: str, record: Optional[dict] = None) -> dict:
     tools = toolchain.for_record(record, f"{scratch}/tmp")
     return {"HOME": f"{scratch}/home", "TMPDIR": f"{scratch}/tmp", "PATH": ":".join([*tools["path"], config.CHILD_PATH]),
-            "LANG": "en_US.UTF-8", "CI": "1", "RTK_DISABLED": "1", **tools["env"]}
+            "LANG": "en_US.UTF-8", "CI": "1", "RTK_DISABLED": "1", **config.GIT_NO_LAZY_FETCH_ENV,
+            **tools["env"]}
 
 
 def _tail(path: str) -> tuple:

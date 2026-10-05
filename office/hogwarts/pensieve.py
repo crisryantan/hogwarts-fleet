@@ -397,6 +397,14 @@ def add_event(conn: Conn, desk: str, kind: str, verdict: str, summary: str,
     return {**_event(conn, event_id), "created": True}
 
 
+def events_with_key_prefix(conn: Conn, prefix: str) -> list[dict]:
+    """Every event whose dedupe key starts with prefix, oldest first. Read only. The prefix is compared as
+    plain text, so no character in it works as a wildcard."""
+    prefix = ids.check("dedupe", prefix, "dedupe key prefix")
+    return db.fetch_all(conn, "SELECT * FROM events WHERE substr(dedupe_key, 1, ?) = ? ORDER BY id",
+                        (len(prefix), prefix))
+
+
 def _event_line(event: dict) -> str:
     return f"[{event['kind']}] #{event['id']} {event['desk']} {event['task_id'] or '-'}: {event['summary']}"
 
@@ -533,6 +541,22 @@ def add_keypoint(conn: Conn, text: str, tags: Iterable[str] = (), session_id: Op
         )
         keypoint_id = cursor.lastrowid
     return db.fetch_one(conn, "SELECT * FROM keypoints WHERE id = ?", (keypoint_id,))
+
+
+def extracts_between(conn: Conn, since: int, until: int, limit: int = 2000) -> list[dict]:
+    """The extracts recorded from since up to (not including) until, oldest first, each with its session's
+    desk and project. Read only. It feeds the nightly Pensieve export."""
+    since = ids.check_int(since, "since", maximum=ids.MAX_TIME)
+    until = ids.check_int(until, "until", maximum=ids.MAX_TIME)
+    limit = ids.check_int(limit, "limit", minimum=1, maximum=10000)
+    return db.fetch_all(
+        conn,
+        "SELECT extracts.id, extracts.session_id, sessions.desk, sessions.project, extracts.seq, extracts.role,"
+        " extracts.text, extracts.created_at FROM extracts JOIN sessions ON sessions.session_id = extracts.session_id"
+        " WHERE extracts.created_at >= ? AND extracts.created_at < ? ORDER BY extracts.created_at, extracts.id"
+        " LIMIT ?",
+        (since, until, limit),
+    )
 
 
 def _scrubbed(text: object, field: str, limit: int) -> str:

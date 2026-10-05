@@ -20,6 +20,9 @@ starts the desk's run if Ryan has enabled the desk.
   fleet build <task-id>     starts the desk again on the same task, for a fix round after a review.
   fleet worktree-remove <task-id>   removes a closed task's worktree. It never deletes the branch.
 
+castle task start goes through start_task for a build desk's task, which makes the same TASK.md check, so it is
+no way round it. Every other desk's task starts as the store allows.
+
 Git always runs through gitops, so no hook in the repo runs.
 """
 from __future__ import annotations
@@ -129,6 +132,21 @@ def holder_lock(holder: str) -> Iterator[None]:
         except safefs.Busy:
             raise FleetError(WORKTREE_RUNNING) from None
         yield
+
+
+def start_task(conn, task_id: str) -> dict:
+    """Start a queued build task for castle task start, with the checks fleet worktree makes before it starts
+    one: the desk must be free to start it, and no other open task of the desk may work under the same TASK.md.
+    It takes that TASK.md's lock without waiting, and the last check and the start share one store transaction,
+    so a start here and a start there never both get through. A task that is not queued gets the store's own
+    refusal."""
+    task = pensieve.get_task(conn, ids.check("task", task_id))
+    with holder_lock(_holder(conn, task["id"])):
+        with db.transaction(conn):
+            task = pensieve.get_task(conn, task["id"])  # read again under the lock and the transaction
+            if task["status"] == "queued":
+                _check_startable(conn, task)
+            return pensieve.start_task(conn, task["id"])
 
 
 def _take_back(record: dict, made_at: Optional[str], exc: BaseException) -> None:

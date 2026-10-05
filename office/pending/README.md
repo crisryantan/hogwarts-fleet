@@ -42,7 +42,7 @@ The Owl Post runs whenever a desk outbox changes (`WatchPaths` on all seven outb
 
 Only McGonagall's request owls start a headless run. Any other owl waits in the inbox. A refused owl file raises a headmaster event, so you see it in the digest.
 
-The other five plists in `launchd/` (map, morning, keeper, portrait, gringotts) are templates for later stages. The modules they call do not exist yet, so do not load them.
+The patrol's five plists in `launchd/` (map, morning, keeper, scoreboard, gringotts) are built: `scripts/patrol-setup.sh` in the repo loads them in shadow mode (onboarding stage 5.2). The portrait's plist is built too: `scripts/portrait-setup.sh` in the repo loads it (onboarding stage 5.3).
 
 ## (c) Codex approval and enabling desks
 

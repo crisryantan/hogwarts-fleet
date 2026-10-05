@@ -53,13 +53,19 @@ run's task, or for a review round by its author task, so the rounds of one revie
 run makes it under the desk lock just before launch, never on a dry run, and the prompt names it in
 one trusted line.
 A run that gives up waiting for its desk lock raises its own event, not a failed-run one.
+SIGTERM or SIGHUP, sent to a real run the Owl Post started, ends it through its finally blocks: the desk's
+process is killed, a Claude run records its usage as a killed run, the locks are released, the owl stays in
+the inbox and Ryan gets the failed-run event.
 
 --dry-run prints the argv as JSON and runs nothing. A real run needs the desk to be
 enabled (a plain file named "enabled" in its office folder, made by Ryan), stays under
 the desk's daily run and spend caps plus any bump Ryan made today, and holds the per-desk
 lock (it waits for it, unless its caller already holds it). Under that lock, before the process
 starts, it records a launch that counts toward the daily run cap at once, so a run that is killed or
-interrupted still counts; when the process ends its usage and cost are recorded against that launch.
+interrupted still counts; when the process ends its usage and cost are recorded against that launch. A
+Claude run killed (a timeout or a signal) before its result event has no cost to record, so it is charged its
+per-run budget ceiling (MAX_BUDGET_USD), with the tokens its streamed messages counted: a spend cap may run
+high, never low.
 A refusal by a cap tells Ryan which cap, how
 many requests wait and when it resets, once per cap and effective limit a day; a desk at 80% of
 a cap gets one warning per effective limit a day. A run that exits 0 reads and acks its owl.
@@ -373,8 +379,9 @@ def _claude_argv(desk: str, row: dict, brief: str, prompt: str, mcp_job: Optiona
 ENV_VALUE = re.compile(r"[A-Za-z0-9._/=:+-]{1,400}")
 # A command in a Codex sandbox can't read ~/.gitconfig or ~/.config, and git stops with "Operation not
 # permitted" instead of treating them as missing. With these, git reads none of Ryan's settings and
-# behaves as on a fresh account. Set only for the sandboxed commands, never for Codex itself.
-SANDBOX_SHELL_ENV = {"GIT_CONFIG_GLOBAL": "/dev/null", "XDG_CONFIG_HOME": "/dev/null"}
+# behaves as on a fresh account. Set only for the sandboxed commands, never for Codex itself. The core
+# inherit policy drops GIT_NO_LAZY_FETCH, so it is set here again for git inside the sandbox.
+SANDBOX_SHELL_ENV = {"GIT_CONFIG_GLOBAL": "/dev/null", "XDG_CONFIG_HOME": "/dev/null", **config.GIT_NO_LAZY_FETCH_ENV}
 
 
 def sandbox_shell_env(tools_env: dict) -> dict:
@@ -761,6 +768,7 @@ def child_env(path_prefix: list = (), extra: Optional[dict] = None) -> dict:
         "LANG": "en_US.UTF-8",
         "SHELL": "/bin/bash",
         "RTK_DISABLED": "1",
+        **config.GIT_NO_LAZY_FETCH_ENV,
         **(extra or {}),
     }
 
@@ -838,6 +846,48 @@ def parse_claude_usage(raw: bytes) -> dict:
     if type(cost) in (int, float) and math.isfinite(cost) and 0 <= cost <= 1e6:
         usage["cost_usd"] = float(cost)
     return {**usage, **_outcome(result)}
+
+
+def _streamed_counts(raw: bytes) -> tuple:
+    """Input, output and cache read tokens from the assistant messages a Claude run streamed, for a run killed
+    before its result event. A message streams as several events that repeat its id and its usage, so each id
+    counts once."""
+    seen: dict = {}
+    for number, line in enumerate(raw.split(b"\n")):
+        if b'"assistant"' not in line:
+            continue
+        try:
+            event = json.loads(line)
+        except (ValueError, RecursionError):
+            continue
+        message = event.get("message") if isinstance(event, dict) and event.get("type") == "assistant" else None
+        counts = message.get("usage") if isinstance(message, dict) else None
+        if isinstance(counts, dict):
+            key = message["id"] if isinstance(message.get("id"), str) else number
+            seen[key] = (_count(counts.get("input_tokens")) + _count(counts.get("cache_creation_input_tokens")),
+                         _count(counts.get("output_tokens")), _count(counts.get("cache_read_input_tokens")))
+    return tuple(sum(column) for column in zip(*seen.values())) if seen else (0, 0, 0)
+
+
+def killed_claude_usage(desk: str, raw: bytes) -> dict:
+    """Usage for a Claude run killed (a timeout or a signal) before its result event, the only place the CLI
+    reports a cost. Its tokens are what its streamed messages counted. Its cost is unknown, and a spend cap that
+    runs low is worse than one that runs high, so it is charged the most the run could have spent: the
+    --max-budget-usd its desk is launched with. spend_unknown marks it for whoever reads the run's result."""
+    tokens_in, tokens_out, cache_read = _streamed_counts(raw)
+    return {"input_tokens": tokens_in, "output_tokens": tokens_out, "cache_read_tokens": cache_read,
+            "cost_usd": float(config.MAX_BUDGET_USD[desk]), "spend_unknown": True}
+
+
+def run_usage(plan: dict, output: bytes, exit_code: int) -> dict:
+    """The usage a run's output reports. A Claude run killed before its result event (exit code below 0: a timeout,
+    or a signal) reports no cost, so it records killed_claude_usage instead of counting as free."""
+    if plan["family"] != "claude":
+        return parse_codex_usage(output)
+    usage = parse_claude_usage(output)
+    if exit_code < 0 and not claude_result(output):
+        return {**usage, **killed_claude_usage(plan["desk"], output)}
+    return usage
 
 
 def claude_outcome(raw: bytes) -> dict:
@@ -1234,6 +1284,33 @@ def wait_child(child, timeout: int) -> int:
         raise
 
 
+def _run_output(run_fd: int, run_id: str) -> bytes:
+    """What the desk's process wrote to its output file, or nothing when that cannot be read, so usage then
+    records as zero. The run log keeps the full output."""
+    try:
+        output, _ = safefs.read_range(run_fd, f"{run_id}.out", None, RUN_OUTPUT_MAX_BYTES, "run output")
+    except FleetError:
+        return b""
+    return output
+
+
+def _record_interrupted(conn, plan: dict, run_fd: int, started: float, now: Optional[int]) -> None:
+    """A Claude run cut short by SIGTERM, SIGHUP or an interrupt, once its process is killed, still records what
+    it used, as a killed run, so its spend is not lost with the signal. It does not count toward a model trial:
+    the desk did not fail. A Codex run has no spend to lose, and its launch already counts toward the run cap.
+    Never raises, so it cannot hide the interrupt."""
+    if plan["family"] != "claude":
+        return
+    try:
+        usage = run_usage(plan, _run_output(run_fd, plan["run_id"]), -1)  # -1: killed, as a timeout is
+        capacity.record_launch_usage(conn, plan["run_id"], usage["input_tokens"], usage["output_tokens"],
+                                     usage["cache_read_tokens"], usage["cost_usd"],
+                                     int((time.monotonic() - started) * 1000), model=plan["model"], now=now,
+                                     spend_unknown=usage.get("spend_unknown") is True)
+    except (StoreError, FleetError, OSError):
+        pass
+
+
 def _launch(conn, plan: dict, now: Optional[int], keep_fds: tuple = ()) -> dict:
     """Start the planned run and record what it did. The process inherits every fd in keep_fds."""
     desk, run_id = plan["desk"], plan["run_id"]
@@ -1245,24 +1322,26 @@ def _launch(conn, plan: dict, now: Optional[int], keep_fds: tuple = ()) -> dict:
         out_fd = safefs.create_new(run_fd, f"{run_id}.out")
         err_fd = safefs.create_new(run_fd, f"{run_id}.err")
         started = time.monotonic()
+        child = None
         try:
             child = start_child(plan["argv"], cwd=plan["cwd"], env=plan.get("env") or child_env(),
                                 stdin=subprocess.DEVNULL, stdout=out_fd, stderr=err_fd, pass_fds=tuple(keep_fds))
             exit_code = wait_child(child, config.RUN_TIMEOUT_SECONDS)
+        except BaseException:
+            if child is not None:  # started, and wait_child has killed it: record what it did, then keep unwinding
+                _record_interrupted(conn, plan, run_fd, started, now)
+            raise
         finally:
             os.close(out_fd)
             os.close(err_fd)
         duration_ms = int((time.monotonic() - started) * 1000)
-        try:
-            output, _ = safefs.read_range(run_fd, f"{run_id}.out", None, RUN_OUTPUT_MAX_BYTES, "run output")
-        except FleetError:
-            output = b""  # usage then records as zero; the run log keeps the full output
+        output = _run_output(run_fd, run_id)
         try:
             errors = safefs.read_regular(run_fd, f"{run_id}.err", config.RUN_ERROR_MAX_BYTES, "run errors")
         except FleetError:
             errors = b""
     claude = plan["family"] == "claude"
-    usage = parse_claude_usage(output) if claude else parse_codex_usage(output)
+    usage = run_usage(plan, output, exit_code)
     # A Claude run names its full model ids in modelUsage. One that does not (a timeout or crash) records
     # the alias it was given, and is left out of the move check on both sides.
     used = claude_models(output) if claude else [plan["model"]]
@@ -1274,7 +1353,8 @@ def _launch(conn, plan: dict, now: Optional[int], keep_fds: tuple = ()) -> dict:
     previous = wands.last_run_model(conn, desk, claude_ids_only=claude)
     capacity.record_launch_usage(conn, run_id, usage["input_tokens"], usage["output_tokens"],
                                  usage["cache_read_tokens"], usage["cost_usd"], duration_ms,
-                                 model=parsed or plan["model"], now=now)
+                                 model=parsed or plan["model"], now=now,
+                                 spend_unknown=usage.get("spend_unknown") is True)
     # Every model the run called is kept against the alias, not only the one that did most of the work, so
     # a blocked model a helper call used is remembered too.
     if claude and wands.CLAUDE_ID.fullmatch(wands.base_alias(plan["model"])) is None:
@@ -1309,7 +1389,10 @@ def main(argv: Optional[list] = None) -> int:
                                                     "cwd", "argv")}}
             sys.stdout.write(json.dumps(result, ensure_ascii=True, indent=2) + "\n")
             return 0
-        result = run(conn, args.desk, args.owl, args.mcp_job)
+        # The Owl Post starts this run detached. SIGTERM or SIGHUP then ends it through its finally blocks, not
+        # mid-step: the desk's process is killed and the locks are released as the run unwinds.
+        with common.ended_by_signals():
+            result = run(conn, args.desk, args.owl, args.mcp_job)
         clean = result["exit_code"] == 0 and result["cap_source"] is None
         sys.stdout.write(json.dumps({"ok": clean, **result}, ensure_ascii=True) + "\n")
         if not clean and result["cap_source"] is None:
@@ -1322,6 +1405,12 @@ def main(argv: Optional[list] = None) -> int:
         elif not args.dry_run and not isinstance(exc, (Capped, Stopped, Blocked, TaskClosed)):
             report_failure(conn, args.desk, args.owl)
         return 1
+    except SystemExit:
+        # Ended by SIGTERM or SIGHUP. The run has unwound, so its owl stays unacknowledged in the inbox and Ryan
+        # hears of it like any run that did not finish.
+        if not args.dry_run:
+            report_failure(conn, args.desk, args.owl)
+        raise
     finally:
         conn.close()
 

@@ -21,6 +21,10 @@ PYTHON_WRAPPER = ("/usr/bin/env", "-i", "/usr/bin/python3", "-I", "-B", "-X", "p
 GIT_BIN = "/usr/bin/git"
 BASH_BIN = "/bin/bash"
 CHILD_PATH = "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin"
+# A partial clone fetches an object it lacks from its remote the moment git needs it, with nothing said and
+# with Ryan's credentials. The environment the fleet gives git sets this, so a missing object is an error
+# instead of a silent fetch. An explicit git fetch is unaffected.
+GIT_NO_LAZY_FETCH_ENV = {"GIT_NO_LAZY_FETCH": "1"}
 
 # Filled in at onboarding (docs/ONBOARDING.md stage 2). Later-stage scripts such as the Map read these.
 # The Map watches every open PR GITHUB_ACCOUNT authored. WATCHED_REPOS names the repos whose main branch
@@ -79,8 +83,9 @@ CODEX_WORK_DIR = "work"
 # Castle folders each Claude desk may read through --add-dir. Writes there are denied by its settings.
 CLAUDE_READ_DIRS = {"hermione": ("tasks", "worktrees"), "ron": ("tasks",), "portrait": ()}
 # Runs per desk in one cap day, counted from launch rows so a killed run counts, and spend for the Claude
-# desks, from the cost runs recorded. Sized for a busy day of 12 to 14 PRs plus side work. Ryan lifts one
-# for the rest of the day with castle desk cap.
+# desks, from the cost runs recorded. A Claude run killed before it reported its cost is charged its
+# MAX_BUDGET_USD, so a spend cap never runs low. Sized for a busy day of 12 to 14 PRs plus side work. Ryan
+# lifts one for the rest of the day with castle desk cap.
 DAILY_RUN_CAP = {"hermione": 80, "ron": 120, "portrait": 3, "harry": 40, "moody": 80}
 DAILY_SPEND_CAP_USD = {"hermione": 60.0, "ron": 10.0, "portrait": 4.0}
 DAY_SECONDS = 86400
@@ -181,6 +186,17 @@ CLOSE_PROMPT_MAX_AGE = 30
 # The doorbell carries no text from any desk.
 DOORBELL_KIND = "owl.doorbell"
 DOORBELL_SUMMARY = "An owl is waiting in your inbox."
+
+# Dumbledore's nightly review (fleet/portrait.py). No desk wrote the export, so its owl comes from the Owl
+# Post's own desk, the fleet's message router.
+PORTRAIT_EXPORT_SENDER = "owl-post"
+# The export's size: extracts up to this many bytes, and at most this many current facts.
+PORTRAIT_EXPORT_MAX_BYTES = 512 * 1024
+PORTRAIT_EXPORT_MAX_FACTS = 300
+# The MCP job (office desks/portrait/mcp-<name>.json) that gives Dumbledore chat, or None for no MCP server at
+# all. Set it to "chat" once that file names your chat server. Chat stays read-only: his settings allow only
+# that server's list and search tools, deny send_message, and his runs refuse every tool not allowed.
+PORTRAIT_MCP_JOB = None
 
 # Ollivander, the model keeper. Desks pick a model by role (office desks/<desk>/role.json), never by
 # model line, and a desk's family never changes.

@@ -577,7 +577,7 @@ pre.cmdline { margin: 0.4rem 0 0; background: var(--code-bg); border-radius: 5px
         <tr><td data-label="Desk or piece"><b>Hermione - Staff Engineer</b></td><td data-label="State">Installed, off</td><td data-label="What switches it on"><code>claude auth login</code> (stage 2), then the review stage's scripts (5.1).</td></tr>
         <tr><td data-label="Desk or piece"><b>Harry - Senior Engineer</b> and <b>Moody - Security Reviewer</b></td><td data-label="State">Installed, off</td><td data-label="What switches it on">Codex approved for your organization's source code, then the review stage (5.1).</td></tr>
         <tr><td data-label="Desk or piece"><b>Ron - Release Engineer</b>, the <b>Marauder's Map</b> and Hermione's bot pass</td><td data-label="State">Installed, off. They start in shadow mode, writing files only</td><td data-label="What switches it on"><code>sh scripts/patrol-setup.sh</code> (the shadow stage, 5.2). Deleting <code>~/.hogwarts/patrol/shadow</code> takes them live.</td></tr>
-        <tr><td data-label="Desk or piece"><b>Dumbledore - Knowledge Manager</b></td><td data-label="State">Installed, off</td><td data-label="What switches it on"><code>claude auth login</code>, then the memory stage (5.3).</td></tr>
+        <tr><td data-label="Desk or piece"><b>Dumbledore - Knowledge Manager</b></td><td data-label="State">Installed, off</td><td data-label="What switches it on"><code>claude auth login</code>, then <code>sh scripts/portrait-setup.sh</code> from the memory stage (5.3).</td></tr>
         <tr><td data-label="Desk or piece"><b>Gringotts - Backup</b></td><td data-label="State">Installed, off</td><td data-label="What switches it on"><code>sh scripts/patrol-setup.sh</code> loads its nightly job and runs a first backup and restore drill.</td></tr>
         <tr><td data-label="Desk or piece"><b>Ollivander - Model Keeper</b></td><td data-label="State">Installed, off</td><td data-label="What switches it on">Load his daily job (5.5). Until then every desk runs the model it was registered with.</td></tr>
         <tr><td data-label="Desk or piece"><b>The live view</b>: <code>fleet feed</code> and the herdr spaces</td><td data-label="State">Installed, off</td><td data-label="What switches it on">Run <code>hogwarts-spaces</code> (5.6). <code>fleet feed</code> itself works any time.</td></tr>
@@ -600,6 +600,7 @@ pre.cmdline { margin: 0.4rem 0 0; background: var(--code-bg); border-radius: 5px
     <li><b>When a session gets long</b><span>If you see the Tempus warning (past about 200k tokens), ask for a Checkpoint and start a fresh session. Long sessions are the single biggest cost.</span></li>
     <li><b>Reviews</b><span>They happen before anything is pushed, by the other model family. You'll see the verdict in your rows.</span></li>
     <li><b>Model notes</b><span>Ollivander's notes arrive with your other rows. A move to a cheaper or equal model has already happened. A costlier one waits for <code>castle desk model &lt;desk&gt; --approve</code>.</span></li>
+    <li><b>Dumbledore's patch</b><span>After his weeknight review a row says his patch is ready, and it changes nothing until you apply it. <code>castle portrait show &lt;date&gt;</code> lists each operation with its reason, its source and whether the store would take it, then prints the exact apply command with the patch's hash. Run it as printed, or with <code>--only</code> naming just the operations you accept. Archive moves are yours to make by hand.</span></li>
     <li><b>Cap warnings</b><span>A desk at 80% of a daily cap sends one note. At the cap its next run waits for the reset or a bump, as in <a href="#caps">Busy days and caps</a>.</span></li>
     <li><b>Wrapping up</b><span>Merge what's ready yourself, then type <code>Mischief managed &lt;task-id&gt;</code> for each finished task.</span></li>
   </ul>
@@ -683,7 +684,7 @@ castle model line &lt;name&gt; &lt;line&gt;     file a model name under a tier</
       </tbody>
     </table>
   </div>
-  <p class="note">The day resets at local midnight on your Mac, daylight saving included. A run counts the moment it starts, so one that gets killed or crashes still counts. Spend comes from the cost each run records.</p>
+  <p class="note">The day resets at local midnight on your Mac, daylight saving included. A run counts the moment it starts, so one that gets killed or crashes still counts. Spend comes from the cost each run records. A Claude run killed before it reports its cost is charged its per-run budget, marked in the store as an estimate, so the spend cap can run high when a cost is lost, never low.</p>
   <ul class="gates">
     <li><b>The warning</b><span>A desk that reaches 80% of a cap sends one note for that cap that day.</span></li>
     <li><b>The cap event</b><span>At the cap, the desk's next run doesn't start and its request keeps waiting. You get one note that names the cap, how much was used, how many requests are waiting, when it resets and the command that lifts it.</span></li>
@@ -773,6 +774,9 @@ castle model line &lt;name&gt; &lt;line&gt;     file a model name under a tier</
           <tr><td data-label="Type"><code>castle request list --open</code></td><td data-label="To">See requests between desks still in flight</td></tr>
           <tr><td data-label="Type"><code>castle audit</code></td><td data-label="To">Find stuck requests and unanswered owls</td></tr>
           <tr><td data-label="Type"><code>castle fact current</code></td><td data-label="To">See what the fleet currently believes</td></tr>
+          <tr><td data-label="Type"><code>castle portrait patches</code></td><td data-label="To">See Dumbledore's dated patches and which operations you applied</td></tr>
+          <tr><td data-label="Type"><code>castle portrait show &lt;date&gt;</code></td><td data-label="To">Read one patch, and get the command that applies it</td></tr>
+          <tr><td data-label="Type"><code>castle portrait apply &lt;date&gt; --sha256 &lt;hash&gt; [--only &lt;ids&gt;]</code></td><td data-label="To">Apply the operations you accept from that patch</td></tr>
           <tr><td data-label="Type"><code>castle desk list</code></td><td data-label="To">See every desk, its job and whether it takes many tasks</td></tr>
           <tr><td data-label="Type"><code>castle desk caps</code></td><td data-label="To">See today's runs and spend against each desk's caps</td></tr>
           <tr><td data-label="Type"><code>castle desk cap &lt;desk&gt; --runs +N</code></td><td data-label="To">Lift a desk's run cap until the next reset</td></tr>

@@ -233,7 +233,18 @@ say "castle doctor: ok"
 
 # --- What is left for you ---------------------------------------------------
 
-placeholder_files=$(grep -rlI -E "$PLACEHOLDERS" "$OFFICE" "$CASTLE" "$AGENTS/snape.md" 2>/dev/null || true)
+# The files that still name a placeholder. The test folders name them on purpose, as fixtures, so they are left
+# out. Every other file is listed, whatever its folder is called.
+unfilled_placeholders() {
+	grep -rlI -E "$PLACEHOLDERS" "$@" 2>/dev/null |
+		while IFS= read -r file; do
+			case $file in
+			"$OFFICE/tests/"* | "$OFFICE/tests_fleet/"*) ;;
+			*) printf '%s\n' "$file" ;;
+			esac
+		done
+}
+placeholder_files=$(unfilled_placeholders "$OFFICE" "$CASTLE" "$AGENTS/snape.md" || true)
 if [ -n "$placeholder_files" ]; then
 	say ""
 	say "Placeholders to fill in (docs/ONBOARDING.md, stage 2):"

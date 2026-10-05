@@ -13,7 +13,7 @@ from unittest import mock
 from hogwarts import capacity, ids, owlery, pensieve
 from tests.support import NOW
 
-from fleet import config, owl_post, run_desk, safefs
+from fleet import config, gitops, owl_post, run_desk, safefs, verify
 from tests_fleet.support import FleetCase, claude_settings, fake_children
 
 BYPASS_WORDS = ("dangerously", "bypass", "skip-permissions", "danger-full-access", "approve-for-me", "yolo")
@@ -217,7 +217,7 @@ class CodexDeskTests(RunDeskCase):
         self.assertNotIn('"/private/var/folders/ab/cd/T"=', table)
         policy = next(item for item in argv if item.startswith("shell_environment_policy.set="))
         self.assertEqual(policy, 'shell_environment_policy.set={GIT_CONFIG_GLOBAL="/dev/null", '
-                                 'XDG_CONFIG_HOME="/dev/null"}')
+                                 'GIT_NO_LAZY_FETCH="1", XDG_CONFIG_HOME="/dev/null"}')
         self.assertTrue(argv[-1].startswith("# moody brief"))
         self.assert_no_bypass(argv)
 
@@ -239,6 +239,7 @@ class CodexDeskTests(RunDeskCase):
         self.assertIn('TMPDIR="/private/var/folders/ab/cd/T/hogwarts-harry"', policy)
         self.assertIn('GIT_CONFIG_GLOBAL="/dev/null"', policy)
         self.assertIn('XDG_CONFIG_HOME="/dev/null"', policy)
+        self.assertIn('GIT_NO_LAZY_FETCH="1"', policy)
         self.assertNotIn("GIT_CONFIG_GLOBAL", json.dumps(plan.get("env", {})))
         self.assertIn(f'"{self.castle}/CLAUDE.md"="read"', table)
         self.assertIn(f'"{self.castle}/AGENTS.md"="read"', table)
@@ -532,6 +533,20 @@ class RealRunTests(RunDeskCase):
 
     def test_the_child_environment_is_fixed(self):
         env = run_desk.child_env()
-        self.assertEqual(sorted(env), ["HOME", "LANG", "LOGNAME", "PATH", "RTK_DISABLED", "SHELL", "USER"])
+        self.assertEqual(sorted(env), ["GIT_NO_LAZY_FETCH", "HOME", "LANG", "LOGNAME", "PATH", "RTK_DISABLED", "SHELL",
+                                       "USER"])
         self.assertEqual(env["USER"], env["LOGNAME"])
         self.assertEqual(env["HOME"].rsplit("/", 1)[1], env["USER"])
+
+    def test_no_git_the_fleet_runs_fetches_a_missing_object_silently(self):
+        # A partial clone would fetch an object it lacks from its remote, quietly and with Ryan's credentials.
+        self.assertEqual(config.GIT_NO_LAZY_FETCH_ENV, {"GIT_NO_LAZY_FETCH": "1"})
+        for name, env in (("fleet git", gitops.child_env()), ("a desk", run_desk.child_env()),
+                          ("a verify check", verify.child_env("/private/tmp/x"))):
+            with self.subTest(env=name):
+                self.assertEqual(env["GIT_NO_LAZY_FETCH"], "1")
+        # What gitops really hands git, not only what it builds.
+        done = subprocess.CompletedProcess(args=[], returncode=0, stdout=b"true\n", stderr=b"")
+        with mock.patch.object(subprocess, "run", return_value=done) as ran:
+            gitops.git(["rev-parse", "--is-shallow-repository"], "/private/tmp/x/.git")
+        self.assertEqual(ran.call_args.kwargs["env"]["GIT_NO_LAZY_FETCH"], "1")

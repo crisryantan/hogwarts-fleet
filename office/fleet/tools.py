@@ -20,13 +20,10 @@ desks cannot read the office, and Ryan's own sessions are denied it by his setti
 from __future__ import annotations
 
 import argparse
-import contextlib
 import json
 import os
-import signal
 import sys
-import threading
-from typing import Iterator, Optional
+from typing import Optional
 
 if __name__ == "__main__" and "/Users/crisryantan/.hogwarts" not in sys.path:
     sys.path.insert(0, "/Users/crisryantan/.hogwarts")
@@ -135,23 +132,8 @@ def run_gringotts(drill: Optional[str]) -> dict:
     return result
 
 
-@contextlib.contextmanager
-def ended_by_signals() -> Iterator[None]:
-    """SIGTERM or SIGHUP (a closed terminal, a caller's timeout) ends the command through its finally blocks,
-    so a review closes its reviewer task and a desk run kills its child, instead of Python dying mid-step."""
-    if threading.current_thread() is not threading.main_thread():
-        yield
-        return
-
-    def stop(signum, frame) -> None:
-        raise SystemExit(128 + signum)
-
-    previous = {number: signal.signal(number, stop) for number in (signal.SIGTERM, signal.SIGHUP)}
-    try:
-        yield
-    finally:
-        for number, handler in previous.items():
-            signal.signal(number, signal.SIG_DFL if handler is None else handler)
+# SIGTERM or SIGHUP ends the command through its finally blocks. It lives in common, so run_desk can use it too.
+ended_by_signals = common.ended_by_signals
 
 
 def run_feed(desk: Optional[str]) -> int:

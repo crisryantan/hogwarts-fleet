@@ -277,7 +277,7 @@ These checks prove the store, the Owl Post and the task flow work before any des
 
 ## Stage 5: Switch on the later stages, one at a time
 
-The fleet grows in the same order as its published rollout. The patrol is built: the Map, Ron's morning lineup, keeper's watch and weekly scoreboard, Hermione's bot pass and Gringotts (`fleet.map`, `fleet.morning`, `fleet.keeper`, `fleet.scoreboard` and `fleet.gringotts`). It starts in shadow mode, writing only to files, and `scripts/patrol-setup.sh` loads its launchd jobs one step at a time. The portrait's module (`fleet.portrait`) does not exist yet, so don't load its plist until that stage ships its code and tests.
+The fleet grows in the same order as its published rollout. The patrol is built: the Map, Ron's morning lineup, keeper's watch and weekly scoreboard, Hermione's bot pass and Gringotts (`fleet.map`, `fleet.morning`, `fleet.keeper`, `fleet.scoreboard` and `fleet.gringotts`). It starts in shadow mode, writing only to files, and `scripts/patrol-setup.sh` loads its launchd jobs one step at a time. The portrait's module, `fleet.portrait`, is built too, and 5.3 loads its job.
 
 5.5 and 5.6 are the exception: Ollivander and the live view are built, and you can switch them on any time after stage 4.
 
@@ -296,7 +296,7 @@ How each stage gets built: your own Claude sessions can't edit the office while 
 
 Nothing leaves the laptop without a pass from the other model family for that exact commit.
 
-- Needs, not built yet: the worktree, verify and review scripts, and the push gate at `fleet/hooks/push_gate.py`.
+- Built: the worktree, verify and review scripts, and the push gate at `fleet/hooks/push_gate.py`.
 - Then: apply `a2` from `~/.hogwarts/pending` to wire the push gate into your user settings, with a fresh `.pre-hogwarts-` backup. Enable Hermione. Enable Harry and Moody only after your organization approves Codex and the stage proves they cannot read `~/.hogwarts`. On Codex 0.160.0 the fleet profile cannot enforce that yet.
 
 **You're done when** three PRs went out with passes tied to their commits, at least one real finding changed a diff, and the gate blocked a test push that had no pass.
@@ -305,8 +305,8 @@ Nothing leaves the laptop without a pass from the other model family for that ex
 
 Prove the cheap jobs are right before they can interrupt you.
 
-- Needs, not built yet: the Marauder's Map, Ron's jobs (morning lineup and keeper's watch) and Gringotts.
-- Then: enable Ron, and load the map, morning, keeper and gringotts plists. For three days they write to files only. Hermione's bot pass runs in draft mode, so every reply is a draft. Do one Gringotts restore drill.
+- Built: the Marauder's Map, Ron's jobs (morning lineup, keeper's watch and weekly scoreboard), Hermione's draft-only bot pass and Gringotts.
+- Then: run `sh scripts/patrol-setup.sh` from your clone of the kit. It checks gh, runs one Map round, a backup and a restore drill, enables Ron and loads the map, morning, keeper, scoreboard and gringotts plists. For three days, while `~/.hogwarts/patrol/shadow` is there, they write to files only. Hermione's bot pass only ever writes drafts.
 
 **You're done when** the morning lineup matched `gh` three days running, a spot check of 50 of Ron's verdicts found nothing urgent marked routine, and at least 75% of map rounds cost zero tokens.
 
@@ -314,8 +314,8 @@ Prove the cheap jobs are right before they can interrupt you.
 
 Close the memory loop, with you approving every change.
 
-- Needs, not built yet: the nightly export of the day's extracts and fact candidates into the portrait's inbox.
-- Then: enable the portrait and load its plist. It runs in proposals-only mode with read-only chat. You apply its patches yourself with `castle fact apply --file <patch> --sha256 <hash>`. Run `rtk discover --all --since 30` for a real savings number, with no hook yet.
+- Built: the nightly export of the day's extracts and fact candidates into the portrait's inbox, his proposals-only run on it at 22:30 on weekdays, and `castle portrait` to read and apply his patches. Not built yet: the weekly scoreboard.
+- Then: run `sh scripts/portrait-setup.sh` yourself. It reads Dumbledore's dry run, exports today once by hand, enables his desk and loads his job, printing OK or FAILED after each step. His chat stays off until you give him a read-only MCP job ([CUSTOMISE.md](CUSTOMISE.md#change-budgets-and-limits)). Each morning after a run, `castle portrait show <date>` lists his patch and prints the exact `castle portrait apply <date> --sha256 <hash>` command. Add `--only <ids>` to apply just the operations you accept. Run `rtk discover --all --since 30` for a real savings number, with no hook yet.
 
 **You're done when** you have reviewed two nightly patches, the first weekly scoreboard shows the budgets held, and you have a go or no-go on RTK.
 
