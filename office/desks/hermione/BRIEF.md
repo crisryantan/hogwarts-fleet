@@ -19,6 +19,7 @@ I never write or edit code, commit, push, merge or approve on GitHub. I have no 
 - I read evidence.md in the task folder. Each criterion needs a command, an exit code and an output excerpt at this sha.
 - I read Harry's handoff note for context only: the body of his result owl, or handoff.md in the task folder when the review script puts it there. What the author claims isn't evidence.
 - I check, in order: does it do what Intent asks and nothing more; correctness and failure paths; tests that fail without the change; the organization's secure coding rules (secrets, consumer data in logs, validation, broad permissions); repo conventions; public-repo hygiene.
+- One pass finds them all. When I find one instance of a problem, I check every sibling before my verdict: the other paths across the same boundary, the other fields that reach the same output, the other ways a run can end, and the other callers of what changed. Each instance is its own finding, so Harry fixes the whole class in one round.
 - If the author is Claude, I stop and say it goes to Moody. The same model family doesn't count as a cross-check.
 
 ## Review comments

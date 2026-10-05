@@ -75,18 +75,22 @@ def add_worktree(conn, task_id: str, repo_dir: str, base: str, branch: Optional[
     slug = gitops.repo_slug(gitops.git(["config", "--get", "remote.origin.url"], common_dir))
     if fetch and base.startswith("origin/"):
         gitops.git(["fetch", "--no-tags", "origin", base[len("origin/"):]], common_dir)
-    gitops.git(["rev-parse", "--verify", "--end-of-options", f"{base}^{{commit}}"], common_dir)
+    # The record keeps the commit the base names now, not the name: a branch like main moves on, and a review's
+    # diff against a moved name shows the wrong change, or nothing at all.
+    base_sha = gitops.git(["rev-parse", "--verify", "--end-of-options", f"{base}^{{commit}}"], common_dir).strip()
+    if gitops.SHA.fullmatch(base_sha) is None:
+        raise FleetError("git did not return a full commit sha for the base")
     if branch is not None:
         branch = gitops.check_branch(branch)
         if _branch_exists(common_dir, branch):
             raise FleetError("that branch already exists; pick a new branch name")
-        gitops.git(["worktree", "add", "-b", branch, path, base], common_dir)
+        gitops.git(["worktree", "add", "-b", branch, path, base_sha], common_dir)
     else:
         if detach_at is None or gitops.SHA.fullmatch(detach_at) is None:
             raise FleetError("a detached worktree needs a full commit sha")
         gitops.git(["worktree", "add", "--detach", path, detach_at], common_dir)
     record = {"name": task_id, "task_id": task_id, "path": path, "repo_dir": repo_dir, "common_dir": common_dir,
-              "git_dir": f"{common_dir}/worktrees/{task_id}", "branch": branch, "base": base, "repo": slug,
+              "git_dir": f"{common_dir}/worktrees/{task_id}", "branch": branch, "base": base_sha, "base_ref": base, "repo": slug,
               "links": toolchain.linkable(repo_dir)}
     if not os.path.isdir(record["git_dir"]):
         raise FleetError("git named the worktree differently than expected; remove it by hand and retry")

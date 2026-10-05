@@ -61,9 +61,9 @@ Four scripts use no model. The **Owl Post - Message Router** moves owls between 
 
 1. **Ask.** You tell McGonagall what you want. Small things she answers directly.
 2. **Ticket.** She writes TASK.md with your words under Intent, plus numbered acceptance criteria and their checks. You say go, and Intent is frozen. You register it with one `castle task create` command.
-3. **Build.** A script makes a fresh worktree. Harry implements, commits locally and writes a handoff note.
+3. **Build.** A script makes a fresh worktree, based on the commit its base names at that moment, so a later merge to main never changes what a review compares against. Harry implements, checks his change against the four kinds of problem reviews keep finding, and writes a handoff note.
 4. **Evidence.** A verify script runs every acceptance check and records the command, exit code and output for that commit.
-5. **Cross-model review.** Codex-written work goes to Hermione and Claude-written work goes to Moody. The review script records the verdict from the reviewer's own output. The store counts a pass only when the families differ, and any new commit voids it.
+5. **Cross-model review.** Codex-written work goes to Hermione and Claude-written work goes to Moody. A reviewer who finds one instance of a problem checks its siblings and lists them all, so one fix round covers the whole kind. The review script records the verdict from the reviewer's own output. The store counts a pass only when the families differ, and any new commit voids it.
 6. **Push and PR.** A hook asks the store for a pass on HEAD and blocks any agent's `git push` without one. Opening a ready PR waits for your yes, because it notifies people.
 7. **Patrol.** Ron watches CI and files bot comments. Hermione reproduces or rebuts each one.
 8. **Merge.** You merge and deploy, then type "Mischief managed <task-id>".

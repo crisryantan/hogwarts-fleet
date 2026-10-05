@@ -335,6 +335,7 @@ def _check_record(data: object, name: str) -> dict:
         "git_dir": data.get("git_dir"),
         "branch": data.get("branch"),
         "base": data.get("base"),
+        "base_ref": data.get("base_ref"),
         "repo": data.get("repo"),
         "links": data.get("links") or [],
     }
@@ -352,6 +353,8 @@ def _check_record(data: object, name: str) -> dict:
     if record["branch"] is not None:
         check_branch(record["branch"])
     check_ref(record["base"], "worktree record base")
+    if record["base_ref"] is not None:  # records from before the base was kept as a commit have no base_ref
+        check_ref(record["base_ref"], "worktree record base_ref")
     ids.check("repo", record["repo"])
     if not isinstance(record["links"], list) or any(name not in config.LINKABLE_DEPS for name in record["links"]):
         raise FleetError("worktree record links name a folder that is not a linkable dependency")

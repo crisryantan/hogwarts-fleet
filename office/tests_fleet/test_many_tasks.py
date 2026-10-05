@@ -194,6 +194,23 @@ class OwnSessionTests(ManyCase):
         self.assertEqual(pensieve.get_task(self.conn, parked["task_id"])["status"], "awaiting_close")
         self.assertEqual(sorted(self.own_tasks()), sorted(others))
 
+    def test_the_review_base_is_the_commit_the_task_started_from(self):
+        # Ryan's case: the change merged to main between rounds, and a base kept as the name main then showed
+        # the reviewer an empty diff.
+        self.on_branch("speedup")
+        start = self.git("rev-parse", "origin/main")
+        self.commit("first try")
+        first = self.own_review()
+        record = gitops.read_record(first["task_id"])
+        self.assertEqual((record["base"], record["base_ref"]), (start, "origin/main"))
+        self.commit("second try")
+        self.git("update-ref", "refs/remotes/origin/main", "HEAD")  # the branch lands on main
+        again = self.own_review(first["task_id"])
+        self.assertEqual(again["round"], 2)
+        self.assertEqual(gitops.read_record(first["task_id"])["base"], start)
+        diff = self.git("-C", record["path"], "diff", "--name-only", f"{record['base']}...HEAD")
+        self.assertIn("fix.txt", diff)
+
     def test_a_store_that_keeps_own_sessions_single_names_the_fix(self):
         self.commit("first")
         self.own_review()
