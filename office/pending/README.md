@@ -65,13 +65,30 @@ Harry and Moody stay disabled until your organization approves Codex for its sou
 
 ## (d) Registering and closing a task
 
-McGonagall writes `tasks/<id>/TASK.md` and waits for your go. Nothing registers the task in the store for her. After your go, she gives you one command to run in your terminal:
+McGonagall writes `tasks/<id>/TASK.md` and waits for your go. Nothing she does registers the task in the store. When you're happy with the draft, type exactly this, and nothing else, as your prompt in her session:
+
+```
+go <tk_id>
+```
+
+The castle's UserPromptSubmit hook takes it from there, the same way it takes "Mischief managed". It checks that you typed the prompt yourself, then registers the task, routes it to Harry, gives his task its worktree and starts his run, all in that one prompt. Its Spec section must open with three lines, which say where the build goes:
+
+```
+## Spec
+repo: <path-to-your-checkout>
+branch: <new-branch>
+base: origin/main
+```
+
+`repo:` gets the same checks as `--repo-dir` below, `branch:` the same as `--branch`, and `base:` the same as `--base`. The go stores the three values and the TASK.md's sha256 with the task. The worktree is made from the stored values only, so editing TASK.md afterwards changes none of them. If TASK.md changes while the go runs, or anything refuses before the go finishes, nothing is registered, routed or made, and you can type the go again. A go for a task that's already registered changes nothing. A go or a `fleet worktree` for a branch that another one is still making in the same repo is refused at once, so run it again when that one ends. If one says the store couldn't say whether its task kept the worktree, it took nothing back: check the task with `castle task show`, and remove what it names by hand only if the task has no worktree.
+
+The hook prints what happened, or why nothing did. A go only works in McGonagall's session: in any other session, your own included, it says so and changes nothing. When it can't confirm you typed the go, it says so and changes nothing too. Register the task by hand instead:
 
 ```
 ~/.hogwarts/bin/castle task create --id <tk_id> --desk mcgonagall --title "<title>" --intent-path ~/hogwarts/tasks/<tk_id>/TASK.md
 ```
 
-She routes the task only after you say it is registered. A request for a task the store does not know is refused, and you get a headmaster event.
+Then tell McGonagall it's registered, so she routes it, and give Harry's task its worktree as in (g). A request for a task the store does not know is refused, and you get a headmaster event.
 
 "Mischief managed <task-id>" closes a task only when it is awaiting close and the hook can see that you typed the prompt yourself. If the hook says it could not confirm, close it from your terminal:
 
@@ -108,13 +125,15 @@ Every `fleet` command prints one JSON object with `"ok": true` or `"ok": false` 
 
 `--repo-dir` below is the main checkout of your repo: a folder inside your home folder, outside the office and the castle, with its own `.git` folder and no symlink on the way.
 
-1. McGonagall writes TASK.md, you say go, and you register her task as in (d). Each acceptance check is either one backtick command and nothing else, which verify runs, or plain words with no backticks, which the reviewer judges. A check that mixes a backtick command with other text is marked malformed in the evidence and never runs.
-2. She posts a request to Harry. The Owl Post holds it and you get a headmaster event: a build task is waiting for its worktree.
-3. Give Harry's task a worktree on a new branch. If Harry is enabled, his run starts:
+1. McGonagall writes TASK.md and you type `go <task-id>` in her session, as in (d). The hook registers her task, routes it to Harry, gives his task its worktree on the Spec's new branch and starts his run if Harry is enabled. Then carry on at step 4. Each acceptance check is either one backtick command and nothing else, which verify runs, or plain words with no backticks, which the reviewer judges. A check that mixes a backtick command with other text is marked malformed in the evidence and never runs.
+2. Steps 2 and 3 are the fallback, for a go the hook couldn't confirm, and for a build McGonagall routes by owl. You register her task by hand as in (d), and she posts a request to Harry. The Owl Post holds it and you get a headmaster event: a build task is waiting for its worktree.
+3. Give Harry's task a worktree on a new branch. If Harry is enabled, his run starts. Under a TASK.md a go started, it takes only the repo, branch and base the go stored:
 
 ```
 ~/.hogwarts/bin/fleet worktree <harry-task-id> --repo-dir <path-to-your-checkout> --branch <new-branch>
 ```
+
+If a go said Harry's run didn't start, start it with `~/.hogwarts/bin/fleet build <harry-task-id>`.
 
 4. Harry leaves his changes uncommitted and posts a handoff with a COMMIT MESSAGE section. Once Hermione is enabled, the Owl Post starts the review on its own: the review script commits for him outside his sandbox, runs the acceptance checks, and runs Hermione. Only a handoff the Owl Post stamped as Harry's, for his own active task with a worktree, starts one, and only once. A handoff that starts nothing leaves a routine event saying why. The review reads the newest handoff that still passes those checks, and only that one: an owl that is not a handoff never takes its place. The review first waits for Harry's run to end. While Hermione's run slots are all busy, or another review of the task is running, it waits and tries again on each Owl Post pass, for up to four hours. A review that dies part way is started again on the next pass, three tries at most. When it gives up or fails, you get a headmaster event. Run it by hand only then, or when the Owl Post is off:
 

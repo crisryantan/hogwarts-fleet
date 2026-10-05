@@ -41,6 +41,10 @@ PATTERNS = {
     "key": re.compile(r"[A-Za-z0-9._:-]{8,128}"),
     "dedupe": re.compile(r"[A-Za-z0-9._:-]{1,200}"),
     "subject_key": re.compile(r"[a-z0-9][a-z0-9._:/-]{1,79}"),
+    # A go spec's branch and base, the shapes fleet/gitops.py makes worktrees from, and a TASK.md's sha256.
+    "branch": re.compile(r"[a-z0-9][a-z0-9._/-]{0,99}"),
+    "ref": re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,199}"),
+    "sha256": re.compile(r"[0-9a-f]{64}"),
 }
 
 NAMES = {
@@ -60,6 +64,9 @@ NAMES = {
     "key": "idempotency key",
     "dedupe": "dedupe key",
     "subject_key": "subject key",
+    "branch": "branch",
+    "ref": "ref",
+    "sha256": "sha256",
 }
 
 _STRIPPED = re.compile(r"[\x01-\x08\x0b-\x1f\x7f-\x9f]")
