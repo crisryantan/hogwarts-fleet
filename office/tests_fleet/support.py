@@ -156,6 +156,13 @@ class FleetCase(unittest.TestCase):
         never = mock.patch.object(run_desk, "start_child", side_effect=AssertionError("no desk process may start"))
         never.start()
         self.addCleanup(never.stop)
+        # A desk run empties its private folder under the per-user temp folder, so every test gets its own temp
+        # folder there unless it sets one. Without this a faked Harry run empties the real hogwarts-harry folder.
+        user_temp = self.tmp / "user-temp"
+        user_temp.mkdir(mode=0o700)
+        temp = mock.patch.object(run_desk, "user_temp_dir", return_value=str(user_temp))
+        temp.start()
+        self.addCleanup(temp.stop)
         # The cap day follows this Mac's time zone. Tests pin it to UTC unless they set their own.
         zone = mock.patch.object(capacity, "local_utc_offset", return_value=0)
         zone.start()
