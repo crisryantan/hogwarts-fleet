@@ -1,17 +1,18 @@
 # The design
 
-Seven single-purpose agents, named after the Harry Potter characters who fit each job. A reviewer from the other model family checks every change before it leaves the laptop. Plain scripts do the patrolling and keep each desk on the right model. Memory gets tidied every night. Most of the token saving comes from shorter sessions. The human stays the Headmaster.
+Seven single-purpose agents, named after the Harry Potter characters who fit each job. A reviewer from the other model family checks every change before it leaves your Mac. Plain scripts do the patrolling and keep each desk on the right model. Memory gets tidied every weeknight. Most of the token saving comes from shorter sessions. You stay the Headmaster.
 
 ## The short version
 
-- **One desk, one job.** Seven agents, each with one role. A desk runs one model process at a time, except the two reviewers, Moody and Hermione, which can run two reviews of different tasks at once. Each run is short and single-threaded. Harry, Hermione, Moody, Ron and your own sessions can each keep many tasks in flight between runs, so a task waiting for fixes never blocks another. McGonagall, Snape and Dumbledore keep one task at a time.
+- **One desk, one job.** Seven agents, each with one role: McGonagall - Chief of Staff, Harry - Senior Engineer, Hermione - Staff Engineer, Moody - Security Reviewer, Ron - Release Engineer, Snape - Data Analyst and Dumbledore - Knowledge Manager.
+- **Short runs, many tasks.** A desk runs one model process at a time, except the two reviewers, Moody and Hermione, which can run two reviews of different tasks at once. Each run is short and single-threaded. Harry, Hermione, Moody, Ron and your own sessions can each keep many tasks in flight between runs, so a task waiting for fixes never blocks another. McGonagall, Snape and Dumbledore keep one task at a time.
 - **No agent pushes without a review from the other model family.** When Codex writes code, Claude reviews it. When Claude writes code, including in your own sessions, Codex reviews it. The pass is tied to the exact commit, and a push gate checks for it.
 - **The controls sit where no agent can change them.** The store, review passes, close tokens, hooks and desk settings live in a folder no desk can write and Claude desks can't read. A desk can only post to its own outbox, so it can't pretend to be another desk.
 - **Scripts patrol and models only judge.** Plain scripts check PRs and CI and move messages at zero tokens. A fast model wakes only when a change may need you. A frontier model is kept for review and the nightly memory pass.
-- **Desks ask for a tier, not a model.** Each desk's role card says what the job needs, and Ollivander picks the model. A desk never changes model family, so the review rule holds.
-- **Caps guard against runaways.** Every headless desk has a daily run cap, and the Claude desks a spend cap. They're sized for a busy day, so they only bite when something loops.
+- **Desks ask for a tier, not a model.** Each desk's role card says what the job needs, and Ollivander - Model Keeper, a script, picks the model. A desk never changes model family, so the review rule holds.
+- **Caps guard against runaways.** Every headless desk has a daily run cap, and the headless Claude desks a spend cap. They're sized for a busy day, so they only bite when something loops.
 - **Memory knows when a fact changes.** Replacing a fact closes the old one and keeps it with its dates. Normal reads see only current facts. Volatile state like PR status carries a live lookup or a short expiry.
-- **Shorter sessions before anything clever.** The biggest saving is restarting at about 200k context instead of running to 400k or more.
+- **Shorter sessions before anything clever.** The biggest saving is restarting at about 200k context instead of letting a session run to twice that or more.
 - **You stay the Headmaster.** Merges, deploys, credentials, prod changes, security config and anything sent to another person always come back to you.
 
 ## Five risks, and what closes each one
@@ -21,8 +22,8 @@ These are the ways a fleet of agents running side by side goes wrong. Each fix i
 | # | The risk | What could happen | How the fleet closes it | Enforced by |
 | --- | --- | --- | --- | --- |
 | 1 | Any terminal pane can drive any other pane | In a multiplexer like herdr, any pane can type into, prompt or close any other. A hijacked builder could press Enter on a reviewer's dialog or type a close command into your chat. | No desk that can run commands runs inside herdr. Headless desks run under the Bash sandbox, which blocks Unix sockets, so they can't reach herdr's socket. The only live sessions in herdr are McGonagall and Snape, who have no shell tool. `hogwarts-spaces` checks their agent definitions before opening them, and starts each with a fixed built-in tool list, every command-running tool denied and skills off. Every other desk gets a read-only feed there. Approvals come only from your own typing. | OS sandbox, tool lists, the spaces check |
-| 2 | Desks inherit your broad allow list | An agent started the normal way inherits its user's allow list. A prompt injection could run code, send data or push with no prompt. | Every headless Claude desk starts with `--restricted`, which ignores user, project and local settings, plus its own settings file: sandbox on, a minimal allow list, explicit denies and `disableBypassPermissionsMode`. Codex desks run with `--ignore-user-config`, `--ignore-rules`, a fleet-owned profile and an explicit `--sandbox read-only` or `workspace-write`, never a bypass flag. | Launch flags, desk settings |
-| 3 | A watchdog that compacts every session | A watchdog that sends `/compact` to every session on a timer interrupts your own sessions as well as the fleet's. | Nothing in the fleet types into a session. Tempus reads real token usage and only warns. Headless runs are bounded by time and budget. Automation acts only on registered desks, by exact id. | Design, desk registry |
+| 2 | Desks inherit your broad allow list | An agent started the normal way inherits its user's allow list. A prompt injection could run code, send data or push with no prompt. | Every headless Claude desk starts with `--restricted`, which ignores user, project and local settings, plus its own settings file: sandbox on, a minimal allow list, explicit denies and `disableBypassPermissionsMode`. Codex desks run with `--ignore-user-config`, `--ignore-rules` and `--ephemeral`, plus a fleet permission profile passed as `-c` overrides: an allowlist of folders, with no network. They never get `--sandbox` or a bypass flag. | Launch flags, desk settings |
+| 3 | A watchdog that compacts every session | A watchdog that sends `/compact` to every session on a timer interrupts your own sessions as well as the fleet's. | Nothing in the fleet types into a session. Tempus, the fleet's context hook, reads real token usage and only warns. Headless runs are bounded by time and budget. Automation acts only on registered desks, by exact id. | Design, desk registry |
 | 4 | Identity is a flag anyone can fake | With a `--from` flag, a builder could send "review passed" as the reviewer, read another desk's mail, or close its own task. | Desks never call the store. Each desk writes only to its own outbox. The Owl Post, run by launchd outside any sandbox, stamps the sender from the folder it read. Review families come from the desk registry. Closing a task needs a one-time token that only you can mint: the hook when you type "Mischief managed" in your own session, or `castle token mint` in your terminal. | Filesystem sandbox, the store |
 | 5 | Code loads from folders agents can write | Fleet scripts that import code from a folder agents write to, or pick binaries from environment variables, let any desk that writes there run code inside every other desk. | The store, hooks, scripts, briefs and desk settings live in `~/.hogwarts`. No desk can write there, and Claude desks can't read it. The store runs only through `bin/castle`, which clears the environment, runs the system Python in isolated mode with no bytecode cache, reads no environment variables, and refuses a symlinked or group-writable database. | Sandbox, permission rules, store code |
 
@@ -30,13 +31,15 @@ These are the ways a fleet of agents running side by side goes wrong. Each fix i
 
 | Desk | Store and settings | Its own desk folder | Other desks | Task worktree | Network from the shell | Message a person |
 | --- | --- | --- | --- | --- | --- | --- |
-| McGonagall, interactive | No | Write, plus tasks and PLAN.md | No | Read | Your settings | Drafts only |
-| Harry, Codex | No | Write outbox | No | Write, his task only | Off | No |
-| Hermione, reviewer | No | Write | No | Read | Off | No |
-| Moody, reviewer | No | None, the script keeps his output | No | Read | Off | No |
-| Ron, Snape, the portrait | No | Write | No | No | Named hosts only | No |
-| Owl Post and Map scripts | Read and write | Read outboxes, deliver inboxes | No | No | GitHub API | Only under a standing order |
-| Ollivander script | Read and write its model rows, and read each role card | None | No | No | The CLIs he asks, and updates only if you switch them on | No. He files notes for you |
+| McGonagall - Chief of Staff | No | Write, plus tasks and PLAN.md | No | Read | Your settings | Drafts only |
+| Harry - Senior Engineer | No | Write outbox | No | Write, his task only | Off | No |
+| Hermione - Staff Engineer | No | Write | No | Read | Off | No |
+| Moody - Security Reviewer | No | None, the script keeps his output | No | Read | Off | No |
+| Ron - Release Engineer | No | Write | No | No | `api.github.com` only | No |
+| Snape - Data Analyst | No | Write | No | No | No shell tool. He reaches only his read-only MCP servers | No |
+| Dumbledore - Knowledge Manager | No | Write | No | No | Off | No |
+| The Owl Post and the Map (scripts) | Read and write | Read outboxes, deliver inboxes | No | No | GitHub API | Only under a standing order |
+| Ollivander - Model Keeper (script) | Read and write his model rows, and read each role card | None | No | No | The CLIs he asks, and updates only if you switch them on | No. He files notes for you |
 | You | Everything | Everything | Everything | Everything | Yes | Yes, and only you merge, deploy or close a task |
 
 The Bash sandbox covers shell commands and everything they start. Each desk's sandbox denies reads and writes on `~/.hogwarts`. File tools and MCP tools sit outside the sandbox, so permission rules deny Read, Edit and Write there too, and `--strict-mcp-config` limits each headless desk to the MCP servers its job needs. Snape is a subagent, so his protection is his explicit tool list. The push gate covers agent pushes. Pushes you make by hand stay yours.
@@ -46,14 +49,14 @@ The Bash sandbox covers shell commands and everything they start. Each desk's sa
 | Desk | Model | Job | Never |
 | --- | --- | --- | --- |
 | McGonagall - Chief of Staff | Claude, frontier tier, interactive | Turns your ask into TASK.md (your words verbatim, numbered acceptance criteria, out of scope), keeps PLAN.md, routes work to one desk at a time, drafts chat replies | Writes or reviews code, sends anything, closes a task |
-| Harry - Senior Engineer | Codex, workhorse tier, workspace-write | Each task in its own git worktree, one run at a time: code, a failing-first test for each bug fix, local commits, a handoff note and a PR body draft | Pushes, opens a PR, uses git stash, weakens a test, folds in a second fix |
+| Harry - Senior Engineer | Codex, workhorse tier, headless | Each task in its own git worktree, one run at a time: code, a failing-first test for each bug fix, local commits, a handoff note and a PR body draft | Pushes, opens a PR, uses git stash, weakens a test, folds in a second fix |
 | Hermione - Staff Engineer | Claude, frontier tier, headless | Reviews Codex-written diffs against Intent and evidence. Triages PR review comments and drafts replies | Edits code, approves on GitHub, reviews Claude-written code |
 | Moody - Security Reviewer | Codex, frontier tier, read-only | Reviews Claude-written diffs, including yours, security first | Writes anything, accepts a summary instead of the diff |
 | Ron - Release Engineer | Claude, fast tier, headless | Sorts PR and CI changes as routine or for you, calls reds real, flaky, infra or unsure, writes the morning lineup and weekly scoreboard from script numbers | Retries or unblocks a build, computes a number himself |
 | Snape - Data Analyst | Claude, workhorse tier, subagent | Read-only warehouse and observability reads with provenance on every number | Writes anywhere, prints raw rows or PII |
 | Dumbledore - Knowledge Manager | Claude, frontier tier, headless | Reviews the day each weeknight and proposes fact and memory changes as a dated patch of typed operations, each with its reason and source, plus a ten-line morning note | Applies his own patch, touches the store, deletes memory |
 
-The tier is each desk's role card, and Ollivander turns it into a model, as in [Models by role](#models-by-role).
+The tier comes from each desk's role card, and Ollivander turns it into a model, as in [Models by role](#models-by-role).
 
 Four scripts use no model. The **Owl Post - Message Router** moves owls between desks and stamps the sender. The **Marauder's Map - PR Watcher** diffs PR and CI state every 15 minutes on weekdays and wakes Ron only for a change that may need you. **Gringotts - Backup** takes a nightly local backup with credentials left out. **Ollivander - Model Keeper** reads each desk's role card every morning and keeps the desk on the model it needs.
 
@@ -79,14 +82,14 @@ Four scripts use no model. The **Owl Post - Message Router** moves owls between 
 | Keeper's watch | Ron | 09:00, 13:00 and 17:00 on weekdays | None when green, fast tier on red |
 | Weekly scoreboard | Script, then Ron | Mondays 09:00 | None for the numbers, fast tier for the words |
 | Bot pass | Map round, then Hermione | Once a PR is 15 minutes old, and when new review threads land | Frontier tier, drafts only |
-| The Pensieve review | The portrait | Weekdays 22:30 | Frontier tier |
+| Nightly memory review | Dumbledore | Weekdays 22:30 | Frontier tier |
 | Gringotts | Script | Daily 23:30 | None |
 
-The launchd templates for all eight jobs sit in `office/launchd/`, and every module they call exists. The patrol jobs and Gringotts start in shadow mode: while `~/.hogwarts/patrol/shadow` is there they only write files under the office, and Ryan deletes it to let their rows reach him. The Pensieve review's job runs the nightly export first, which uses no model, and then the portrait.
+The launchd templates for all eight jobs sit in `office/launchd/`. The patrol jobs and Gringotts start in shadow mode: while `~/.hogwarts/patrol/shadow` is there, they only write files under the office. Delete it when you want their rows to reach you. The nightly memory review's job runs the nightly export first, which uses no model, and then Dumbledore.
 
 ## Models by role
 
-A desk asks for what its job needs, never for a model by name. Its role card, `desks/<desk>/role.json` in the office, holds a tier (frontier, workhorse or fast), an effort and one line of why. Ollivander turns that into a model:
+A desk asks for what its job needs, never for a model by name. Its role card, `desks/<desk>/role.json` in the office, holds a tier (frontier, workhorse or fast), an effort and one line of why. Ollivander - Model Keeper turns that into a model:
 
 - A Claude desk takes the Claude Code alias for its tier, so it always gets the newest model of that line. A Codex desk takes a model from Codex's own catalog, filed by the wording of its description.
 - He never picks a model that is retiring within 30 days, one the catalog calls older or legacy, or one your organization blocks.
@@ -102,28 +105,41 @@ A desk asks for what its job needs, never for a model by name. Its role card, `d
 
 ## Caps are guards, not targets
 
-Every headless desk has a daily cap on runs, and the Claude desks a cap on spend. They exist so a loop can't burn a day's budget while you're away. They aren't a quota to spend. The numbers in `fleet/config.py` are sized for a busy day of a dozen or so PRs plus side work, so a normal day never reaches them.
+Every headless desk has a daily cap on runs, and the headless Claude desks a cap on spend. They exist so a loop can't burn a day's budget while you're away. They aren't a quota to spend. The numbers in `fleet/config.py` assume a busy day of a dozen or so PRs plus side work, so a normal day shouldn't reach them.
 
 - The day resets at local midnight, so a bump you make lasts until then and no longer.
-- A run counts toward the run cap the moment it starts, so one that gets killed or crashes still counts. Spend comes from the cost each run records. A Claude run killed before it reports its cost, by a timeout or a signal, has none to record, so it is charged the most it could have spent, its per-run budget, and a routine `rundesk.spend_unknown` event stored with its usage marks that cost as an estimate. The spend cap runs high when a cost is lost, never low.
+- A run counts toward the run cap the moment it starts, so one that gets killed or crashes still counts.
+- Spend comes from the cost each run records. A Claude run killed by a timeout or a signal before it reports its cost has none to record. It is charged the most it could have spent, its per-run budget, and a routine `rundesk.spend_unknown` event stored with its usage marks that cost as an estimate. So the spend cap runs high when a cost is lost, never low.
 - A desk at 80% of a cap sends one warning. At the cap its next run doesn't start, and its request keeps waiting for the reset or for your `castle desk cap`.
-- A cap day resets all at once, so a desk busy on both sides of the reset can use up to two days' cap within hours. If that matters, a rolling 24 hour guard on top would close it, and that's your call.
-- Nothing waits in line. A second review of a task that's already being reviewed stops at once and changes nothing. A review whose reviewer is busy, meaning other runs hold every one of its run slots, or at its cap, is queued, and the next review of that same task replaces it, so only a task's newest commit gets reviewed. Reviews of other tasks never replace it. A task gets three review rounds, and only a round where the reviewer recorded a verdict counts. A fourth waits for `castle task allow-round`.
+- A cap day resets all at once, so a desk busy on both sides of the reset can use up to two days' cap within hours. There's no rolling 24 hour guard on top.
+- Nothing waits in line. A second review of a task that's already being reviewed stops at once and changes nothing.
+- A review whose reviewer is busy (other runs hold every one of its run slots) or at its cap is queued. The next review of that same task replaces it, so only a task's newest commit gets reviewed. Reviews of other tasks never replace it.
+- A task gets three review rounds, and only a round where the reviewer recorded a verdict counts. A fourth waits for `castle task allow-round`.
 - Every stop says which limit it was. The fleet's cap is yours to lift. The Claude or Codex plan's own usage limit isn't, and no bump pretends to lift it.
 
 ## Watching without typing
 
-Nothing in the fleet types into a desk's session, and the live view is built the same way. `fleet feed` opens the store read-only and reads each run's own output file, so it only ever reads. It cuts every terminal control sequence out of what a desk wrote before printing it, so a desk can't steer your terminal through the feed.
+Nothing in the fleet types into a desk's session, and the live view works the same way. `fleet feed` opens the store read-only and reads each run's own output file, so it only ever reads. It cuts every terminal control sequence out of what a desk wrote before printing it, so a desk can't steer your terminal through the feed.
 
-The herdr spaces follow from risk 1. Any herdr pane can type into any other pane, so an agent that can run commands must never live in one. McGonagall and Snape have no shell tool, so they can have live sessions there. That rests on their agent files, and the install keeps an edited `~/.claude/agents/snape.md`, so `hogwarts-spaces` checks every definition Claude could load for them each time. It refuses the space unless there is an explicit `tools:` list in which every tool, built-in or MCP, is named exactly on that agent's trusted list, and only frontmatter keys that start nothing, so no hooks or MCP servers. The trusted list is an allowlist, `desks/<agent>/live-tools.json` in the office, which no desk or agent can write, because a tool that types into another pane or sends a message can have a name that looks harmless. It's read like every other office file, with no link anywhere on the way and only when you own it and nobody else can write it, since it's what the live panes trust. The check also refuses a trusted list that names a built-in able to run commands. It reads the frontmatter the way Claude does, so a `---` inside a line or a YAML word like `null` in `tools:` is refused, and any file whose name only a YAML parser could work out counts as a possible definition and gets checked too. The castle settings must still name McGonagall. The session then starts with `--tools` naming its few built-in tools, every command-running tool and Skill denied, and skills turned off, because a skill can carry hooks. So an edit after the check still gets no shell and no skill. Its MCP tools and frontmatter rest on the check alone, since their server setup lives in your own Claude config. Every other desk keeps running short, one owl per run, and its space only runs a feed. `hogwarts-spaces` leaves any space that already exists alone, and it types only into a pane it has just made.
+The herdr spaces follow from risk 1. Any herdr pane can type into any other pane, so an agent that can run commands must never live in one. McGonagall and Snape have no shell tool, so they can have live sessions there. Every other desk keeps running short, one owl per run, and its space only runs a feed.
+
+That rests on their agent files, and the install keeps an `~/.claude/agents/snape.md` you've edited. So each time, `hogwarts-spaces` checks every definition Claude could load for them:
+
+- **Tools.** It refuses the space unless there is an explicit `tools:` list in which every tool, built-in or MCP, is named exactly on that agent's trusted list. Only frontmatter keys that start nothing are allowed, so no hooks or MCP servers.
+- **The trusted list.** It's an allowlist, `desks/<agent>/live-tools.json` in the office, which no desk or agent can write, because a tool that types into another pane or sends a message can have a name that looks harmless. It's read like every other office file, with no link anywhere on the way, and only when you own it and nobody else can write it, since it's what the live panes trust. The check also refuses a trusted list that names a built-in able to run commands.
+- **Parsing.** It reads the frontmatter the way Claude does, so a `---` inside a line or a YAML word like `null` in `tools:` is refused. Any file whose name only a YAML parser could work out counts as a possible definition and gets checked too.
+- **Settings.** The castle settings must still name McGonagall.
+- **Launch.** The session starts with `--tools` naming its few built-in tools, every command-running tool and Skill denied, and skills turned off, because a skill can carry hooks. So an edit after the check still gets no shell and no skill. Its MCP tools and frontmatter rest on the check alone, since their server setup lives in your own Claude config.
+
+`hogwarts-spaces` leaves any space that already exists alone, and it types only into a pane it has just made.
 
 ## Two homes and the memory
 
-- **The office, `~/.hogwarts`.** The store package, `bin/castle`, the database at `state/pensieve.db`, the fleet scripts and hooks, each desk's brief and settings, launchd templates, pending settings snippets, the avatars, the patrol's files in `patrol/` and Gringotts' archives in `backups/`. No desk can read or write it.
+- **The office, `~/.hogwarts`.** The store package, `bin/castle`, the database at `state/pensieve.db`, the fleet scripts and hooks, each desk's brief, role card and settings, launchd templates, pending settings snippets, the avatars, the patrol's files in `patrol/` and Gringotts' archives in `backups/`. No desk can read or write it.
 - **The castle, `~/hogwarts`.** The charter (`CLAUDE.md`), `PLAN.md`, `standing-orders.md`, a folder per desk with `scratchpad.md`, `inbox/` and `outbox/` (Hermione and Ron also keep one pad per task in `pads/`), `tasks/<id>/` and `worktrees/`. It is a local git repo with no remote. Its `.gitignore` keeps `worktrees/` and the per-task pads out of git: a pad is a throwaway Checkpoint for one task, and the durable memory is the scratchpads and the Pensieve.
 - **The Pensieve.** One SQLite file with full-text search. A SessionEnd hook stores a capped extract of each castle session at zero tokens: your prompts and the final replies, never tool output, scrubbed of emails, IPs, tokens and long hashes.
 - **Facts know when they change.** Each fact can carry a subject key, and only one fact per key is current. Replacing a fact closes the old one and keeps its dates. You can ask what was true, or what the fleet believed, on any past date. A fact that looks like PR status, build colour or a rollout percentage is refused unless it carries the command that fetches the live value, or expires within a week.
-- **The nightly review.** At 22:30 on weekdays a script exports the day's extracts, the fact candidates and the current facts into the portrait's inbox, with every string run through the store's scrubber, then runs him. He writes a dated patch of typed operations (fact add, retire and edit, memory note add, and archive moves for you to make by hand), each with a reason and a source, and a morning note of at most ten lines. Nothing changes until you run `castle portrait apply`. It checks every operation against a strict schema, needs the hash of the patch you read, applies the operations you accept through the store's own fact and Pensieve calls in one transaction, and records each one so it never applies twice.
+- **The nightly review.** At 22:30 on weekdays a script exports the day's extracts, the fact candidates and the current facts into Dumbledore's inbox, with every string run through the store's scrubber, then runs him. He writes a dated patch of typed operations (fact add, retire and edit, memory note add, and archive moves for you to make by hand), each with a reason and a source, and a morning note of at most ten lines. Nothing changes until you run `castle portrait apply`. It checks every operation against a strict schema, needs the hash of the patch you read, applies the operations you accept through the store's own fact and Pensieve calls in one transaction, and records each one so it never applies twice.
 - **Budgets.** The charter at about 600 tokens, the fleet memory index at 4KB, scratchpads at 6KB, and the startup digest under 40 lines. Nothing is deleted. Stale facts are closed or archived. Only raw extracts (after 90 days) and owl bodies (after 30) are purged.
 
 ## The store
@@ -132,17 +148,17 @@ Standard-library Python that runs on the Mac's built-in Python 3.9, with a CLI c
 
 | What it holds | What it guarantees |
 | --- | --- |
-| Desks and tasks | One active task per desk, except the desks granted many tasks (Harry, Hermione, Moody, Ron and your own sessions), and one per session always. The grant is one way, and McGonagall, Snape, Dumbledore, Ryan and the scripts are refused it. A task never changes desk. A closed task never reopens. Closing as complete needs a hashed, single-use, expiring token only you can mint. |
+| Desks and tasks | One active task per desk, except the desks granted many tasks (Harry, Hermione, Moody, Ron and your own sessions), and one per session always. The grant is one way, and McGonagall, Snape, Dumbledore, the human desk and the script desks are refused it. A task never changes desk. A closed task never reopens. Closing as complete needs a hashed, single-use, expiring token only you can mint. |
 | Owls | A duplicate send collapses into one. Reading is separate from acknowledging. One answer per question, and a result only from the desk that was asked. |
 | Requests | Phases only move forward. A desk can defer or decline with a reason. |
 | Review passes | A pass counts only for that exact commit, only when it is registered on the author's task, and only when the reviewer's family differs from the author's. |
 | Facts | One current fact per subject. Volatile facts need a live lookup or a short expiry. Nightly changes arrive as typed operations applied all or nothing. |
 
-The full contract is in `office/README.md`. Both the store and fleet test suites pass on the system Python. They include checks that no code reads environment variables and that hostile ids and paths are refused at every entry point.
+The full contract is in `office/README.md`. Both the store and fleet test suites run on the system Python. They include checks that no code reads environment variables and that hostile ids and paths are refused at every entry point.
 
 ## Spending fewer tokens
 
-An example baseline, from one person's last 80 Claude Code sessions: a fresh desktop session started at about 88k tokens before anything was typed, and the median call carried about 435k of context over 30 days. 196 tools from four connectors loaded into every session and none were called. Bash output came to 14.8M tokens in 30 days. Re-measure your own before you trust these.
+Three things usually dominate token use: what loads before you type, how long a session runs, and Bash output. With many connectors switched on, a fresh session can use a large share of the 200k restart point before your first prompt, much of it on tools that never get called. Measure your own with `/context` and `rtk discover` before you change anything.
 
 - **Tempus.** One task per session. At about 200k context, write a Checkpoint and start fresh. A hook prints one line once a session passes 200k.
 - **Lean memory.** Keep the memory index small and archive older entries.
@@ -167,27 +183,31 @@ The only pre-approvals are the ones you write in `standing-orders.md`.
 
 ## Rollout
 
+Switch the fleet on in this order, one stage at a time. The stage numbers match [ONBOARDING.md](ONBOARDING.md), which has the steps and a "You're done when" check for each.
+
 | Stage | What | Done when |
 | --- | --- | --- |
-| 0 Clean up | Prerequisites, sign-ins, deny rules for your own sessions, idle connectors off | Your own settings reviewed and the office denied to your sessions |
-| 1 The front desk | The castle, the Owl Post, McGonagall, Snape and the hooks | An owl round trip works, a forged sender is refused, a second active task for McGonagall is refused |
-| 2 Review loop | Worktree, verify, review and push scripts, the push gate, Harry, Hermione and Moody | Three PRs went out with passes tied to their commits, and the gate blocked a push with no pass |
-| 3 Shadow | The Map and Ron's jobs (lineup, keeper's watch, weekly scoreboard) writing to files only, Hermione's bot pass in draft mode, Gringotts with a restore drill | The morning lineup matched `gh` three days running |
-| 4 Memory loop | The nightly export and the portrait in proposals-only mode, an RTK number | Two nightly patches reviewed and an RTK go or no-go |
-| 5 After that | The RTK hook and standing orders, if the numbers say so | A normal week where you only answered what needed you |
+| 0 to 3.1 | Prerequisites, the install, sign-ins, deny rules for your own sessions, idle connectors off | Your own settings are reviewed and the office is denied to your sessions |
+| 3.2 and 4 | The front desk: the Owl Post, McGonagall, Snape and the hooks | An owl round trip works, a forged sender is refused, and a second active task for McGonagall is refused |
+| 5.1 | The review loop: worktree, verify, review and push scripts, the push gate, Harry, Hermione and Moody | Three PRs pushed, each with a pass tied to its commit, and the gate blocked a push with no pass |
+| 5.2 | Patrol in shadow mode: the Map and Ron's jobs (lineup, keeper's watch, weekly scoreboard) writing to files only, Hermione's bot pass in draft mode, Gringotts with a restore drill | The morning lineup matches `gh` three days running |
+| 5.3 | Dumbledore's nightly review: the nightly export and Dumbledore in proposals-only mode, an RTK number | Two nightly patches reviewed, and an RTK go or no-go |
+| 5.4 | The RTK hook and standing orders, if the numbers say so | A normal week where you only answer what needs you |
 
-Stages 0 to 4 are built, apart from the library index. The install sets up stages 0 and 1, you switch on stages 2 to 4 by hand, stage 3 starts in shadow mode with `scripts/patrol-setup.sh`, and stage 4 starts with `scripts/portrait-setup.sh`. Stage 5 is standing orders and RTK, which need your numbers first. [ONBOARDING.md](ONBOARDING.md) stage 5 says what each one needs.
+Ollivander (5.5) and the live view (5.6) can go on any time after stage 4.
+
+`install.sh` covers stage 1 and writes the pending snippets you apply yourself in stage 3. `scripts/owlpost-setup.sh` switches on the Owl Post (3.2). The review loop (5.1) is pending snippets you apply plus one `enabled` file per desk. `scripts/patrol-setup.sh` starts the patrol in shadow mode (5.2), and `scripts/portrait-setup.sh` starts the nightly review (5.3). Stage 5.4 is standing orders and RTK, which need your own numbers first.
 
 ## Known limits
 
-These are honest gaps in what ships today.
+What the fleet doesn't do, or only partly does.
 
-- **Codex desks rely on a beta feature for their read boundary.** On Codex 0.160.0 the `--sandbox` modes let commands read the whole disk. So `run_desk` never passes `--sandbox` to Harry or Moody. It passes a fleet permission profile instead: an allowlist with the desk's working folder, its own castle folder, the castle tasks and its repo's `.git` folder, a private temp folder for a desk that writes, no network, and `~/.hogwarts` and `/private/tmp` denied by name. `scripts/codex-boundary-test.sh` proves that kind of profile through `codex sandbox`, with no model and no tokens. Permission profiles are marked beta, so rerun that test after every Codex upgrade, and confirm it once under a real `codex exec` run before enabling Harry.
+- **Codex desks rely on a beta feature for their read boundary.** Codex's `--sandbox` modes let commands read the whole disk (checked on Codex 0.160.0), so `run_desk` never passes `--sandbox` to Harry or Moody. It passes a fleet permission profile instead: an allowlist with the desk's working folder, its own castle folder, the castle tasks and its repo's `.git` folder, a private temp folder for a desk that writes, no network, and `~/.hogwarts` and `/private/tmp` denied by name. `scripts/codex-boundary-test.sh` checks that kind of profile through `codex sandbox`, with no model and no tokens. `scripts/codex-exec-boundary-test.py` checks each desk's real command under `codex exec`, for a few cents per desk. Permission profiles are marked beta, so rerun both after every Codex upgrade. Enable Harry and Moody only after both pass on your Mac.
 - **No hook field says a person typed the prompt.** Claude Code's hook input does not separate an interactive session from `claude -p`. So the close hook also checks the session transcript: every entry must name the `cli` or `claude-desktop` entrypoint, and the prompt's own entry must be a typed human prompt from the last 30 seconds. If it can't confirm that, it refuses and prints the `castle` commands to close the task from your terminal.
 - **McGonagall asks you each time.** Her outbox writes and TASK.md edits are on the castle's ask list, so Claude asks you before every owl she posts and every TASK.md she writes. That is deliberate friction, and you can't pre-approve it from inside a session.
-- **The review loop has only run on this kit so far.** Its first real tasks were this repo's own changes: Harry built and Hermione reviewed two, and Moody reviewed the rest, which came from Claude sessions. `office/pending/README.md` (g) walks through a task.
-- **The nightly review has only run on temp stores.** The export, the run and the patch checks are tested, but not yet on a real day. It reviews the local day its job runs in, so when the Mac sleeps through 22:30 and launchd only runs the job on waking after midnight, the new day is reviewed and the missed one never is. The export stops at 512KB of extracts and 300 fact candidates and says how many it left out. Archive moves are notes you carry out by hand, and the export carries no copy of a memory index, so he proposes them only from what the day shows him. His chat is off until you give him a read-only MCP job ([CUSTOMISE.md](CUSTOMISE.md#change-budgets-and-limits)).
-- **The patrol hasn't met real GitHub traffic yet.** Its tests fake GitHub and the desks. What to know before it goes live:
+- **The review loop is tested on temporary repos.** The fleet suite runs it on throwaway git repos, so try it on a small real task first. `office/pending/README.md` (g) walks through one.
+- **The nightly review is tested on temporary stores.** Its tests cover the export, the run and the patch checks. It reviews the local day its job runs in, so when the Mac sleeps through 22:30 and launchd only runs the job on waking after midnight, the new day is reviewed and the missed one never is. The export stops at 512KB of extracts and 300 fact candidates and says how many it left out. Archive moves are notes you carry out by hand, and the export carries no copy of a memory index, so he proposes them only from what the day shows him. His chat is off until you give him a read-only MCP job ([CUSTOMISE.md](CUSTOMISE.md#change-budgets-and-limits)).
+- **The patrol is tested against a faked GitHub and faked desks.** Know these before you take it out of shadow mode:
   - The patrol's scripts read GitHub with `gh api graphql`, which is always an HTTP POST, because only GraphQL says whether a review thread is resolved. A guard lets through only the patrol's five fixed queries, none of them a mutation, with checked variables. The one read outside that guard is Ron's own `gh run view` of a failing log, which his brief allows and which only reads.
   - Open PRs come 50 to a page, up to 10 pages per list. A list that can't be read to its end leaves the Map's snapshot as it was, and the round's row says it was incomplete. Within a PR, the patrol sees 100 review threads and 100 checks per commit, and past that those lists are cut.
   - Shadow mode covers Ron's and Hermione's patrol runs too. A cap, near-cap or vendor-limit note from one of those runs lands in the job's file instead of the digest, while the cap itself and the spend still count. Notes about a desk's model still reach the digest in shadow mode (a blocked model, a model change, a failed model trial), since they are about the desk's setup, not the patrol's findings.
@@ -199,10 +219,18 @@ These are honest gaps in what ships today.
 - **Harry never commits.** A commit in a git worktree writes into the main repo's `.git` folder, and write access there would let a desk plant a hook or config that later runs outside any sandbox. So his profile only reads `.git`, and the review script commits his work for him, pointing git at the repo the office recorded and running no hooks.
 - **Deny rules for Bash match the usual command form only.** They are not a wall around a program. The sandbox stays the real boundary for desks.
 - **The push gate only covers agent pushes.** Pushes you make by hand from a terminal stay yours.
-- **A desk's runs share its run slots.** Most desks have one run slot, and Moody and Hermione two (`RUN_SLOTS`). A run waits for a free slot, so a burst of more than about ten Harry runs can outlast the 31 minute wait, and the late ones give up with their own event. Each slot has its own lock, Codex work folder and private temp folder, and a Codex run's permission profile grants only its own. A review records its slot on its round, and a reviewer task a dead review left open is closed only by whoever holds that slot. The caps stay per desk: a short launch lock stops two slots both passing a cap that only one run fits under, and a desk with two slots holds each run still going at its per-run budget against its spend cap. Each such run also holds a lock of its own that its process inherits, so a run whose launcher was killed keeps its budget held while its process lives, and the next launch decision records what it spent before letting that go. `fleet feed` follows whichever run of a desk wrote last, keeps its place in every other run, even one that never wrote last, and reads each to its end before letting it go. A review round's owl runs only from its own review, so starting it by hand is refused. Two runs of any other owl can overlap on a two-slot desk, which only happens when one is started again by hand, or by a patrol retry after its job was killed, while the first still goes. Update the office while no review is running: a review started on the old code still takes the desk lock as its only lock, and on its way in could close a reviewer task that a new review holds in another slot.
+- **A desk's runs share its run slots.** Most desks have one run slot, and Moody and Hermione two (`RUN_SLOTS`).
+  - A run waits for a free slot, so a burst of more than about ten Harry runs can outlast the 31 minute wait, and the late ones give up with their own event.
+  - Each slot has its own lock, Codex work folder and private temp folder, and a Codex run's permission profile grants only its own.
+  - A review records its slot on its round, and a reviewer task a dead review left open is closed only by whoever holds that slot.
+  - The caps stay per desk. A short launch lock stops two slots both passing a cap that only one run fits under, and a desk with two slots holds each run still going at its per-run budget against its spend cap.
+  - Each such run also holds a lock of its own that its process inherits. So a run whose launcher was killed keeps its budget held while its process lives, and the next launch decision records what it spent before letting that go.
+  - `fleet feed` follows whichever run of a desk wrote last, keeps its place in every other run, even one that never wrote last, and reads each to its end before letting it go.
+  - A review round's owl runs only from its own review, so starting it by hand is refused. Two runs of any other owl can overlap on a two-slot desk. That only happens when one is started again by hand, or by a patrol retry after its job was killed, while the first still goes.
+  - Update the office while no review is running. A review started on the old code still takes the desk lock as its only lock, and on its way in could close a reviewer task that a new review holds in another slot.
 - **Two open build tasks never share one TASK.md.** The evidence, the handoff and the reviews are written next to TASK.md, so `fleet worktree` and `castle task start` both refuse a second open Harry task under the same McGonagall task. Two commands under one TASK.md never both get through: each takes that TASK.md's lock without waiting and holds it until its task is active, and the last check and the start share one store transaction. A command that store transaction refuses takes back its worktree, its new branch and its record, so its task stays queued and the same command can run again. The rest rests on the briefs: Hermione's outbox body files start with the task id, and Ron's with the id of the owl that started his run.
 - **Partial clones never fetch behind your back.** The git the fleet runs, and the git its desks and verify checks run, has `GIT_NO_LAZY_FETCH=1`. A clone made with `--filter` then reports a missing object instead of quietly fetching it with your credentials, so a review or check that needs one fails until you fetch it yourself. Git older than 2.44 ignores the setting.
 
-## Where the ideas came from
+## Credits
 
-The fleet borrows from a teammate's own agent fleet, from firstmate (one front agent that never does project work, bounded extracts, a digest ordered for truncation, durable requests with a doorbell), from RTK, and from Graphiti's temporal facts. Graphiti itself was left out: it keeps replaced facts in default search results, costs several model calls per write, and needs a graph database. SQLite with subject keys, validity windows and current-only reads gives the useful part at zero tokens, with nothing leaving the Mac.
+The fleet borrows from firstmate (one front agent that never does project work, bounded extracts, a digest ordered for truncation, durable requests with a doorbell), from RTK, and from Graphiti's temporal facts. Graphiti itself was left out: it keeps replaced facts in default search results, costs several model calls per write, and needs a graph database. SQLite with subject keys, validity windows and current-only reads gives the useful part at zero tokens, with nothing leaving the Mac.

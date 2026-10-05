@@ -1,6 +1,6 @@
 # Customise the fleet
 
-Everything here is an edit you make yourself, in your own terminal. No desk can change the office, and that is the point.
+Every change on this page is one you make yourself, in your own terminal. No desk can write to the office, so no desk can make these changes for you.
 
 ## Before you change anything
 
@@ -25,9 +25,11 @@ Everything here is an edit you make yourself, in your own terminal. No desk can 
 The fleet starts `claude` and `codex` by absolute path, never through `PATH`. The paths are two constants in `~/.hogwarts/fleet/config.py`:
 
 ```
-CLAUDE_BIN = "/Users/you/.local/bin/claude"
+CLAUDE_BIN = "<home>/.local/bin/claude"
 CODEX_BIN = "/opt/homebrew/bin/codex"
 ```
+
+`<home>` stands for your home folder. `install.sh` writes its absolute path into the file.
 
 `install.sh` checks the default and the usual Homebrew places, and sets them when it finds one. If you install either tool somewhere else, find it with `command -v claude codex` and edit those two lines. `hogwarts-spaces` reads `CLAUDE_BIN` from the same file, so McGonagall's and Snape's live sessions run the same `claude` as the headless desks.
 
@@ -40,7 +42,13 @@ McGonagall's and Snape's live herdr sessions only get tools you've trusted by na
 ~/.hogwarts/desks/snape/live-tools.json
 ```
 
-Each file is a JSON object with one key, `tools`, listing every tool that live session may have, built-in and MCP, by its exact name. Before a live space opens, `hogwarts-spaces` refuses it if any definition of that agent lists a tool that isn't on the list. Names match exactly, so there are no wildcards or prefixes, and case counts. The list itself is refused if it names a built-in tool that can run commands, such as Bash, a subagent or a notebook, or any built-in that `fleet/agent_gate.py` doesn't know runs nothing. It's also refused unless it's a plain file you own, with one hard link and nobody else able to write it, in a plain folder you own, so edit it in place. A symlink to a copy elsewhere, or a list or folder others can write, keeps the space shut.
+Each file is a JSON object with one key, `tools`, listing every tool that live session may have, built-in and MCP, by its exact name. Before a live space opens, `hogwarts-spaces` refuses it if any definition of that agent lists a tool that isn't on the list.
+
+The list has its own rules:
+
+- Names match exactly. There are no wildcards or prefixes, and case counts.
+- The list is refused if it names a built-in tool that can run commands, such as Bash, a subagent or a notebook, or any built-in that `fleet/agent_gate.py` doesn't know runs nothing.
+- The list is also refused unless it's a plain file you own, with one hard link and nobody else able to write it, in a plain folder you own. So edit it in place. A symlink to a copy elsewhere, or a list or folder others can write, keeps the space shut.
 
 To add a tool:
 
@@ -51,7 +59,7 @@ To add a tool:
 
 A built-in tool also has to be in that agent's `--tools` list at the top of `hogwarts-spaces` before the live session gets it.
 
-The kit's lists use the same placeholders as the kit's agent files, `<warehouse-mcp>`, `<observability-mcp>` and `<chat-mcp>`, and onboarding stage 2 fills them in with everything else. If you keep a private overlay of the kit with your real server names, put the real names in its copies of these two files too, or the live spaces will be refused.
+The kit's lists use the same placeholders as the kit's agent files, `<warehouse-mcp>`, `<observability-mcp>` and `<chat-mcp>`, and onboarding stage 2 fills them in with everything else. If you keep your own fork or copy of the kit with your real server names, put the real names in its copies of these two files too, or the live spaces will be refused.
 
 ## Change a desk's model
 
@@ -71,7 +79,7 @@ You change a desk's role, not its model name. Each desk has a role card, `~/.hog
 - `effort` is `low`, `medium`, `high`, `xhigh` or `max`. Ollivander lowers it to the nearest level the picked model lists.
 - `why` is one plain line of at most 120 characters.
 
-What ships in the kit:
+The kit's defaults:
 
 | Desk | Needs | Effort | Why |
 | --- | --- | --- | --- |
@@ -83,7 +91,11 @@ What ships in the kit:
 | Harry - Senior Engineer | workhorse | high | Everyday coding |
 | Ron - Release Engineer | fast | low | Sorts lots of PR and CI updates |
 
-Edit the card, then run `~/.hogwarts/bin/fleet ollivander --dry-run` to read the new pick. His daily job applies it, or run `~/.hogwarts/bin/fleet ollivander` yourself. A move to the same tier or a cheaper one applies with a note. A costlier one waits for `castle desk model <desk> --approve`. If a later pass no longer makes that pick, for any reason, it's dropped and you get a quiet note. `--approve` also checks the pick against the latest catalog first, and refuses one that's gone, hidden, filed under another tier or retiring within 30 days.
+Edit the card, then run `~/.hogwarts/bin/fleet ollivander --dry-run` to read the new pick. His daily job applies it, or run `~/.hogwarts/bin/fleet ollivander` yourself.
+
+- A move to the same tier or a cheaper one applies with a note.
+- A costlier one waits for `castle desk model <desk> --approve`. `--approve` checks the pick against the latest catalog first, and refuses one that's gone, hidden, filed under another tier or retiring within 30 days.
+- If a later pass no longer makes a waiting pick, for any reason, it's dropped and you get a quiet note.
 
 How he picks:
 
@@ -112,13 +124,20 @@ After any switch, the first two runs are a trial. If both fail, the desk goes ba
 BLOCKED_MODEL_PREFIXES = ("<model-alias>", "claude-<model-alias>-")
 ```
 
-To forbid a whole Claude line, list its alias and its full id prefix, as above. A blocked model is never picked, pinned, filed or launched. Ollivander skips it without a note. If every model of a tier is blocked, the desk keeps the one it has and you get one note. If its current model is blocked, `run_desk` won't launch the desk until you pin an allowed one. A trial that fails never reverts a desk onto a blocked model. While anything is blocked, a Codex desk with no model of its own isn't launched either, because the Codex CLI default can't be checked against the list. Ollivander's first pass gives each unpinned Codex desk its pick, so run `~/.hogwarts/bin/fleet ollivander` once after you fill the list, or pin a model. A desk a failed trial pinned to no model is one he leaves alone, so pin it a model or hand it back with `--role`. The refusal and his daily note both say so. A failed trial never reverts a Codex desk onto that default while anything is blocked.
+To forbid a whole Claude line, list its alias and its full id prefix, as above. What a block does:
+
+- A blocked model is never picked, pinned, filed or launched. Ollivander skips it without a note.
+- If every model of a tier is blocked, the desk keeps the one it has and you get one note.
+- If a desk's current model is blocked, `run_desk` won't launch the desk until you pin an allowed one.
+- A trial that fails never reverts a desk onto a blocked model.
+- While anything is blocked, a Codex desk with no model of its own isn't launched either, because the Codex CLI default can't be checked against the list. Ollivander's first pass gives each unpinned Codex desk its pick, so run `~/.hogwarts/bin/fleet ollivander` once after you fill the list, or pin a model.
+- A desk a failed trial pinned to no model is one he leaves alone, so pin it a model or hand it back with `--role`. The refusal and his daily note both say so. A failed trial never reverts a Codex desk onto that default while anything is blocked.
 
 An alias counts as blocked once it has run as a blocked full id, even for a helper call that did little of the work. The office remembers every full id each alias has run as, and `opus[1m]` shares the record of `opus`, so switching a desk away and back doesn't make it forget. A later run on an allowed id doesn't lift it, since that run must have started before the block was known. That alias stays refused until you change the list, so pin an allowed alias or full id instead.
 
 ## Update the CLIs automatically
 
-Off by default. Make the plain file `~/.hogwarts/desks/ollivander/update-clis` and each of Ollivander's passes first runs `claude update` and `brew upgrade --cask codex`, with the output in `~/.hogwarts/logs/ollivander-update.log`. Then he checks both `--version` commands and every enabled desk's dry run. Any failure stops every headless desk. So does a new Codex version, because the Codex permission boundary is proven per version: run `scripts/codex-boundary-test.sh` on it first. A new Claude Code version is only a note.
+Off by default. Make the plain file `~/.hogwarts/desks/ollivander/update-clis` and each of Ollivander's passes first runs `claude update` and `brew upgrade --cask codex`, with the output in `~/.hogwarts/logs/ollivander-update.log`. Then he checks both `--version` commands and every enabled desk's dry run. Any failure stops every headless desk. So does a new Codex version, because the Codex permission boundary is proven per version: run `scripts/codex-boundary-test.sh` and `scripts/codex-exec-boundary-test.py` on it first. A new Claude Code version is only a note.
 
 While the stop file `~/.hogwarts/state/ollivander-stop` exists, or an update is running, no headless desk launches. A run that has passed its last check also holds off an update until its process has exited, so an update never swaps a CLI under a desk that's about to run or still running. If runs keep an update waiting for two minutes, that pass skips the update and the next one tries again. If a pass dies part way through an update, the next pass updates nothing, stops every headless desk and tells you, since the CLIs may have moved with no check run. Run `~/.hogwarts/bin/castle ollivander clear` once you've looked. Remove `update-clis` to switch updates off again.
 
@@ -174,8 +193,8 @@ All in `~/.hogwarts/fleet/config.py`:
 | Constant | What it limits |
 | --- | --- |
 | `MAX_BUDGET_USD` | The most one headless Claude run may spend, passed as `--max-budget-usd`. A run killed before it reports its cost is charged this much |
-| `DAILY_RUN_CAP` | Runs per desk in one cap day. The kit sizes it for a busy day: Hermione 80, Ron 120, the portrait 3, Harry 40 and Moody 80 |
-| `DAILY_SPEND_CAP_USD` | Spend per Claude desk in one cap day, read from the store's metrics: Hermione $60, Ron $10 and the portrait $4. The Codex desks have no spend cap |
+| `DAILY_RUN_CAP` | Runs per desk in one cap day. The kit sizes it for a busy day: Hermione 80, Ron 120, Dumbledore 3, Harry 40 and Moody 80 |
+| `DAILY_SPEND_CAP_USD` | Spend per Claude desk in one cap day, read from the store's metrics: Hermione $60, Ron $10 and Dumbledore $4. The Codex desks have no spend cap |
 | `CAP_RESET_UTC_SECONDS` | When the cap day starts. `None` is local midnight on your Mac, daylight saving included. A number fixes the reset that many seconds after UTC midnight instead |
 | `CAP_WARN_FRACTION` | The share of a cap, 0.8, at which a desk sends one warning that day |
 | `REVIEW_ROUND_CAP` | Review rounds per author task, 3. The next one waits for `castle task allow-round <task-id>` |
@@ -203,7 +222,7 @@ The cap event says whether the fleet's cap or your Claude or Codex plan's own li
 
 ## Change schedules
 
-Each background job is a launchd plist in `~/.hogwarts/launchd/`. The Owl Post sweeps every 300 seconds (`StartInterval`) and also runs whenever an outbox changes. Ollivander's job, `com.hogwarts.ollivander`, runs once a day at 06:00 from one `StartCalendarInterval` entry with an `Hour` and a `Minute`. The later-stage jobs use the same kind of entry, one per weekday and time.
+Each background job is a launchd plist in `~/.hogwarts/launchd/`. The Owl Post sweeps every 300 seconds (`StartInterval`) and also runs whenever an outbox changes. Ollivander's job, `com.hogwarts.ollivander`, runs once a day at 06:00 from one `StartCalendarInterval` entry with an `Hour` and a `Minute`. The other scheduled jobs use the same kind of entry. Gringotts' job runs every day at 23:30. The patrol's jobs and Dumbledore's add a `Weekday` key, with one entry per weekday and time.
 
 1. Edit the template in `~/.hogwarts/launchd/`.
 2. Check it with `plutil -lint`.
@@ -223,4 +242,9 @@ The one rule that matters most: **the author and the reviewer must come from dif
 
 ## Rename the Headmaster
 
-"Ryan" appears in prose in the charter, the briefs and the agent files. Change that text freely. Two registry names also carry it: `ryan` (the human) and `ryan-claude-1` (your own Claude sessions in the castle). Those are wired into `INTERACTIVE_DESKS` and `OWN_SESSION_DESK` in `fleet/config.py`, into `install.sh`, into `MANY_TASK_DESKS_SEED` in `hogwarts/db.py` and into the fleet tests. Rename them together in your clone, then reinstall with `./install.sh --force`.
+The charter, the briefs and the agent files address the Headmaster by the kit's default name, the string `Ryan`. Change that prose freely. Two desk ids carry the same name: `ryan` (you, the human desk) and `ryan-claude-1` (your own Claude sessions in the castle). These are identifiers, not prose:
+
+- `install.sh` registers both, and the fleet tests use both.
+- `ryan-claude-1` is also in `INTERACTIVE_DESKS` and `OWN_SESSION_DESK` in `fleet/config.py`, and in `MANY_TASK_DESKS_SEED` in `hogwarts/db.py`.
+
+To rename them, change every place together in your clone, run both suites, then reinstall with `./install.sh --force`.

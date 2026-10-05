@@ -6,6 +6,24 @@ Run every command in the Terminal app, one at a time. Press Cmd+Space, type Term
 
 Nothing in this guide asks you to paste a password or token into a desk. Sign-ins happen in your own terminal or browser.
 
+## The desks you'll meet
+
+Each desk has one job. The guide switches them on one at a time, in this order. You stay in charge of all of them.
+
+| Desk | Its job | You switch it on in |
+| --- | --- | --- |
+| Owl Post - Message Router | Moves messages ("owls") between desks | Stage 3.2 |
+| McGonagall - Chief of Staff | Your front desk. Writes each task, keeps the plan and routes work | Stage 4 |
+| Hermione - Staff Engineer | Reviews code that Codex wrote | Stage 5.1 |
+| Harry - Senior Engineer | Builds changes in a git worktree, on Codex | Stage 5.1, after your organization approves Codex |
+| Moody - Security Reviewer | Reviews code that Claude wrote, including yours, on Codex | Stage 5.1, after your organization approves Codex |
+| Marauder's Map - PR Watcher | Watches your PRs and CI | Stage 5.2 |
+| Ron - Release Engineer | Morning lineup, keeper's watch and weekly scoreboard | Stage 5.2 |
+| Gringotts - Backup | Nightly local backup and a restore drill | Stage 5.2 |
+| Dumbledore - Knowledge Manager | Reviews the fleet's memory each weeknight and proposes changes. His desk id is `portrait` | Stage 5.3 |
+| Ollivander - Model Keeper | Keeps each desk on the model its job needs | Stage 5.5 |
+| Snape - Data Analyst | Answers read-only warehouse and observability questions from your own sessions | Any time after stage 3.1 |
+
 ## Stage 0: Prerequisites
 
 The fleet needs the macOS Command Line Tools, Homebrew and a handful of tools from Homebrew. Read `brew info` for each one before you install it.
@@ -33,7 +51,7 @@ The fleet needs the macOS Command Line Tools, Homebrew and a handful of tools fr
 
    The Claude desktop app is optional. McGonagall works well in its Code tab: `brew info --cask claude`, then `brew install --cask claude`.
 
-4. Optional: RTK compresses Bash output. Install the binary only. Don't add its hook yet, because stage 5 decides that from real numbers.
+4. Optional: RTK compresses Bash output. Install the binary only. Don't add its hook yet. You decide on that in stage 5, from your own numbers.
 
    ```
    brew info rtk
@@ -52,7 +70,7 @@ command -v git jq gh rg shellcheck claude codex
 
 ## Stage 1: Clone and install
 
-1. Sign `gh` in. The PR watcher uses it in a later stage. A browser window opens and you approve it there.
+1. Sign `gh` in. The Marauder's Map uses it in stage 5.2. A browser window opens and you approve it there.
 
    ```
    gh auth login
@@ -71,7 +89,7 @@ command -v git jq gh rg shellcheck claude codex
    ./install.sh
    ```
 
-   It copies `office/` to `~/.hogwarts` and `castle/` to `~/hogwarts`. It adds `~/.claude/agents/snape.md` only if that file is missing. The fleet uses fixed absolute paths on purpose, so the installer rewrites the original home folder in the copied files to yours. It sets every folder to mode 0700 and every file to 0600, with `bin/castle` at 0700. It makes the castle a local git repo with no remote, creates the database, registers the thirteen desks, and runs both test suites.
+   It copies `office/` to `~/.hogwarts`, the office, and `castle/` to `~/hogwarts`, the castle where desks work. It adds `~/.claude/agents/snape.md` only if that file is missing. The fleet uses fixed absolute paths on purpose, so the installer rewrites the kit's built-in home path to yours in the copied files. It sets every folder to mode 0700 and every file to 0600, with `bin/castle` at 0700. It makes the castle a local git repo with no remote, creates the database, registers 13 desks and runs both test suites. The 13 desks are the seven agents, the four scripts, you (desk id `ryan`) and your own Claude sessions (desk id `ryan-claude-1`).
 
    It refuses to touch an existing `~/.hogwarts` or `~/hogwarts`. If you really want to reinstall, `./install.sh --force` first moves each folder aside to `<folder>.pre-install-<timestamp>`.
 
@@ -110,13 +128,13 @@ If it printed a note that `CLAUDE_BIN` or `CODEX_BIN` was not found, fix that no
    gh auth switch --user <your-account>
    ```
 
-4. Fill in the placeholders. The fleet ships without anyone's server names. These five tokens stand in for yours:
+4. Fill in the placeholders. The kit comes with no server names or accounts filled in. These five placeholders stand in for yours:
 
    | Placeholder | What to put there | Files |
    | --- | --- | --- |
    | `<warehouse-mcp>` | The name of your SQL warehouse MCP server, exactly as `/mcp` lists it in a Claude session | `~/.claude/agents/snape.md`, `~/.hogwarts/desks/snape/settings.json`, `~/.hogwarts/desks/snape/live-tools.json`, `~/hogwarts/.claude/settings.json` |
    | `<observability-mcp>` | The name of your metrics, logs and traces MCP server | the same four files |
-   | `<chat-mcp>` | The name of your team chat MCP server | `~/hogwarts/.claude/settings.json`, `~/hogwarts/.claude/agents/mcgonagall.md`, `~/.hogwarts/desks/mcgonagall/live-tools.json`, and the settings for Hermione, Ron, Snape and the portrait in `~/.hogwarts/desks/` |
+   | `<chat-mcp>` | The name of your team chat MCP server | `~/hogwarts/.claude/settings.json`, `~/hogwarts/.claude/agents/mcgonagall.md`, `~/.hogwarts/desks/mcgonagall/live-tools.json`, and the `settings.json` of `hermione`, `ron`, `snape` and `portrait` in `~/.hogwarts/desks/` |
    | `<github-account>` | The GitHub account the fleet's scripts should use | `~/.hogwarts/fleet/config.py` |
    | `<repos-to-watch>` | The repos whose main branch the keeper's watch and the weekly scoreboard read, as `owner/repo`. The Map follows every open PR your GitHub account authored. | `~/.hogwarts/fleet/config.py` |
 
@@ -140,12 +158,12 @@ If it printed a note that `CLAUDE_BIN` or `CODEX_BIN` was not found, fix that no
    WATCHED_REPOS = ("your-account/your-repo", "your-org/another-repo")
    ```
 
-5. Close off any other MCP server McGonagall has no business using. Her deny list in `~/hogwarts/.claude/settings.json` already names the warehouse, observability and chat send tools, the desktop app's own servers, and the Gmail connector's write tools. Add `"mcp__<server>"` for each other server `/mcp` shows you, such as a browser, ticketing or cloud console server. Keep the file valid JSON.
+5. Block every other MCP server McGonagall doesn't need. Her deny list in `~/hogwarts/.claude/settings.json` already names the warehouse, observability and chat send tools, the desktop app's own servers, and the Gmail connector's write tools. Add `"mcp__<server>"` for each other server `/mcp` shows you, such as a browser, ticketing or cloud console server. Keep the file valid JSON.
 
 **You're done when** all of these hold:
 
 - `claude auth status`, `codex login status` and `gh auth status` show you signed in, with the right GitHub account active.
-- This prints nothing:
+- This prints nothing outside `~/.hogwarts/tests_fleet/`. The tests there name some placeholders on purpose, as fixtures.
 
   ```
   grep -rn -e '<warehouse-mcp>' -e '<observability-mcp>' -e '<chat-mcp>' -e '<github-account>' -e '<repos-to-watch>' ~/.hogwarts ~/hogwarts ~/.claude/agents/snape.md
@@ -160,7 +178,7 @@ If it printed a note that `CLAUDE_BIN` or `CODEX_BIN` was not found, fix that no
 
 ## Stage 3: Apply the pending settings yourself
 
-Two changes touch your own Claude settings and start a background job. The fleet only prepares them. You apply each one yourself, in this order. The full notes are in `~/.hogwarts/pending/README.md`.
+Two changes touch your own Claude settings and start a background job. The kit only prepares them. You apply each one yourself, in this order. The full notes are in `~/.hogwarts/pending/README.md`.
 
 ### 3.1 Keep your own Claude sessions out of the office
 
@@ -215,8 +233,8 @@ If a step prints FAILED, the lines above it say why. The same steps by hand, wit
 
 ### Leave for later
 
-- `a2`, the push gate, is ready. It blocks an agent's push that has no review pass, so apply it when you start stage 5 and the review loop. Sections (e) and (f) of the pending README add the same gate to your Codex hooks and the desk settings, and (g) walks through a real task.
-- `~/.hogwarts/pending/c-codex-approval.txt` explains why Harry and Moody stay off. They send code to OpenAI, so they wait until your organization approves Codex for its source code, and until `sh scripts/codex-boundary-test.sh` passes on your Mac.
+- `a2` adds the push gate. It blocks an agent's push that has no review pass, so apply it when you reach stage 5.1 and the review loop. Sections (e) and (f) of the pending README add the same gate to your Codex hooks and the desk settings, and (g) walks through a real task.
+- `~/.hogwarts/pending/c-codex-approval.txt` explains why Harry and Moody stay off. They send code to OpenAI, so they wait until your organization approves Codex for its source code. They also wait until both boundary tests pass on your Mac: `sh scripts/codex-boundary-test.sh`, then `/usr/bin/python3 -I -B scripts/codex-exec-boundary-test.py`, both from your clone. The second one sends a short prompt to OpenAI, so run it only after the approval.
 - Optional clean-up that saves tokens in every session: switch off connectors and MCP servers you never call, with `/mcp` in a session or in your claude.ai connector settings.
 
 ## Stage 4: First session with McGonagall, and a smoke test
@@ -277,9 +295,10 @@ These checks prove the store, the Owl Post and the task flow work before any des
 
 ## Stage 5: Switch on the later stages, one at a time
 
-The fleet grows in the same order as its published rollout. The patrol is built: the Map, Ron's morning lineup, keeper's watch and weekly scoreboard, Hermione's bot pass and Gringotts (`fleet.map`, `fleet.morning`, `fleet.keeper`, `fleet.scoreboard` and `fleet.gringotts`). It starts in shadow mode, writing only to files, and `scripts/patrol-setup.sh` loads its launchd jobs one step at a time. The portrait's module, `fleet.portrait`, is built too, and 5.3 loads its job.
+Switch these on in order, one at a time. Each piece starts off, and nothing switches itself on. Pass each stage's check before you start the next.
 
-5.5 and 5.6 are the exception: Ollivander and the live view are built, and you can switch them on any time after stage 4.
+- 5.1 to 5.4 build on each other: the review loop, then the patrol in shadow mode, then Dumbledore's nightly review, then RTK and your standing orders.
+- 5.5 (Ollivander) and 5.6 (the live view) don't depend on the others. Switch them on any time after stage 4.
 
 Every headless desk starts disabled. A desk is enabled only by a plain file named `enabled` in its office folder. One desk at a time, read the exact command the fleet would run for it, then make the file. `--dry-run` prints the command as JSON and runs nothing.
 
@@ -290,38 +309,37 @@ touch ~/.hogwarts/desks/hermione/enabled
 
 Remove the file to switch the desk off again: `rm ~/.hogwarts/desks/hermione/enabled`.
 
-How each stage gets built: your own Claude sessions can't edit the office while the stage 3 deny rules are on. So for a build you lift them, ask Claude in a session outside `~/hogwarts` to build that stage, then put them back. The [handbook](HANDBOOK.md#part-2-building-the-rest-one-stage-at-a-time) has those steps.
-
 ### 5.1 The review loop
 
-Nothing leaves the laptop without a pass from the other model family for that exact commit.
+An agent's push goes out only with a pass from the other model family for that exact commit. The push gate is a guardrail, not a wall: pushes you type yourself never reach it.
 
-- Built: the worktree, verify and review scripts, and the push gate at `fleet/hooks/push_gate.py`.
-- Then: apply `a2` from `~/.hogwarts/pending` to wire the push gate into your user settings, with a fresh `.pre-hogwarts-` backup. Enable Hermione. Enable Harry and Moody only after your organization approves Codex and the stage proves they cannot read `~/.hogwarts`. On Codex 0.160.0 the fleet profile cannot enforce that yet.
+- What it is: the worktree, verify and review scripts (`fleet worktree`, `fleet verify`, `fleet review`, `fleet build` and `fleet push`), and the push gate at `fleet/hooks/push_gate.py`.
+- To switch it on: apply `a2` from `~/.hogwarts/pending` to wire the push gate into your user settings, with a fresh `.pre-hogwarts-` backup. Enable Hermione. Enable Harry and Moody only after your organization approves Codex and both `scripts/codex-boundary-test.sh` and `scripts/codex-exec-boundary-test.py` pass on your Mac. Section (g) of the pending README walks through a task.
 
-**You're done when** three PRs went out with passes tied to their commits, at least one real finding changed a diff, and the gate blocked a test push that had no pass.
+**You're done when** three PRs have gone out with passes tied to their commits, at least one real finding has changed a diff, and the gate has blocked a test push that had no pass.
 
 ### 5.2 Patrol in shadow mode
 
 Prove the cheap jobs are right before they can interrupt you.
 
-- Built: the Marauder's Map, Ron's jobs (morning lineup, keeper's watch and weekly scoreboard), Hermione's draft-only bot pass and Gringotts.
-- Then: run `sh scripts/patrol-setup.sh` from your clone of the kit. It checks gh, runs one Map round, a backup and a restore drill, enables Ron and loads the map, morning, keeper, scoreboard and gringotts plists. For three days, while `~/.hogwarts/patrol/shadow` is there, they write to files only. Hermione's bot pass only ever writes drafts.
+- What it is: the Marauder's Map, which diffs your PR and CI state each round. Ron's jobs: the morning lineup, the keeper's watch and the weekly scoreboard. Hermione's bot pass, which triages review threads on your PRs and only ever writes reply drafts. Gringotts, which takes a nightly local backup.
+- To switch it on: run `sh scripts/patrol-setup.sh` from your clone of the kit. It checks gh, runs one Map round, a backup and a restore drill, enables Ron and loads the map, morning, keeper, scoreboard and gringotts plists. While `~/.hogwarts/patrol/shadow` exists, which it does from install, they write to files only and send you no rows or owls. Leave it there for at least three days.
 
-**You're done when** the morning lineup matched `gh` three days running, a spot check of 50 of Ron's verdicts found nothing urgent marked routine, and at least 75% of map rounds cost zero tokens.
+**You're done when** the morning lineup has matched `gh` three days running, a spot check of 50 of Ron's verdicts finds nothing urgent marked routine, and at least 75% of Map rounds cost zero tokens. Then delete `~/.hogwarts/patrol/shadow` to let their rows and owls reach you.
 
-### 5.3 The nightly portrait
+### 5.3 Dumbledore's nightly review
 
-Close the memory loop, with you approving every change.
+Dumbledore reviews the fleet's memory each weeknight and proposes changes. You approve every one.
 
-- Built: the nightly export of the day's extracts and fact candidates into the portrait's inbox, his proposals-only run on it at 22:30 on weekdays, and `castle portrait` to read and apply his patches. Not built yet: the weekly scoreboard.
-- Then: run `sh scripts/portrait-setup.sh` yourself. It reads Dumbledore's dry run, exports today once by hand, enables his desk and loads his job, printing OK or FAILED after each step. His chat stays off until you give him a read-only MCP job ([CUSTOMISE.md](CUSTOMISE.md#change-budgets-and-limits)). Each morning after a run, `castle portrait show <date>` lists his patch and prints the exact `castle portrait apply <date> --sha256 <hash>` command. Add `--only <ids>` to apply just the operations you accept. Run `rtk discover --all --since 30` for a real savings number, with no hook yet.
+- What it is: a nightly export of the day's extracts and fact candidates into Dumbledore's inbox, his proposals-only run on it at 22:30 on weekdays, and `castle portrait` to read and apply his patches.
+- To switch it on: run `sh scripts/portrait-setup.sh` yourself. It reads Dumbledore's dry run, exports today once by hand, enables his desk and loads his job, printing OK or FAILED after each step. His chat stays off until you give him a read-only MCP job ([CUSTOMISE.md](CUSTOMISE.md#change-budgets-and-limits)). Each morning after a run, `castle portrait show <date>` lists his patch and prints the exact `castle portrait apply <date> --sha256 <hash>` command. Add `--only <ids>` to apply just the operations you accept.
+- If you installed RTK, run `rtk discover --all --since 30` to see what it would save on your own sessions. Don't add its hook yet.
 
 **You're done when** you have reviewed two nightly patches, the first weekly scoreboard shows the budgets held, and you have a go or no-go on RTK.
 
 ### 5.4 After that
 
-If the numbers justify it: the RTK hook in hook-only mode, with its exclude list set and recall off first. Then write your own standing orders in `~/hogwarts/standing-orders.md`. A standing order can never include a merge or a deploy.
+If your numbers justify it, add the RTK hook in hook-only mode, with its exclude list set and recall off first. Then write your own standing orders in `~/hogwarts/standing-orders.md`. A standing order can never include a merge or a deploy.
 
 ### 5.5 Ollivander, the model keeper
 
@@ -361,7 +379,7 @@ To take the job off again: `launchctl bootout gui/$(id -u)/com.hogwarts.ollivand
 **You're done when** all of these hold:
 
 - `launchctl print gui/$(id -u)/com.hogwarts.ollivander | head -5` shows the job.
-- `~/.hogwarts/bin/castle desk models` lists every desk that has a role card (McGonagall, Hermione, Moody, Dumbledore, Snape, Harry and Ron) with a tier and a model. `ryan-claude-1` has no role card, so it shows no tier.
+- `~/.hogwarts/bin/castle desk models` lists every desk that has a role card (McGonagall, Hermione, Moody, Dumbledore, Snape, Harry and Ron) with a tier and a model. Your own sessions' desk, `ryan-claude-1`, has no role card, so it shows no tier.
 - `ls ~/.hogwarts/state/` shows no `ollivander-stop` file.
 
 ### 5.6 The live view
@@ -399,7 +417,7 @@ From here on, the [handbook](HANDBOOK.md) is your guide: which desk to ask, the 
 - [ ] **0** Command Line Tools, Homebrew, `claude-code`, `codex`, `jq`, `gh`, `ripgrep`, `shellcheck` installed. RTK binary optional. `fts5 ok` printed.
 - [ ] **1** `gh auth login`. Repo cloned outside `~/hogwarts`. `./install.sh` ended with both suites OK and `castle doctor: ok`.
 - [ ] **2** `claude auth login`, `codex login`, right `gh` account active.
-- [ ] **2** Five placeholders filled. The placeholder grep prints nothing. JSON parses. Fleet tests pass.
+- [ ] **2** Five placeholders filled. The placeholder grep prints nothing outside the test fixtures. JSON parses. Fleet tests pass.
 - [ ] **2** McGonagall's deny list covers every other MCP server you have.
 - [ ] **3.1** `~/.claude/settings.json` backed up as `.pre-hogwarts-<timestamp>`, then the `a1` deny rules applied. `grep -c hogwarts` prints more than zero.
 - [ ] **3.2** `sh scripts/owlpost-setup.sh` printed OK for all six steps. The test owl reached Hermione.
@@ -408,9 +426,9 @@ From here on, the [handbook](HANDBOOK.md) is your guide: which desk to ask, the 
 - [ ] **4** Owl round trip: Hermione's reply reached McGonagall.
 - [ ] **4** McGonagall introduced herself with a digest.
 - [ ] **4** A TASK.md registered with `castle task create`, then closed as abandoned.
-- [ ] **5.1** Review loop built, `a2` applied, Hermione on. Codex desks only after approval.
-- [ ] **5.2** Map, Ron and Gringotts in shadow for three days. Restore drill done.
-- [ ] **5.3** Portrait proposals reviewed twice. RTK go or no-go.
+- [ ] **5.1** Review loop on, `a2` applied, Hermione on. Codex desks only after approval and both boundary tests.
+- [ ] **5.2** Map, Ron and Gringotts in shadow for three days. Restore drill done. Shadow file deleted once the checks pass.
+- [ ] **5.3** Dumbledore's proposals reviewed twice. RTK go or no-go.
 - [ ] **5.4** RTK hook and standing orders, only if the numbers say so.
 - [ ] **5.5** Role cards read, any forbidden models listed, `fleet ollivander --dry-run` read, the daily job loaded, a first pass run, and `castle desk models` shows a tier for every desk that has a role card.
 - [ ] **5.6** `fleet feed --all` prints its first line. `hogwarts-spaces` printed OK or SKIP for all nine spaces.

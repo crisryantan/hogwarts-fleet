@@ -1,33 +1,47 @@
 # Hogwarts store
 
-The Hogwarts store is the single source of truth for the planned Hogwarts fleet. It holds desks, tasks, peer requests (owls), outcomes, review passes, close tokens, session memory (the Pensieve), curated facts and run metrics.
+The Hogwarts store is the single source of truth for the Hogwarts fleet. It holds desks, tasks, peer requests (owls), outcomes, review passes, close tokens, session memory (the Pensieve), curated facts and run metrics.
 
-It is a small Python 3.9+ package that uses only the standard library, plus a CLI named `castle`. It is not wired into anything. There are no hooks, no launchd jobs, no agent files and no settings changes.
+It is a small Python 3.9+ package that uses only the standard library, plus a CLI named `castle` that prints JSON. The package starts nothing by itself: it has no daemon, hook or job of its own. The fleet's scripts, hooks and launchd jobs are what use it. `install.sh` copies this file to `~/.hogwarts/README.md`.
 
 ## Trust model
 
-Nothing a desk runs can call the store, and desks (the agents) have no file access to this directory. Only Ryan's own terminal and the fleet's scripts and hooks use it, and those run outside every desk sandbox:
+Nothing a desk runs can call the store, and desks (the agents) have no file access to this directory. Only your terminal and the fleet's scripts and hooks use it, and those run outside every desk sandbox:
 
-- the Owl Post;
-- the Map;
-- the nightly Pensieve export, which runs the portrait after it;
-- the worktree, verify and review scripts;
+- the Owl Post, and `run_desk`, which starts each headless run;
+- the patrol scripts: the Map, the morning lineup, keeper's watch and the scoreboard;
+- Gringotts and Ollivander;
+- the nightly Pensieve export, which runs Dumbledore after it;
+- the worktree, verify, review and push scripts, and `fleet feed`;
 - the push gate;
-- the close-token and SessionEnd hooks.
+- the castle's session hooks, including the close-token and SessionEnd hooks.
 
 Sender identity is a parameter that the calling script supplies. The Owl Post derives it from the desk outbox directory a file came from. The store still validates every input strictly, as defence in depth.
 
 File modes (0700 directories, 0600 files) keep other users out. They do not stop processes that run as the same user. Keeping agents away from this directory is the job of the agent sandbox.
 
+### Left out on purpose
+
+The store has none of these:
+
+- herdr pane and tab bookkeeping;
+- typing into terminals;
+- session ids parsed from free text fields;
+- file locks held across waits;
+- paths taken from the environment.
+
 ## Layout
 
 ```
-/Users/crisryantan/.hogwarts            mode 0700
-  README.md
-  .gitignore                            ignores state/
+~/.hogwarts                             mode 0700
+  README.md                             this file
+  .gitignore                            ignores state/, logs/, runs/, locks/, backups/ and patrol/ except patrol/shadow
   bin/castle                            POSIX sh wrapper, mode 0700
   bin/fleet                             POSIX sh wrapper for the fleet command, mode 0700
   bin/hogwarts-spaces                   opens one herdr space per desk, after fleet/agent_gate.py checks the live ones
+  desks/<desk>/                         each desk's office folder: for a headless desk, BRIEF.md, role.json (its role card),
+                                        and settings.json (Claude) or codex.toml (Codex)
+  desks/<desk>/enabled                  a headless desk runs only while this plain file exists
   desks/<desk>/live-tools.json          for mcgonagall and snape: every tool their live herdr session may have, by exact name
   hogwarts/__init__.py                  version string
   hogwarts/errors.py                    error classes and exit codes
@@ -40,25 +54,40 @@ File modes (0700 directories, 0600 files) keep other users out. They do not stop
   hogwarts/wands.py                     Ollivander's ledger: model filing, catalogs, each desk's model, trials, alias resolutions, the stop file
   hogwarts/watch.py                     read-only queries behind fleet feed
   hogwarts/cli.py                       argparse CLI, JSON output
-  fleet/                                the fleet scripts and hooks: run_desk.py, review.py, push.py, owl_post.py,
-                                        ollivander.py, feed.py, tools.py (the fleet command), the patrol (patrol.py,
-                                        map.py, morning.py, keeper.py, scoreboard.py), gringotts.py, portrait.py
-                                        (the nightly export and Dumbledore's run), portrait_patch.py (his
+  fleet/                                the fleet scripts: run_desk.py, worktree.py, verify.py, review.py, push.py,
+                                        owl_post.py, ollivander.py, feed.py, tools.py (the fleet command), the patrol
+                                        (patrol.py, map.py, morning.py, keeper.py, scoreboard.py), gringotts.py,
+                                        portrait.py (the nightly export and Dumbledore's run), portrait_patch.py (his
                                         patches, behind castle portrait) and their helpers
-  tests/                                unittest suite
+  fleet/hooks/                          the castle's session hooks and the push gate, push_gate.py
+  launchd/                              the launchd plist templates, one per background job
+  pending/                              settings snippets and launchctl steps you apply yourself (see pending/README.md)
+  assets/avatars/                       each desk's SVG badge, with PNG exports in png/
+  tests/                                the store's unittest suite
+  tests_fleet/                          the fleet's unittest suite
   run_suites.py                         runs both test suites fast, one process per test module
   state/pensieve.db                     the real database, created by castle init
+  logs/                                 the fleet's job and script logs
+  runs/<desk>/                          each headless run's output, which fleet feed follows
+  locks/                                lock files for run slots, launches, the patrol and Ollivander's updates
+  reviews/<task>/                       review files and verify evidence, which no desk can write
   patrol/shadow                         while it is here, the patrol and Gringotts only write files (shadow mode)
   patrol/<job>/                         the Map's snapshot and rows, lineups, keeper's watches, scoreboards, bot passes
   backups/                              Gringotts' archives, mode 0600, kept 14 days, never synced anywhere
 ```
 
+## The `bin/castle` wrapper
+
 `bin/castle` is exactly:
 
 ```
 #!/bin/sh
-exec /usr/bin/env -i /usr/bin/python3 -I -B -X pycache_prefix=/var/empty -c 'import sys; sys.path.insert(0, "/Users/crisryantan/.hogwarts"); from hogwarts.cli import main; sys.exit(main())' "$@"
+exec /usr/bin/env -i /usr/bin/python3 -I -B -X pycache_prefix=/var/empty -c 'import sys; sys.path.insert(0, "<home>/.hogwarts"); from hogwarts.cli import main; sys.exit(main())' "$@"
 ```
+
+`<home>` stands for your home folder. `install.sh` writes your home folder's absolute path here, so the wrapper reads no environment variable.
+
+`bin/fleet` is the same line with `fleet.tools` in place of `hogwarts.cli`.
 
 - `env -i` clears the environment before the interpreter starts. `/usr/bin/python3` is the macOS xcrun shim, which reads `DEVELOPER_DIR` before Python runs, so `-I` alone cannot stop a caller's environment from choosing the interpreter.
 - `-I` ignores `PYTHON*` variables and the user site directory.
@@ -74,16 +103,27 @@ The store never opens a path. Paths are validated, stored, and handed back. Each
 
 | Field | Root |
 | --- | --- |
-| `owls.body_path` | under `/Users/crisryantan/hogwarts/desks/<sender>/outbox/` |
-| `tasks.intent_path` | exactly `/Users/crisryantan/hogwarts/tasks/<task_id>/TASK.md`, for that task's own id |
-| `tasks.worktree` | under `/Users/crisryantan/hogwarts/worktrees/` |
-| `review_passes.review_path` | under `/Users/crisryantan/.hogwarts/reviews/`, in the office, which no desk can write |
+| `owls.body_path` | under `~/hogwarts/desks/<sender>/outbox/` |
+| `tasks.intent_path` | exactly `~/hogwarts/tasks/<task_id>/TASK.md`, for that task's own id |
+| `tasks.worktree` | under `~/hogwarts/worktrees/` |
+| `review_passes.review_path` | under `~/.hogwarts/reviews/`, in the office, which no desk can write |
 
-The first three sit in the castle (`/Users/crisryantan/hogwarts`), where desks work. Review files sit in the office (`/Users/crisryantan/.hogwarts`), so a desk cannot write or swap a review the store points at.
+Here `~` stands for your home folder. The roots are constants in `hogwarts/ids.py` that `install.sh` points at your home folder, and the store checks and keeps absolute paths. It never expands `~` itself.
+
+The first three sit in the castle (`~/hogwarts`), where desks work. Review files sit in the office (`~/.hogwarts`), so a desk cannot write or swap a review the store points at.
 
 Paths must be absolute and already normalised, with no control characters, so `..`, `.` and repeated slashes are refused. Whoever later opens one of these files (a fleet script or a desk) must open it with `O_NOFOLLOW` and check that the resolved path is still under its root.
 
-The CLI reads two kinds of file. `castle portrait show` and `apply` read Dumbledore's dated patch from his castle outbox through `fleet/portrait_patch.py`, which opens it with no link anywhere on the way and holds it to a strict schema (see Dumbledore's patches below). The other is the ops file for `castle fact apply --file PATH`. The path must be absolute and normalised. Every directory above it, up to `/`, must be a real directory (not a symlink) owned by root or the current user, and must not be group or world writable unless it has the sticky bit, like `/private/tmp`. The file is opened with `O_NOFOLLOW` and `O_NONBLOCK`, so a symlink or a FIFO is refused without blocking. It must be a regular file owned by the current user, not group or world writable, and at most 256KB. It must be UTF-8 JSON with no repeated keys inside an object and no `NaN` or `Infinity`. With `--sha256 HEX`, the bytes read must hash to that value, or nothing is applied. Pass the hash taken when the file was reviewed, so the reviewed bytes are the applied bytes.
+The CLI reads two kinds of file:
+
+- `castle portrait show` and `apply` read Dumbledore's dated patch from his castle outbox through `fleet/portrait_patch.py`, which opens it with no link anywhere on the way and holds it to a strict schema (see Dumbledore's patches below).
+- `castle fact apply --file PATH` reads an ops file, with these checks:
+  - The path must be absolute and normalised.
+  - Every directory above it, up to `/`, must be a real directory (not a symlink) owned by root or the current user, and must not be group or world writable unless it has the sticky bit, like `/private/tmp`.
+  - The file is opened with `O_NOFOLLOW` and `O_NONBLOCK`, so a symlink or a FIFO is refused without blocking.
+  - It must be a regular file owned by the current user, not group or world writable, and at most 256KB.
+  - It must be UTF-8 JSON with no repeated keys inside an object and no `NaN` or `Infinity`.
+  - With `--sha256 HEX`, the bytes read must hash to that value, or nothing is applied. Pass the hash taken when the file was reviewed, so the reviewed bytes are the applied bytes.
 
 ## Security rules
 
@@ -103,7 +143,7 @@ The CLI reads two kinds of file. `castle portrait show` and `apply` read Dumbled
 - CLI output is `json.dumps(ensure_ascii=True)`. List views never include owl bodies.
 - Close tokens and owl bodies never travel on argv. They come from stdin only.
 
-## Schema summary (version 7)
+## Schema summary (version 8)
 
 All tables are STRICT when SQLite supports it. Timestamps are integer unix seconds.
 
@@ -111,8 +151,8 @@ All tables are STRICT when SQLite supports it. Timestamps are integer unix secon
 | --- | --- |
 | `schema_version` | Applied migrations. |
 | `desks` | Name, family (`claude`, `codex`, `human`, `script`), role, model. Desks are immutable. `fleet` is reserved. |
-| `tasks` | Status `queued`, `active`, `awaiting_close`, `closed`. One active task per session (a partial unique index), and one per desk unless the desk is in `many_task_desks` (a trigger, so a raw write is refused too). A task keeps its desk (trigger), so no write moves an active task onto a single desk. Tasks are inserted queued. A closed task never reopens (trigger). `review_branch` (version 7) is the branch an own-session review task follows: set only on an active task and never cleared (triggers), NULL on rows from before version 7. It is Ryan's own branch, so any name git takes as a branch counts, capitals included, held to 1 to 255 bytes of printable ASCII with no whitespace (a CHECK); the fleet's lowercase, fleet-word-free rule is only for the branches it makes and pushes. |
-| `many_task_desks` | The desks that may hold many active tasks at once, with when each was granted. Version 7 grants `harry`, `hermione`, `moody`, `ron` and `ryan-claude-1` on a store that already has them, and `castle desk many-tasks` grants one. `mcgonagall`, `snape`, `portrait` and every human or script desk are refused, by the API and a trigger. One way: rows are never changed or deleted. |
+| `tasks` | Status `queued`, `active`, `awaiting_close`, `closed`. One active task per session (a partial unique index), and one per desk unless the desk is in `many_task_desks` (a trigger, so a raw write is refused too). A task keeps its desk (trigger), so no write moves an active task onto a single desk. Tasks are inserted queued. A closed task never reopens (trigger). `review_branch` (version 7) is the branch an own-session review task follows: set only on an active task and never cleared (triggers), NULL on rows from before version 7. It is a branch of your own checkout, so any name git takes as a branch counts, capitals included, held to 1 to 255 bytes of printable ASCII with no whitespace (a CHECK); the fleet's lowercase, fleet-word-free rule is only for the branches it makes and pushes. |
+| `many_task_desks` | The desks that may hold many active tasks at once, with when each was granted. Version 7 grants `harry`, `hermione`, `moody`, `ron` and `ryan-claude-1` on a store that already has them, and `castle desk many-tasks` grants one. `mcgonagall`, `snape`, `portrait` and every human or script desk are refused, by the API and a trigger. One way: rows are never changed or deleted. Because `ryan-claude-1` takes many tasks, reviews of your own sessions on different branches never block each other, while a fix commit on a branch goes on that branch's open task. |
 | `task_commits` | The repo and sha a task produced. One task per commit. Immutable. |
 | `events` | Episodic events. Verdict `routine` or `headmaster`. Optional unique `dedupe_key`. |
 | `sessions` | One row per agent session, with token counts. |
@@ -128,7 +168,7 @@ All tables are STRICT when SQLite supports it. Timestamps are integer unix secon
 | `close_tokens` | Hashed single use tokens for closing a task as complete. |
 | `cap_bumps` | One row each time you lift a desk's runs or spend cap with `castle desk cap`. It lasts until the next cap reset. Immutable. |
 | `cap_hits` | One row each time a fleet cap refuses a run, or a vendor's own limit stops one. `cap_source` says which: `fleet`, `claude_plan` or `codex_plan`. Immutable. |
-| `review_rounds` | One row per review request of an author task, with its round number, whether a newer commit superseded it, and the review it recorded. That review is stored and tied to its round in one step and never changes, so a round with a verdict counts even if publishing the review afterwards failed. `slot` is the reviewer desk's run slot the review held when the round opened, set once in the row that opens it, so the review script knows whose lock to try before it closes that round's reviewer task. It is NULL for a round queued while every slot was busy and for rounds from before V8, and the script reads NULL as slot 0. |
+| `review_rounds` | One row per review request of an author task, with its round number, whether a newer commit superseded it, and the review it recorded. That review is stored and tied to its round in one step and never changes, so a round with a verdict counts even if publishing the review afterwards failed. `slot` is the reviewer desk's run slot the review held when the round opened, set once in the row that opens it, so the review script knows whose lock to try before it closes that round's reviewer task. It is NULL for a round queued while every slot was busy and for rounds from before version 8, and the script reads NULL as slot 0. |
 | `run_launches` | One row per headless run, written before its process starts, so the run counts toward the daily run cap even if it is killed before it records usage. Its usage is the `metrics` row tied to it once it ends, set once. `task_id` is the desk's own task the run was for, when it had one, and never changes. Never deleted. |
 | `round_allowances` | One row each time you allow another review round with `castle task allow-round`. Immutable. |
 | `model_lines` | How you filed a model name: `frontier`, `workhorse`, `fast` or `ignore`. The latest row per name wins. Immutable. |
@@ -139,13 +179,23 @@ All tables are STRICT when SQLite supports it. Timestamps are integer unix secon
 
 Triggers also block deletes on desks, tasks, task commits, requests, events, facts, owls and review passes. Fact triggers require `valid_from` and `recorded_at` on every row, and keep `valid_to`, `closed_at` and `end_reason` set or unset together, with `valid_to` no earlier than `valid_from` and `closed_at` no earlier than `recorded_at`. `superseded_by` is only set on a superseded row. `restores` never changes once written.
 
-Migration 2 adds the fact columns, backfills `valid_from` and `recorded_at` from `created_at`, and builds the index and `facts_fts`. Migration 3 adds `facts.restores` and the trigger that keeps it fixed. Migration 4 adds the cap and review round tables. Migration 5 adds the model tables. Migration 6 adds the catalog look number and numbers the rows already kept by their `seen_at` order in each family. Each column is added only while it is missing, so running a migration again changes nothing.
+Migration 1 creates the base tables. The later ones:
+
+- Migration 2 adds the fact columns, backfills `valid_from` and `recorded_at` from `created_at`, and builds the index and `facts_fts`.
+- Migration 3 adds `facts.restores` and the trigger that keeps it fixed.
+- Migration 4 adds the cap, review round and run launch tables.
+- Migration 5 adds the model tables.
+- Migration 6 adds the catalog look number and numbers the rows already kept by their `seen_at` order in each family.
+- Migration 7 adds `many_task_desks` and its triggers, and grants the seeded desks that already exist. It replaces the one-active-task-per-desk index with a trigger that reads those grants, and adds `run_launches.task_id` and `tasks.review_branch`.
+- Migration 8 adds `review_rounds.slot` and the trigger that keeps a round's slot fixed.
+
+Each column is added only while it is missing, so running a migration again changes nothing.
 
 ## Why facts work this way
 
 A fact that changes is replaced explicitly with `supersede`, never guessed at. The replaced row is kept, with its validity window closed, so history and as-of reads still see it. A key's windows never overlap, so as-of reads give one answer per key. A closed row is never reopened. When a replacement is withdrawn, the earlier fact comes back as a new row, so belief history is never rewritten either. The default read (`current_facts`, `context_facts` for a desk, and `castle fact list`) returns only current facts: not superseded, withdrawn, expired or archived. Volatile state such as PR status, build colour or rollout percentage goes stale fast, so a fact whose text looks volatile is accepted only with a `lookup` that fetches the live value, or as a perishable fact that expires within 7 days.
 
-The volatility lint matches words, not meaning, so it also catches ordinary lasting prose: "open question", "red flag", "open source", "closed-form", "go-live checklist", "patent pending", "released under MIT", "issue #42", "+16.1%" and "NEVER open ACME/legacyapp PRs" are all refused. This is on purpose, since a false refusal costs a rewrite and a missed volatile fact goes stale silently. The remedy for a lasting fact is to reword it ("unresolved question", "warning sign", "never create ACME/legacyapp PRs"). Do not add a placeholder lookup, and do not make a lasting rule perishable to get past the lint, because a perishable fact quietly drops out after a week. There is no recorded override yet. Any importer, including one for MEMORY.md, must reword or skip, and never fall back to perishable.
+The volatility lint matches words, not meaning, so it also catches ordinary lasting prose: "open question", "red flag", "open source", "closed-form", "go-live checklist", "patent pending", "released under MIT", "issue #42", "+16.1%" and "NEVER open ACME/legacyapp PRs" are all refused. This is on purpose, since a false refusal costs a rewrite and a missed volatile fact goes stale silently. The remedy for a lasting fact is to reword it ("unresolved question", "warning sign", "never create ACME/legacyapp PRs"). Do not add a placeholder lookup, and do not make a lasting rule perishable to get past the lint, because a perishable fact quietly drops out after a week. There is no override. Any importer, including one for MEMORY.md, must reword or skip, and never fall back to perishable.
 
 ## API
 
@@ -176,9 +226,14 @@ Every function takes a connection from `db.connect(path)` as its first argument.
 ### Behaviour notes
 
 - Writes run in `BEGIN IMMEDIATE` through `db.transaction`. A write helper nests inside another write transaction as a savepoint, so a nested helper that fails undoes its own changes even when the caller catches the error and commits. It refuses with `StoreError` inside a `snapshot` or a transaction the caller opened, and so does `consume`.
-- `create_task` takes an optional `task_id`, so a fleet script can mint the id (`tk_` and 16 lowercase hex digits), write `tasks/<task_id>/TASK.md`, then register the task. An id that is already taken raises `ConflictError`. An `intent_path` needs that `task_id` and must be exactly `/Users/crisryantan/hogwarts/tasks/<task_id>/TASK.md`. Without a `task_id` the store mints one and the task has no intent path.
+- `create_task` takes an optional `task_id`, so a fleet script can mint the id (`tk_` and 16 lowercase hex digits), write `tasks/<task_id>/TASK.md`, then register the task. An id that is already taken raises `ConflictError`. An `intent_path` needs that `task_id` and must be exactly `~/hogwarts/tasks/<task_id>/TASK.md`, written as an absolute path. Without a `task_id` the store mints one and the task has no intent path.
 - `start_task` only starts a queued task whose ancestors are all open. A session that already has an active task raises `ConflictError`, and so does a single desk (`blocking_task` names the task in the way). A desk granted many tasks with `allow_many_tasks` starts any number. `allow_many_tasks` refuses `mcgonagall`, `snape`, `portrait` and every human or script desk with `ValidationError`. `mark_awaiting_close` moves the task out of `active`, so a single desk can start its next one, and can record the head commit.
-- `in_flight` lists every active or awaiting-close author task by desk, and any other task with a run going for it (a queued task whose ordinary request run Owl Post started, shown as `running`), with its latest round, verdict, rounds used against the cap, whether it needs an allowance, whether a run is going, and its state: `awaiting close`, `HEADMASTER`, `round cap`, `CHANGES`, `review died`, `review queued`, `in review`, `running` or `working`. A reviewer's round task is folded into its author task. Running means a launch for the task or one of its rounds' reviewer tasks has no usage yet and started within `running_window`. The latest round says where a task stands even when it does not count: one with no verdict is `in review` while its run is going, and `review died` once none is or once its run ended without a verdict, so the task needs its review run again. `needs_allowance(task, max_rounds=3)` says whether a task's next round waits for `castle task allow-round`.
+- `in_flight` lists every active or awaiting-close author task by desk, and any other task with a run going for it (a queued task whose ordinary request run the Owl Post started, shown as `running`).
+  - Each entry has its latest round, verdict, rounds used against the cap, whether it needs an allowance, whether a run is going, and its state: `awaiting close`, `HEADMASTER`, `round cap`, `CHANGES`, `review died`, `review queued`, `in review`, `running` or `working`.
+  - A reviewer's round task is folded into its author task.
+  - Running means a launch for the task or one of its rounds' reviewer tasks has no usage yet and started within `running_window`.
+  - The latest round says where a task stands even when it does not count. One with no verdict is `in review` while its run is going. It is `review died` once none is, or once its run ended without a verdict, so the task needs its review run again.
+  - `needs_allowance(task, max_rounds=3)` says whether a task's next round waits for `castle task allow-round`.
 - `close_task(task, "complete", token)` needs a valid close token. `abandoned` and `superseded` need none. Closing a task also closes every open descendant:
   - a started descendant closes `complete` only when its parent closed `complete`;
   - every other descendant, including any queued one, closes `superseded`.
@@ -291,18 +346,27 @@ Every command except `init` and `doctor` needs an existing database. `init` is s
 [
   {"op": "set_key", "fact_id": 12, "subject_key": "ci.main"},
   {"op": "supersede", "scope": "fleet", "subject_key": "ci.main", "text": "main needs one approval", "source": "portrait"},
-  {"op": "withdraw", "fact_id": 14, "desk": "ryan-claude"},
+  {"op": "withdraw", "fact_id": 14, "desk": "ryan-claude-1"},
   {"op": "archive", "fact_id": 9}
 ]
 ```
 
-`desk cap` raises one desk's runs or spend cap until the next cap reset, which is local midnight unless `CAP_RESET_UTC_SECONDS` in the fleet's config says otherwise. `desk model DESK MODEL` pins a desk to a model of its own family, `--role` unpins it and `--approve` takes a pending costlier pick, once it has checked the pick still qualifies. `ollivander clear` removes Ollivander's stop file. `desk many-tasks` lets a desk hold many active tasks at once, for good, and refuses McGonagall, Snape, Dumbledore, Ryan and the scripts. `task list --open` lists queued, active and awaiting-close tasks, and refuses `--status` with it. `task board` prints `in_flight`. The cap numbers, the review round cap, the running window and the blocklist are the fleet's settings, kept in `fleet/config.py` next to this package.
+A few commands in more detail:
+
+- `desk cap` raises one desk's runs or spend cap until the next cap reset, which is local midnight unless `CAP_RESET_UTC_SECONDS` in the fleet's config says otherwise.
+- `desk model DESK MODEL` pins a desk to a model of its own family, `--role` unpins it and `--approve` takes a pending costlier pick, once it has checked the pick still qualifies.
+- `ollivander clear` removes Ollivander's stop file.
+- `desk many-tasks` lets a desk hold many active tasks at once, for good. It refuses `mcgonagall`, `snape`, `portrait`, the human desk and the script desks.
+- `task list --open` lists queued, active and awaiting-close tasks, and refuses `--status` with it.
+- `task board` prints `in_flight`.
+
+The cap numbers, the review round cap, the running window and the blocklist are the fleet's settings, kept in `fleet/config.py` next to this package.
 
 `token mint` prints the raw token once. Never send its stdout to a log file, and never set a launchd `StandardOutPath` for a job that mints tokens.
 
 ### Dumbledore's patches
 
-Each weeknight `fleet/portrait.py` exports the day into the portrait's inbox, scrubbing every string it takes from the store, and runs him. A patch's subject keys and tags must pass the same scrubber as its text, and an error never shows a field name the schema does not know. He writes `~/hogwarts/desks/portrait/outbox/patch-<YYYY-MM-DD>.ops`, one JSON object:
+Each weeknight `fleet/portrait.py` exports the day into Dumbledore's inbox, scrubbing every string it takes from the store, and runs him. A patch's subject keys and tags must pass the same scrubber as its text, and an error never shows a field name the schema does not know. He writes `~/hogwarts/desks/portrait/outbox/patch-<YYYY-MM-DD>.ops`, one JSON object:
 
 ```
 {"format": "portrait-patch-1", "date": "2027-01-15", "ops": [
@@ -317,7 +381,7 @@ Each weeknight `fleet/portrait.py` exports the day into the portrait's inbox, sc
 
 `fact_add` also takes `lookup` and `expires_at`, `fact_edit` takes `tier`, `lookup`, `expires_at` and `subject_key` (only for a fact without one), and `fact_retire` takes `how` as `archive` or `withdraw`. Every op needs its own id, a reason and a source, and exactly its type's fields. The checks and their limits are in the docstring of `fleet/portrait_patch.py`: a malformed file is refused whole, an op out of schema can never be applied, and no text may hold anything the scrubber would change.
 
-`portrait show` lists each op as ready, applied, out of schema or refused by the store, which it learns by running the ops in a transaction it always rolls back, and prints the exact apply command with the file's sha256. `portrait apply` needs that hash, so the bytes you read are the bytes applied. It runs the chosen ops in patch order in one transaction through `facts.add_fact`, `facts.set_key`, `facts.supersede`, `facts.withdraw`, `pensieve.archive` and `pensieve.add_keypoint`, so one refusal applies none. An archive move is never carried out: it comes back under `for_you`. Each applied op is a routine `portrait.applied` event on the portrait desk with dedupe key `portrait:applied:<date>:<op id>`, so no op applies twice. Facts it writes carry the source `portrait:<date>:<op id>`, and key points the tag `portrait`. `portrait patches` lists the newest 30 with the ops each holds, those out of schema and those applied.
+`portrait show` lists each op as ready, applied, out of schema or refused by the store, which it learns by running the ops in a transaction it always rolls back, and prints the exact apply command with the file's sha256. `portrait apply` needs that hash, so the bytes you read are the bytes applied. It runs the chosen ops in patch order in one transaction through `facts.add_fact`, `facts.set_key`, `facts.supersede`, `facts.withdraw`, `pensieve.archive` and `pensieve.add_keypoint`, so one refusal applies none. An archive move is never carried out: it comes back under `for_you`. Each applied op is a routine `portrait.applied` event on the `portrait` desk with dedupe key `portrait:applied:<date>:<op id>`, so no op applies twice. Facts it writes carry the source `portrait:<date>:<op id>`, and key points the tag `portrait`. `portrait patches` lists the newest 30 with the ops each holds, those out of schema and those applied.
 
 ## Exit codes
 
@@ -333,49 +397,28 @@ Each weeknight `fleet/portrait.py` exports the day into the portrait's inbox, sc
 
 ## Running tests
 
-The fast way runs both suites, `tests` and `tests_fleet`, with every test module in its own process, up to six at a time, from any folder:
+The fast way runs both suites, `tests` and `tests_fleet`, with every test module in its own process, up to six at a time by default, from any folder:
 
 ```
-/usr/bin/env -i /usr/bin/python3 -I -B -X pycache_prefix=/var/empty /Users/crisryantan/.hogwarts/run_suites.py
+/usr/bin/env -i /usr/bin/python3 -I -B -X pycache_prefix=/var/empty ~/.hogwarts/run_suites.py
 ```
 
-Name one suite to run only that one, and add `--jobs N` to change how many modules run at once. Each module runs the hardened discover line below, narrowed to that module with `-p`, in the office folder with an empty environment, and the slowest modules start first. The runner prints the full output of every module that failed, then one line per suite with its test count, and exits 1 if any module failed, timed out or ended without a unittest summary. A full run takes about as long as the slowest module, `tests_fleet/test_many_tasks.py`.
+Name one suite to run only that one, and add `--jobs N` to change how many modules run at once. Each module runs the hardened discover line below, narrowed to that module with `-p`, in the office folder with an empty environment. The slowest modules start first, so a full run takes about as long as its slowest module. The runner prints the full output of every module that failed, then one line per suite with its test count. It exits 1 if any module failed, timed out or ended without a unittest summary.
 
 The reference form runs one suite in one process:
 
 ```
-cd /Users/crisryantan/.hogwarts && /usr/bin/python3 -I -B -m unittest discover -s tests -t . -v
+cd ~/.hogwarts && /usr/bin/python3 -I -B -m unittest discover -s tests -t . -v
 ```
 
 The hardened form uses the wrapper's interpreter line:
 
 ```
-cd /Users/crisryantan/.hogwarts && /usr/bin/env -i /usr/bin/python3 -I -B -X pycache_prefix=/var/empty -m unittest discover -s tests -t . -v
+cd ~/.hogwarts && /usr/bin/env -i /usr/bin/python3 -I -B -X pycache_prefix=/var/empty -m unittest discover -s tests -t . -v
 ```
 
 `discover -t .` puts the repo root on `sys.path`, which `-I` would otherwise drop. Discover is the only supported way to run a suite, and the runner uses it for every module. Running one module by dotted name fails under `-I`, so use `-p test_tasks.py` instead.
 
 Tests make their temporary directories under the constant `/private/tmp`, so `tempfile` never reads `TMPDIR`. They never touch `state/` and never read environment variables.
 
-A clone of the kit can also run both suites against an installed copy whose private values are made up: `sh scripts/installed-office-check.sh` installs into a throwaway home, fills the GitHub account, watched repos, blocked models and MCP names with fake values, and runs the suites there, so a test that quietly depends on your own private values fails. It never reads or writes your real `~/.hogwarts` or `~/hogwarts`.
-
-## Mapping from the teammate's modules
-
-| `db_adapter.py` / `dispatch_store.py` | Here |
-| --- | --- |
-| `MemoryManager` task registry | `pensieve.create_task`, `start_task`, `mark_awaiting_close`, `close_task` |
-| One open task per session or desk, `TaskConflictError` | A partial unique index on active tasks per session, and a trigger allowing one active task per desk except the desks in `many_task_desks`, `ConflictError`. `ryan-claude-1` takes many tasks, so reviews of Ryan's own sessions on different branches never block each other, while a fix commit on a branch goes on that branch's open task. |
-| `append_event` | `pensieve.add_event`, `drain`, `ack` |
-| `mem fact add`, context build | `pensieve.add_fact`, `context_facts`, `touch`, `decay`, `archive_stale`, `archive`, plus `facts.supersede`, `withdraw`, `current_facts` and the as-of reads |
-| `DispatchStore` private message bodies | `owls.body` or `owls.body_path`, returned only by `read` |
-| Dedupe by content hash | Idempotency keys, plus content dedupe into unacked owls and in-flight requests |
-| Read separate from ack | `owlery.read`, `owlery.ack` |
-| One answer per question | Partial unique index on answers |
-| Request scoped mailbox | `owls.request_id`, parties must match the request, `owlery.request_owls` |
-| `REQUEST_PHASES` forward only saga, crash safe resume | `owlery.REQUEST_PHASES`, `advance` (idempotent at the current phase, each phase checks its evidence) |
-| Record first close | `awaiting_close` with the head commit, then `close_task` with a close token |
-| Orphan close when the parent closes | Cascade in `close_task`, `start_task` refusing a closed ancestor, audit list of orphaned queued tasks |
-| Recover and audit | `owlery.audit` (including never delivered owls), plus idempotent `open_request`, `send` and `advance` for resume |
-| `DispatchStoreError` | `StoreError` and its subclasses |
-
-Dropped on purpose: herdr pane and tab bookkeeping, typing into terminals, session ids parsed from free text fields, file locks held across waits, and paths taken from the environment.
+A clone of the kit can also run both suites against an installed copy whose private values are made up. `sh scripts/installed-office-check.sh` installs into a throwaway home, fills the GitHub account, watched repos, blocked models and MCP names with fake values, and runs the suites there, so a test that quietly depends on your own private values fails. It never reads or writes your real `~/.hogwarts` or `~/hogwarts`.

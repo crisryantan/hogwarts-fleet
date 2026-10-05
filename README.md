@@ -1,6 +1,8 @@
 # Hogwarts fleet
 
-A Harry Potter themed fleet of single-purpose AI agents for Claude Code and Codex. Seven desks each do one job. A desk runs one model process at a time, two for the reviewers, and Harry, Hermione, Moody, Ron and your own sessions each keep many tasks in flight, so a task waiting for fixes blocks nothing. Four plain scripts move messages, watch PRs, take backups and keep each desk on the model its job needs, all at zero tokens. A reviewer from the other model family checks every change before it leaves the laptop. You are the Headmaster: merges, deploys, credentials, settings and anything sent to a person always come back to you. Everything that controls the fleet lives in a folder no desk can write.
+A kit for running a small fleet of single-purpose AI coding agents on your Mac, with Claude Code and Codex. Each agent does one job. Before an agent's change can be pushed, a reviewer from the other model family has to pass that exact commit. Plain scripts move messages, watch your PRs, take backups and pick models without spending tokens. You stay in charge: merges, deploys, credentials and anything sent to a person always come back to you.
+
+The agents are called desks. Each one is named after a Harry Potter character, with its job after the name, like Hermione - Staff Engineer. In the theme, you are the Headmaster.
 
 <table>
   <tr>
@@ -15,42 +17,107 @@ A Harry Potter themed fleet of single-purpose AI agents for Claude Code and Code
   </tr>
 </table>
 
-**What ships today:** the store and its `castle` CLI, the castle, McGonagall, Snape, the Owl Post and the session hooks, and the review loop: the `fleet` command's worktree, verify, review and push scripts and the push gate. Also built: busy-day caps on runs and spend, review rounds that stop at three, Ollivander - Model Keeper, a read-only live view of every desk, the PR patrol in shadow mode and Dumbledore's nightly memory review. The patrol is the Marauder's Map, Ron's morning lineup, keeper's watch and weekly scoreboard, Hermione's draft-only bot pass, and Gringotts' nightly backup with its restore drill; until you delete one shadow file, it only writes files. The memory review is a weekday job that exports the day from the store into Dumbledore's inbox and runs him in proposals-only mode, and `castle portrait` lets you read his dated patch and apply only the operations you accept. The store and fleet test suites cover it. The review loop is tested on temp repos but not yet on real tasks, the patrol on faked GitHub but not yet on real PRs, and the memory review on temp stores. [DESIGN.md](docs/DESIGN.md#known-limits) lists the gaps.
+## Who it's for
 
-## Start here
+One person on macOS who already works with Claude Code, Codex and GitHub pull requests, and wants agents with narrow jobs and hard guardrails rather than one agent with broad access.
 
-**[docs/ONBOARDING.md](docs/ONBOARDING.md)** takes a fresh Mac to a working fleet, one stage at a time. Each stage ends with a check that tells you it worked.
+It isn't a hosted service and it isn't multi-user. The fleet runs locally on one Mac, under your own user, with your own Claude and Codex sign-ins.
 
-- [Handbook](docs/HANDBOOK.md): daily use, which desk to ask, cheat sheet and troubleshooting. There is also a [standalone HTML copy](docs/handbook.html) you can open in a browser.
-- [Design](docs/DESIGN.md): how the fleet works and the five risks it closes.
-- [Customise](docs/CUSTOMISE.md): change a desk's role card, pin a model, block models, add or retire a desk, change caps, budgets and schedules.
-- [Uninstall](docs/UNINSTALL.md): take it all off again, by script or by hand.
-- [Setup prompt](prompts/setup-prompt.md): let a fresh Claude Code session walk you through onboarding.
+## Requirements
 
-## At a glance
+- macOS with the Command Line Tools, which bring `git` and `/usr/bin/python3` 3.9 or newer. The fleet runs on the system Python only.
+- SQLite with FTS5. The macOS build has it.
+- Homebrew, and from it the Claude Code CLI, the Codex CLI, `jq`, `gh`, `ripgrep` and `shellcheck`.
+- `claude`, `codex` and `gh` signed in from your own terminal.
+- Your organization's approval before its code goes to OpenAI. Harry and Moody run on Codex, and both start switched off.
 
-**The desks.** McGonagall - Chief of Staff, Harry - Senior Engineer, Hermione - Staff Engineer, Moody - Security Reviewer, Ron - Release Engineer, Snape - Data Analyst and Dumbledore - Knowledge Manager. The name after the dash is the job.
+Optional:
 
-**The scripts.** Owl Post - Message Router, Ollivander - Model Keeper, Marauder's Map - PR Watcher and Gringotts - Backup. None of them uses a model. Ollivander reads each desk's role card and keeps the desk on the newest model of the tier its job needs, inside its own model family.
+- MCP servers for a SQL warehouse, observability and team chat. Snape and McGonagall use them. Use the name `none` for any kind you don't have.
+- herdr, a third-party terminal workspace manager, for the live view.
+- RTK, a third-party tool that compresses Bash output.
 
-**Busy days and the live view.** Every headless desk has a daily run cap, and the Claude desks a spend cap too. They guard against runaway loops, they don't ration a normal day, and they reset at local midnight. A desk still runs one owl at a time, or two for the reviewers, while its other tasks wait without blocking it, and `fleet feed` plus one herdr space per desk lets you watch them work without typing into anything.
+## Quick start
 
-**The Headmaster gate.** You. No desk merges, deploys, signs in, changes settings or sends anything to a person. A task closes only when you type `Mischief managed <task-id>`.
+Install the prerequisites first, as in stage 0 of [docs/ONBOARDING.md](docs/ONBOARDING.md). Then clone the kit anywhere except `~/hogwarts` or `~/.hogwarts`, and run the installer:
 
-**Two homes.**
+```
+gh auth login
+gh repo clone crisryantan/hogwarts-fleet ~/hogwarts-fleet
+cd ~/hogwarts-fleet
+./install.sh
+```
 
-- `~/.hogwarts` is the office. It holds the store (a SQLite database and the `castle` CLI), the hooks, the scripts, each desk's brief and locked-down settings, and the launchd templates. No desk can write here, and Claude desks cannot read it.
-- `~/hogwarts` is the castle, where desks work. It holds the charter, the plan, each desk's scratchpad, task pads, inbox and outbox, the task folders and the git worktrees.
+`install.sh` copies the kit into two folders in your home, creates the database, registers the desks and runs both test suites. It refuses to touch an existing install. It never changes `~/.claude/settings.json`, `~/.codex` or launchd, and every headless desk starts switched off.
 
-**Five risks it closes.**
+From there, follow [docs/ONBOARDING.md](docs/ONBOARDING.md) from stage 2. You switch on one piece at a time, and each stage ends with a "You're done when" check. If you'd like Claude to walk you through it, paste the [setup prompt](prompts/setup-prompt.md) into a fresh Claude Code session in your clone.
 
-1. One terminal pane driving another. No desk that can run commands runs inside a terminal multiplexer. The only live sessions there are McGonagall and Snape, who have no shell tool, which is checked before each one opens, and every other desk gets a read-only feed.
-2. Desks inheriting your broad allow list. Every headless desk starts restricted, with its own settings.
-3. A watchdog typing into sessions. Nothing types into a session. Warnings only.
-4. Faked identity. A desk can only post to its own outbox, and the Owl Post stamps the sender from the folder.
+## How it works
+
+### The desks
+
+| Desk | Model family | Job |
+| --- | --- | --- |
+| McGonagall - Chief of Staff | Claude | Your front desk in `~/hogwarts`. Turns your ask into a TASK.md, keeps the plan, routes work and drafts replies. |
+| Harry - Senior Engineer | Codex | Builds each task in its own git worktree, with a failing-first test for each bug fix. Never pushes. |
+| Hermione - Staff Engineer | Claude | Reviews Codex-written code, and checks bot review comments on your PRs. |
+| Moody - Security Reviewer | Codex | Read-only, security-first review of Claude-written code, including work from your own Claude sessions. |
+| Ron - Release Engineer | Claude | Sorts PR and CI changes into routine or for you, and writes the morning lineup and weekly scoreboard. |
+| Snape - Data Analyst | Claude | Read-only warehouse and observability queries, with the source of every number. |
+| Dumbledore - Knowledge Manager | Claude | Reviews the day each weeknight and proposes memory changes, which you apply or skip. |
+
+Each desk's role card asks for a tier (frontier, workhorse or fast), not a model. Ollivander - Model Keeper maps that tier to a model inside the desk's own family, so a desk never changes family and the review rule holds.
+
+Harry, Hermione, Moody, Ron and your own sessions can each keep many tasks open. A desk runs one model process at a time, or two for the reviewers, so a task waiting on fixes doesn't hold up the others. Every headless desk has a daily run cap, and the headless Claude desks a daily spend cap. The caps are there to stop a runaway loop. They're sized for a busy day and reset at local midnight.
+
+### The scripts
+
+None of these uses a model.
+
+| Script | Job |
+| --- | --- |
+| Owl Post - Message Router | Moves messages (owls) between desks and stamps each sender from the folder it came from. |
+| Marauder's Map - PR Watcher | Diffs PR and CI state every 15 minutes, weekdays 08:00 to 19:00, and wakes Ron only for a change that may need you. |
+| Gringotts - Backup | Takes a nightly local backup with credentials left out. `fleet gringotts --drill` tests a restore. |
+| Ollivander - Model Keeper | Each morning, maps every desk's role card to a model in its own family. |
+
+### How a task moves
+
+1. You ask McGonagall. She writes a TASK.md with your words as the Intent, plus numbered acceptance criteria, each with a check. You read it, say go, and register it with `castle task create`.
+2. The task gets a fresh git worktree, and Harry builds there. Work from your own Claude sessions joins at the next step, through `fleet review own`.
+3. `fleet verify` runs each acceptance check and records the command, exit code and output for that commit.
+4. `fleet review` sends Codex-written work to Hermione and Claude-written work to Moody. A pass counts only for that exact commit, and only when the reviewer's family differs from the author's.
+5. You run `fleet push`, which pushes exactly the reviewed commit and prints the `gh` command for a draft PR. You open the PR yourself. The push gate blocks any agent's own `git push` that has no pass.
+6. The patrol (the Map, Ron and Hermione's bot pass) watches CI and review comments. You merge and deploy, then close the task by typing `Mischief managed <task-id>`.
+
+### Two homes
+
+- `~/.hogwarts` is the office. It holds the store (a SQLite database and its `castle` CLI), the `fleet` command, the hooks and scripts, each desk's brief, role card and locked-down settings, the launchd templates and the pending settings snippets. No desk can write here, and Claude desks can't read it.
+- `~/hogwarts` is the castle, where desks work. It holds the charter, the plan, your standing orders, each desk's scratchpad, inbox and outbox, the task folders and the git worktrees. It's a local git repo with no remote.
+
+## Safety model
+
+The design answers five ways a group of agents can go wrong. [DESIGN.md](docs/DESIGN.md#five-risks-and-what-closes-each-one) has the full table.
+
+1. One terminal pane driving another. No desk that can run commands lives in a terminal multiplexer. The only live sessions there are McGonagall and Snape, who have no shell tool, and that is checked before each one opens.
+2. Desks inheriting your broad allow list. Headless Claude desks start with `--restricted` and their own settings. Codex desks ignore your Codex config and run under a fleet permission profile.
+3. A watchdog typing into sessions. Nothing in the fleet types into a session. It only warns.
+4. Faked identity. A desk can post only to its own outbox, and the Owl Post stamps the sender from the folder.
 5. Code loading from folders agents can write. The controls live in the office, and the store runs on the system Python with a cleared environment.
 
-**Requirements.** macOS, Homebrew, the Claude Code CLI, the Codex CLI, the system `/usr/bin/python3` 3.9 or newer, SQLite with FTS5 (the macOS build has it), `jq`, `git`, `gh`, `ripgrep` and `shellcheck`. RTK is optional.
+Some things always come back to you: merges, deploys, prod changes, credentials and sign-ins, security settings, installs, anything sent to a person (opening a ready PR included), force pushes and deletions. The only pre-approvals are the standing orders you write yourself, and they can never include a merge or a deploy.
+
+The push gate is a guardrail, not a wall. It reads an agent's Bash command as text and blocks a `git push` that has no pass, which stops a push made by habit or mistake. A desk's real boundary is its sandbox, where the network is off or limited to named hosts. Pushes you type in your own terminal never reach the gate.
+
+## Docs
+
+[docs/ONBOARDING.md](docs/ONBOARDING.md) takes a fresh Mac to a working fleet, one stage at a time.
+
+- [Handbook](docs/HANDBOOK.md): daily use, which desk to ask, the cheat sheet and troubleshooting. There's also a [standalone HTML copy](docs/handbook.html) to open in a browser.
+- [Design](docs/DESIGN.md): how the fleet works, the five risks it closes and its known limits.
+- [Customise](docs/CUSTOMISE.md): change a desk's role card, pin or block models, add or retire a desk, and change caps, budgets and schedules.
+- [Uninstall](docs/UNINSTALL.md): take it all off again, by script or by hand.
+- [Setup prompt](prompts/setup-prompt.md): let a fresh Claude Code session walk you through onboarding.
 
 ## What is in this repo
 
@@ -60,12 +127,24 @@ A Harry Potter themed fleet of single-purpose AI agents for Claude Code and Code
 | `castle/` | The charter, an empty plan, standing orders, desk folders, McGonagall's settings and agent file, and a Codex config that keeps any Codex session opened there read-only | `~/hogwarts` |
 | `claude-agents/snape.md` | Snape's user-level agent file | `~/.claude/agents/snape.md`, only if absent |
 | `install.sh` | Installs the two homes, creates the database, registers the desks and runs the tests | |
-| `scripts/owlpost-setup.sh` | Your one command to switch on the Owl Post and send a test owl (onboarding stage 3) | |
-| `scripts/patrol-setup.sh` | Your one command for the shadow stage: checks gh, runs one Map round, a backup and a restore drill, switches Ron on and loads the Map, lineup, keeper's watch, scoreboard and Gringotts jobs in shadow mode | |
-| `scripts/portrait-setup.sh` | Your one command to switch on Dumbledore: it checks his dry run and the export, enables his desk and loads his weekday job (onboarding stage 5.3) | |
+| `scripts/owlpost-setup.sh` | Switches on the Owl Post and sends a test owl (onboarding stage 3.2) | |
+| `scripts/patrol-setup.sh` | Switches on the patrol in shadow mode (onboarding stage 5.2). It checks gh, runs one Map round, a backup and a restore drill, enables Ron, and loads the Map, morning lineup, keeper's watch, scoreboard and Gringotts jobs | |
+| `scripts/portrait-setup.sh` | Switches on Dumbledore (onboarding stage 5.3). It checks his dry run and the export, enables his desk and loads his weekday job | |
 | `scripts/codex-boundary-test.sh` | Proves the Codex desks' permission profile on your Mac: no office, no folder it isn't given, no network. Run it before enabling Harry or Moody, and after every Codex upgrade | |
-| `scripts/codex-exec-boundary-test.py` | Proves the boundary again under real `codex exec` runs for Harry and Moody, launched exactly the way the desk launcher does: the folders, temp folders and network above, a borrowed folder, quiet Xcode tools, and none of your own Codex hooks or MCP servers. Sends a short prompt to OpenAI and costs a few cents | |
+| `scripts/codex-exec-boundary-test.py` | Proves the boundary again under real `codex exec` runs for Harry and Moody, launched the way the desk launcher launches them. It checks the same folders and network, the temp folders, a `node_modules` link to a folder outside the task, that Xcode's Python and git run cleanly, and that none of your own Codex hooks or MCP servers start. Sends a short prompt to OpenAI and costs a few cents per desk | |
 | `scripts/installed-office-check.sh` | Installs the kit into a throwaway home, fills the GitHub account, watched repos, blocked models and MCP names with made-up values, and runs both suites there. A test that leans on your own private values fails. Never touches your real `~/.hogwarts` or `~/hogwarts` | |
 | `uninstall.sh` | A dry run by default. With `--yes` it removes the fleet and keeps an archive | |
 
 `install.sh` never touches `~/.claude/settings.json`, `~/.codex` or launchd. Those changes are yours to apply, and the onboarding guide shows how.
+
+## Status and known limits
+
+Two test suites cover the kit: `tests` for the store and `tests_fleet` for the fleet. Both run on the system Python, and `install.sh` runs them on every install.
+
+- The review loop is tested against temporary git repos.
+- The patrol is tested against a faked GitHub and faked desks. It starts in shadow mode: while `~/.hogwarts/patrol/shadow` exists, the patrol and Gringotts only write files under the office, and none of their findings reach you.
+- The weeknight memory review by Dumbledore - Knowledge Manager is tested against temporary stores. He only proposes changes, and nothing applies until you run `castle portrait apply`.
+- The Codex desks' read boundary rests on Codex permission profiles, which Codex marks as beta. Rerun `scripts/codex-boundary-test.sh` after every Codex upgrade.
+- The fleet runs on macOS only, for one person on one Mac.
+
+Tested with Claude Code 2.1.274, Codex 0.160.0 and herdr 0.9.3. [DESIGN.md](docs/DESIGN.md#known-limits) lists every known limit.

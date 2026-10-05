@@ -21,7 +21,7 @@ It archives both folders before it removes them. If you are sure you want no arc
 
 It is safe to run again. A second run finds nothing left to do.
 
-It exits with 0 when nothing is left for you, with 1 when your settings still mention the fleet, and with 2 when it stopped at a worktree with uncommitted changes.
+It exits with 0 when nothing is left for you, with 1 when your settings still mention the fleet or a step failed, and with 2 when it stopped at a worktree with uncommitted changes.
 
 ## The same steps by hand
 
@@ -51,8 +51,6 @@ It exits with 0 when nothing is left for you, with 1 when your settings still me
    ```
 
    If there is no backup, remove the lines that mention the fleet by hand. You're done when the grep prints nothing.
-
-   If you kept a `settings.json.with-hogwarts-deny` copy for building later stages, delete it too.
 
 3. **RTK.** If your settings mention `rtk hook` and you added it for the fleet, remove it with `rtk init -g --uninstall`.
 
@@ -103,10 +101,10 @@ Then switch the Owl Post back on with `sh scripts/owlpost-setup.sh` from your cl
 
 ## Remove the repo
 
-The repo is just a folder. Delete your clone when you no longer need it:
+Your clone is an ordinary folder. Delete it when you no longer need it:
 
 ```
 rm -rf ~/hogwarts-fleet
 ```
 
-To delete the GitHub repo too, open it on GitHub, go to Settings, and use "Delete this repository" at the bottom of the page.
+If you forked the repo on GitHub and no longer want the fork, open your fork, go to Settings, and use "Delete this repository" at the bottom of the page.

@@ -1,19 +1,19 @@
-# Pending changes for Ryan
+# Pending changes
 
 Nothing in this folder has been applied. Each item changes your own config or starts a job, so you apply it yourself. Back up any file before you touch it, as `<file>.pre-hogwarts-<YYYYMMDD-HHMM>`.
 
 ## (0) The fleet must be in the office before anyone opens ~/hogwarts
 
-The castle's `.claude/settings.json` is live. Every Claude session you open in `~/hogwarts` runs its four hooks. Each hook imports `fleet.hooks.<name>` from `/Users/crisryantan/.hogwarts` through the wrapper line, so `fleet/` must sit in the office first.
+The castle's `.claude/settings.json` takes effect as soon as it's installed. Every Claude session you open in `~/hogwarts` runs its four hooks. Each hook imports `fleet.hooks.<name>` from `~/.hogwarts` through the wrapper line, so `fleet/` must sit in the office first.
 
 The hooks use the `-c` import form. If `fleet/` is ever missing, the import fails with exit 1, which Claude Code treats as a non-blocking error. A missing script file would exit 2 instead, and on UserPromptSubmit that blocks every prompt.
 
 Check the install from your terminal:
 
 ```
-ls -ld /Users/crisryantan/.hogwarts/fleet /Users/crisryantan/.hogwarts/logs
-cd /Users/crisryantan/.hogwarts && /usr/bin/env -i /usr/bin/python3 -I -B -X pycache_prefix=/var/empty -m unittest discover -s tests_fleet -t .
-/Users/crisryantan/.hogwarts/bin/castle doctor
+ls -ld ~/.hogwarts/fleet ~/.hogwarts/logs
+cd ~/.hogwarts && /usr/bin/env -i /usr/bin/python3 -I -B -X pycache_prefix=/var/empty -m unittest discover -s tests_fleet -t .
+~/.hogwarts/bin/castle doctor
 ```
 
 ## (a) User settings: the deny rules and the push gate
@@ -26,11 +26,18 @@ cp ~/.claude/settings.json ~/.claude/settings.json.pre-hogwarts-$(date +%Y%m%d-%
 
 There are two snippets. Merge each one by hand: add the list items to the existing arrays and keep everything else.
 
-`a1-user-settings-deny.merge.json` denies the office to your own Claude sessions through the file tools, and denies the usual ways of running `castle` and `fleet` from Bash. If your settings have no `deny` list yet, this adds one. A Bash deny rule only matches the command as Claude usually writes it. It is not a wall around the program, so the sandbox stays the real boundary for desks. Apply a1 before you first summon Snape. He is a user-level subagent with Read, so until a1 is in place he could read the office from any of your sessions.
+`a1-user-settings-deny.merge.json` denies the office to your own Claude sessions through the file tools, and denies the usual ways of running `castle` and `fleet` from Bash. If your settings have no `deny` list yet, this adds one. A Bash deny rule only matches the command as Claude usually writes it. It is not a wall around the program, so the sandbox stays the real boundary for desks.
+
+Apply a1 before you first summon Snape. He is a user-level subagent with Read, so until a1 is in place he could read the office from any of your sessions.
 
 `a2-user-settings-push-gate.merge.json` adds a `PreToolUse` hook on `Bash` that runs the push gate. If you already have a `PreToolUse` Bash hook, it goes next to it as a new entry in the same array. Check afterwards: `grep -c push_gate ~/.claude/settings.json` prints 1.
 
-The push gate blocks an agent's `git push` unless every commit it pushes has a review pass from the other model family. It refuses force, delete and mirror pushes, pushes chained to other commands, and anything it cannot read, and it fails closed. It never allows anything your settings would otherwise ask about. It reads text, so it is a guardrail against an agent pushing by habit or mistake, not a wall: a session with your permissions can always push some other way. Pushes you type in your own terminal never reach it.
+The push gate blocks an agent's `git push` unless every commit it pushes has a review pass from the other model family. What else it does:
+
+- It refuses force, delete and mirror pushes, pushes chained to other commands, and anything it cannot read. It fails closed.
+- It never allows anything your settings would otherwise ask about.
+- It reads text, so it is a guardrail against an agent pushing by habit or mistake, not a wall. A session with your permissions can always push some other way.
+- Pushes you type in your own terminal never reach it.
 
 Undo: copy the backup back over `~/.claude/settings.json`.
 
@@ -42,22 +49,26 @@ The Owl Post runs whenever a desk outbox changes (`WatchPaths` on all seven outb
 
 Only McGonagall's request owls start a headless run. Any other owl waits in the inbox. A refused owl file raises a headmaster event, so you see it in the digest.
 
-The patrol's five plists in `launchd/` (map, morning, keeper, scoreboard, gringotts) are built: `scripts/patrol-setup.sh` in the repo loads them in shadow mode (onboarding stage 5.2). The portrait's plist is built too: `scripts/portrait-setup.sh` in the repo loads it (onboarding stage 5.3).
+Most of the other jobs have setup scripts in the kit. `scripts/patrol-setup.sh` loads the patrol's five plists from `launchd/` (map, morning, keeper, scoreboard, gringotts) in shadow mode, at onboarding stage 5.2. `scripts/portrait-setup.sh` loads Dumbledore's, at onboarding stage 5.3. You load Ollivander's job by hand at onboarding stage 5.5.
 
 ## (c) Codex approval and enabling desks
 
 File: `c-codex-approval.txt`.
 
-Every headless desk starts disabled. The Owl Post delivers to a disabled desk's inbox but never launches it, and `castle audit` escalates an owl that sits unacked for two hours. Hermione, Ron and the portrait stay disabled until you run `claude auth login`. To enable a desk you make a plain file named `enabled` in its office folder. Read the desk's `--dry-run` command first.
+Every headless desk starts disabled. The Owl Post delivers to a disabled desk's inbox but never launches it, and `castle audit` escalates an owl that sits unacked for two hours. To enable a desk you make a plain file named `enabled` in its office folder. Read the desk's `--dry-run` command first. Hermione, Ron and Dumbledore also need `claude auth login` before you enable them.
 
-Harry and Moody stay disabled until your organization approves Codex for its source code. Their read boundary is closed: run_desk runs them under a fleet permission profile, an allowlist that denies the office and every folder it does not name, with no network. Neither may touch `/private/tmp` or your per-user temp folder: Harry gets a private temp folder of his own as `TMPDIR`, emptied before each run, and both may only read xcrun's lookup cache. `scripts/codex-boundary-test.sh` in the kit proves that kind of profile on your Mac, and `scripts/codex-exec-boundary-test.py` proves it again under real `codex exec` runs. Run both before enabling Harry, and after every Codex upgrade.
+Harry and Moody stay disabled until your organization approves Codex for its source code. Their read boundary comes from a fleet permission profile:
+
+- run_desk runs them under that profile, an allowlist that denies the office and every folder it does not name, with no network.
+- Neither may touch `/private/tmp` or your per-user temp folder. Harry gets a private temp folder of his own as `TMPDIR`, emptied before each run, and both may only read xcrun's lookup cache.
+- `scripts/codex-boundary-test.sh` in the kit proves that kind of profile on your Mac, and `scripts/codex-exec-boundary-test.py` proves it again under real `codex exec` runs. Run both before enabling Harry, and after every Codex upgrade.
 
 ## (d) Registering and closing a task
 
 McGonagall writes `tasks/<id>/TASK.md` and waits for your go. Nothing registers the task in the store for her. After your go, she gives you one command to run in your terminal:
 
 ```
-/Users/crisryantan/.hogwarts/bin/castle task create --id <tk_id> --desk mcgonagall --title "<title>" --intent-path /Users/crisryantan/hogwarts/tasks/<tk_id>/TASK.md
+~/.hogwarts/bin/castle task create --id <tk_id> --desk mcgonagall --title "<title>" --intent-path ~/hogwarts/tasks/<tk_id>/TASK.md
 ```
 
 She routes the task only after you say it is registered. A request for a task the store does not know is refused, and you get a headmaster event.
@@ -65,8 +76,8 @@ She routes the task only after you say it is registered. A request for a task th
 "Mischief managed <task-id>" closes a task only when it is awaiting close and the hook can see that you typed the prompt yourself. If the hook says it could not confirm, close it from your terminal:
 
 ```
-/Users/crisryantan/.hogwarts/bin/castle token mint <tk_id>
-/Users/crisryantan/.hogwarts/bin/castle task close <tk_id> --reason complete --token-stdin
+~/.hogwarts/bin/castle token mint <tk_id>
+~/.hogwarts/bin/castle task close <tk_id> --reason complete --token-stdin
 ```
 
 Paste the token from the first command into the second when it waits for stdin. The token works once and expires.
@@ -85,9 +96,9 @@ Undo: restore the backup, or remove the entry.
 
 ## (f) Desk settings: the push gate for headless desks
 
-The desk settings for Hermione, Ron and the portrait ship with the push gate as a top-level `hooks` object. `a4-desk-settings-push-gate.merge.json` shows that block on its own.
+The desk settings for Hermione, Ron and Dumbledore include the push gate as a top-level `hooks` object. `a4-desk-settings-push-gate.merge.json` shows that block on its own.
 
-This is defence in depth. Hermione and the portrait have no network, and Ron's sandbox reaches only api.github.com, which takes no `git push`, so a push fails anyway. Hooks in a `--settings` file do run under `--restricted`: a headless test run with such a hook saw it block the command. If the hook cannot load, it exits 1, which Claude Code treats as a non-blocking error, so it changes nothing else.
+This is defence in depth. Hermione and Dumbledore have no network, and Ron's sandbox reaches only api.github.com, which takes no `git push`, so a push fails anyway. Hooks in a `--settings` file run under `--restricted`, so the gate blocks there too. If the hook cannot load, it exits 1, which Claude Code treats as a non-blocking error, so it changes nothing else.
 
 Undo: remove the `hooks` object from each desk's settings.
 
@@ -95,12 +106,14 @@ Undo: remove the `hooks` object from each desk's settings.
 
 Every `fleet` command prints one JSON object with `"ok": true` or `"ok": false` and a reason. Find task ids with `~/.hogwarts/bin/castle task list`.
 
+`--repo-dir` below is the main checkout of your repo: a folder inside your home folder, outside the office and the castle, with its own `.git` folder and no symlink on the way.
+
 1. McGonagall writes TASK.md, you say go, and you register her task as in (d).
 2. She posts a request to Harry. The Owl Post holds it and you get a headmaster event: a build task is waiting for its worktree.
 3. Give Harry's task a worktree on a new branch. If Harry is enabled, his run starts:
 
 ```
-~/.hogwarts/bin/fleet worktree <harry-task-id> --repo-dir ~/Documents/<repo> --branch <new-branch>
+~/.hogwarts/bin/fleet worktree <harry-task-id> --repo-dir <path-to-your-checkout> --branch <new-branch>
 ```
 
 4. Harry leaves his changes uncommitted and posts a handoff with a COMMIT MESSAGE section. The review script commits for him outside his sandbox, runs the acceptance checks, and runs Hermione:
@@ -124,7 +137,7 @@ Every `fleet` command prints one JSON object with `"ok": true` or `"ok": false` 
 7. For a commit from one of your own Claude sessions, Moody reviews it in a detached worktree. On PASS, that session's `git push` gets through the gate. For a fix round, pass `--task <id>` instead of `--title`:
 
 ```
-~/.hogwarts/bin/fleet review own --repo-dir ~/Documents/<repo> --title "<what the change does>"
+~/.hogwarts/bin/fleet review own --repo-dir <path-to-your-checkout> --title "<what the change does>"
 ```
 
 8. To rerun the acceptance checks on their own: `~/.hogwarts/bin/fleet verify <task-id>`. Each check runs inside a Codex permission profile with no network and no office, through `codex sandbox`, which runs no model.
