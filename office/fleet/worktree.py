@@ -13,9 +13,10 @@ It refuses rather than guesses:
   evidence, handoff and reviews are written next to it. One worktree command per TASK.md runs at a time:
   it takes that TASK.md's lock without waiting before it checks, and holds it until the task is active, so
   a second command for a task under the same TASK.md is refused at once and changes nothing. The last
-  check, the attach and the start share one store transaction. When that transaction refuses, say a
+  check, the attach, the start and the request's claimed and running phases share one store transaction.
+  When anything refuses after git starts making the worktree and before that transaction commits, say a
   single-task Harry started a task under another TASK.md meanwhile, or McGonagall closed the parent, the
-  command takes back the worktree, its new branch and its record before it says why;
+  command takes back the worktree, its new branch and its record, however far it got, before it says why;
 - the repo must be a main checkout in Ryan's home, outside the office and the castle, with a GitHub origin;
 - the branch must be new, plain and free of fleet words;
 - under a TASK.md that a go started, the repo folder, branch and base must be the ones the go stored.
@@ -89,8 +90,12 @@ def fetch_base(repo_dir: str, base: str) -> None:
 
 
 def add_worktree(conn, task_id: str, repo_dir: str, base: str, branch: Optional[str], fetch: bool,
-                 detach_at: Optional[str] = None) -> dict:
-    """Add ~/hogwarts/worktrees/<task-id> and write its office record. Shared with the review script."""
+                 detach_at: Optional[str] = None, *, claim: dict) -> dict:
+    """Add ~/hogwarts/worktrees/<task-id> and write its office record. Shared with the review script.
+
+    The caller owns taking back whatever this makes: before the first git change, claim["record"] holds the record
+    this will write, so take_back(claim, exc) undoes the worktree, its new branch, the links and the record, however
+    far it got, with no record saved yet."""
     repo_dir = gitops.check_repo_dir(repo_dir)
     base = gitops.check_ref(base, "base")
     common_dir = f"{repo_dir}/.git"
@@ -109,14 +114,16 @@ def add_worktree(conn, task_id: str, repo_dir: str, base: str, branch: Optional[
         branch = gitops.check_branch(branch)
         if _branch_exists(common_dir, branch):
             raise FleetError("that branch already exists; pick a new branch name")
-        gitops.git(["worktree", "add", "-b", branch, path, base_sha], common_dir)
+        add = ["worktree", "add", "-b", branch, path, base_sha]
     else:
         if detach_at is None or gitops.SHA.fullmatch(detach_at) is None:
             raise FleetError("a detached worktree needs a full commit sha")
-        gitops.git(["worktree", "add", "--detach", path, detach_at], common_dir)
+        add = ["worktree", "add", "--detach", path, detach_at]
     record = {"name": task_id, "task_id": task_id, "path": path, "repo_dir": repo_dir, "common_dir": common_dir,
               "git_dir": f"{common_dir}/worktrees/{task_id}", "branch": branch, "base": base_sha, "base_ref": base, "repo": slug,
               "links": toolchain.linkable(repo_dir)}
+    claim["record"] = record  # from here the caller takes back what git makes
+    gitops.git(add, common_dir)
     if not os.path.isdir(record["git_dir"]):
         raise FleetError("git named the worktree differently than expected; remove it by hand and retry")
     toolchain.link_deps(record, record["links"])
@@ -187,26 +194,51 @@ def start_task(conn, task_id: str) -> dict:
             return pensieve.start_task(conn, task["id"])
 
 
-def _take_back(record: dict, made_at: Optional[str], exc: BaseException) -> None:
-    """Undo add_worktree for a task that was refused before it got the worktree, so the task stays queued with
-    nothing left on disk and the same command can run again. The branch goes only while it still sits where the
-    worktree was made. If the undo fails, the refusal says what is left to remove by hand."""
-    branch, common_dir = record["branch"], record["common_dir"]
+def _take_back(record: dict, exc: BaseException) -> None:
+    """Undo add_worktree, however far it got, for a task that never got the worktree, so the task stays queued with
+    nothing left on disk and the same command can run again. The new branch goes only while it still sits at the
+    base commit add_worktree resolved before it made anything. If the undo fails, or the branch's tip cannot be
+    read, the refusal says what is left to remove by hand."""
+    branch, common_dir, base_sha = record["branch"], record["common_dir"], record["base"]
     path, branch_left = f"the worktree {record['path']}", f"branch {branch}"
     left = [path] + ([branch_left] if branch is not None else []) + [f"the record {record['name']}.json"]
     try:
         toolchain.unlink_deps(record)
-        gitops.git(["worktree", "remove", record["path"]], common_dir)
+        if os.path.lexists(record["path"]):
+            gitops.git(["worktree", "remove", record["path"]], common_dir)
         left.remove(path)
-        if branch is not None and made_at is not None:
+        if branch is not None:
             tip = gitops.git(["rev-parse", "--verify", "--quiet", f"refs/heads/{branch}"], common_dir, check=False)
-            if tip.strip() == made_at:
-                gitops.git(["update-ref", "-d", f"refs/heads/{branch}", made_at], common_dir)
+            if tip.strip() == base_sha:
+                gitops.git(["update-ref", "-d", f"refs/heads/{branch}", base_sha], common_dir)
+            elif not tip.strip() and gitops.has_branch(common_dir, branch):
+                raise FleetError(f"git could not read where branch {branch} points")
             left.remove(branch_left)
-        gitops.drop_record(record["name"])
+        with contextlib.suppress(FileNotFoundError, safefs.Missing):
+            gitops.drop_record(record["name"])
     except Exception as undo:
         raise FleetError(f"{exc}; taking back the new worktree also failed ({undo}), so remove"
                          f" {' and '.join(left)} by hand") from exc
+
+
+def take_back(claim: dict, exc: BaseException) -> None:
+    """Undo add_worktree for the caller that owns claim, so nothing is left on disk: the worktree, its new branch
+    (while it still sits at the base it was made at), the links and the record go, from the record in claim, so a
+    partial worktree with no saved record goes too. An empty claim has nothing to take back. If the undo fails, the
+    FleetError says what is left to remove by hand."""
+    if "record" in claim:
+        _take_back(claim["record"], exc)
+
+
+def kept(conn, claim: dict) -> bool:
+    """Whether the store has committed the worktree in claim to its task, so it is the task's and nothing takes it
+    back. False while a transaction is open, since it may still roll back, and when the store cannot say."""
+    if "record" not in claim or conn.in_transaction:
+        return False
+    try:
+        return pensieve.get_task(conn, claim["record"]["task_id"])["worktree"] is not None
+    except Exception:  # noqa: BLE001 - a task the store does not have, or cannot read, never kept a worktree
+        return False
 
 
 def start_desk(conn, task: dict) -> str:
@@ -222,14 +254,20 @@ def start_desk(conn, task: dict) -> str:
 
 
 def create(conn, task_id: str, repo_dir: str, branch: str, base: str = config.DEFAULT_BASE,
-           fetch: bool = True, start: bool = True) -> dict:
+           fetch: bool = True, start: bool = True, claim: Optional[dict] = None) -> dict:
     """Give a queued build task its worktree and start it, then start the desk's run. With start=False the run
     is left to the caller, which starts it with start_desk once its own store transaction has committed, so the
-    run never reads a store that has not got its task yet (the go hook)."""
+    run never reads a store that has not got its task yet (the go hook).
+
+    Without claim, create takes back what it made when anything refuses before its store transaction commits. A
+    caller that runs create inside its own transaction passes claim, an empty dict, and owns that from the start:
+    claim["record"] is set before the first git change, and the caller calls take_back(claim, exc) when its own
+    transaction rolls back, whether create refused or something after it did."""
     task = pensieve.get_task(conn, ids.check("task", task_id))
     if task["desk"] not in config.WORKTREE_DESKS:
         raise FleetError("only a build desk's task gets a worktree from this script")
     branch = gitops.check_branch(branch)
+    made = {} if claim is None else claim
     holder = _holder(conn, task["id"])
     with holder_lock(holder):
         task = pensieve.get_task(conn, task["id"])  # read again under the lock
@@ -237,36 +275,23 @@ def create(conn, task_id: str, repo_dir: str, branch: str, base: str = config.DE
             raise FleetError("the task must be queued and have no worktree yet")
         _check_spec(conn, holder, repo_dir, branch, base)
         _check_startable(conn, task)
-        record = add_worktree(conn, task["id"], repo_dir, base, branch, fetch)
-        made_at = None
         try:
-            made_at = gitops.rev(record)
+            record = add_worktree(conn, task["id"], repo_dir, base, branch, fetch, claim=made)
             with db.transaction(conn):
                 # BEGIN IMMEDIATE: the check sees every start committed before it, and no start lands in between.
                 _check_startable(conn, task)
                 pensieve.set_worktree(conn, task["id"], _real_worktree(task["id"]))
                 task = pensieve.start_task(conn, task["id"])
+                if task["request_id"] is not None:
+                    owlery.advance(conn, task["request_id"], "claimed", detail="worktree attached")
+                    owlery.advance(conn, task["request_id"], "running", detail="build desk started")
         except BaseException as exc:
-            _take_back(record, made_at, exc)
+            if claim is None and not kept(conn, made):
+                take_back(made, exc)
             raise
-    if task["request_id"] is not None:
-        owlery.advance(conn, task["request_id"], "claimed", detail="worktree attached")
-        owlery.advance(conn, task["request_id"], "running", detail="build desk started")
     started = start_desk(conn, task) if start else None
     return {"task_id": task["id"], "worktree": record["path"], "branch": record["branch"], "base": record["base"],
             "repo": record["repo"], "desk": started}
-
-
-def take_back(task_id: str, exc: BaseException) -> None:
-    """Undo create for a caller whose own store transaction failed, so the store never kept the task or its
-    worktree: the worktree, its new branch (while it still sits at the base it was made at) and the record go.
-    A task with no record has nothing to take back: create refused before it made one, or took it back itself.
-    If the undo fails, the FleetError says what is left to remove by hand."""
-    try:
-        record = gitops.read_record(ids.check("task", task_id))
-    except safefs.Missing:
-        return
-    _take_back(record, record["base"], exc)
 
 
 def build(conn, task_id: str) -> dict:

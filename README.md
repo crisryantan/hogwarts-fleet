@@ -83,7 +83,7 @@ None of these uses a model.
 
 ### How a task moves
 
-1. You ask McGonagall. She writes a TASK.md with your words as the Intent, plus numbered acceptance criteria, each with a check, and a Spec that names the repo, a new branch and its base. You read it, ask for changes until you're happy, then type `go <task-id>`.
+1. You ask McGonagall. She writes a TASK.md with your words as the Intent, plus numbered acceptance criteria, each with a check, and a Spec that names the repo, a new branch and its base. You read it, ask for changes until you're happy, then type `go <task-id>` in her session.
 2. The hook that reads your prompts checks you typed the go yourself, then registers the task, routes it to Harry, gives it a fresh git worktree from the Spec and starts Harry's run there. If it can't confirm your typing, it changes nothing and you register the task with `castle task create` instead. Work from your own Claude sessions joins at the next step, through `fleet review own`.
 3. `fleet verify` runs each acceptance check and records the command, exit code and output for that commit.
 4. `fleet review` sends Codex-written work to Hermione and Claude-written work to Moody. A pass counts only for that exact commit, and only when the reviewer's family differs from the author's.

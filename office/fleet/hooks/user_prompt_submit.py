@@ -6,6 +6,8 @@ Input fields read:
 - prompt_id: the id Claude Code gives this prompt. Its transcript entries carry it as promptId.
 - transcript_path: the session transcript, read from its tail only.
 - agent_id: present only inside a subagent; a close or a go is refused there.
+- agent_type: names the agent a session's main thread runs. A go runs only when common.session_desk
+  says the session is McGonagall's.
 
 Output is one JSON object. systemMessage is shown to Ryan. The same text goes to the
 session as additionalContext, except that headmaster events appear there as a count
@@ -19,7 +21,8 @@ What it says (each part only when there is something to say):
    other text never closes anything.
 2. The result of "go <task-id>" when the prompt is exactly that, after trimming. See
    "The go" below. A prompt that holds a go with a task id but is not exactly one gets a
-   refusal line and starts nothing. Any other prompt pays only for two regular expressions.
+   refusal line and starts nothing, and so does any go in a session that is not McGonagall's.
+   Any other prompt pays only for two regular expressions.
 3. Unacked headmaster events, newest per task, cut to about 1500 characters, with a
    count of the rest. The hook never acks them. They stay until Ryan runs
    castle event ack in his terminal.
@@ -37,8 +40,11 @@ The close runs only when every check passes:
   send_message arrives with origin.kind "peer", isMeta and promptSource "system".
 
 The go starts a build from a TASK.md McGonagall drafted and Ryan approved, with no command
-in his terminal. It passes the same typed_by_ryan check as the close, before it reads
-anything else, and then, only for a task id the store does not know yet whose TASK.md is at
+in his terminal. It runs only in McGonagall's own session: when common.session_desk names any
+other desk (Ryan's own sessions, a subagent, or the hook run with --desk for another desk), a go
+gets one refusal line before anything else is read, and changes nothing. In her session it
+passes the same typed_by_ryan check as the close, before it reads anything else, and then,
+only for a task id the store does not know yet whose TASK.md is at
 ~/hogwarts/tasks/<task-id>/TASK.md:
 - reads TASK.md once (no link, at most 64KB) and takes its title from the first line,
   "# <task-id> <title>", and the repo folder, branch and base from the block the ## Spec
@@ -56,8 +62,11 @@ anything else, and then, only for a task id the store does not know yet whose TA
 - only after that transaction commits, starts Harry's run with worktree.start_desk, when
   Ryan has enabled him and he is under his cap.
 A refusal anywhere before the commit, or SIGTERM or SIGHUP (a hook timeout), rolls the
-store back and takes back the worktree, its branch, its record and the inbox copy, so a go
-that did not get through leaves nothing and can be typed again. A kill no process can catch
+store back and takes back the worktree, however far git got with it, its branch, its record
+and the inbox copy, so a go that did not get through leaves nothing and can be typed again.
+The go owns that take-back from before git makes anything: worktree.create fills its claim
+first and leaves the take-back to the go. A signal after the commit keeps it all, since the
+store holds the task, the worktree and the owl by then. A kill no process can catch
 (SIGKILL) between the worktree and the commit leaves that worktree and its branch with no task,
 and the next go refuses because the branch exists until Ryan removes them. Nothing a go prints
 carries a token, the prompt's id or the TASK.md hash. A go Ryan's typing could not confirm
@@ -94,6 +103,7 @@ GO = re.compile(r"go (tk_[0-9a-f]{16})")
 # A go with a task id anywhere in a prompt that is not exactly one: it gets a refusal line and starts nothing.
 NEAR_GO = re.compile(r"(?<![A-Za-z0-9_])go\s+tk_[0-9a-f]{16}", re.IGNORECASE)
 GO_EXACT = "Go was not applied: a go is the whole prompt, exactly go <task-id>, so nothing was started."
+GO_SESSION = "a go runs only in McGonagall's session, so nothing was started."
 # A go registers the TASK.md's task on McGonagall's desk, as castle task create does by hand, and routes it to Harry.
 TASK_DESK = "mcgonagall"
 BUILD_DESK = "harry"
@@ -290,9 +300,10 @@ def _deliver(conn, owl: dict, body: str, now: int) -> None:
     owlery.mark_delivered(conn, owl["id"], now=now)
 
 
-def _undo(build_id: Optional[str], inbox_copy: Optional[str], exc: BaseException) -> Optional[str]:
+def _undo(claim: dict, inbox_copy: Optional[str], exc: BaseException) -> Optional[str]:
     """Take back what a go made outside the store once its transaction has rolled back: the inbox copy, then the
-    worktree, its new branch and its record. Returns the refusal naming what is left to remove by hand, or None."""
+    worktree, its new branch and its record, from the claim worktree.create filled before its first git change.
+    Returns the refusal naming what is left to remove by hand, or None."""
     from fleet import worktree
 
     stuck = None
@@ -304,11 +315,10 @@ def _undo(build_id: Optional[str], inbox_copy: Optional[str], exc: BaseException
             pass
         except (FleetError, OSError):
             stuck = f"the inbox copy desks/{BUILD_DESK}/inbox/{inbox_copy}"
-    if build_id is not None:
-        try:
-            worktree.take_back(build_id, exc)
-        except FleetError as undo:
-            return str(undo) if stuck is None else f"{undo}; remove {stuck} by hand too"
+    try:
+        worktree.take_back(claim, exc)
+    except FleetError as undo:
+        return str(undo) if stuck is None else f"{undo}; remove {stuck} by hand too"
     return None if stuck is None else f"{exc}; removing {stuck} also failed, so remove it by hand"
 
 
@@ -326,7 +336,7 @@ def _go(conn, task_id: str, now: int) -> tuple:
         raise FleetError(f"there is no TASK.md at ~/hogwarts/tasks/{task_id}/TASK.md") from None
     drafted = read_spec(raw, task_id)
     worktree.fetch_base(drafted["repo_dir"], drafted["base"])
-    build_id, inbox_copy = None, None
+    claim, inbox_copy = {}, None
     try:
         with db.transaction(conn):
             pensieve.create_task(conn, TASK_DESK, drafted["title"], intent_path=ids.intent_path(task_id),
@@ -337,19 +347,21 @@ def _go(conn, task_id: str, now: int) -> tuple:
             opened = owlery.open_request(conn, TASK_DESK, BUILD_DESK, drafted["title"], body=body,
                                          parent_task_id=task_id, idempotency_key=f"go:{task_id}", now=now)
             _unchanged(task_id, spec)
-            # A create that refuses takes its own worktree back. Once it returns, the worktree is this go's to
-            # take back, since the transaction that attached it may still roll back.
+            # The worktree is this go's to take back from before git makes it until this transaction commits:
+            # create fills claim before its first git change and never takes back what a claim holds.
             made = worktree.create(conn, opened["task"]["id"], spec["repo_dir"], spec["branch"], spec["base"],
-                                   fetch=False, start=False)
-            build_id = made["task_id"]
+                                   fetch=False, start=False, claim=claim)
             inbox_copy = f"{opened['owl']['id']}.json"
             _deliver(conn, opened["owl"], body, now)
             _unchanged(task_id, spec)
     except BaseException as exc:
-        stuck = _undo(build_id, inbox_copy, exc)
+        if worktree.kept(conn, claim):
+            raise  # stopped after the commit: the store holds the task, the worktree and the owl now
+        stuck = _undo(claim, inbox_copy, exc)
         if stuck is not None and isinstance(exc, Exception):
             raise FleetError(stuck) from exc
         raise
+    build_id = made["task_id"]
     lines = [f"Go: {task_id} is registered, and Harry's task {build_id} has its worktree on the new branch"
              f" {spec['branch']} from {spec['base']} in {made['repo']}."]
     try:
@@ -407,7 +419,11 @@ def _body(data: dict, desk: str, out, now: int) -> None:
             shown += closed
             context += closed
         go_id = go_request(data.get("prompt"))
-        if go_id is not None:
+        if (go_id is not None or near_go(data.get("prompt"))) and common.session_desk(data, desk) != TASK_DESK:
+            elsewhere = f"Go was not applied{'' if go_id is None else ' to ' + go_id}: {GO_SESSION}"
+            shown.append(elsewhere)
+            context.append(elsewhere)
+        elif go_id is not None:
             started, ok = start_build(conn, data, go_id, now)
             shown += started
             context += started + ([GO_CONTEXT] if ok else [])

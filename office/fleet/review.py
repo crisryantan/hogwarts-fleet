@@ -498,12 +498,16 @@ def _review_own(conn, repo_dir: str, title: Optional[str], intent: Optional[str]
                 pensieve.close_task(conn, task["id"], "abandoned")
                 raise FleetError(f"{OWN_DESK} could not start a new task: {exc}; castle desk many-tasks {OWN_DESK}"
                                  " lets it hold many") from None
+            made = {}
             try:
                 pensieve.set_review_branch(conn, task["id"], branch)
-                record = worktree.add_worktree(conn, task["id"], repo_dir, base, None, fetch, detach_at=sha)
+                record = worktree.add_worktree(conn, task["id"], repo_dir, base, None, fetch, detach_at=sha,
+                                               claim=made)
                 task = pensieve.set_worktree(conn, task["id"], f"{ids.WORKTREES_ROOT}/{task['id']}")
-            except BaseException:
+            except BaseException as exc:
                 _abandon_unreviewed(conn, task["id"])
+                if not worktree.kept(conn, made):
+                    worktree.take_back(made, exc)  # the task never got it, so nothing else would remove it
                 raise
         try:
             return _review_own_at(conn, task, record, sha, lock_fd)

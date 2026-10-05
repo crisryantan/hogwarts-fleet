@@ -7,19 +7,21 @@ network. No desk process starts: run_desk.spawn is faked wherever a run may star
 """
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
 import re
 import signal
 import subprocess
+import types
 from unittest import mock
 
-from hogwarts import ids, owlery, pensieve
+from hogwarts import db, ids, owlery, pensieve
 from hogwarts.errors import ConflictError
 from tests.support import NOW
 
-from fleet import config, gitops, owl_post, run_desk, worktree
+from fleet import common, config, gitops, owl_post, run_desk, toolchain, worktree
 from fleet.hooks import user_prompt_submit
 from fleet.safefs import FleetError
 from tests_fleet.support import (
@@ -107,16 +109,18 @@ class GoCase(FleetCase):
             current,
         ], name=name)
 
-    def prompt(self, text: str, transcript: str = None, **fields) -> tuple:
+    def prompt(self, text: str, transcript: str = None, argv: list = None, **fields) -> tuple:
+        """One prompt through the hook, in McGonagall's session unless fields say otherwise (None drops a field)."""
         path = self.transcript(text) if transcript is None else transcript
-        fields = {key: value for key, value in {"prompt_id": PROMPT_ID, **fields}.items() if value is not None}
+        fields = {key: value for key, value in {"prompt_id": PROMPT_ID, "agent_type": "mcgonagall", **fields}.items()
+                  if value is not None}
         payload = {"session_id": SESSION, "transcript_path": path, "cwd": str(self.castle),
                    "hook_event_name": "UserPromptSubmit", "prompt": text, **fields}
-        return self.run_hook(user_prompt_submit, payload)
+        return self.run_hook(user_prompt_submit, payload, argv)
 
-    def said(self, text: str, transcript: str = None, **fields) -> tuple:
+    def said(self, text: str, transcript: str = None, argv: list = None, **fields) -> tuple:
         """(shown to Ryan, given to the session, raw output) from one prompt, or ("", "", "") when silent."""
-        code, out, err = self.prompt(text, transcript, **fields)
+        code, out, err = self.prompt(text, transcript, argv, **fields)
         self.assertEqual(code, 0, err)
         if not out:
             return "", "", ""
@@ -241,7 +245,6 @@ class GoTests(GoCase):
         cases = (
             ("print mode", self.transcript(text, entrypoint="sdk-cli", name="print.jsonl"), {}),
             ("resumed with claude -p", mixed, {}),
-            ("subagent", self.transcript(text, name="sub.jsonl"), {"agent_id": "agent-1"}),
             ("no transcript", str(self.transcripts / "-project" / "missing.jsonl"), {}),
             ("outside root", "/private/tmp/elsewhere.jsonl", {}),
             ("peer message", self.transcript(text, name="peer.jsonl", prompt=peer_entry(text, promptId=PROMPT_ID)), {}),
@@ -263,6 +266,30 @@ class GoTests(GoCase):
                     self.assertIn(f"castle task create --id {TASK_ID} --desk mcgonagall", shown)
                     self.assertNotIn(user_prompt_submit.GO_CONTEXT, context)
                     self.assert_unchanged(before)
+
+    def test_a_go_in_any_session_but_mcgonagalls_changes_nothing(self):
+        self.task_md()
+        self.enable("harry")
+        before = self.snapshot()
+        sessions = (
+            ("Ryan's own session", {"agent_type": None}, None),
+            ("another agent's session", {"agent_type": "general-purpose"}, None),
+            ("a subagent in McGonagall's session", {"agent_id": "agent-1"}, None),
+            ("the hook run for Ryan's own desk", {}, ["--desk", "ryan-claude-1"]),
+        )
+        # Ryan's typing is confirmed in each, so only the session stops the go, before the typing is even read.
+        with mock.patch.object(run_desk, "spawn", side_effect=AssertionError("spawned")), \
+                mock.patch.object(user_prompt_submit, "typed_by_ryan", side_effect=AssertionError("typing read")), \
+                mock.patch.object(user_prompt_submit, "_go", side_effect=AssertionError("a go ran")):
+            for label, fields, argv in sessions:
+                for text, named in ((f"go {TASK_ID}", f" to {TASK_ID}"), (f"please go {TASK_ID}", "")):
+                    with self.subTest(session=label, text=text):
+                        shown, context, _ = self.said(text, argv=argv, **fields)
+                        self.assertEqual(shown, f"Go was not applied{named}: {user_prompt_submit.GO_SESSION}")
+                        self.assertEqual(context, shown)
+                        self.assert_unchanged(before)
+        # The same go in McGonagall's own session gets through.
+        self.go_ok()
 
     def test_a_go_for_a_task_with_no_task_md_changes_nothing(self):
         self.enable("harry")
@@ -517,6 +544,196 @@ class GoWorktreeChecksTests(GoCase):
         self.assertEqual(stopped.exception.code, 128 + signal.SIGTERM)
         self.assert_unchanged(before)
         self.assertIs(signal.getsignal(signal.SIGTERM), signal.SIG_DFL)
+
+
+def then_terminated(real):
+    """real, then SIGTERM (the hook's timeout) once it has returned."""
+    def run(*args, **kwargs):
+        done = real(*args, **kwargs)
+        signal.raise_signal(signal.SIGTERM)
+        return done
+    return run
+
+
+def terminated(*args, **kwargs):
+    signal.raise_signal(signal.SIGTERM)
+
+
+def committed_then_terminated() -> types.SimpleNamespace:
+    """A db whose transaction commits, then gets SIGTERM before the code after it runs."""
+    @contextlib.contextmanager
+    def transaction(conn):
+        with db.transaction(conn):
+            yield conn
+        signal.raise_signal(signal.SIGTERM)
+    return types.SimpleNamespace(transaction=transaction)
+
+
+def stopped_at(phase: str, stop) -> object:
+    """owlery.advance that runs stop() instead of moving the request to phase."""
+    real = owlery.advance
+
+    def advance(conn, request_id, to_phase, *args, **kwargs):
+        if to_phase == phase:
+            stop()
+        return real(conn, request_id, to_phase, *args, **kwargs)
+    return advance
+
+
+def refused(error: Exception):
+    def stop():
+        raise error
+    return stop
+
+
+def git_stopped_after_the_branch():
+    """gitops.git where git worktree add makes the new branch, then stops before the worktree."""
+    real = gitops.git
+
+    def git(args, *rest, **kwargs):
+        if args[:3] == ["worktree", "add", "-b"]:
+            real(["branch", args[3], args[5]], *rest, **kwargs)
+            raise FleetError("git worktree failed: stopped")
+        return real(args, *rest, **kwargs)
+    return git
+
+
+class GoTakeBackTests(GoCase):
+    """Whatever git made for a go or for fleet worktree is taken back, wherever it stops before its commit, with
+    no record saved yet and no read of the worktree's revision; and once its commit lands, nothing is."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.task_md()
+        self.enable("harry")
+
+    def go_stopped(self) -> tuple:
+        """(shown, whether SIGTERM ended it) for one go that does not get through."""
+        with mock.patch.object(run_desk, "spawn", side_effect=AssertionError("spawned")):
+            try:
+                code, out, err = self.prompt(f"go {TASK_ID}")
+            except SystemExit as stopped:
+                self.assertEqual(stopped.code, 128 + signal.SIGTERM)
+                return "", True
+        self.assertEqual(code, 0, err)
+        return json.loads(out)["systemMessage"], False
+
+    def routed_by_hand(self) -> dict:
+        """Harry's queued task under a TASK.md registered with castle task create, as fleet worktree finds it."""
+        pensieve.create_task(self.conn, "mcgonagall", "registered by hand", intent_path=ids.intent_path(TASK_ID),
+                             task_id=TASK_ID, now=NOW)
+        return owlery.open_request(self.conn, "mcgonagall", "harry", "build it", body="see TASK.md",
+                                   parent_task_id=TASK_ID, now=NOW)["task"]
+
+    def fleet_worktree(self, task: dict) -> dict:
+        """fleet worktree for task, with SIGTERM handled as the fleet command handles it and no desk process."""
+        with mock.patch.object(run_desk, "spawn"), common.ended_by_signals():
+            return worktree.create(self.conn, task["id"], str(self.repo), BRANCH, fetch=False)
+
+    def test_a_go_stopped_anywhere_before_its_commit_takes_back_whatever_git_made(self):
+        before = self.snapshot()
+        late = (pensieve, "set_worktree", ConflictError("refused late"))
+        stops = (
+            ("git stopped after making the branch", [(gitops, "git", git_stopped_after_the_branch())],
+             "git worktree failed: stopped"),
+            ("linking the dependencies refused", [(toolchain, "link_deps", FleetError("node_modules is in the way"))],
+             "node_modules is in the way"),
+            ("SIGTERM while linking the dependencies", [(toolchain, "link_deps", terminated)], None),
+            ("writing the record refused", [(gitops, "write_record", FleetError("the record folder is full"))],
+             "the record folder is full"),
+            ("SIGTERM once the record is written", [(gitops, "write_record", then_terminated(gitops.write_record))],
+             None),
+            ("the revision read failed", [(gitops, "rev", FleetError("git rev-parse failed")), late], None),
+            ("the revision read was interrupted", [(gitops, "rev", terminated), late], None),
+            ("the claimed phase refused",
+             [(owlery, "advance", stopped_at("claimed", refused(ConflictError("no claim"))))], "no claim"),
+            ("SIGTERM at the claimed phase", [(owlery, "advance", stopped_at("claimed", terminated))], None),
+            ("the running phase refused",
+             [(owlery, "advance", stopped_at("running", refused(ConflictError("not run"))))], "not run"),
+            ("SIGTERM at the running phase", [(owlery, "advance", stopped_at("running", terminated))], None),
+        )
+        for label, patches, reason in stops:
+            with self.subTest(stop=label), contextlib.ExitStack() as stack:
+                for module, name, effect in patches:
+                    stack.enter_context(mock.patch.object(module, name, side_effect=effect))
+                shown, _ = self.go_stopped()
+                if reason is not None:
+                    self.assertIn(f"Go was not applied to {TASK_ID}: {reason}", shown)
+                self.assert_unchanged(before)
+        # Nothing was left in the way, so the same go gets through.
+        self.go_ok()
+
+    def test_fleet_worktree_stopped_anywhere_before_its_commit_takes_back_whatever_git_made(self):
+        task = self.routed_by_hand()
+        before = self.snapshot()
+        phase = owlery.get_request(self.conn, task["request_id"])["phase"]
+        late = (pensieve, "set_worktree", ConflictError("refused late"))
+        stops = (
+            ("git stopped after making the branch", [(gitops, "git", git_stopped_after_the_branch())], FleetError),
+            ("linking the dependencies refused", [(toolchain, "link_deps", FleetError("node_modules is in the way"))],
+             FleetError),
+            ("SIGTERM once the record is written", [(gitops, "write_record", then_terminated(gitops.write_record))],
+             SystemExit),
+            ("the revision read failed", [(gitops, "rev", FleetError("git rev-parse failed")), late],
+             (FleetError, ConflictError)),
+            ("the revision read was interrupted", [(gitops, "rev", terminated), late], (SystemExit, ConflictError)),
+            ("the claimed phase refused", [(owlery, "advance", stopped_at("claimed", refused(ConflictError("no"))))],
+             ConflictError),
+            ("SIGTERM at the running phase", [(owlery, "advance", stopped_at("running", terminated))], SystemExit),
+        )
+        for label, patches, error in stops:
+            with self.subTest(stop=label), contextlib.ExitStack() as stack:
+                for module, name, effect in patches:
+                    stack.enter_context(mock.patch.object(module, name, side_effect=effect))
+                with self.assertRaises(error):
+                    self.fleet_worktree(task)
+                self.assert_unchanged(before)
+                self.assertEqual(pensieve.get_task(self.conn, task["id"])["status"], "queued")
+                self.assertEqual(owlery.get_request(self.conn, task["request_id"])["phase"], phase)
+        self.assertEqual(self.fleet_worktree(task)["branch"], BRANCH)
+        self.assertEqual(owlery.get_request(self.conn, task["request_id"])["phase"], "running")
+
+    def test_a_branch_whose_tip_the_take_back_cannot_read_is_named_as_left(self):
+        real_git = gitops.git
+
+        def unreadable_tip(args, *rest, **kwargs):
+            if args[:3] == ["rev-parse", "--verify", "--quiet"]:
+                return ""
+            return real_git(args, *rest, **kwargs)
+
+        with mock.patch.object(pensieve, "set_worktree", side_effect=ConflictError("refused late")), \
+                mock.patch.object(gitops, "git", side_effect=unreadable_tip):
+            shown, _ = self.go_stopped()
+        self.assertRegex(shown, f"Go was not applied to {TASK_ID}: refused late; taking back the new worktree also"
+                                f" failed \\(git could not read where branch {BRANCH} points\\), so remove branch"
+                                f" {BRANCH} and the record tk_[0-9a-f]{{16}}\\.json by hand")
+        self.assertEqual(pensieve.list_tasks(self.conn), [])
+        self.assertIn(BRANCH, self.git("branch", "--list", BRANCH))
+
+    def test_a_signal_after_the_go_commits_keeps_all_the_store_holds(self):
+        with mock.patch.object(user_prompt_submit, "db", committed_then_terminated()):
+            _, signalled = self.go_stopped()
+        self.assertTrue(signalled)
+        built = self.harry_task()
+        self.assertEqual((built["status"], built["worktree"]), ("active", f"{ids.WORKTREES_ROOT}/{built['id']}"))
+        self.assertTrue(os.path.isdir(config.worktree_dir(built["id"])))
+        self.assertEqual(gitops.read_record(built["id"])["branch"], BRANCH)
+        [owl] = owlery.inbox(self.conn, "harry")
+        self.assertTrue((self.inbox("harry") / f"{owl['id']}.json").is_file())
+        # Harry's run never started, and a second go says how to start it.
+        with mock.patch.object(run_desk, "spawn", side_effect=AssertionError("spawned")):
+            shown, _, _ = self.said(f"go {TASK_ID}")
+        self.assertIn(f"start it with fleet build {built['id']}", shown)
+
+    def test_a_signal_after_fleet_worktree_commits_keeps_the_worktree(self):
+        task = self.routed_by_hand()
+        with mock.patch.object(worktree, "db", committed_then_terminated()), self.assertRaises(SystemExit):
+            self.fleet_worktree(task)
+        task = pensieve.get_task(self.conn, task["id"])
+        self.assertEqual((task["status"], task["worktree"]), ("active", f"{ids.WORKTREES_ROOT}/{task['id']}"))
+        self.assertTrue(os.path.isdir(config.worktree_dir(task["id"])))
+        self.assertEqual(gitops.read_record(task["id"])["branch"], BRANCH)
+        self.assertEqual(owlery.get_request(self.conn, task["request_id"])["phase"], "running")
 
 
 class SingleHarryGoTests(GoCase):

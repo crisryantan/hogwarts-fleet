@@ -376,3 +376,18 @@ class OwnSessionGuardTests(ManyCase):
         [closed] = self.own_tasks("closed")
         self.assertEqual(pensieve.get_task(self.conn, closed)["close_reason"], "abandoned")
         self.assertEqual(self.own_review()["round"], 1)
+
+    def test_a_new_task_stopped_before_it_holds_its_worktree_leaves_no_worktree(self):
+        self.commit("first")
+        stops = (("linking the dependencies refused", worktree.toolchain, "link_deps",
+                  FleetError("node_modules is in the way")),
+                 ("the attach refused", pensieve, "set_worktree", ConflictError("refused late")))
+        for label, module, name, error in stops:
+            with self.subTest(stop=label), mock.patch.object(module, name, side_effect=error):
+                with self.assertRaisesRegex(type(error), str(error)):
+                    self.own_review()
+                self.assertEqual(self.own_tasks(), [])
+                for folder in (self.castle / "worktrees", self.office / "worktrees"):
+                    self.assertEqual(sorted(os.listdir(folder)) if folder.exists() else [], [])
+                self.assertEqual(self.git("worktree", "list", "--porcelain").count("worktree "), 1)
+        self.assertEqual(self.own_review()["round"], 1)

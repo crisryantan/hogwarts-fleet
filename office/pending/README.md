@@ -65,7 +65,7 @@ Harry and Moody stay disabled until your organization approves Codex for its sou
 
 ## (d) Registering and closing a task
 
-McGonagall writes `tasks/<id>/TASK.md` and waits for your go. Nothing she does registers the task in the store. When you're happy with the draft, type exactly this, and nothing else, as your prompt:
+McGonagall writes `tasks/<id>/TASK.md` and waits for your go. Nothing she does registers the task in the store. When you're happy with the draft, type exactly this, and nothing else, as your prompt in her session:
 
 ```
 go <tk_id>
@@ -82,7 +82,7 @@ base: origin/main
 
 `repo:` gets the same checks as `--repo-dir` below, `branch:` the same as `--branch`, and `base:` the same as `--base`. The go stores the three values and the TASK.md's sha256 with the task. The worktree is made from the stored values only, so editing TASK.md afterwards changes none of them. If TASK.md changes while the go runs, or anything refuses before the go finishes, nothing is registered, routed or made, and you can type the go again. A go for a task that's already registered changes nothing.
 
-The hook prints what happened, or why nothing did. When it can't confirm you typed the go, it says so and changes nothing. Register the task by hand instead:
+The hook prints what happened, or why nothing did. A go only works in McGonagall's session: in any other session, your own included, it says so and changes nothing. When it can't confirm you typed the go, it says so and changes nothing too. Register the task by hand instead:
 
 ```
 ~/.hogwarts/bin/castle task create --id <tk_id> --desk mcgonagall --title "<title>" --intent-path ~/hogwarts/tasks/<tk_id>/TASK.md
@@ -125,7 +125,7 @@ Every `fleet` command prints one JSON object with `"ok": true` or `"ok": false` 
 
 `--repo-dir` below is the main checkout of your repo: a folder inside your home folder, outside the office and the castle, with its own `.git` folder and no symlink on the way.
 
-1. McGonagall writes TASK.md and you type `go <task-id>`, as in (d). The hook registers her task, routes it to Harry, gives his task its worktree on the Spec's new branch and starts his run if Harry is enabled. Then carry on at step 4.
+1. McGonagall writes TASK.md and you type `go <task-id>` in her session, as in (d). The hook registers her task, routes it to Harry, gives his task its worktree on the Spec's new branch and starts his run if Harry is enabled. Then carry on at step 4.
 2. Steps 2 and 3 are the fallback, for a go the hook couldn't confirm, and for a build McGonagall routes by owl. You register her task by hand as in (d), and she posts a request to Harry. The Owl Post holds it and you get a headmaster event: a build task is waiting for its worktree.
 3. Give Harry's task a worktree on a new branch. If Harry is enabled, his run starts. Under a TASK.md a go started, it takes only the repo, branch and base the go stored:
 
