@@ -441,9 +441,10 @@ class Feed:
             seen.add(name)
             run_id = RUN_OUT.fullmatch(name).group(1)
             if starting and not self._running(run_id, info, now):
-                if running is not None and run_id in running and not self._end_known(fd, desk, run_id, running):
-                    # Its file is old but its usage is not in, so it may still be going after its launcher was
-                    # killed: a place at its end, so what it writes from now on, and its end, still follow.
+                if (running is None or run_id in running) and not self._end_known(fd, desk, run_id, running):
+                    # Its file is old but its usage is not in, or the store cannot say now, so it may still be going
+                    # after its launcher was killed: a place at its end, so what it writes from now on, and its end,
+                    # still follow. _let_go lets it go once the store says it ended.
                     paused[name] = RunTail()
                     paused[name].switch(name, info.st_size)
                 continue  # it ended before the feed started, or is followed only from here

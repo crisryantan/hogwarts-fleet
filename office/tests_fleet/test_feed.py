@@ -512,6 +512,24 @@ class FeedTests(FeedCase):
             f"run end {RUN_A}: model codex, 0.7s, tokens in 4 out 5 cache 6, $0.00, status completed"])
         self.assertEqual((follow.poll(start + 8), follow.paused["moody"]), ([], {}))
 
+    def test_a_feed_started_while_the_store_cannot_be_read_still_follows_a_quiet_run(self):
+        capacity.record_launch(self.conn, "moody", RUN_A, "codex", now=NOW)
+        quiet = self.run_file("moody", RUN_A, jsonl(CODEX_STREAM[:4]), mtime=NOW)
+        start = NOW + config.RUN_TIMEOUT_SECONDS + 61
+        follow = feed.Feed(self.reader, "moody")
+        # The first read of the open runs fails: completion is unknown, so the quiet run keeps a place at its end.
+        with mock.patch.object(feed.watch, "open_runs", side_effect=sqlite3.OperationalError("locked")):
+            self.assertEqual(follow.poll(start), [])
+        held = [follow.tails["moody"].name, *follow.paused["moody"]]
+        self.assertIn(f"{RUN_A}.out", held)
+        self.append(quiet, jsonl(CODEX_STREAM[6:]))
+        os.utime(quiet, (start + 5, start + 5))
+        self.assertEqual(texts(follow.poll(start + 6)), ["says: Done, tests pass."])
+        self.assertEqual(follow.poll(start + 7), [])  # shown exactly once
+        capacity.record_launch_usage(self.conn, RUN_A, 4, 5, 6, 0.0, 700, now=start + 8)
+        self.assertEqual(texts(follow.poll(start + 8)), [
+            f"run end {RUN_A}: model codex, 0.7s, tokens in 4 out 5 cache 6, $0.00, status completed"])
+
     def test_a_drain_on_switching_away_from_an_ended_run_that_fails_part_way_loses_nothing(self):
         follow = feed.Feed(self.reader, "moody")
         follow.poll(NOW)
