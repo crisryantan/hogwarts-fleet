@@ -10,7 +10,7 @@ import threading
 import time
 from typing import Callable, Iterator, Optional, Sequence
 
-from hogwarts import db, ids
+from hogwarts import db, ids, pensieve
 from hogwarts.errors import StoreError
 
 from . import config
@@ -101,6 +101,13 @@ def one_line(text: object, limit: int) -> str:
     cleaned = _PRINTABLE.sub(" ", str(text)).strip()
     cleaned = re.sub(r" {2,}", " ", cleaned)
     return cleaned if len(cleaned) <= limit else cleaned[: max(limit - 3, 0)] + "..."
+
+
+def scrubbed_line(text: object, limit: int) -> str:
+    """one_line for text that can quote git, gh or a desk: all of it is scrubbed of anything shaped like a credential
+    (pensieve.scrub) before it is cut, so a cut never leaves part of one unscrubbed, and again once it is on one line,
+    since joining its lines can shape one."""
+    return one_line(pensieve.scrub(one_line(pensieve.scrub(str(text)), sys.maxsize)), limit)
 
 
 def hook_desk(argv: Sequence[str]) -> str:

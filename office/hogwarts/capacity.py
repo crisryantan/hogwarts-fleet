@@ -36,7 +36,7 @@ MAX_ROUNDS_LIMIT = 100
 _ROUND_ROWS = """SELECT review_rounds.*, requests.phase AS request_phase, requests.outcome AS request_outcome,
        requests.task_id AS reviewer_task_id, tasks.status AS reviewer_task_status,
        review_rounds.review_id IS NOT NULL AS has_verdict,
-       review_passes.verdict AS verdict
+       review_passes.verdict AS verdict, review_passes.review_path AS review_path
    FROM review_rounds JOIN requests ON requests.id = review_rounds.request_id
    LEFT JOIN tasks ON tasks.id = requests.task_id
    LEFT JOIN review_passes ON review_passes.id = review_rounds.review_id
@@ -347,7 +347,8 @@ def needs_allowance(conn: Conn, task_id: str, max_rounds: int = 3) -> bool:
 def review_rounds(conn: Conn, task_id: str) -> list[dict]:
     """Every review round of an author task. counts says whether it uses up a round: a recorded verdict
     does, and so does a round whose run started and has not ended yet; a run that ended without one does
-    not, and neither does a round still waiting for its reviewer's run."""
+    not, and neither does a round still waiting for its reviewer's run. verdict and review_path are those of its
+    recorded review, None without one."""
     task_id = pensieve.get_task(conn, ids.check("task", task_id))["id"]
     return [{**row, "has_verdict": bool(row["has_verdict"]), "waiting": _is_waiting(row),
              "counts": _holds_round(row)} for row in _round_rows(conn, task_id)]

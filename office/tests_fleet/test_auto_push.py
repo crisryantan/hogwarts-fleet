@@ -5,10 +5,14 @@ local bare repo, and gh is faked at gitops.run_gh_pr, so nothing reaches the net
 """
 from __future__ import annotations
 
+import contextlib
+import io
+import json
 import os
+import subprocess
 from unittest import mock
 
-from fleet import config, gitops, owl_post, push, review
+from fleet import config, gitops, owl_post, push, review, worktree
 from fleet.safefs import FleetError
 from tests_fleet.test_push import GateCase
 from tests_fleet.test_review_chain import ChainCase, Killed
@@ -20,6 +24,17 @@ TOKEN = "gh" + "p_" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8"  # shaped like a Gi
 EMAIL = "a.person" + "@" + "example.invalid"
 # A password whose quoted value holds scrub's own [secret] mark, so scrubbing it leaves as many marks as it found.
 HIDDEN = "pass" + 'word="hunter22 [secret]"'
+# A quoted password long enough that the cut an error is kept to falls inside its quotes, after where it begins.
+LONG_SECRET = "hunter22" + "Zq7" * 30
+QUOTED = "pass" + f'word="{LONG_SECRET}"'
+# A private key whose last line is part of its body, as an error may end.
+KEY_LINE = "MIIEpAIBAAKCAQEAx" + "Yz9Wq" * 10
+KEY = "-----BEGIN " + "RSA PRIVATE KEY-----\n" + KEY_LINE + "\n"
+
+
+def past_the_cut(limit: int) -> str:
+    """Error text that a cut at limit characters splits inside QUOTED, with its first characters before the cut."""
+    return "x" * (limit - 50) + " " + QUOTED
 
 
 class AutoPushCase(ChainCase, GateCase):
@@ -254,6 +269,76 @@ class FailureStopsAndTellsRyanTests(AutoPushCase):
         self.assertEqual(len(self.gh_calls), 1)
 
 
+class ScrubbedBeforeCutTests(AutoPushCase):
+    """Error text that can quote git, gh or a desk is scrubbed whole before it is cut, at every layer it passes, so a
+    credential the cut would split never reaches an event, a log or a record in part."""
+
+    def assert_no_secret(self, *texts: str) -> None:
+        for text in texts:
+            self.assertNotIn(LONG_SECRET[:12], text)
+            self.assertNotIn(KEY_LINE[:12], text)
+
+    def test_git_error_text_is_scrubbed_whole_before_it_is_cut(self):
+        failed = subprocess.CompletedProcess([], 128, stdout=b"", stderr=past_the_cut(300).encode())
+        with mock.patch.object(subprocess, "run", return_value=failed), self.assertRaises(FleetError) as caught:
+            gitops.git(["push", "origin", "HEAD"], "/private/tmp/x/.git")
+        self.assertIn("git push failed: xxx", str(caught.exception))
+        self.assert_no_secret(str(caught.exception))
+
+    def test_a_refused_automatic_push_never_tells_part_of_a_credential(self):
+        self.opt_in()
+        real = gitops._run
+
+        def run(args, *rest, **kwargs):
+            if args[0] == "push":
+                return 1, "", past_the_cut(300)
+            return real(args, *rest, **kwargs)
+
+        with mock.patch.object(gitops, "_run", side_effect=run):
+            ran = self.passed()
+        [event] = self.new_events()
+        self.assertEqual(event["kind"], "push.auto-failed")
+        self.assertIn("git push failed", event["summary"])
+        self.assert_no_secret(event["summary"], ran["next"])
+
+    def test_gh_error_text_is_scrubbed_whole_before_its_last_line_is_kept(self):
+        self.gh_answer = (1, "", "could not open the pull request\n" + KEY)
+        with self.assertRaisesRegex(FleetError, "gh pr create failed") as caught:
+            gitops.open_draft_pr(REPO_ID, "fix/widget", "main", "Add the widget file", "Adds it.\n")
+        self.assert_no_secret(str(caught.exception))
+
+    def test_an_automatic_review_error_is_scrubbed_whole_before_it_is_cut(self):
+        self.spawned_reviews.side_effect = None
+        self.post(1, "widget")
+        [owl_id] = owl_post.unfinished_handoffs(self.task["id"])
+        with mock.patch.object(review, "_review_build", side_effect=FleetError(past_the_cut(300))):
+            result = review.auto_review(self.conn, self.task["id"])
+        [event] = self.new_events()
+        self.assertEqual(event["kind"], "review.auto")
+        done = (self.office / "reviews" / self.task["id"] / f"auto-{owl_id}.done").read_text()
+        self.assertIn("the automatic review stopped: xxx", done)
+        self.assert_no_secret(event["summary"], result["outcome"], done)
+
+    def test_a_fix_round_error_is_scrubbed_whole_before_it_is_cut(self):
+        with mock.patch.object(worktree, "build", side_effect=FleetError(past_the_cut(200))), \
+                self.fake_reviewer("CHANGES"):
+            self.post(1, "widget")
+        [ran] = self.reviews_run
+        [event] = self.new_events()
+        self.assertEqual(event["kind"], "review.fix-round")
+        self.assertIn("it did not start (xxx", ran["next"])
+        self.assert_no_secret(event["summary"], ran["next"])
+
+    def test_the_automatic_review_log_never_holds_part_of_a_credential(self):
+        out = io.StringIO()
+        with mock.patch.object(review, "auto_review", side_effect=FleetError(past_the_cut(600))), \
+                contextlib.redirect_stdout(out):
+            self.assertEqual(review.main([self.task["id"]]), 1)
+        logged = json.loads(out.getvalue())
+        self.assertTrue(logged["error"].startswith("xxx"))
+        self.assert_no_secret(out.getvalue())
+
+
 class SensitiveTextTests(AutoPushCase):
     def test_a_mark_already_in_the_text_never_hides_a_credential(self):
         for text in (HIDDEN, "pass" + "word=[secret]", f"[email] {EMAIL}", f"[token] {TOKEN}",
@@ -400,3 +485,24 @@ class InterruptedPushTests(AutoPushCase):
         self.assertEqual([event["kind"] for event in self.new_events()], ["push.draft-pr"])
         self.assertEqual(owl_post.unfinished_afters(self.task["id"]), [])
         self.assertEqual(len(self.gh_calls), 1)
+
+    def test_killed_after_a_failure_before_the_push_was_told_it_is_never_tried_again(self):
+        refused = FleetError("the worktree's base is not a branch of origin, so the PR has no base branch to name")
+        self.killed_before_done("PASS", mock.patch.object(push, "pr_base", side_effect=refused))
+        [event] = self.new_events()
+        self.assertEqual(event["kind"], "push.auto-failed")
+        self.next_pass()  # what stopped it has cleared by now
+        self.next_pass()
+        self.assertEqual(self.new_events(), [event])
+        self.assert_nothing_pushed()
+        self.assertEqual(owl_post.unfinished_afters(self.task["id"]), [])
+
+    def test_killed_after_ready_for_push_was_told_a_later_opt_in_pushes_nothing(self):
+        os.unlink(self.office / config.AUTO_DRAFT_PR_FILE)
+        self.killed_before_done("PASS")
+        [event] = self.new_events()
+        self.assertEqual(event["kind"], "review.ready-for-push")
+        self.opt_in()
+        self.next_pass()
+        self.assertEqual(self.new_events(), [event])
+        self.assert_nothing_pushed()

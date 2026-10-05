@@ -355,10 +355,11 @@ def unfinished_handoffs(task_id: str) -> list:
 
 
 def finish_handoff(task_id: str, owl_id: str, outcome: str) -> None:
-    """Record that the review loop is finished with a handoff, and what came of it. Nothing tries it again."""
+    """Record that the review loop is finished with a handoff, and what came of it, scrubbed whole before it is cut.
+    Nothing tries it again."""
     with _handoff_dir(task_id, create=True) as fd:
         safefs.write_new(fd, f"auto-{ids.check('owl', owl_id)}.done",
-                         (common.one_line(outcome, 600) + "\n").encode("ascii"))
+                         (common.scrubbed_line(outcome, 600) + "\n").encode("ascii"))
 
 
 def take_try(task_id: str, owl_id: str) -> Optional[int]:

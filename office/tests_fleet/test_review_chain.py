@@ -12,15 +12,17 @@ import io
 import json
 import os
 import re
+import signal
 import subprocess
 import threading
 import time
 from pathlib import Path
+from typing import Optional
 from unittest import mock
 
-from hogwarts import capacity, db, ids, pensieve
+from hogwarts import capacity, db, ids, owlery, pensieve
 
-from fleet import config, gitops, owl_post, push, review, run_desk, safefs, tools, worktree
+from fleet import config, gitops, owl_post, push, review, run_desk, safefs, tools, verify, worktree
 from fleet.safefs import FleetError
 from tests_fleet.test_review_loop import HANDOFF, LoopCase
 
@@ -55,6 +57,28 @@ def sleeping_runs(case):
 
     with mock.patch.object(run_desk, "spawn", side_effect=spawn):
         yield started
+
+
+@contextlib.contextmanager
+def signalled_runs(case, start: bool = True):
+    """Harry's detached runs, started by the real run_desk.spawn, where SIGTERM ends the process that starts them just
+    as Popen returns, the way common.ended_by_signals ends it (SystemExit). With start, the run had started: a sleeper
+    that inherits exactly the fds a run would, as in sleeping_runs. Without it, no process started at all."""
+
+    def popen(argv, **kwargs):
+        if start:
+            child = REAL_POPEN(["/bin/sleep", "60"], pass_fds=kwargs.get("pass_fds", ()), close_fds=True,
+                               stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            case.addCleanup(child.wait)
+            case.addCleanup(child.kill)
+        raise SystemExit(128 + signal.SIGTERM)
+
+    def spawn(*args, **kwargs):
+        with mock.patch.object(subprocess, "Popen", side_effect=popen):
+            return REAL_SPAWN(*args, **kwargs)
+
+    with mock.patch.object(run_desk, "spawn", side_effect=spawn):
+        yield
 
 
 class ChainCase(LoopCase):
@@ -124,6 +148,30 @@ class ChainCase(LoopCase):
 
     def head(self) -> str:
         return self.git("rev-parse", "HEAD", cwd=self.wt)
+
+    def latest_review(self) -> Optional[str]:
+        """The text of review-latest.md next to the task's TASK.md, or None while there is none."""
+        holder, _ = verify.task_md(self.conn, self.task["id"])
+        path = self.castle / "tasks" / holder / "review-latest.md"
+        return path.read_text() if path.exists() else None
+
+    def killed_before_done(self, verdict: str, *patches) -> None:
+        """An automatic review of the posted handoff, killed as it marks what follows its verdict done, so whatever
+        that told Ryan was told."""
+        real = owl_post.write_after
+
+        def write_after(task_id, request_id, owl_id, state, step=None):
+            if state == "done":
+                raise Killed("killed")
+            return real(task_id, request_id, owl_id, state, step)
+
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(self.fake_reviewer(verdict))
+            stack.enter_context(mock.patch.object(owl_post, "write_after", side_effect=write_after))
+            for patch in patches:
+                stack.enter_context(patch)
+            with self.assertRaises(Killed):
+                review.auto_review(self.conn, self.task["id"])
 
 
 class HandoffStartsReviewTests(ChainCase):
@@ -497,6 +545,34 @@ class CheckedHandoffSelectionTests(ChainCase):
         self.assertEqual(owl_post.unfinished_handoffs(self.task["id"]), [])
         self.assertEqual(self.rounds(), [(1, "CHANGES")])
 
+    def test_a_handoff_delivered_after_the_choice_is_never_superseded_and_is_reviewed_next(self):
+        self.post(1, "widget", now=self.stamp)
+        [chosen] = owl_post.unfinished_handoffs(self.task["id"])
+        later = HANDOFF.format(task_id=self.task["id"]).replace("round 1", "round 2").replace(
+            "Add the widget file", "Add the widget file again")
+        real, choices = review._pending_handoff, []
+
+        def choose(conn, task, now):
+            picked = real(conn, task, now)
+            choices.append(picked)
+            if len(choices) == 2:  # the choice under the review lock: the Owl Post delivers Harry's next one now
+                self.post(2, body=later, now=self.stamp + 1)
+            return picked
+
+        with mock.patch.object(review, "_pending_handoff", side_effect=choose), self.fake_reviewer("CHANGES"):
+            result = review.auto_review(self.conn, self.task["id"], now=self.stamp + 1)
+        self.assertEqual((result["owl_id"], result["outcome"]), (chosen, "reviewed: CHANGES"))
+        self.assertEqual(self.git("log", "-1", "--format=%s", cwd=self.wt), "Add the widget file")
+        [waiting] = owl_post.unfinished_handoffs(self.task["id"])
+        self.assertNotEqual(waiting, chosen)
+        self.write_file(self.wt / "widget.txt", "widget again\n")  # Harry's fix round
+        with self.fake_reviewer("CHANGES"):
+            result = review.auto_review(self.conn, self.task["id"], now=self.stamp + 2)
+        self.assertEqual((result["owl_id"], result["outcome"]), (waiting, "reviewed: CHANGES"))
+        self.assertEqual(self.git("log", "-1", "--format=%s", cwd=self.wt), "Add the widget file again")
+        self.assertEqual(self.rounds(), [(1, "CHANGES"), (2, "CHANGES")])
+        self.assertEqual(owl_post.unfinished_handoffs(self.task["id"]), [])
+
 
 class BuildRunHoldsTheReviewLockTests(ChainCase):
     def assert_review_refused(self, why: str = None) -> None:
@@ -537,7 +613,49 @@ class BuildRunHoldsTheReviewLockTests(ChainCase):
         self.assertEqual(self.rounds(), [])
 
 
+class SignalDuringTheHandOverTests(ChainCase):
+    """SIGTERM or SIGHUP at the moment a run is started never lets go of the review lock the run was handed: the lock
+    stays with the run, so no review starts while it may be writing. When no run started, the lock is free."""
+
+    def assert_review_lock_held(self, held: bool = True) -> None:
+        if held:
+            with self.assertRaisesRegex(FleetError, re.escape(review.REVIEW_RUNNING)):
+                with review.task_review_lock(self.task["id"]):
+                    pass
+        else:
+            with review.task_review_lock(self.task["id"]):
+                pass
+
+    def test_a_signal_as_fleet_build_starts_the_run_leaves_the_review_lock_with_the_run(self):
+        args = argparse.Namespace(command="build", task=self.task["id"])
+        with signalled_runs(self), self.assertRaises(SystemExit):
+            tools.run(self.conn, args)
+        self.assert_review_lock_held()
+
+    def test_a_signal_as_the_loop_starts_the_fix_round_leaves_the_review_lock_with_the_run(self):
+        self.spawned_reviews.side_effect = None
+        self.post(1, "widget")
+        with signalled_runs(self), self.fake_reviewer("CHANGES"), self.assertRaises(SystemExit):
+            review.auto_review(self.conn, self.task["id"])
+        self.assertEqual(self.rounds(), [(1, "CHANGES")])
+        self.assert_review_lock_held()
+
+    def test_a_signal_before_any_run_started_leaves_the_review_lock_free(self):
+        args = argparse.Namespace(command="build", task=self.task["id"])
+        with signalled_runs(self, start=False), self.assertRaises(SystemExit):
+            tools.run(self.conn, args)
+        self.assert_review_lock_held(False)
+
+
 class WorktreeHandsTheReviewLockTests(LoopCase):
+    def test_a_signal_as_fleet_worktree_starts_the_first_run_leaves_the_review_lock_with_it(self):
+        _, task, _, _ = self.harry_task()
+        with signalled_runs(self), self.assertRaises(SystemExit):
+            worktree.create(self.conn, task["id"], str(self.repo), "fix/widget", fetch=False)
+        with self.assertRaisesRegex(FleetError, re.escape(review.REVIEW_RUNNING)):
+            with review.task_review_lock(task["id"]):
+                pass
+
     def test_fleet_worktree_hands_the_review_lock_to_the_first_run(self):
         _, task, owl_id, _ = self.harry_task()
         with sleeping_runs(self) as started:
@@ -625,3 +743,174 @@ class AfterTheVerdictTests(ChainCase):
             review.review_build(self.conn, self.task["id"])
         self.assertEqual(pensieve.get_task(self.conn, self.task["id"])["status"], "awaiting_close")
         self.assertEqual(self.rounds(), [(1, "PASS")])
+
+    def test_killed_after_the_round_cap_was_told_an_allowance_starts_nothing_by_itself(self):
+        self.spawned_reviews.side_effect = lambda task_id: self.reviews_run.append(
+            review.auto_review(self.conn, task_id))
+        for round_no in range(1, config.REVIEW_ROUND_CAP):
+            self.round_with("CHANGES", round_no)
+        self.spawned_reviews.side_effect = None
+        self.post(config.REVIEW_ROUND_CAP, "widget last")
+        self.killed_before_done("CHANGES")
+        [event] = self.new_events()
+        self.assertEqual(event["kind"], "review.loop-stopped")
+        capacity.allow_round(self.conn, self.task["id"])  # Ryan, who was told fleet build starts it after this
+        self.next_pass()
+        self.assert_nothing_more()
+        self.assertEqual(self.harry_runs.call_count, config.REVIEW_ROUND_CAP - 1)
+        self.assertEqual(len(self.new_events()), 1)
+        self.assertEqual(owl_post.unfinished_afters(self.task["id"]), [])
+
+    def test_killed_after_a_fix_round_that_did_not_start_was_told_ryan_hears_it_once(self):
+        self.post(1, "widget")
+        self.killed_before_done("CHANGES", mock.patch.object(worktree, "build",
+                                                             side_effect=FleetError("harry is at his daily cap")))
+        self.next_pass()
+        self.assert_nothing_more()
+        [event] = self.new_events()
+        self.assertEqual(event["kind"], "review.fix-round")
+        self.assertIn("harry is at his daily cap", event["summary"])
+        self.harry_runs.assert_not_called()
+        self.assertEqual(owl_post.unfinished_afters(self.task["id"]), [])
+
+    def test_a_review_that_stopped_after_its_verdict_and_told_ryan_is_never_carried_on_by_itself(self):
+        self.post(1, "widget")
+        real = review._castle_task_file
+
+        def castle_file(holder_id, name, text):
+            if name == "review-latest.md":
+                raise FleetError("the task folder is not a plain folder")
+            return real(holder_id, name, text)
+
+        with self.fake_reviewer("CHANGES"), mock.patch.object(review, "_castle_task_file", side_effect=castle_file):
+            stopped = review.auto_review(self.conn, self.task["id"])
+        self.assertIn("the automatic review stopped", stopped["outcome"])
+        self.next_pass()
+        self.assert_nothing_more()
+        [event] = self.new_events()
+        self.assertEqual(event["kind"], "review.auto")
+        self.harry_runs.assert_not_called()
+        # Ryan runs it by hand, as he was told: the review is published, and nothing new is reviewed.
+        with self.assertRaises(review.Unchanged):
+            review.review_build(self.conn, self.task["id"])
+        self.assertIn(f"REVIEW {self.task['id']} @ {self.head()}", self.latest_review() or "")
+        self.assertEqual(self.rounds(), [(1, "CHANGES")])
+
+
+class UnpublishedVerdictTests(ChainCase):
+    """A review killed after its verdict was recorded but before it published the review has it published from the
+    copy kept in the office before anything acts on that verdict: a fix round, the HEADMASTER event, a settled PASS.
+    When it cannot be published, Ryan hears so once and nothing follows the verdict."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.spawned_reviews.side_effect = None  # the first review is run, and killed, by each test
+
+    def killed_before_publication(self, verdict: str, manual: bool = False) -> None:
+        real = review._castle_task_file
+
+        def castle_file(holder_id, name, text):
+            if name == "review-latest.md":
+                raise Killed("killed")
+            return real(holder_id, name, text)
+
+        with self.fake_reviewer(verdict), mock.patch.object(review, "_castle_task_file", side_effect=castle_file), \
+                self.assertRaises(Killed):
+            if manual:
+                review.review_build(self.conn, self.task["id"])
+            else:
+                review.auto_review(self.conn, self.task["id"])
+
+    def result_owls(self, round_no: int) -> list:
+        row = capacity.review_rounds(self.conn, self.task["id"])[round_no - 1]
+        return [owl for owl in owlery.request_owls(self.conn, row["request_id"]) if owl["kind"] == "result"]
+
+    def assert_nothing_more(self) -> None:
+        with mock.patch.object(run_desk, "run", side_effect=AssertionError("a reviewer ran")):
+            self.assertEqual(self.next_pass()["reviews"], [])
+
+    def test_a_fix_round_starts_only_once_the_killed_round_s_review_is_published(self):
+        self.spawned_reviews.side_effect = lambda task_id: self.reviews_run.append(
+            review.auto_review(self.conn, task_id))
+        self.round_with("CHANGES", 1)
+        self.spawned_reviews.side_effect = None
+        self.post(2, "widget 2")
+        self.killed_before_publication("CHANGES")
+        sha = self.head()
+        self.assertNotIn(f"@ {sha}", self.latest_review())  # still round 1's
+        seen = []
+        self.harry_runs.side_effect = lambda *args, **kwargs: seen.append(self.latest_review())
+        self.next_pass()
+        [published] = seen
+        self.assertIn(f"REVIEW {self.task['id']} @ {sha}", published or "")
+        self.assertEqual(len(self.result_owls(2)), 1)
+        self.assert_nothing_more()
+        self.assertEqual(self.rounds(), [(1, "CHANGES"), (2, "CHANGES")])
+
+    def test_a_headmaster_verdict_is_told_only_once_its_review_is_published(self):
+        self.post(1, "widget")
+        self.killed_before_publication("HEADMASTER")
+        self.assertIsNone(self.latest_review())
+        self.assertEqual(self.new_events(), [])
+        self.next_pass()
+        self.assertEqual([event["kind"] for event in self.new_events()], ["review.headmaster"])
+        self.assertIn(f"REVIEW {self.task['id']} @ {self.head()}", self.latest_review() or "")
+        self.assertEqual(len(self.result_owls(1)), 1)
+        self.assert_nothing_more()
+
+    def test_a_manual_review_killed_before_publication_is_published_by_the_next_one(self):
+        self.post(1, "widget")
+        self.killed_before_publication("PASS", manual=True)
+        self.assertIsNone(self.latest_review())
+        with self.assertRaises(review.Unchanged):
+            review.review_build(self.conn, self.task["id"])
+        self.assertIn(f"REVIEW {self.task['id']} @ {self.head()}", self.latest_review() or "")
+        [owl] = self.result_owls(1)
+        self.assertIsNotNone(owl["acked_at"])
+        row = capacity.review_rounds(self.conn, self.task["id"])[0]
+        self.assertEqual(owlery.get_request(self.conn, row["request_id"])["phase"], "cleaned")
+        self.assertEqual(pensieve.get_task(self.conn, self.task["id"])["status"], "awaiting_close")
+
+    def test_a_review_killed_after_its_result_owl_was_sent_is_finished_with_that_same_owl(self):
+        self.post(1, "widget")
+        with self.fake_reviewer("CHANGES"), mock.patch.object(owlery, "ack", side_effect=Killed("killed")), \
+                self.assertRaises(Killed):
+            review.auto_review(self.conn, self.task["id"])
+        [sent] = self.result_owls(1)
+        self.assertIsNone(sent["acked_at"])
+        self.next_pass()
+        [owl] = self.result_owls(1)
+        self.assertEqual(owl["id"], sent["id"])
+        self.assertIsNotNone(owl["acked_at"])
+        row = capacity.review_rounds(self.conn, self.task["id"])[0]
+        self.assertEqual(owlery.get_request(self.conn, row["request_id"])["phase"], "cleaned")
+        self.harry_runs.assert_called_once_with("harry", self.request_owl, hold_fd=mock.ANY)
+        self.assert_nothing_more()
+
+    def test_a_review_that_cannot_be_published_stops_with_one_event_and_nothing_follows_it(self):
+        self.post(1, "widget")
+        self.killed_before_publication("CHANGES")
+        [kept] = (self.office / "reviews" / self.task["id"]).glob("review-*-hermione-*.md")
+        kept.unlink()
+        self.next_pass()
+        self.assert_nothing_more()
+        [event] = self.new_events()
+        self.assertEqual(event["kind"], "review.unpublished")
+        self.assertIn("could not be published again", event["summary"])
+        self.harry_runs.assert_not_called()
+        self.assertIsNone(self.latest_review())
+        self.assertEqual(owl_post.unfinished_afters(self.task["id"]), [])
+
+    def test_a_later_round_s_review_stays_the_latest_when_an_earlier_one_is_published_again(self):
+        self.post(1, "widget")
+        self.killed_before_publication("CHANGES")
+        first = self.head()
+        self.write_file(self.wt / "widget.txt", "widget by hand\n")
+        with self.fake_reviewer("PASS"):
+            review.review_build(self.conn, self.task["id"])
+        second = self.head()
+        self.next_pass()
+        self.assertIn(f"@ {second}", self.latest_review() or "")
+        holder, _ = verify.task_md(self.conn, self.task["id"])
+        self.assertIn(f"@ {first}", (self.castle / "tasks" / holder / f"review-{first[:12]}-hermione.md").read_text())
+        self.assertEqual(len(self.result_owls(1)), 1)

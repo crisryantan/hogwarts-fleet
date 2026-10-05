@@ -941,21 +941,22 @@ def spawn_review(task_id: str) -> None:
 
 def _detach(module: str, args: list, log_name: str, hold_fd: Optional[int] = None) -> None:
     """Start fleet.<module>'s main with args in a new session, with an empty environment, logging to the office. The
-    process inherits no fd but hold_fd, a lock this process holds, which is then handed over to it (safefs.hand_over)
-    once it has started."""
+    process inherits no fd but hold_fd, a lock this process holds, which is handed over to it (safefs.hand_over)
+    before it starts: from then on this process only closes its copy, so a signal at any point, even inside Popen,
+    never lets go of the lock the new process shares. When no process starts, closing its copy frees it."""
     boot = ("import sys; sys.path.insert(0, " + json.dumps(config.OFFICE_ROOT)
             + f"); from fleet.{module} import main; sys.exit(main())")
     argv = [*config.PYTHON_WRAPPER, "-c", boot, *args]
     with safefs.opened_dir(config.OFFICE_ROOT, "logs", create=True) as logs_fd:
         log_fd = safefs.open_append(logs_fd, log_name, "run log")
         try:
+            if hold_fd is not None:
+                safefs.hand_over(hold_fd)
             subprocess.Popen(argv, cwd=config.OFFICE_ROOT, env={}, stdin=subprocess.DEVNULL,
                              stdout=log_fd, stderr=log_fd, start_new_session=True, close_fds=True,
                              pass_fds=() if hold_fd is None else (hold_fd,))
         finally:
             os.close(log_fd)
-    if hold_fd is not None:
-        safefs.hand_over(hold_fd)
 
 
 def _count(value: object) -> int:

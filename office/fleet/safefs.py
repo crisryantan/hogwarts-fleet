@@ -298,9 +298,11 @@ def held_lock(dir_fd: int, name: str, blocking: bool, timeout: Optional[float] =
 
 
 def hand_over(fd: int) -> None:
-    """Leave a lock that held_lock holds to the process it was just passed to (Popen pass_fds), which shares it. The
-    fd is marked inheritable, which only this call does to a lock fd, so the held_lock block that took it only
-    closes its own copy as it ends: the lock is never let go of in between, and stays with that process."""
+    """Leave a lock that held_lock holds to the process it is about to be passed to (Popen pass_fds), which shares it.
+    The fd is marked inheritable, which only this call does to a lock fd, so the held_lock block that took it only
+    closes its own copy as it ends, however it ends: the lock is never let go of in between, and stays with that
+    process. Called before the process starts, so no moment exists where it runs and this block would unlock; if
+    none starts, closing the last copy frees the lock."""
     os.set_inheritable(fd, True)
 
 

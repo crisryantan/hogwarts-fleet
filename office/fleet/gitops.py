@@ -188,10 +188,11 @@ def git(args: list, git_dir: Optional[str], work_tree: Optional[str] = None, che
         timeout: Optional[int] = None, folder: Optional[str] = None, whole: bool = False) -> str:
     """Run one git command with the hardening flags. Returns stdout, cut at OUTPUT_MAX_CHARS. Never uses a shell.
     whole is for output that is checked, such as the commit messages and the diff a push scans: all of stdout comes
-    back, and more than SCAN_MAX_CHARS is refused, so nothing past a cut is ever passed unread."""
+    back, and more than SCAN_MAX_CHARS is refused, so nothing past a cut is ever passed unread. A failure quotes what
+    git printed, scrubbed whole before it is cut (common.scrubbed_line)."""
     code, out, err = _run(args, git_dir, work_tree, timeout, folder, whole=whole)
     if check and code != 0:
-        raise FleetError(f"git {args[0]} failed: {common.one_line(err, 300)}")
+        raise FleetError(f"git {args[0]} failed: {common.scrubbed_line(err, 300)}")
     return out
 
 
@@ -271,8 +272,9 @@ def run_gh_pr(argv: list, body: bytes) -> tuple:
 
 def open_draft_pr(repo: str, head: str, base: str, title: str, body: str) -> str:
     """Open a draft PR from head into base and return its URL. It runs once and is never retried. A login problem is
-    named without anything gh printed, and any other failure keeps only gh's last line, scrubbed. Output that may
-    have been cut at OUTPUT_MAX_CHARS is never read for a login word, a line to repeat or the PR's URL."""
+    named without anything gh printed, and any other failure keeps only the last line of what gh printed, scrubbed
+    whole first, so no line of a credential is kept on its own. Output that may have been cut at OUTPUT_MAX_CHARS is
+    never read for a login word, a line to repeat or the PR's URL."""
     if not isinstance(body, str) or not body.strip() or len(body) > PR_BODY_MAX or "\x00" in body:
         raise FleetError(f"the PR body must be text of at most {PR_BODY_MAX} characters")
     code, out, err = run_gh_pr(draft_pr_argv(repo, head, base, title), body.encode("utf-8"))
@@ -283,9 +285,8 @@ def open_draft_pr(repo: str, head: str, base: str, title: str, body: str) -> str
         if code == GH_AUTH_EXIT or GH_AUTH_WORDS.search(err):
             raise FleetError("gh is not signed in to GitHub, or GitHub refused its login: check gh auth status in"
                              " your terminal")
-        last = [line for line in err.splitlines() if line.strip()]
-        raise FleetError("gh pr create failed: " + common.one_line(pensieve.scrub(last[-1] if last else
-                                                                                  f"exit {code}"), 200))
+        last = [line for line in pensieve.scrub(err).splitlines() if line.strip()]
+        raise FleetError("gh pr create failed: " + common.scrubbed_line(last[-1] if last else f"exit {code}", 200))
     lines = [line.strip() for line in out.splitlines() if line.strip()]
     match = PR_URL.fullmatch(lines[-1]) if lines else None
     if match is None or f"{match.group(1)}/{match.group(2)}".lower() != repo.lower():
@@ -381,7 +382,7 @@ def clean_ignored(record: dict) -> list:
     skipped = [line for line in planned if not line.startswith("Would remove ")]
     if skipped:
         raise FleetError("the worktree holds ignored content git clean would not remove, such as a nested git "
-                         f"repository ({common.one_line(skipped[0], 200)}); remove it by hand, then verify again")
+                         f"repository ({common.scrubbed_line(skipped[0], 200)}); remove it by hand, then verify again")
     names = [line[len("Would remove "):] for line in planned]
     if len(names) > CLEAN_MAX_PATHS or sum(len(name) for name in names) > CLEAN_MAX_CHARS:
         raise FleetError(f"the worktree holds {len(names)} git-ignored paths, more than the evidence can list; "

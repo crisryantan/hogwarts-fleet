@@ -47,11 +47,12 @@ takes the newest handoff the Owl Post recorded that still passes owl_post.handof
 store keeps the request's owls, never by their random ids. A newer one that no longer passes is finished saying why,
 so an owl that is no handoff never stands in for one that is. It waits up to AUTO_REVIEW_AUTHOR_WAIT_SECONDS for the
 run that posted it to end, takes the task review lock, chooses and checks the handoff again under it, and only then
-finishes the older ones as superseded and runs the same review as fleet review <task-id>, bound to that one owl
-(_review_build handoff_owl), so an owl that came in during the wait never supplies its commit message. A manual
-review, a manual fleet build and the loop never open two rounds at once, and a run of Harry on the task holds the
-same lock until it ends (run_desk.task_lock), so neither review entry point runs beside it; a manual review also
-refuses while a launch of his on the task has recorded no usage yet. What it cannot do yet (the author's run
+finishes as superseded the ones that same snapshot holds as older, never one that came in since, and runs the same
+review as fleet review <task-id>, bound to that one owl (_review_build handoff_owl), so an owl that came in during
+the wait never supplies its commit message. A manual review, a manual fleet build and the loop never open two
+rounds at once, and a run of Harry on the task holds the same lock until it ends (run_desk.task_lock), so neither
+review entry point runs beside it; a manual review also refuses while a launch of his on the task has recorded no
+usage yet. What it cannot do yet (the author's run
 still going, the reviewer's run slots all busy, another review of the task running) it leaves to the Owl Post's
 next pass, for at most AUTO_REVIEW_WAIT_LIMIT_SECONDS. Each try it starts work on is counted, so a review killed
 part way is started again at most AUTO_REVIEW_MAX_TRIES times in all. Any other ending, a verdict, a refusal or an
@@ -70,10 +71,13 @@ folder (owl_post.write_after, after-<request>.json): "review" from before its re
 step (fix-round, push or pr) before anything that reaches outside the office begins, and "done" once it has ended
 and Ryan heard what he must. The Owl Post starts the loop again for a task with a record that is not done, and the
 loop finishes it first, under the task review lock and without opening a round (_auto_recover): a round that
-recorded no verdict needs nothing; one with a verdict has its handoff finished and what every review does after a
-verdict done again (settle_verdict), and a step that had not begun starts then, once. A step that had begun may or
-may not have happened, so it is never started again by itself: Ryan hears so once, unless its own ending was told.
-A review Ryan runs with fleet review stops at its verdict, as it always has.
+recorded no verdict needs nothing; one with a verdict has its handoff finished, and an ending Ryan already heard
+(_told: the step's own ending, a failure before a push began included, or the loop's stop) is left as told and
+never tried again. Otherwise its review is published again from the copy in the office if it was stopped before
+that (restore_publication), or Ryan hears once why it cannot be and nothing follows the verdict; then what every
+review does after a verdict is done again (settle_verdict), and a step that had not begun starts then, once. A step
+that had begun may or may not have happened, so it is never started again by itself: Ryan hears so once. A review
+Ryan runs with fleet review stops at its verdict, as it always has.
 
 A build desk's review is refused before anything changes when it would read exactly what the task's last verdict
 judged: HEAD is that round's commit and the desk's latest handoff is the same text. Each round that runs records,
@@ -82,10 +86,10 @@ record (one from before records were kept) never refuses a review, so the guard 
 new commit or a new handoff.
 
 The verdict is recorded on its round in the same transaction that stores it, so the round counts even
-if publishing the review afterwards fails. A review holds one run slot of the reviewer desk from before its
-round opens until its reviewer task is closed as superseded, once its verdict is recorded or its run fails,
-and the reviewer's process holds that slot too while it runs. The round records its slot in the row that
-opens it, before its reviewer task can start. So a reviewer task still active while its round's own slot is
+if publishing the review afterwards fails; whatever acts on that verdict later publishes it first. A review holds
+one run slot of the reviewer desk from before its round opens until its reviewer task is closed as superseded,
+once its verdict is recorded or its run fails, and the reviewer's process holds that slot too while it runs. The
+round records its slot in the row that opens it, before its reviewer task can start. So a reviewer task still active while its round's own slot is
 free was left by a review that died (killed, or its cleanup failed) and whose reviewer is gone: the next
 review that holds that slot closes it, and a round with no verdict stops counting. That is the slot the
 review took for itself, or another it takes without waiting just while it closes the task, so for that moment
@@ -316,8 +320,9 @@ def round_inputs(task_id: str, request_id: str) -> Optional[dict]:
 def refuse_unchanged(conn, task: dict, sha: str, handoff: Optional[str]) -> None:
     """Refuse a review whose reviewer would read exactly what the task's last verdict judged: HEAD is that round's
     commit and the desk's latest handoff is the same text. A new commit or a new handoff always gets through, and
-    so does a last round whose record is missing. Before it refuses, it finishes what every review does after its
-    verdict (settle_verdict), in case that round's review was killed before it did."""
+    so does a last round whose record is missing. Before it refuses, it publishes that round's review again if it was
+    stopped before that (restore_publication, a FleetError when it cannot be) and finishes what every review does
+    after its verdict (settle_verdict), in case that round's review was killed before it did."""
     judged = [row for row in capacity.review_rounds(conn, task["id"]) if row["has_verdict"]]
     if not judged or judged[-1]["sha"] != sha:
         return
@@ -325,7 +330,9 @@ def refuse_unchanged(conn, task: dict, sha: str, handoff: Optional[str]) -> None
     inputs = round_inputs(task["id"], last["request_id"])
     if inputs is None or inputs["sha"] != sha or inputs["handoff_sha256"] != handoff_digest(handoff):
         return
-    # That round's review may have been killed right after its verdict was recorded: finish what it left.
+    # That round's review may have been killed right after its verdict was recorded: finish what it left, publishing
+    # its review first, or stop here, saying why, when it cannot be published.
+    restore_publication(conn, task, last)
     settle_verdict(conn, task, last["reviewer"], last["verdict"], last["sha"])
     raise Unchanged(f"nothing new to review: HEAD {sha[:12]} and {task['desk']}'s latest handoff are what round"
                     f" {last['round']} already judged ({last['verdict']}), so no round was opened; a new commit or a"
@@ -486,18 +493,77 @@ def _review_and_record(conn, task: dict, record: dict, sha: str, holder_id: str,
     name = f"review-{sha}-{reviewer}-{result['run_id']}.md"
     with safefs.opened_dir(config.OFFICE_ROOT, "reviews", task["id"], create=True) as fd:
         safefs.write_new(fd, name, block.encode("utf-8"))
-    # From here the round counts, even if publishing the review below fails.
+    # From here the round counts, even if publishing the review below fails. A review killed before it has published
+    # it is published from this copy before anything acts on the verdict (restore_publication).
     capacity.record_round_verdict(conn, request_id, record["repo"], verdict,
                                   review_path=f"{ids.REVIEWS_ROOT}/{task['id']}/{name}")
-    castle_review = _castle_task_file(holder_id, "review-latest.md", block)
+    castle_review = _publish(conn, task, holder_id, reviewer, request_id, reviewer_task_id, verdict, sha, block)
+    return verdict, castle_review
+
+
+def _publish(conn, task: dict, holder_id: str, reviewer: str, request_id: str, reviewer_task_id: str, verdict: str,
+             sha: str, block: str, latest: bool = True) -> str:
+    """Publish a recorded review: review-latest.md in the task folder (when latest), its own review file there, and its
+    result owl to the author, delivered, read and acked, with the request at result_posted. A step already done is
+    left as it is, so it runs again safely (restore_publication): the owl is sent unless this same review's owl is
+    already there. The castle path of review-latest.md."""
+    castle_review = f"{config.CASTLE_ROOT}/tasks/{holder_id}/review-latest.md"
+    if latest:
+        _castle_task_file(holder_id, "review-latest.md", block)
     _castle_task_file(holder_id, f"review-{sha[:12]}-{reviewer}.md", block)
-    posted = owlery.send(conn, reviewer, task["desk"], "result", f"review {verdict} {task['id']} @ {sha[:12]}",
-                         body=block, task_id=reviewer_task_id, request_id=request_id)
+    subject = f"review {verdict} {task['id']} @ {sha[:12]}"
+    posted = next((owl for owl in owlery.request_owls(conn, request_id)
+                   if (owl["kind"], owl["sender"], owl["subject"]) == ("result", reviewer, subject)
+                   and owlery._owl(conn, owl["id"])["body"] == block), None)  # a plain lookup, like owl_body
+    if posted is None:
+        posted = owlery.send(conn, reviewer, task["desk"], "result", subject, body=block, task_id=reviewer_task_id,
+                             request_id=request_id)
     owlery.mark_delivered(conn, posted["id"])
     owlery.read(conn, posted["id"], task["desk"])
     owlery.ack(conn, posted["id"], task["desk"])
-    owlery.advance(conn, request_id, "result_posted", detail=verdict)
-    return verdict, castle_review
+    if _before_result(owlery.get_request(conn, request_id)):
+        owlery.advance(conn, request_id, "result_posted", detail=verdict)
+    return castle_review
+
+
+def _before_result(request: dict) -> bool:
+    """Whether a review request has not reached result_posted, the last step of publishing its review."""
+    return owlery.REQUEST_PHASES.index(request["phase"]) < owlery.REQUEST_PHASES.index("result_posted")
+
+
+def restore_publication(conn, task: dict, row: dict) -> None:
+    """Publish again, from the copy kept in the office, the review of a round (row, from capacity.review_rounds) whose
+    verdict is recorded but whose review was stopped before it had published it, so nothing acts on that verdict
+    while review-latest.md or the author's result owl is missing or older. A round whose request reached
+    result_posted was published whole, and is left alone. review-latest.md is written only while no later round has
+    a verdict, so it never goes back to an older review. A FleetError says why the review could not be published,
+    and then nothing may act on its verdict."""
+    if not _before_result(owlery.get_request(conn, row["request_id"])):
+        return
+    try:
+        prefix = f"{ids.REVIEWS_ROOT}/{task['id']}/"
+        path = row["review_path"]
+        if not isinstance(path, str) or not path.startswith(prefix):
+            raise FleetError("the round names no review file in the office")
+        with safefs.opened_dir(config.OFFICE_ROOT, "reviews", task["id"]) as fd:
+            raw = safefs.read_regular(fd, safefs.check_component(path[len(prefix):]), REVIEW_MAX_BYTES, "review")
+        verdict, block = review_block(raw.decode("utf-8"), task["id"], row["sha"])
+        if verdict != row["verdict"]:
+            raise FleetError("the review kept in the office holds another verdict")
+        judged = [other["request_id"] for other in capacity.review_rounds(conn, task["id"]) if other["has_verdict"]]
+        holder_id, _ = verify.task_md(conn, task["id"])
+        _publish(conn, task, holder_id, row["reviewer"], row["request_id"], row["reviewer_task_id"], verdict,
+                 row["sha"], block, latest=judged[-1] == row["request_id"])
+        if pensieve.get_task(conn, row["reviewer_task_id"])["status"] == "closed":
+            # A later review closed the reviewer task while the request was short of result_posted.
+            _finish_reviewer_task(conn, row["request_id"], row["reviewer_task_id"])
+    except (FleetError, StoreError, OSError, UnicodeDecodeError) as exc:
+        reason = (type(exc).__name__ if isinstance(exc, (OSError, UnicodeDecodeError))
+                  else common.scrubbed_line(exc, 200))
+        raise FleetError(f"round {row['round']} of task {task['id']} recorded {row['verdict']}, but its review was"
+                         f" stopped before it was published and could not be published again ({reason}), so nothing"
+                         " that follows the verdict was done: the reviewer's review is kept in the office reviews"
+                         " folder") from None
 
 
 def run_review(conn, task: dict, record: dict, sha: str, holder_id: str, handoff: bool, task_lock_fd: int,
@@ -653,7 +719,7 @@ def auto_review(conn, task_id: str, now: Optional[int] = None) -> dict:
 
 def _auto_review(conn, task_id: str, now: Optional[int]) -> dict:
     task = pensieve.get_task(conn, task_id)
-    newest = _pending_handoff(conn, task, now)
+    newest, _ = _pending_handoff(conn, task, now)
     if newest is None:
         return {"task_id": task_id, "outcome": "no handoff of this task waits for its review"}
     if not _author_run_over(conn, task, now, wait=True):
@@ -670,14 +736,15 @@ def _auto_review(conn, task_id: str, now: Optional[int]) -> dict:
         if not _author_run_over(conn, task, now, wait=False):
             return _auto_wait(conn, task, newest, f"{task['desk']}'s run on it is still going", now)
         # Chosen and checked again under the lock, before anything is superseded: a handoff that came in during the
-        # wait is the newest now, and the review reads only the one chosen here.
-        newest = _pending_handoff(conn, task, now)
+        # wait is the newest now, and the review reads only the one chosen here. Only the handoffs that same ordered
+        # snapshot proves older are superseded: the Owl Post delivers without this lock, so one that comes in from
+        # here on is newer, and waits for the next pass.
+        newest, older = _pending_handoff(conn, task, now)
         if newest is None:
             return {"task_id": task_id, "outcome": "no handoff of this task waits for its review"}
         newest_id = newest["id"]
-        for owl_id in owl_post.unfinished_handoffs(task_id):
-            if owl_id != newest_id:
-                owl_post.finish_handoff(task_id, owl_id, "superseded by a newer handoff from the same desk")
+        for owl_id in older:
+            owl_post.finish_handoff(task_id, owl_id, "superseded by a newer handoff from the same desk")
         tried = owl_post.take_try(task_id, newest_id)
         if tried is None:
             return _auto_finish(conn, task, newest_id, f"the automatic review stopped: it started"
@@ -688,8 +755,9 @@ def _auto_review(conn, task_id: str, now: Optional[int]) -> dict:
         except Unchanged as exc:
             return _auto_finish(conn, task, newest_id, str(exc), "routine", now)
         except (FleetError, StoreError) as exc:
-            return _auto_finish(conn, task, newest_id, f"the automatic review stopped: {common.one_line(exc, 300)};"
-                                f" once that is sorted, fleet review {task_id} runs it", "headmaster", now)
+            return _auto_finish(conn, task, newest_id, f"the automatic review stopped:"
+                                f" {common.scrubbed_line(exc, 300)}; once that is sorted, fleet review {task_id} runs"
+                                " it", "headmaster", now)
         except Exception as exc:  # noqa: BLE001 - an unexpected error still finishes the handoff and tells Ryan
             return _auto_finish(conn, task, newest_id, f"the automatic review stopped on an unexpected"
                                 f" {type(exc).__name__}; fleet review {task_id} runs it", "headmaster", now)
@@ -705,25 +773,27 @@ def _auto_review(conn, task_id: str, now: Optional[int]) -> dict:
             "review": result}
 
 
-def _pending_handoff(conn, task: dict, now: Optional[int]) -> Optional[dict]:
-    """The handoff the review loop reviews next: the newest one the Owl Post gave it that it has not finished with
-    and that still passes owl_post.handoff_problem, newest by the order the store keeps the request's owls
-    (desk_results). One newer than it that no longer passes is finished, saying why, so a result that is no handoff,
-    or a handoff that fails its checks, never stands in for one that passes or gets it superseded. Nothing older
-    than the one chosen is touched here."""
+def _pending_handoff(conn, task: dict, now: Optional[int]) -> tuple:
+    """(owl, older): the handoff the review loop reviews next, the newest one the Owl Post gave it that it has not
+    finished with and that still passes owl_post.handoff_problem, newest by the order the store keeps the request's
+    owls (desk_results), and the ids of the unfinished handoffs before it in that same snapshot, the only ones its
+    review may supersede. (None, []) when none waits. One newer than it that no longer passes is finished, saying why,
+    so a result that is no handoff, or a handoff that fails its checks, never stands in for one that passes or gets
+    it superseded. Nothing older than the one chosen is touched here."""
     unfinished = owl_post.unfinished_handoffs(task["id"])
     results = desk_results(conn, task)
-    for owl in reversed([owl for owl in results if owl["id"] in unfinished]):
-        problem = owl_post.handoff_problem(conn, owl)
+    pending = [owl for owl in results if owl["id"] in unfinished]
+    for index in reversed(range(len(pending))):
+        problem = owl_post.handoff_problem(conn, pending[index])
         if problem is None:
-            return owl
-        _auto_finish(conn, task, owl["id"], f"no review: {problem}", "routine", now)
+            return pending[index], [owl["id"] for owl in pending[:index]]
+        _auto_finish(conn, task, pending[index]["id"], f"no review: {problem}", "routine", now)
     known = {owl["id"] for owl in results}
     for owl_id in unfinished:
         if owl_id not in known:
             _auto_finish(conn, task, owl_id, "no review: the handoff is not a result of this task's request",
                          "routine", now)
-    return None
+    return None, []
 
 
 def _auto_recover(conn, task: dict, afters: list, now: Optional[int]) -> Optional[list]:
@@ -759,6 +829,17 @@ def _recover_after(conn, task: dict, record: dict, row: Optional[dict], lock_fd:
             # Its verdict is in, so the handoff is never reviewed again.
             owl_post.finish_handoff(task_id, owl_id, f"round {row['round']} at {row['sha'][:12]} recorded"
                                     f" {row['verdict']}")
+        if _told(conn, task, record, row):
+            # Ryan already heard how it ended, a failure before a push began included: nothing is tried again.
+            owl_post.write_after(task_id, request_id, owl_id, "done")
+            return "its ending was already told"
+        try:
+            restore_publication(conn, task, row)
+        except FleetError as exc:
+            pensieve.add_event(conn, task["desk"], "review.unpublished", "headmaster", common.scrubbed_line(exc, 480),
+                               task_id=task_id, dedupe_key=f"review:unpublished:{request_id}", now=now)
+            owl_post.write_after(task_id, request_id, owl_id, "done")
+            return "stopped: its review could not be published"
         settle_verdict(conn, task, row["reviewer"], row["verdict"], row["sha"])
     if record["state"] == "review":
         # Nothing after the verdict had begun, so it starts now, once.
@@ -768,15 +849,29 @@ def _recover_after(conn, task: dict, record: dict, row: Optional[dict], lock_fd:
     return _interrupted(conn, task, record, row, now)
 
 
+def _told(conn, task: dict, record: dict, row: dict) -> bool:
+    """Whether Ryan already heard how what follows a round's verdict ended, so recovery leaves it as told and never
+    starts it again: the loop told him its review of the handoff stopped, the review could not be published, or the
+    step's own ending was told (ready for push, the draft PR or why it stopped, even before the push began, the round
+    cap, a fix round that did not start). Each event is matched by its whole key."""
+    task_id, sha, round_no = task["id"], row["sha"], row["round"]
+    keys = [f"review:unpublished:{record['request_id']}"]
+    if record["owl_id"] is not None:
+        keys.append(f"review:auto:{record['owl_id']}")
+    if row["verdict"] == "PASS":
+        keys += [f"review:ready:{task_id}:{sha}", f"push:auto-failed:{task_id}:{sha}", f"push:draft-pr:{task_id}:{sha}"]
+    elif row["verdict"] == "CHANGES":
+        keys += [f"review:loop-stopped:{task_id}:{round_no}", f"review:fix-round:{task_id}:{round_no}"]
+    return any(event["dedupe_key"] == key for key in keys for event in pensieve.events_with_key_prefix(conn, key))
+
+
 def _interrupted(conn, task: dict, record: dict, row: Optional[dict], now: Optional[int]) -> str:
     """Ryan hears, once, that a step after a verdict had begun when the loop was cut off, so it may or may not have
-    happened, and what to look at. It never runs again by itself. A push or PR whose own ending was already told
-    (push:draft-pr or push:auto-failed) is left as told."""
+    happened, and what to look at. It never runs again by itself. One whose own ending was already told never gets
+    here (_told)."""
     task_id, desk = task["id"], task["desk"]
     step = record["step"] if row is not None and row["has_verdict"] else None
     sha = None if step is None else row["sha"]
-    told = step in ("push", "pr") and any(pensieve.events_with_key_prefix(conn, f"{kind}:{task_id}:{sha}")
-                                          for kind in ("push:draft-pr", "push:auto-failed"))
     if step == "fix-round":
         text = (f"round {row['round']} of task {task_id} recorded CHANGES, and the review loop was stopped while it"
                 f" started the fix round, so {desk} may or may not have started on it; nothing was started again:"
@@ -793,21 +888,20 @@ def _interrupted(conn, task: dict, record: dict, row: Optional[dict], now: Optio
         text = (f"the review loop was stopped part way through what follows a review round of task {task_id}, and"
                 " its record of where it was cannot be read, so nothing was tried again: look at the task's"
                 " worktree, branch and pull requests")
-    if not told:
-        pensieve.add_event(conn, desk, "review.interrupted", "headmaster", common.one_line(text, 480),
-                           task_id=task_id, dedupe_key=f"review:interrupted:{record['request_id']}", now=now)
+    pensieve.add_event(conn, desk, "review.interrupted", "headmaster", common.one_line(text, 480),
+                       task_id=task_id, dedupe_key=f"review:interrupted:{record['request_id']}", now=now)
     owl_post.write_after(task_id, record["request_id"], record["owl_id"], "done")
-    if told:
-        return "its ending was already told"
     return f"interrupted ({step or 'unknown step'}): Ryan heard it may or may not have happened"
 
 
 def _auto_finish(conn, task: dict, owl_id: str, text: str, verdict: str, now: Optional[int]) -> dict:
     """Finish a handoff for good, the event first, so a review killed in between tells Ryan once on its retry. An
-    error's text can quote git, so it is scrubbed of anything shaped like a credential before it is kept."""
+    error's text can quote git, so all of it is scrubbed of anything shaped like a credential before any of it is
+    kept or cut."""
     text = pensieve.scrub(text)
-    pensieve.add_event(conn, task["desk"], "review.auto", verdict, common.one_line(f"task {task['id']}: {text}", 480),
-                       task_id=task["id"], dedupe_key=f"review:auto:{owl_id}", now=now)
+    pensieve.add_event(conn, task["desk"], "review.auto", verdict,
+                       common.scrubbed_line(f"task {task['id']}: {text}", 480), task_id=task["id"],
+                       dedupe_key=f"review:auto:{owl_id}", now=now)
     owl_post.finish_handoff(task["id"], owl_id, text)
     return {"task_id": task["id"], "owl_id": owl_id, "outcome": text}
 
@@ -876,12 +970,12 @@ def _after_verdict(conn, task: dict, result: dict, lock_fd: int, now: Optional[i
         try:
             outcome = worktree.build(conn, task_id, lock_fd)["desk"]
         except (FleetError, StoreError, OSError) as exc:
-            outcome = f"it did not start ({common.one_line(exc, 200)})"
+            outcome = f"it did not start ({common.scrubbed_line(exc, 200)})"
         if not outcome.startswith(f"started {task['desk']} "):
             pensieve.add_event(conn, task["desk"], "review.fix-round", "headmaster",
-                               common.one_line(pensieve.scrub(f"round {round_no} of task {task_id} recorded {verdict},"
-                                                              f" but its fix round did not start: {outcome}; fleet"
-                                                              f" build {task_id} starts it"), 480),
+                               common.scrubbed_line(f"round {round_no} of task {task_id} recorded {verdict}, but its"
+                                                    f" fix round did not start: {outcome}; fleet build {task_id}"
+                                                    " starts it", 480),
                                task_id=task_id, dedupe_key=f"review:fix-round:{task_id}:{round_no}", now=now)
     owl_post.write_after(task_id, request_id, owl_id, "done")
     return outcome
@@ -909,12 +1003,11 @@ def _after_pass(conn, task: dict, result: dict, now: Optional[int], checked_owl:
         title, _ = commit_message(handoff, check_words=False)
         pushed = push.push_draft_pr(conn, task_id, sha, title, pr_body(handoff), on_step=begun)
     except (FleetError, StoreError, OSError) as exc:
-        reason = common.one_line(pensieve.scrub(str(exc) if not isinstance(exc, OSError) else type(exc).__name__),
-                                 300)
+        reason = common.scrubbed_line(str(exc) if not isinstance(exc, OSError) else type(exc).__name__, 300)
         pensieve.add_event(conn, task["desk"], "push.auto-failed", "headmaster",
-                           common.one_line(f"task {task_id} passed review at {sha[:12]}, but the automatic draft PR"
-                                           f" stopped and was not retried: {reason}; fleet push {task_id} pushes it by"
-                                           " hand", 480),
+                           common.scrubbed_line(f"task {task_id} passed review at {sha[:12]}, but the automatic draft"
+                                                f" PR stopped and was not retried: {reason}; fleet push {task_id}"
+                                                " pushes it by hand", 480),
                            task_id=task_id, dedupe_key=f"push:auto-failed:{task_id}:{sha}", now=now)
         return f"the automatic draft PR stopped: {reason}"
     pensieve.add_event(conn, task["desk"], "push.draft-pr", "headmaster",
@@ -935,7 +1028,7 @@ def main(argv: Optional[list] = None) -> int:
     try:
         conn = common.connect()
     except StoreError as exc:
-        sys.stdout.write(json.dumps({"ok": False, "error": common.one_line(exc, 300)}, ensure_ascii=True) + "\n")
+        sys.stdout.write(json.dumps({"ok": False, "error": common.scrubbed_line(exc, 300)}, ensure_ascii=True) + "\n")
         return 1
     try:
         with common.ended_by_signals():
@@ -943,7 +1036,8 @@ def main(argv: Optional[list] = None) -> int:
         sys.stdout.write(json.dumps({"ok": True, "data": data}, ensure_ascii=True) + "\n")
         return 0
     except (FleetError, StoreError) as exc:
-        sys.stdout.write(json.dumps({"ok": False, "error": common.one_line(exc, 600)}, ensure_ascii=True) + "\n")
+        # Printed to review-auto.log: an error can quote git, so all of it is scrubbed before it is cut.
+        sys.stdout.write(json.dumps({"ok": False, "error": common.scrubbed_line(exc, 600)}, ensure_ascii=True) + "\n")
         return 1
     finally:
         conn.close()
