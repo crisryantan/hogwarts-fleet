@@ -5,9 +5,10 @@ The script gathers every number, with the patrol's read-only GitHub queries (fle
 - the open PRs that ask Ryan for a review;
 - overnight reds: his PRs whose checks are red now, and main-branch commits of the watched repos that went red
   since the last weekday morning (since Friday's on a Monday);
-- the portrait's morning note, when his newest nightly patch file in the castle has one.
+- the portrait's morning note, his newest morning-<date>.md in the castle, when there is one.
 
-It writes those tables to patrol/lineup/<date>.md and wakes Ron, on the fast tier, to write the lineup's words
+It writes those tables to patrol/lineup/<date>.md, once a day: when that file is already there, from this job or
+from a Map round that wrote a missed lineup, it changes nothing. Then it wakes Ron, on the fast tier, to write the lineup's words
 from them. Ron computes nothing, and his words are appended to the same file. In shadow mode that file is all.
 Once Ryan removes the shadow file, he also gets one headmaster event a day that names the file.
 
@@ -32,8 +33,6 @@ from fleet import common, config, patrol, safefs  # noqa: E402
 from fleet.safefs import FleetError  # noqa: E402
 
 DAY = 86400
-# The portrait's nightly patch notes: patch-<YYYY-MM-DD>.md in his outbox, or <owl-id>-patch-<date>.md once the
-# Owl Post has moved it to outbox/.sent with his result owl.
 # The portrait's nightly note, morning-<date>.md in his outbox, as portrait_patch.NOTE_NAME names it.
 MORNING_NOTE = re.compile(r"morning-([0-9]{4}-[0-9]{2}-[0-9]{2})\.md")
 NOTE_MAX_LINES = 10
@@ -113,13 +112,17 @@ def render(seen: dict, reds: list, errors: list, note: Optional[dict], ts: int, 
 def lineup(conn, now: Optional[int] = None) -> dict:
     """Write the morning lineup's tables, then wake Ron for its words."""
     ts = patrol.stamp(now)
+    out = f"{patrol.local_day(ts)}.md"
+    if os.path.lexists(patrol.file_path("lineup", out)):
+        # One lineup a day: the Map's catch-up or an earlier run wrote it, so its file and Ron's words stay.
+        return {"ok": True, "skipped": "today's lineup is already written", "file": patrol.file_path("lineup", out),
+                "model": False}
     shadow = patrol.shadow_on()
     seen = patrol.fetch_prs()
     since = since_last_morning(ts)
     reds, errors = main_reds(seen, since)
     note = portrait_note(since)
     text = render(seen, reds, errors, note, ts, since)
-    out = f"{patrol.local_day(ts)}.md"
     path = patrol.write_text("lineup", out, text)
     try:
         woke = patrol.wake(conn, "ron", "lineup", "morning lineup", text, out, now, shadow=shadow)

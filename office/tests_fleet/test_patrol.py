@@ -32,6 +32,7 @@ RON_WORDS = ("Ron - Release Engineer, map round.\n\nOne red on web-app.\n\nOUTCO
              "routine | acme/web-app#12 | new commits | - | -\n")
 DRAFTS = "| thread | author | label | why |\n|---|---|---|---|\n| 1 | lint-bot | VALID | real typo |\n"
 DAY = 86400
+REAL_LINEUP_DUE = patrol_map.lineup_due  # PatrolCase fakes it; the due-time test calls the real one
 
 
 def read_file(path: str) -> str:
@@ -58,19 +59,21 @@ def opinion(by: str, state: str) -> dict:
 
 def pr_node(number: int = 12, repo: str = REPO, title: str = "Add retry", created: int = NOW - 3 * HOUR,
             head: str = SHA, decision: str = "REVIEW_REQUIRED", rollup: str = "SUCCESS", contexts: tuple = (),
-            opinions: tuple = (), threads: tuple = (), draft: bool = False) -> dict:
+            opinions: tuple = (), threads: tuple = (), draft: bool = False, updated: int = None) -> dict:
     return {"number": number, "title": title, "url": f"https://github.com/{repo}/pull/{number}", "isDraft": draft,
-            "createdAt": iso(created), "repository": {"nameWithOwner": repo}, "author": {"login": "octo"},
+            "createdAt": iso(created), "updatedAt": iso(created if updated is None else updated),
+            "repository": {"nameWithOwner": repo}, "author": {"login": "octo"},
             "headRefOid": head, "reviewDecision": decision,
             "commits": {"nodes": [{"commit": {"statusCheckRollup": {
                 "state": rollup, "contexts": {"nodes": list(contexts)}}}}]},
             "latestOpinionatedReviews": {"nodes": list(opinions)}, "reviewThreads": {"nodes": list(threads)}}
 
 
-def asked_node(number: int = 40, repo: str = "acme/api", author: str = "bob") -> dict:
+def asked_node(number: int = 40, repo: str = "acme/api", author: str = "bob", bot: bool = False,
+               created: int = NOW - DAY, updated: int = None) -> dict:
     return {"number": number, "title": "Rename the cache flag", "url": f"https://github.com/{repo}/pull/{number}",
-            "isDraft": False, "createdAt": iso(NOW - DAY), "repository": {"nameWithOwner": repo},
-            "author": {"login": author}}
+            "isDraft": False, "createdAt": iso(created), "updatedAt": iso(created if updated is None else updated),
+            "repository": {"nameWithOwner": repo}, "author": {"__typename": "Bot" if bot else "User", "login": author}}
 
 
 def commit_node(sha: str, at: int, rollup: str = "SUCCESS", contexts: tuple = ()) -> dict:
@@ -130,7 +133,9 @@ class PatrolCase(RunDeskCase):
         self.github = FakeGitHub()
         for patcher in (mock.patch.object(config, "GITHUB_ACCOUNT", "octo"),
                         mock.patch.object(config, "WATCHED_REPOS", ("<repos-to-watch>",)),
-                        mock.patch.object(patrol, "run_gh", side_effect=self.github)):
+                        mock.patch.object(patrol, "run_gh", side_effect=self.github),
+                        # Whether a lineup is due follows the Mac's clock and zone; a test that wants it says so.
+                        mock.patch.object(patrol_map, "lineup_due", return_value=False)):
             patcher.start()
             self.addCleanup(patcher.stop)
         (self.office / "patrol").mkdir(mode=0o700)
@@ -652,9 +657,27 @@ class LineupCatchUpTests(PatrolCase):
         self.round(NOW - 3600)  # the baseline
         self.github.prs = [pr_node()]
 
+    def due_while_missing(self):
+        return mock.patch.object(patrol_map, "lineup_due", side_effect=lambda ts: not os.path.lexists(
+            patrol.file_path("lineup", f"{patrol.local_day(ts)}.md")))
+
+    def test_the_scheduled_lineup_after_a_catch_up_changes_nothing(self):
+        with self.due_while_missing(), self.desk_writes("Words from the catch-up.\n") as started:
+            caught = self.round(NOW)["lineup"]
+            again = morning.lineup(self.conn, now=NOW + 60)
+        self.assertEqual((started.call_count, again["skipped"], again["model"]),
+                         (1, "today's lineup is already written", False))
+        self.assertIn("Words from the catch-up.", read_file(caught["file"]))
+
+    def test_a_round_after_the_scheduled_lineup_does_not_catch_up(self):
+        with self.due_while_missing(), self.desk_writes("Words from 08:30.\n") as started:
+            first = morning.lineup(self.conn, now=NOW)
+            result = self.round(NOW + 60)
+        self.assertEqual((started.call_count, result["lineup"]), (1, None))
+        self.assertIn("Words from 08:30.", read_file(first["file"]))
+
     def test_a_round_writes_a_missed_lineup_once(self):
-        with mock.patch.object(patrol_map, "lineup_due", side_effect=lambda ts: not os.path.lexists(
-                patrol.file_path("lineup", f"{patrol.local_day(ts)}.md"))):
+        with self.due_while_missing():
             with self.desk_writes("Lineup words.\n") as started:
                 first = self.round(NOW)
                 second = self.round(NOW + 900)
@@ -678,10 +701,44 @@ class LineupCatchUpTests(PatrolCase):
         for (wday, hour, minute), due in cases.items():
             with self.subTest(wday=wday, hour=hour, minute=minute), \
                     mock.patch.object(patrol_map.time, "localtime", return_value=at(wday, hour, minute)):
-                self.assertEqual(patrol_map.lineup_due(NOW), due)
+                self.assertEqual(REAL_LINEUP_DUE(NOW), due)
         with mock.patch.object(patrol_map.time, "localtime", return_value=at(1, 9, 0)), \
                 mock.patch.object(patrol_map.os.path, "lexists", return_value=True):
-            self.assertFalse(patrol_map.lineup_due(NOW))
+            self.assertFalse(REAL_LINEUP_DUE(NOW))
+
+
+class StaleAndBotTests(PatrolCase):
+    def test_stale_prs_go_below_the_ones_that_moved(self):
+        prs = {f"{REPO}#1": patrol.pr_record(pr_node(number=1, title="Moved", created=NOW - 90 * DAY, updated=NOW - HOUR)),
+               f"{REPO}#2": patrol.pr_record(pr_node(number=2, title="Parked", created=NOW - 90 * DAY,
+                                                     updated=NOW - 31 * DAY))}
+        text = patrol.prs_table(prs, NOW)
+        top, stale = text.split(f"### Stale, no activity in {config.PATROL_STALE_DAYS}+ days (1)")
+        self.assertIn("| Moved |", top)
+        self.assertNotIn("Parked", top)
+        self.assertIn("| Parked |", stale)
+
+    def test_bot_and_stale_requests_are_counted_and_listed_below(self):
+        asked = {key: patrol.asked_record(node) for key, node in (
+            ("acme/api#40", asked_node(40, author="bob")),
+            ("acme/api#41", asked_node(41, author="dependabot", bot=True)),
+            ("acme/api#42", asked_node(42, author="carol", created=NOW - 400 * DAY, updated=NOW - 300 * DAY)))}
+        text = patrol.asked_table(asked, NOW)
+        top, rest = text.split("### Bot and stale requests (2)")
+        self.assertIn("| acme/api#40 | Rename the cache flag | bob |", top)
+        self.assertIn(f"Also asked of you: 1 from bots and 1 with no activity in {config.PATROL_STALE_DAYS}+ days, "
+                      "the oldest 400d 0h old.", top)
+        self.assertIn("| dependabot (bot) |", rest)
+        self.assertIn("| carol |", rest)
+
+    def test_a_new_review_request_from_a_bot_never_wakes_ron(self):
+        self.round(NOW - 3600)  # the baseline
+        self.github.asked = [asked_node(41, author="dependabot", bot=True)]
+        with self.desk_writes() as started:
+            result = self.round(NOW)
+        self.assertEqual((result["for_me"], result["model"], started.call_count), (0, False, 0))
+        self.assertEqual([(row["change"], row["mark"]) for row in self.rows()],
+                         [("review requested from you by a bot", "routine")])
 
 
 class LineupTests(PatrolCase):

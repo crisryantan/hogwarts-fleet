@@ -83,7 +83,7 @@ PRS_QUERY = """query($mine: String!, $after: String) {
   mine: search(query: $mine, type: ISSUE, first: 50, after: $after) {
     pageInfo { hasNextPage endCursor }
     nodes { ... on PullRequest {
-      number title url isDraft createdAt
+      number title url isDraft createdAt updatedAt
       repository { nameWithOwner }
       author { login }
       headRefOid reviewDecision
@@ -96,7 +96,8 @@ PRS_QUERY = """query($mine: String!, $after: String) {
 ASKED_QUERY = """query($asked: String!, $after: String) {
   asked: search(query: $asked, type: ISSUE, first: 50, after: $after) {
     pageInfo { hasNextPage endCursor }
-    nodes { ... on PullRequest { number title url isDraft createdAt repository { nameWithOwner } author { login } } }
+    nodes { ... on PullRequest { number title url isDraft createdAt updatedAt repository { nameWithOwner }
+      author { __typename login } } }
   }
 }"""
 MAIN_QUERY = """query($owner: String!, $name: String!, $since: GitTimestamp!) {
@@ -442,6 +443,7 @@ def pr_record(node: dict) -> Optional[dict]:
         "repo": repo, "number": number, "title": common.one_line(clean(node.get("title") or ""), 200),
         "url": safe_url(node.get("url")), "draft": node.get("isDraft") is True,
         "created_at": parse_ts(node.get("createdAt")) or 0,
+        "updated_at": parse_ts(node.get("updatedAt")) or 0,
         "head": head if isinstance(head, str) and ids.PATTERNS["sha"].fullmatch(head) else None,
         "decision": decision if isinstance(decision, str) and decision.replace("_", "").isalpha() else None,
         "checks": checks["state"], "failing": checks["failing"], "waiting": checks["waiting"],
@@ -461,7 +463,9 @@ def asked_record(node: dict) -> Optional[dict]:
     return {"repo": repo, "number": number, "title": common.one_line(clean(node.get("title") or ""), 200),
             "url": safe_url(node.get("url")), "draft": node.get("isDraft") is True,
             "author": login if isinstance(login, str) and LOGIN.fullmatch(login) else "unknown",
-            "created_at": parse_ts(node.get("createdAt")) or 0}
+            "bot": get(node, "author", "__typename") == "Bot",
+            "created_at": parse_ts(node.get("createdAt")) or 0,
+            "updated_at": parse_ts(node.get("updatedAt")) or 0}
 
 
 def search_all(name: str, field: str, variables: dict) -> tuple:
@@ -510,25 +514,57 @@ def checks_text(record: dict) -> str:
     return text
 
 
-def prs_table(prs: dict, ts: int) -> str:
-    """Ryan's open PRs as a markdown table, oldest first."""
-    rows = [(key + (" (draft)" if record["draft"] else ""), record["title"], checks_text(record),
+def fresh(record: dict, ts: int) -> bool:
+    """Whether a PR had any activity (a commit, review, comment or edit) within PATROL_STALE_DAYS."""
+    last = record.get("updated_at") or record.get("created_at") or 0
+    return ts - last < config.PATROL_STALE_DAYS * DAY
+
+
+def _pr_rows(prs: dict, ts: int) -> list:
+    return [(key + (" (draft)" if record["draft"] else ""), record["title"], checks_text(record),
              record["approvals"], record["changes"], len(record["open_threads"]),
              age(ts - record["created_at"]) if record["created_at"] else "-")
             for key, record in sorted(prs.items(), key=lambda item: (item[1]["created_at"], item[0]))]
-    if not rows:
+
+
+def prs_table(prs: dict, ts: int) -> str:
+    """Ryan's open PRs as markdown, oldest first: the ones with recent activity, then the stale ones under their
+    own heading, so the top of the list is what moved."""
+    if not prs:
         return "No open PRs.\n"
-    return table(("PR", "title", "checks", "approvals", "changes requested", "unresolved threads", "age"), rows)
+    head = ("PR", "title", "checks", "approvals", "changes requested", "unresolved threads", "age")
+    live = {key: record for key, record in prs.items() if fresh(record, ts)}
+    stale = {key: record for key, record in prs.items() if key not in live}
+    text = table(head, _pr_rows(live, ts)) if live else f"No PR had activity in the last {config.PATROL_STALE_DAYS} days.\n"
+    if stale:
+        text += (f"\n### Stale, no activity in {config.PATROL_STALE_DAYS}+ days ({len(stale)})\n\n"
+                 + table(head, _pr_rows(stale, ts)))
+    return text
+
+
+def _asked_rows(asked: dict, ts: int) -> list:
+    return [(key + (" (draft)" if record["draft"] else ""), record["title"],
+             record["author"] + (" (bot)" if record.get("bot") else ""),
+             age(ts - record["created_at"]) if record["created_at"] else "-")
+            for key, record in sorted(asked.items(), key=lambda item: (item[1]["created_at"], item[0]))]
 
 
 def asked_table(asked: dict, ts: int) -> str:
-    """The open PRs asking Ryan for a review, oldest first."""
-    rows = [(key + (" (draft)" if record["draft"] else ""), record["title"], record["author"],
-             age(ts - record["created_at"]) if record["created_at"] else "-")
-            for key, record in sorted(asked.items(), key=lambda item: (item[1]["created_at"], item[0]))]
-    if not rows:
+    """The open PRs asking Ryan for a review: people's requests with recent activity first, then one line that
+    counts the bots' and the stale ones, which are listed under it."""
+    if not asked:
         return "No reviews waiting on you.\n"
-    return table(("PR", "title", "author", "age"), rows)
+    head = ("PR", "title", "author", "age")
+    live = {key: record for key, record in asked.items() if not record.get("bot") and fresh(record, ts)}
+    rest = {key: record for key, record in asked.items() if key not in live}
+    text = table(head, _asked_rows(live, ts)) if live else "No recent review requests from people.\n"
+    if rest:
+        bots = sum(1 for record in rest.values() if record.get("bot"))
+        oldest = max((ts - record["created_at"] for record in rest.values() if record["created_at"]), default=0)
+        text += (f"\nAlso asked of you: {bots} from bots and {len(rest) - bots} with no activity in "
+                 f"{config.PATROL_STALE_DAYS}+ days" + (f", the oldest {age(oldest)} old" if oldest else "") + ".\n"
+                 f"\n### Bot and stale requests ({len(rest)})\n\n" + table(head, _asked_rows(rest, ts)))
+    return text
 
 
 def main_repos(seen: dict) -> list:

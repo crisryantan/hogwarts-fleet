@@ -128,7 +128,11 @@ def changes(before: dict, after: dict) -> list:
         rows += pr_changes(key, was, new.get(key))
     old_asked = before.get("asked") if isinstance(before.get("asked"), dict) else {}
     for key in sorted(set(after["asked"]) - set(old_asked)):
-        rows.append(_row(key, "review requested from you", f"by {after['asked'][key]['author']}", FOR_ME))
+        asked = after["asked"][key]
+        if asked.get("bot"):  # a bot's request is listed in the lineup but never wakes Ron
+            rows.append(_row(key, "review requested from you by a bot", f"by {asked['author']}", ROUTINE))
+        else:
+            rows.append(_row(key, "review requested from you", f"by {asked['author']}", FOR_ME))
     for key in sorted(set(old_asked) - set(after["asked"])):
         rows.append(_row(key, "review request gone", "reviewed, closed or withdrawn", ROUTINE))
     return rows
