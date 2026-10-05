@@ -121,9 +121,9 @@ You don't need to remember which desk does what. Start every piece of work with 
 1. **Open her session.** In the Claude desktop app, open the Code tab, start a new session and pick the `hogwarts` folder in your home folder. Or in Terminal, type `cd ~/hogwarts` and then `claude`. The folder's settings make McGonagall the default.
 2. **Read her digest.** Her first message lists what's in flight, one line per desk and then the tasks that need you first, the notes waiting on you, and queued work. On a fresh install it's short.
 3. **Ask in your own words.** For example: "Add a unit test for the retry path when the cache is empty, in my web-app repo." Small questions she answers directly.
-4. **Check her ticket.** For real work she writes `tasks/<id>/TASK.md`: your words under Intent, numbered acceptance criteria with the check for each, and what's out of scope. Claude asks you before she writes it. Fix anything that's wrong, then reply "go". She hands you one `castle task create` command to register it. Run that in Terminal. A data question skips all of this: she hands you a prompt to run with Snape in another session.
-5. **Let it move.** She posts the work to the right desk through her outbox, and Claude asks you before each post. The Owl Post delivers it. You'll see rows for anything that needs you at the start of your next message to her.
-6. **Merge and close.** When a PR is green and reviewed, you merge it yourself. Then type `Mischief managed <task-id>` to her. That exact phrase is the only thing that closes a task.
+4. **Check her ticket.** For real work she writes `tasks/<id>/TASK.md`: your words under Intent, numbered acceptance criteria with the check for each, a Spec that opens with the repo, a new branch and its base, and what's out of scope. Claude asks you before she writes it. Fix anything that's wrong. For a build, type `go <task-id>` as your whole message: that registers the task, gives Harry a fresh worktree on the new branch and starts his run once he's switched on. For any other desk she hands you one `castle task create` command to run in Terminal instead. A data question skips all of this: she hands you a prompt to run with Snape in another session.
+5. **Let it move.** A build runs on its own from here. Harry's handoff starts his review, a CHANGES verdict starts his fix round, and the loop stops at a PASS, a HEADMASTER verdict or the third round. Other work she posts to the right desk through her outbox, and Claude asks you before each post. The Owl Post delivers it. You'll see rows for anything that needs you at the start of your next message to her.
+6. **Push, merge and close.** After a PASS, push with `fleet push <task-id>`. Or switch on draft PRs once, with `echo on > ~/.hogwarts/auto-draft-pr`, and the loop pushes the reviewed commit and opens a draft PR for you; delete that file to switch it off. When a PR is green and reviewed, you merge it yourself. Then type `Mischief managed <task-id>` to her. That exact phrase is the only thing that closes a task.
 
 Good first prompts:
 
@@ -171,10 +171,10 @@ A desk switches on when you create its `enabled` file after reading its dry run,
 ## Daily rhythm
 
 - **Morning.** Open McGonagall's session. Her digest, and Ron's lineup once he's on, tell you what's in flight and what needs you.
-- **Starting work.** Ask her in your own words. Check the TASK.md she writes, then say "go".
+- **Starting work.** Ask her in your own words. Check the TASK.md she writes, then type `go <task-id>` for a build, or run the command she gives you for anything else.
 - **Quick data questions.** In a new session outside `~/hogwarts`: "Use the snape agent to..." When the question has a link, start with "Read <link>, then". He answers with the query behind every number.
 - **When a session gets long.** If you see the Tempus warning (past about 200k tokens), ask for a Checkpoint and start a fresh session. Long sessions are one of the biggest costs.
-- **Reviews.** They happen before anything is pushed, by the other model family. You'll see the verdict in your rows.
+- **Reviews.** They happen before anything is pushed, by the other model family, and Harry's handoffs start them on their own. You'll see the verdict in your rows.
 - **Model notes.** Ollivander's notes arrive with your other rows. A move to a cheaper or equal model has already happened. A costlier one waits for `castle desk model <desk> --approve`.
 - **Dumbledore's patch.** After his weeknight review a row says his patch is ready, and it changes nothing until you apply it. `castle portrait show <date>` lists each operation with its reason, its source and whether the store would take it, then prints the exact apply command with the patch's hash. Run it as printed, or with `--only` naming just the operations you accept. Archive moves are yours to make by hand.
 - **Cap warnings.** A desk at 80% of a daily cap sends one note. At the cap its next run waits for the reset or a bump, as in [Busy days and caps](#busy-days-and-caps).
