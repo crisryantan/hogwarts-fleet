@@ -59,9 +59,8 @@ RECORDED_SECONDS = {
 }
 BYTES_PER_SECOND = 25_000
 # Modules that must never run beside another module, each as "<suite>/<module file>". They run alone
-# after the parallel batch. None needs it: each module makes its own temp folders under /private/tmp,
-# and the one fixed path a test reaches, the per-user temp folder hogwarts-harry that test_ollivander.py
-# empties and remakes through a faked harry run, no other module touches.
+# after the parallel batch. None needs it: each module makes its own temp folders under /private/tmp, and
+# the shared fleet test base gives every test its own per-user temp folder, so no test reaches a fixed path.
 SERIAL = frozenset()
 RAN_LINE = re.compile(r"^Ran (\d+) tests? in \d+(?:\.\d+)?s$", re.MULTILINE)
 STATUS_LINE = re.compile(r"(OK|FAILED)(?: \(([a-z ]+=\d+(?:, [a-z ]+=\d+)*)\))?")
