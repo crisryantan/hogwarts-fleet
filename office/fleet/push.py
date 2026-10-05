@@ -8,7 +8,7 @@ It refuses unless:
 - the worktree is clean and HEAD has a pass in the store, so the other family's reviewer said PASS
   for this exact commit;
 - the branch name, every commit message from the base to HEAD, and every added line of the diff are
-  free of fleet words.
+  free of fleet words. Each scan reads all that git prints, or refuses the push when it is too much to read.
 It then shows the repo, branch, commit and commit list, and waits for Ryan to type the branch name
 (--yes skips that). It pushes exactly the reviewed commit, `git push origin <sha>:refs/heads/<branch>`,
 never with --force, so a remote branch that moved makes git refuse. It opens no PR: it prints the
@@ -36,15 +36,16 @@ from fleet.safefs import FleetError
 ADDED_LINE_PREFIX = "+"
 MAX_LISTED = 20
 OPT_IN_MAX_BYTES = 64
-# What pensieve.scrub puts in place of a credential, key or email. Text it would change this way never goes out
-# by itself. Its hex and IP address marks are left out, since commit shas and version numbers look like them.
+# What pensieve.scrub puts in place of a credential, key or email. Text any of its patterns matches this way never
+# goes out by itself. Its hex and IP address marks are left out, since commit shas and version numbers look like them.
 SENSITIVE_MARKS = ("[private_key]", "[credentials]", "[jwt]", "[token]", "[secret]", "[aws_key]", "[email]")
 
 
 def _fleet_word_hits(record: dict, sha: str) -> list:
-    """file:line for each added line in base...sha that contains a fleet word, capped."""
+    """file:line for each added line in base...sha that contains a fleet word, capped. Every line of the diff is
+    read, or the push is refused (gitops.git whole)."""
     diff = gitops.git(["diff", "--no-ext-diff", "--no-textconv", "-U0", f"{record['base']}...{sha}"],
-                      record["git_dir"], record["path"])
+                      record["git_dir"], record["path"], whole=True)
     hits, path, line_no = [], None, 0
     for line in diff.splitlines():
         if line.startswith("+++ "):
@@ -77,7 +78,8 @@ def check(conn, task_id: str) -> dict:
         raise FleetError("HEAD has no review pass from the other model family; run fleet review first")
     branch = gitops.check_branch(record["branch"])
     if record["repo"] not in config.FLEET_WORDS_ALLOWED_REPOS:
-        messages = gitops.git(["log", "--format=%B", f"{record['base']}..{sha}"], record["git_dir"], record["path"])
+        messages = gitops.git(["log", "--format=%B", f"{record['base']}..{sha}"], record["git_dir"], record["path"],
+                              whole=True)
         word = gitops.fleet_words_in(messages)
         if word:
             raise FleetError(f"a commit message contains a fleet word ({word})")
@@ -130,9 +132,17 @@ def auto_draft_pr_on() -> bool:
 
 
 def sensitive_mark(text: str) -> Optional[str]:
-    """What text holds that looks like a credential, key or email, or None."""
-    scrubbed = pensieve.scrub(text)
-    return next((mark.strip("[]") for mark in SENSITIVE_MARKS if scrubbed.count(mark) > text.count(mark)), None)
+    """What text holds that looks like a credential, key or email, or None. Each of pensieve.scrub's patterns is
+    matched directly, in the order scrub applies them, so a match counts whatever it would be replaced with: a
+    mark already in the text, such as a password that holds the word [secret], never hides one."""
+    for pattern, replacement in pensieve._SCRUBBERS:  # scrub's own patterns, so the two never drift apart
+        for match in pattern.finditer(text):
+            put = replacement if isinstance(replacement, str) else replacement(match)
+            mark = next((mark for mark in SENSITIVE_MARKS if mark in put), None)
+            if mark is not None:
+                return mark.strip("[]")
+        text = pattern.sub(replacement, text)
+    return None
 
 
 def pr_base(record: dict) -> str:
@@ -158,21 +168,33 @@ def check_pr_text(record: dict, title: str, body: str) -> None:
                          " open the PR by hand")
 
 
-def push_draft_pr(conn, task_id: str, sha: str, title: str, body: str) -> dict:
+def push_draft_pr(conn, task_id: str, sha: str, title: str, body: str,
+                  on_step: Optional[Callable[[str], None]] = None) -> dict:
     """Push exactly the commit that passed review and open a draft PR for it (see the module notes). Nothing is
-    pushed unless every check passes first, and a draft PR that fails to open after the push says so."""
+    pushed unless every check passes first, and a draft PR that fails to open after the push says so. on_step is
+    called with "push" just before the push starts and "pr" just before gh starts, so a caller can record each as
+    begun first; when it raises, that step never starts."""
     plan = check(conn, task_id)
     record, branch = plan["record"], plan["branch"]
     if not isinstance(sha, str) or gitops.SHA.fullmatch(sha) is None or plan["sha"] != sha:
         raise FleetError("HEAD is not the commit that passed review, so nothing was pushed")
     base = pr_base(record)
     check_pr_text(record, title, body)
-    messages = gitops.git(["log", "--format=%B", f"{record['base']}..{sha}"], record["git_dir"], record["path"])
+    messages = gitops.git(["log", "--format=%B", f"{record['base']}..{sha}"], record["git_dir"], record["path"],
+                          whole=True)
     mark = sensitive_mark(messages)
     if mark is not None:
         raise FleetError(f"a commit message holds what looks like a credential or personal data ({mark}), so"
                          " nothing was pushed")
+    if on_step is not None:
+        on_step("push")
     _push_exact(record, sha, branch)
+    if on_step is not None:
+        try:
+            on_step("pr")
+        except (FleetError, OSError):
+            raise FleetError(f"{sha[:12]} is pushed to {branch}, but the draft PR was not opened, since its start"
+                             " could not be recorded first") from None
     try:
         url = gitops.open_draft_pr(record["repo"], branch, base, title, body)
     except FleetError as exc:

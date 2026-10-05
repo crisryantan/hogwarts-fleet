@@ -13,7 +13,7 @@ from unittest import mock
 from hogwarts import capacity, ids, owlery, pensieve
 from tests.support import NOW
 
-from fleet import config, gitops, owl_post, run_desk, safefs, verify
+from fleet import config, gitops, owl_post, review, run_desk, safefs, verify
 from tests_fleet.support import FleetCase, claude_settings, fake_children
 
 BYPASS_WORDS = ("dangerously", "bypass", "skip-permissions", "danger-full-access", "approve-for-me", "yolo")
@@ -367,6 +367,59 @@ class GuardTests(RunDeskCase):
                 mock.patch.object(config, "HEADLESS_CODEX", ("moody",)):
             with self.assertRaises(safefs.FleetError):
                 run_desk.build_plan(self.conn, "harry")
+
+
+class BuildRunTaskLockTests(RunDeskCase):
+    """A build desk's run on its own task holds the task's review lock from before it waits for a slot until its
+    process has exited, and the process inherits it, so no review of the task runs beside it."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.enable("harry")
+        self.owl_id, self.task_id = self.request("harry", worktree="tk-one")
+
+    def review_free(self) -> bool:
+        try:
+            with review.task_review_lock(self.task_id):
+                return True
+        except safefs.FleetError:
+            return False
+
+    def test_a_build_run_holds_its_task_review_lock_until_its_process_has_exited(self):
+        seen = {}
+
+        def desk(argv, **kwargs):
+            seen.update(free=self.review_free(), inherited=[os.fstat(fd).st_ino for fd in kwargs["pass_fds"]])
+            return subprocess.CompletedProcess(argv, 0)
+
+        with fake_children(desk):
+            self.assertEqual(run_desk.run(self.conn, "harry", self.owl_id, now=NOW)["exit_code"], 0)
+        self.assertFalse(seen["free"])
+        self.assertIn(os.stat(self.office / "locks" / f"review-{self.task_id}.lock").st_ino, seen["inherited"])
+        self.assertTrue(self.review_free())
+
+    def test_a_build_run_is_refused_while_a_review_of_its_task_runs(self):
+        with review.task_review_lock(self.task_id), fake_children() as started:
+            with self.assertRaisesRegex(safefs.FleetError, f"a review of task {self.task_id} is running"):
+                run_desk.run(self.conn, "harry", self.owl_id, now=NOW)
+        started.assert_not_called()
+        self.assertEqual(capacity.list_launches(self.conn, "harry"), [])
+
+    def test_a_build_run_keeps_the_lock_it_was_handed_and_refuses_any_other_fd(self):
+        seen = {}
+
+        def desk(argv, **kwargs):
+            seen["fds"] = kwargs["pass_fds"]
+            return subprocess.CompletedProcess(argv, 0)
+
+        with review.task_review_lock(self.task_id) as lock_fd, fake_children(desk):
+            self.assertEqual(run_desk.run(self.conn, "harry", self.owl_id, now=NOW, task_lock_fd=lock_fd)["exit_code"],
+                             0)
+            self.assertIn(lock_fd, seen["fds"])
+        with run_desk.slot_lock("ron", 0) as other, fake_children() as started:
+            with self.assertRaisesRegex(safefs.FleetError, "is not task .* review lock"):
+                run_desk.run(self.conn, "harry", self.owl_id, now=NOW, task_lock_fd=other.fd)
+        started.assert_not_called()
 
 
 class LockInheritanceTests(FleetCase):

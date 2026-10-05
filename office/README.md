@@ -73,7 +73,8 @@ The store has none of these:
                                         Ollivander's updates
   reviews/<task>/                       review files and verify evidence, which no desk can write, what each review
                                         round was opened for (round-<request>.json), and the review loop's record of
-                                        each handoff (auto-<owl>.pending, .try<n>, .done)
+                                        each handoff (auto-<owl>.pending, .try<n>, .done) and of what follows each
+                                        verdict of its own rounds (after-<request>.json)
   auto-draft-pr                         while it holds exactly "on", the review loop pushes and opens a draft PR after
                                         its PASS (off when missing)
   patrol/shadow                         while it is here, the patrol and Gringotts only write files (shadow mode)

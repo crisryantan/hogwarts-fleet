@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import fcntl
 import os
+import re
 import signal
 import subprocess
 import threading
@@ -294,8 +295,7 @@ class ReviewRoundTests(LoopCase):
                           self.conn.execute("SELECT COUNT(*) FROM requests").fetchone()[0])
                 for attempt in (lambda: review.review_own(self.conn, str(self.repo), task_id=task["id"], fetch=False),
                                 lambda: tools.run(self.conn, tools.build_parser().parse_args(["verify", task["id"]]))):
-                    with self.assertRaisesRegex(FleetError, "^a review of this task is already running; run it again"
-                                                            " when it ends$"):
+                    with self.assertRaisesRegex(FleetError, "^" + re.escape(review.REVIEW_RUNNING) + "$"):
                         attempt()
                 after = (self.head_and_evidence(task["id"]), capacity.review_rounds(self.conn, task["id"]),
                          self.conn.execute("SELECT COUNT(*) FROM requests").fetchone()[0])

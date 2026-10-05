@@ -157,7 +157,7 @@ class WorktreeTests(LoopCase):
         self.assertEqual(doorbell, "waiting for a worktree")
         with mock.patch.object(run_desk, "spawn") as spawn:
             created = worktree.create(self.conn, task["id"], str(self.repo), "fix/widget", fetch=False)
-        spawn.assert_called_once_with("harry", owl_id)
+        spawn.assert_called_once_with("harry", owl_id, hold_fd=mock.ANY)
         path = Path(created["worktree"])
         self.assertTrue((path / "README.md").is_file())
         self.assertEqual(created["branch"], "fix/widget")

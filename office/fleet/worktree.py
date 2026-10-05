@@ -19,7 +19,10 @@ starts the desk's run if Ryan has enabled the desk.
 
   fleet build <task-id>     starts the desk again on the same task, for a fix round after a review. The review
                             loop starts a fix round through build() itself after a CHANGES verdict, so this is the
-                            fallback. Both run under the task's review lock, so neither starts the desk mid-review.
+                            fallback. Both run under the task's review lock, so neither starts the desk mid-review,
+                            and hand that lock to the run they start, which holds it until its process ends, so no
+                            review starts while the desk may still be writing (see run_desk.task_lock). fleet
+                            worktree starts the first run the same way.
   fleet worktree-remove <task-id>   removes a closed task's worktree. It never deletes the branch.
 
 castle task start goes through start_task for a build desk's task, which makes the same TASK.md check, so it is
@@ -177,15 +180,17 @@ def _take_back(record: dict, made_at: Optional[str], exc: BaseException) -> None
                          f" {' and '.join(left)} by hand") from exc
 
 
-def start_desk(conn, task: dict) -> str:
-    """Start the desk's run on its request owl, when Ryan has enabled the desk. Returns what happened."""
+def start_desk(conn, task: dict, lock_fd: int) -> str:
+    """Start the desk's run on its request owl, when Ryan has enabled the desk. Returns what happened. Called under
+    the task's review lock (lock_fd), which the run is handed, so no review of the task starts before the run holds
+    it (see run_desk.task_lock)."""
     owl_id = _request_owl(conn, task)
     if not run_desk.is_enabled(task["desk"]):
         return f"{task['desk']} is not enabled, so nothing was started"
     if run_desk.over_daily_cap(conn, task["desk"]) is not None:
         run_desk.report_cap(conn, task["desk"])
         return f"{task['desk']} reached its daily cap, so nothing was started"
-    run_desk.spawn(task["desk"], owl_id)
+    run_desk.spawn(task["desk"], owl_id, hold_fd=lock_fd)
     return f"started {task['desk']} on owl {owl_id}"
 
 
@@ -215,17 +220,25 @@ def create(conn, task_id: str, repo_dir: str, branch: str, base: str = config.DE
     if task["request_id"] is not None:
         owlery.advance(conn, task["request_id"], "claimed", detail="worktree attached")
         owlery.advance(conn, task["request_id"], "running", detail="build desk started")
-    started = start_desk(conn, task)
+    with contextlib.ExitStack() as held:
+        try:
+            lock_fd = held.enter_context(run_desk.task_lock(task["id"]))
+        except safefs.Busy:
+            lock_fd = None
+        started = (start_desk(conn, task, lock_fd) if lock_fd is not None else
+                   f"a review of this task is running, so {task['desk']} was not started; fleet build {task['id']}"
+                   " starts it once the review has ended")
     return {"task_id": task["id"], "worktree": record["path"], "branch": record["branch"], "base": record["base"],
             "repo": record["repo"], "desk": started}
 
 
-def build(conn, task_id: str) -> dict:
-    """Start the build desk again on its own task, for a fix round."""
+def build(conn, task_id: str, lock_fd: int) -> dict:
+    """Start the build desk again on its own task, for a fix round, under the task's review lock (lock_fd), which
+    the run it starts is handed."""
     task = pensieve.get_task(conn, ids.check("task", task_id))
     if task["desk"] not in config.WORKTREE_DESKS or task["status"] != "active" or not task["worktree"]:
         raise FleetError("only an active build task with a worktree can be started again")
-    return {"task_id": task["id"], "desk": start_desk(conn, task)}
+    return {"task_id": task["id"], "desk": start_desk(conn, task, lock_fd)}
 
 
 def remove(conn, task_id: str) -> dict:

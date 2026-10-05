@@ -79,6 +79,12 @@ holds the author task's review lock and passes the run slot the round recorded; 
 hand, the Owl Post or a patrol) is refused before it waits for a slot. The run makes the pad under its slot
 just before launch, never on a dry run, and the prompt names it in one trusted line.
 A run that gives up waiting for a free slot raises its own event, not a failed-run one.
+A build desk's run on its own task (config.WORKTREE_DESKS) holds that task's review lock (task_lock) from before it
+waits for a slot until its process has exited, and the process inherits it, so no review of the task (manual or
+the review loop's) runs while the desk may be writing in its worktree. fleet build, fleet worktree and the review
+loop's fix round take the lock first and hand it to the run they start (spawn with hold_fd, --task-lock-fd), so it
+is held without a gap from before the run is started until its process ends. A run started any other way takes
+the lock without waiting, and is refused while a review of the task holds it.
 SIGTERM or SIGHUP, sent to a real run the Owl Post started, ends it through its finally blocks: the desk's
 process is killed, a Claude run records its usage as a killed run, the locks are released, the owl stays in
 the inbox and Ryan gets the failed-run event.
@@ -104,7 +110,7 @@ if it appears.
 This is the only fleet module that starts processes.
 
 Run it with the wrapper line:
-/usr/bin/env -i /usr/bin/python3 -I -B -X pycache_prefix=/var/empty -c 'import sys; sys.path.insert(0, "/Users/crisryantan/.hogwarts"); from fleet.run_desk import main; sys.exit(main())' DESK [--owl OWL_ID] [--dry-run] [--mcp-job NAME]
+/usr/bin/env -i /usr/bin/python3 -I -B -X pycache_prefix=/var/empty -c 'import sys; sys.path.insert(0, "/Users/crisryantan/.hogwarts"); from fleet.run_desk import main; sys.exit(main())' DESK [--owl OWL_ID] [--dry-run] [--mcp-job NAME] [--task-lock-fd FD]
 """
 from __future__ import annotations
 
@@ -193,6 +199,10 @@ class TaskClosed(FleetError):
 
 class ReviewOwl(FleetError):
     """The owl belongs to a review round, which only the review that opened it runs, so it was not started."""
+
+
+class TaskLocked(FleetError):
+    """A review of the build desk's task holds the task's review lock, so the desk was not started on it."""
 
 
 # Office files
@@ -911,13 +921,16 @@ def child_env(path_prefix: list = (), extra: Optional[dict] = None) -> dict:
     }
 
 
-def spawn(desk: str, owl_id: str) -> None:
-    """Start a detached run for one owl through the wrapper line. Used by the Owl Post."""
+def spawn(desk: str, owl_id: str, hold_fd: Optional[int] = None) -> None:
+    """Start a detached run for one owl through the wrapper line. Used by the Owl Post, and by fleet build, fleet
+    worktree and the review loop, which pass the task's review lock they hold (hold_fd): the run is handed it, so it
+    stays held from before the run starts until its process ends (see task_lock)."""
     desk = ids.check("desk", desk)
     owl_id = ids.check("owl", owl_id)
     if not is_enabled(desk):
         raise FleetError(f"{desk} is not enabled")
-    _detach("run_desk", [desk, "--owl", owl_id], f"run-desk-{desk}.log")
+    held = [] if hold_fd is None else ["--task-lock-fd", str(int(hold_fd))]
+    _detach("run_desk", [desk, "--owl", owl_id, *held], f"run-desk-{desk}.log", hold_fd)
 
 
 def spawn_review(task_id: str) -> None:
@@ -926,8 +939,10 @@ def spawn_review(task_id: str) -> None:
     _detach("review", [ids.check("task", task_id)], "review-auto.log")
 
 
-def _detach(module: str, args: list, log_name: str) -> None:
-    """Start fleet.<module>'s main with args in a new session, with an empty environment, logging to the office."""
+def _detach(module: str, args: list, log_name: str, hold_fd: Optional[int] = None) -> None:
+    """Start fleet.<module>'s main with args in a new session, with an empty environment, logging to the office. The
+    process inherits no fd but hold_fd, a lock this process holds, which is then handed over to it (safefs.hand_over)
+    once it has started."""
     boot = ("import sys; sys.path.insert(0, " + json.dumps(config.OFFICE_ROOT)
             + f"); from fleet.{module} import main; sys.exit(main())")
     argv = [*config.PYTHON_WRAPPER, "-c", boot, *args]
@@ -935,9 +950,12 @@ def _detach(module: str, args: list, log_name: str) -> None:
         log_fd = safefs.open_append(logs_fd, log_name, "run log")
         try:
             subprocess.Popen(argv, cwd=config.OFFICE_ROOT, env={}, stdin=subprocess.DEVNULL,
-                             stdout=log_fd, stderr=log_fd, start_new_session=True, close_fds=True)
+                             stdout=log_fd, stderr=log_fd, start_new_session=True, close_fds=True,
+                             pass_fds=() if hold_fd is None else (hold_fd,))
         finally:
             os.close(log_fd)
+    if hold_fd is not None:
+        safefs.hand_over(hold_fd)
 
 
 def _count(value: object) -> int:
@@ -1313,6 +1331,44 @@ def desk_lock(desk: str, wait: bool = True) -> Iterator[Slot]:
         yield held
 
 
+def task_lock_name(task_id: str) -> str:
+    """The lock file of an author task's reviews, which a build desk's run on the task holds too: review-<task>.lock."""
+    return f"review-{ids.check('task', task_id)}.lock"
+
+
+@contextlib.contextmanager
+def task_lock(task_id: str) -> Iterator[int]:
+    """An author task's review lock, taken without waiting, yielding its fd; safefs.Busy while another process holds
+    it. Every review of the task holds it until it ends (review.task_review_lock), and so does every run of a build
+    desk on its own task until its process has exited (see run), so neither ever runs beside the other."""
+    with safefs.opened_dir(config.OFFICE_ROOT, "locks", create=True) as locks_fd, \
+            safefs.held_lock(locks_fd, task_lock_name(task_id), blocking=False) as lock_fd:
+        yield lock_fd
+
+
+def _hold_task_lock(held: contextlib.ExitStack, plan: dict, task_lock_fd: Optional[int]) -> Optional[int]:
+    """The fd of the review lock of the task a build desk's run is on, held from here until the run ends, or None
+    for any other run. A run fleet build, fleet worktree or the review loop started was handed it (task_lock_fd), and
+    it must be that lock and held by this process; any other run takes it without waiting, and is refused while a
+    review of the task holds it."""
+    if plan["desk"] not in config.WORKTREE_DESKS or plan.get("task_id") is None:
+        if task_lock_fd is not None:
+            raise FleetError("only a build desk's run on its own task is handed its task's review lock")
+        return None
+    task_id = plan["task_id"]
+    try:
+        if task_lock_fd is None:
+            return held.enter_context(task_lock(task_id))
+        locks_fd = held.enter_context(safefs.opened_dir(config.OFFICE_ROOT, "locks"))
+        return held.enter_context(safefs.handed_lock(locks_fd, task_lock_name(task_id), task_lock_fd))
+    except safefs.Busy:
+        raise TaskLocked(f"a review of task {task_id} is running, so {plan['desk']} was not started on it; fleet build"
+                         f" {task_id} starts it once the review has ended") from None
+    except (safefs.Unsafe, safefs.Missing):
+        raise FleetError(f"the lock {plan['desk']}'s run was handed is not task {task_id}'s review lock, so it was"
+                         " not started") from None
+
+
 def launch_lock_name(desk: str) -> str:
     return f"desk-{ids.check('desk', desk)}.launch.lock"
 
@@ -1468,7 +1524,7 @@ def launch_gate() -> Iterator[int]:
 
 def run(conn, desk: str, owl_id: str, mcp_job: Optional[str] = None, now: Optional[int] = None,
         on_start: Optional[Callable[[], None]] = None, lock_held: Optional[Slot] = None, keep_fds: tuple = (),
-        shadow: bool = False) -> dict:
+        shadow: bool = False, task_lock_fd: Optional[int] = None) -> dict:
     """Run one desk on one owl. on_start is called under the run's slot and the desk's launch lock once the
     caps allow the run, just before its launch is recorded, so a caller's own bookkeeping never runs for a
     refused run. lock_held is the Slot of this desk the caller already holds (the review script holds one, from
@@ -1478,7 +1534,9 @@ def run(conn, desk: str, owl_id: str, mcp_job: Optional[str] = None, now: Option
     every fd in keep_fds, its slot's and, on a desk that holds spend, its own run lock's, so the locks they hold
     outlive this process if it is killed mid-run. shadow is the patrol's shadow mode: the cap, near-cap and
     vendor-limit notes go in the result's held list, not to Ryan (a cap refusal's own reason is the Capped error),
-    and the caps and accounting are unchanged."""
+    and the caps and accounting are unchanged. A build desk's run on its own task holds the task's review lock from
+    before it waits for a slot until it ends, and its process inherits it: task_lock_fd is that lock when the run was
+    handed it (spawn hold_fd), and otherwise the run takes it itself (see _hold_task_lock)."""
     notes = [] if shadow else None
     desk = ids.check("desk", desk)
     if lock_held is not None and (not isinstance(lock_held, Slot) or lock_held.desk != desk):
@@ -1493,9 +1551,11 @@ def run(conn, desk: str, owl_id: str, mcp_job: Optional[str] = None, now: Option
     _refuse_closed(early)
     _refuse_blocked(conn, early, now)
     with contextlib.ExitStack() as held:
+        # First in the lock order: no review of a build desk's task runs from here until this run's process ends.
+        task_fd = _hold_task_lock(held, early, task_lock_fd)
         slot = lock_held if lock_held is not None else held.enter_context(desk_lock(desk))
         # The process always inherits its slot, even from a caller that left the fd out of keep_fds.
-        keep_fds = tuple(dict.fromkeys((*keep_fds, slot.fd)))
+        keep_fds = tuple(dict.fromkeys((*keep_fds, slot.fd, *(() if task_fd is None else (task_fd,)))))
         with launch_lock(desk):
             # From the last stop check until the process has exited, no CLI update can start (see launch_gate).
             keep_fds = (*keep_fds, held.enter_context(launch_gate()))
@@ -1731,9 +1791,12 @@ def main(argv: Optional[list] = None) -> int:
     parser.add_argument("--owl", default=None)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--mcp-job", default=None)
+    parser.add_argument("--task-lock-fd", type=int, default=None, help=argparse.SUPPRESS)
     args = parser.parse_args(sys.argv[1:] if argv is None else argv)
     if args.owl is None and not args.dry_run:
         parser.error("a real run needs --owl")
+    if args.task_lock_fd is not None and args.dry_run:
+        parser.error("a dry run takes no lock")
     try:
         conn = common.connect()
     except StoreError as exc:
@@ -1751,7 +1814,7 @@ def main(argv: Optional[list] = None) -> int:
         # The Owl Post starts this run detached. SIGTERM or SIGHUP then ends it through its finally blocks, not
         # mid-step: the desk's process is killed and the locks are released as the run unwinds.
         with common.ended_by_signals():
-            result = run(conn, args.desk, args.owl, args.mcp_job)
+            result = run(conn, args.desk, args.owl, args.mcp_job, task_lock_fd=args.task_lock_fd)
         clean = result["exit_code"] == 0 and result["cap_source"] is None
         sys.stdout.write(json.dumps({"ok": clean, **result}, ensure_ascii=True) + "\n")
         if not clean and result["cap_source"] is None:

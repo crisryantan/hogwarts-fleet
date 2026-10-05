@@ -12,9 +12,10 @@ terminal as the fallback.
       --task <id> reviews a fix round on the same task.
 
 One review of an author task runs at a time. Before anything changes, the review takes that task's
-review lock without waiting; if another review of the task holds it, this one is refused at once and
-changes nothing. Under the lock the checkout, the evidence, the round, the reviewer's run and the
-verdict all belong to the one sha this review asked for. The reviewer's own process inherits this lock
+review lock without waiting; if another review of the task holds it, or a run of the build desk on it
+(which holds it until its process ends), this one is refused at once and changes nothing. Under the lock
+the checkout, the evidence, the round, the reviewer's run and the verdict all belong to the one sha this
+review asked for. The reviewer's own process inherits this lock
 and the reviewer desk's run slot this review holds, so a review killed mid-run (SIGKILL, a crash) still
 holds both until its reviewer's process ends too. Then, for either:
 1. verify runs the acceptance checks and writes evidence for this sha;
@@ -42,14 +43,19 @@ holds both until its reviewer's process ends too. Then, for either:
 
 The review loop. When Harry posts the handoff for his own active task, the Owl Post records it and starts
 auto_review for that task in a process of its own (main). Under the task's loop lock, so one runs per task, it
-takes the task's newest handoff the Owl Post recorded, and the older ones are finished as superseded. It checks the
-handoff again, waits up to AUTO_REVIEW_AUTHOR_WAIT_SECONDS for the run that posted it to end, and then runs the same
-review as fleet review <task-id> under the same task review lock, so a manual review, a manual fleet build and the
-loop never open two rounds at once. What it cannot do yet (the author's run still going, the reviewer's run slots
-all busy, another review of the task running) it leaves to the Owl Post's next pass, for at most
-AUTO_REVIEW_WAIT_LIMIT_SECONDS. Each try it starts work on is counted, so a review killed part way is started
-again at most AUTO_REVIEW_MAX_TRIES times in all. Any other ending, a verdict, a refusal or an error, finishes the
-handoff for good, and every ending that needs Ryan raises one headmaster event. After a verdict:
+takes the newest handoff the Owl Post recorded that still passes owl_post.handoff_problem, newest by the order the
+store keeps the request's owls, never by their random ids. A newer one that no longer passes is finished saying why,
+so an owl that is no handoff never stands in for one that is. It waits up to AUTO_REVIEW_AUTHOR_WAIT_SECONDS for the
+run that posted it to end, takes the task review lock, chooses and checks the handoff again under it, and only then
+finishes the older ones as superseded and runs the same review as fleet review <task-id>, bound to that one owl
+(_review_build handoff_owl), so an owl that came in during the wait never supplies its commit message. A manual
+review, a manual fleet build and the loop never open two rounds at once, and a run of Harry on the task holds the
+same lock until it ends (run_desk.task_lock), so neither review entry point runs beside it; a manual review also
+refuses while a launch of his on the task has recorded no usage yet. What it cannot do yet (the author's run
+still going, the reviewer's run slots all busy, another review of the task running) it leaves to the Owl Post's
+next pass, for at most AUTO_REVIEW_WAIT_LIMIT_SECONDS. Each try it starts work on is counted, so a review killed
+part way is started again at most AUTO_REVIEW_MAX_TRIES times in all. Any other ending, a verdict, a refusal or an
+error, finishes the handoff for good, and every ending that needs Ryan raises one headmaster event. After a verdict:
 - CHANGES starts Harry's fix round through the same path as fleet build, unless the task has used its
   REVIEW_ROUND_CAP rounds with no allowance left: then nothing starts, and Ryan hears the task and its verdict.
   Harry's next handoff starts the next review the same way.
@@ -59,7 +65,15 @@ handoff for good, and every ending that needs Ryan raises one headmaster event. 
   It is never retried, never ready for review and never merged. Without the opt-in, Ryan hears it is ready for push.
 - HEADMASTER starts nothing more, and Ryan hears it as he does from any review.
 A handoff is finished before anything after its verdict starts, so a killed review never reviews a fix round
-that is still being written. A review Ryan runs with fleet review stops at its verdict, as it always has.
+that is still being written. What follows the verdict of each round the loop opens is kept in the office reviews
+folder (owl_post.write_after, after-<request>.json): "review" from before its reviewer starts, "acting" with the
+step (fix-round, push or pr) before anything that reaches outside the office begins, and "done" once it has ended
+and Ryan heard what he must. The Owl Post starts the loop again for a task with a record that is not done, and the
+loop finishes it first, under the task review lock and without opening a round (_auto_recover): a round that
+recorded no verdict needs nothing; one with a verdict has its handoff finished and what every review does after a
+verdict done again (settle_verdict), and a step that had not begun starts then, once. A step that had begun may or
+may not have happened, so it is never started again by itself: Ryan hears so once, unless its own ending was told.
+A review Ryan runs with fleet review stops at its verdict, as it always has.
 
 A build desk's review is refused before anything changes when it would read exactly what the task's last verdict
 judged: HEAD is that round's commit and the desk's latest handoff is the same text. Each round that runs records,
@@ -138,7 +152,7 @@ COMMIT_SUBJECT_MAX = 100
 COMMIT_MESSAGE_MAX = 4000
 REVIEW_MAX_BYTES = 262144
 OWN_DESK = config.OWN_SESSION_DESK
-REVIEW_RUNNING = "a review of this task is already running; run it again when it ends"
+REVIEW_RUNNING = "a review of this task, or a run of its build desk on it, is going; run this again when it ends"
 OWN_LINEAGE_LOCK = "review-own-lineage.lock"
 OWN_LINEAGE_WAIT_SECONDS = 120
 ROUND_RECORD_MAX_BYTES = 1024
@@ -229,15 +243,20 @@ def pr_body(handoff: str) -> str:
     return body + "\n"
 
 
+def desk_results(conn, task: dict) -> list:
+    """The result owls the desk posted for its own request, oldest first, in the order the store keeps them
+    (owlery.request_owls: by time, then as stored), so two in the same second keep the order they came in. Owl ids
+    are random, so they never order anything."""
+    if task["request_id"] is None:
+        return []
+    return [owl for owl in owlery.request_owls(conn, task["request_id"])
+            if owl["kind"] == "result" and owl["sender"] == task["desk"]]
+
+
 def latest_result_owl(conn, task: dict) -> Optional[dict]:
     """The newest result owl the desk posted for its own request, or None."""
-    if task["request_id"] is None:
-        return None
-    results = [owl for owl in owlery.request_owls(conn, task["request_id"])
-               if owl["kind"] == "result" and owl["sender"] == task["desk"]]
-    if not results:
-        return None
-    return max(results, key=lambda owl: (owl["created_at"], owl["id"]))
+    results = desk_results(conn, task)
+    return results[-1] if results else None
 
 
 def latest_result(conn, task: dict) -> Optional[str]:
@@ -297,7 +316,8 @@ def round_inputs(task_id: str, request_id: str) -> Optional[dict]:
 def refuse_unchanged(conn, task: dict, sha: str, handoff: Optional[str]) -> None:
     """Refuse a review whose reviewer would read exactly what the task's last verdict judged: HEAD is that round's
     commit and the desk's latest handoff is the same text. A new commit or a new handoff always gets through, and
-    so does a last round whose record is missing."""
+    so does a last round whose record is missing. Before it refuses, it finishes what every review does after its
+    verdict (settle_verdict), in case that round's review was killed before it did."""
     judged = [row for row in capacity.review_rounds(conn, task["id"]) if row["has_verdict"]]
     if not judged or judged[-1]["sha"] != sha:
         return
@@ -305,6 +325,8 @@ def refuse_unchanged(conn, task: dict, sha: str, handoff: Optional[str]) -> None
     inputs = round_inputs(task["id"], last["request_id"])
     if inputs is None or inputs["sha"] != sha or inputs["handoff_sha256"] != handoff_digest(handoff):
         return
+    # That round's review may have been killed right after its verdict was recorded: finish what it left.
+    settle_verdict(conn, task, last["reviewer"], last["verdict"], last["sha"])
     raise Unchanged(f"nothing new to review: HEAD {sha[:12]} and {task['desk']}'s latest handoff are what round"
                     f" {last['round']} already judged ({last['verdict']}), so no round was opened; a new commit or a"
                     f" new handoff from {task['desk']} opens the next one")
@@ -367,12 +389,12 @@ def _finish_reviewer_task(conn, request_id: str, reviewer_task_id: str) -> None:
 def task_review_lock(task_id: str) -> Iterator[int]:
     """One review of an author task at a time, taken without waiting before anything changes and held
     until the review ends, yielding its fd for the reviewer's process to inherit. A second review of the
-    task is refused at once."""
+    task is refused at once, and so is a review while a run of its build desk on it is going, since that run
+    holds the same lock until its process ends (run_desk.task_lock)."""
     task_id = ids.check("task", task_id)
     with contextlib.ExitStack() as stack:
-        locks_fd = stack.enter_context(safefs.opened_dir(config.OFFICE_ROOT, "locks", create=True))
         try:
-            lock_fd = stack.enter_context(safefs.held_lock(locks_fd, f"review-{task_id}.lock", blocking=False))
+            lock_fd = stack.enter_context(run_desk.task_lock(task_id))
         except safefs.Busy:
             raise FleetError(REVIEW_RUNNING) from None
         yield lock_fd
@@ -509,6 +531,9 @@ def run_review(conn, task: dict, record: dict, sha: str, holder_id: str, handoff
         if inputs is not None:
             # Before the reviewer starts: a round whose record cannot be written never runs, and stays waiting.
             record_round_inputs(task["id"], request_id, sha, inputs["handoff_sha256"])
+            if inputs.get("handoff_owl") is not None:
+                # The review loop's own round: what follows its verdict is tracked from here (see _after_verdict).
+                owl_post.write_after(task["id"], request_id, inputs["handoff_owl"], "review")
         if run_desk.over_daily_cap(conn, reviewer, now) is not None:
             run_desk.report_cap(conn, reviewer, now)
             raise run_desk.Capped(f"{reviewer} is at its fleet daily cap, so round {opened['round']} of {task['id']}"
@@ -535,14 +560,21 @@ def run_review(conn, task: dict, record: dict, sha: str, holder_id: str, handoff
                     _finish_reviewer_task(conn, request_id, reviewer_task_id)
             raise
         _finish_reviewer_task(conn, request_id, reviewer_task_id)
+    settle_verdict(conn, task, reviewer, verdict, sha)
+    return {**result, "verdict": verdict, "round": opened["round"], "request_id": request_id,
+            "superseded": [item["request_id"] for item in opened["superseded"]], "review": castle_review}
+
+
+def settle_verdict(conn, task: dict, reviewer: str, verdict: str, sha: str) -> None:
+    """What every review does once its verdict is recorded: on PASS the author's task moves to awaiting_close, and
+    a HEADMASTER verdict tells Ryan. Each is done at most once, so it runs again safely where a review killed after
+    its verdict was recorded may not have done it (refuse_unchanged, the review loop's recovery)."""
     if verdict == "PASS" and pensieve.get_task(conn, task["id"])["status"] == "active":
         pensieve.mark_awaiting_close(conn, task["id"])
     if verdict == "HEADMASTER":
         pensieve.add_event(conn, reviewer, "review.headmaster", "headmaster",
                            "a reviewer handed a decision to you; read review-latest.md in the task folder",
                            task_id=task["id"], dedupe_key=f"review:headmaster:{task['id']}:{sha}")
-    return {**result, "verdict": verdict, "round": opened["round"], "request_id": request_id,
-            "superseded": [item["request_id"] for item in opened["superseded"]], "review": castle_review}
 
 
 def review_build(conn, task_id: str) -> dict:
@@ -551,18 +583,29 @@ def review_build(conn, task_id: str) -> dict:
         return _review_build(conn, ids.check("task", task_id), lock_fd)
 
 
-def _review_build(conn, task_id: str, lock_fd: int) -> dict:
+def _review_build(conn, task_id: str, lock_fd: int, handoff_owl: Optional[str] = None) -> dict:
+    """The review of a build desk's task under its review lock (lock_fd). Its handoff is the desk's newest result
+    owl, or for the review loop the handoff owl it chose and checked under this same lock (handoff_owl), so no owl
+    that came in meanwhile can stand in for it."""
     task = pensieve.get_task(conn, task_id)
     if task["desk"] not in config.WORKTREE_DESKS:
         raise FleetError("use 'fleet review own' for your own sessions; this is for a build desk's task")
     if task["status"] != "active":
         raise FleetError("the task must be active (a passed task is already awaiting close)")
+    if _author_running(conn, task, None):
+        # Its run holds this lock until its process ends; a launch with no usage yet is checked too, for a run whose
+        # process outlived the lock (one started before runs held it).
+        raise FleetError(f"{task['desk']}'s run on this task may still be going, so nothing was reviewed; review it"
+                         " once that run has ended")
     record = gitops.find_record(worktree.castle_path(task["worktree"]))
     if record is None:
         raise FleetError("this task has no worktree with an office record")
     holder_id, _ = verify.task_md(conn, task["id"])
-    newest = latest_result_owl(conn, task)
-    handoff = None if newest is None else owl_body(conn, newest["id"])
+    newest_id = handoff_owl
+    if newest_id is None:
+        newest = latest_result_owl(conn, task)
+        newest_id = None if newest is None else newest["id"]
+    handoff = None if newest_id is None else owl_body(conn, newest_id)
     dirty = gitops.dirty(record)
     if not dirty:
         # Uncommitted work always makes a new commit. A clean worktree is refused here, before anything changes,
@@ -581,8 +624,8 @@ def _review_build(conn, task_id: str, lock_fd: int) -> dict:
     if sha == gitops.rev(record, record["base"]):
         raise FleetError("there is nothing to review: HEAD is still the base")
     result = run_review(conn, task, record, sha, holder_id, handoff is not None, lock_fd,
-                        inputs={"handoff_sha256": handoff_digest(handoff)})
-    return {**result, "handoff_owl": None if newest is None else newest["id"]}
+                        inputs={"handoff_sha256": handoff_digest(handoff), "handoff_owl": handoff_owl})
+    return {**result, "handoff_owl": newest_id}
 
 
 # The review loop
@@ -590,29 +633,29 @@ def _review_build(conn, task_id: str, lock_fd: int) -> dict:
 
 def auto_review(conn, task_id: str, now: Optional[int] = None) -> dict:
     """The review the Owl Post starts when a build desk posts a handoff (see the module notes). Never raises for
-    a refused or failed review: each ending is in the result, and what needs Ryan is an event."""
+    a refused or failed review: each ending is in the result, and what needs Ryan is an event. What followed an
+    earlier verdict of the loop and was cut off by a kill is finished first (_auto_recover)."""
     task_id = ids.check("task", task_id)
     with contextlib.ExitStack() as held:
         try:
             held.enter_context(owl_post.auto_review_lock(task_id, wait=config.AUTO_REVIEW_LOCK_WAIT_SECONDS))
         except safefs.Busy:
             return {"task_id": task_id, "outcome": "another automatic review of this task is running"}
-        return _auto_review(conn, task_id, now)
+        afters = owl_post.unfinished_afters(task_id)
+        if not afters:
+            return _auto_review(conn, task_id, now)
+        recovered = _auto_recover(conn, pensieve.get_task(conn, task_id), afters, now)
+        if recovered is None:
+            return {"task_id": task_id, "outcome": "waiting: another review of this task, or a run of its build desk"
+                                                   " on it, is going; the Owl Post tries again on its next pass"}
+        return {**_auto_review(conn, task_id, now), "recovered": recovered}
 
 
 def _auto_review(conn, task_id: str, now: Optional[int]) -> dict:
     task = pensieve.get_task(conn, task_id)
-    newest = latest_result_owl(conn, task)
-    newest_id = None if newest is None else newest["id"]
-    unfinished = owl_post.unfinished_handoffs(task_id)
-    for owl_id in unfinished:
-        if owl_id != newest_id:
-            owl_post.finish_handoff(task_id, owl_id, "superseded by a newer handoff from the same desk")
-    if newest_id not in unfinished:
+    newest = _pending_handoff(conn, task, now)
+    if newest is None:
         return {"task_id": task_id, "outcome": "no handoff of this task waits for its review"}
-    problem = owl_post.handoff_problem(conn, newest)
-    if problem is not None:
-        return _auto_finish(conn, task, newest_id, f"no review: {problem}", "routine", now)
     if not _author_run_over(conn, task, now, wait=True):
         return _auto_wait(conn, task, newest, f"{task['desk']}'s run on it is still going", now)
     reviewer = config.REVIEWER_FOR_FAMILY[pensieve.get_desk(conn, task["desk"])["family"]]
@@ -626,13 +669,22 @@ def _auto_review(conn, task_id: str, now: Optional[int]) -> dict:
         # Again under the lock, which a manual fleet build also takes: no run of the author may have begun since.
         if not _author_run_over(conn, task, now, wait=False):
             return _auto_wait(conn, task, newest, f"{task['desk']}'s run on it is still going", now)
+        # Chosen and checked again under the lock, before anything is superseded: a handoff that came in during the
+        # wait is the newest now, and the review reads only the one chosen here.
+        newest = _pending_handoff(conn, task, now)
+        if newest is None:
+            return {"task_id": task_id, "outcome": "no handoff of this task waits for its review"}
+        newest_id = newest["id"]
+        for owl_id in owl_post.unfinished_handoffs(task_id):
+            if owl_id != newest_id:
+                owl_post.finish_handoff(task_id, owl_id, "superseded by a newer handoff from the same desk")
         tried = owl_post.take_try(task_id, newest_id)
         if tried is None:
             return _auto_finish(conn, task, newest_id, f"the automatic review stopped: it started"
                                 f" {config.AUTO_REVIEW_MAX_TRIES} times and each try ended without finishing (killed,"
                                 f" or the Mac stopped); run fleet review {task_id}", "headmaster", now)
         try:
-            result = _review_build(conn, task_id, lock_fd)
+            result = _review_build(conn, task_id, lock_fd, handoff_owl=newest_id)
         except Unchanged as exc:
             return _auto_finish(conn, task, newest_id, str(exc), "routine", now)
         except (FleetError, StoreError) as exc:
@@ -644,12 +696,110 @@ def _auto_review(conn, task_id: str, now: Optional[int]) -> dict:
         if result["queued"] is not None:
             owl_post.give_back_try(task_id, newest_id, tried)
             return {**_auto_wait(conn, task, newest, f"{reviewer} became busy", now), "review": result}
-        # Finished before anything starts after the verdict, so no later try reviews a fix round mid-write.
+        # Finished before anything starts after the verdict, so no later try reviews a fix round mid-write. What
+        # follows is tracked in the round's after record, which run_review wrote before the reviewer started.
         owl_post.finish_handoff(task_id, newest_id, f"round {result['round']} at {result['sha'][:12]} recorded"
                                 f" {result['verdict']}")
-        after = _after_verdict(conn, task, result, now, checked_owl=newest_id)
+        after = _after_verdict(conn, task, result, lock_fd, now, checked_owl=newest_id)
     return {"task_id": task_id, "owl_id": newest_id, "outcome": f"reviewed: {result['verdict']}", "next": after,
             "review": result}
+
+
+def _pending_handoff(conn, task: dict, now: Optional[int]) -> Optional[dict]:
+    """The handoff the review loop reviews next: the newest one the Owl Post gave it that it has not finished with
+    and that still passes owl_post.handoff_problem, newest by the order the store keeps the request's owls
+    (desk_results). One newer than it that no longer passes is finished, saying why, so a result that is no handoff,
+    or a handoff that fails its checks, never stands in for one that passes or gets it superseded. Nothing older
+    than the one chosen is touched here."""
+    unfinished = owl_post.unfinished_handoffs(task["id"])
+    results = desk_results(conn, task)
+    for owl in reversed([owl for owl in results if owl["id"] in unfinished]):
+        problem = owl_post.handoff_problem(conn, owl)
+        if problem is None:
+            return owl
+        _auto_finish(conn, task, owl["id"], f"no review: {problem}", "routine", now)
+    known = {owl["id"] for owl in results}
+    for owl_id in unfinished:
+        if owl_id not in known:
+            _auto_finish(conn, task, owl_id, "no review: the handoff is not a result of this task's request",
+                         "routine", now)
+    return None
+
+
+def _auto_recover(conn, task: dict, afters: list, now: Optional[int]) -> Optional[list]:
+    """Finish what followed a verdict of the loop's own rounds that a kill cut off (afters, from
+    owl_post.unfinished_afters), under the task's review lock, or None while another review or a build run holds it.
+    It never opens a round. A step that had not begun starts now, once; one that had begun may or may not have
+    happened, so it never runs again by itself and Ryan hears so, once (_interrupted)."""
+    with contextlib.ExitStack() as held:
+        try:
+            lock_fd = held.enter_context(task_review_lock(task["id"]))
+        except FleetError:
+            return None
+        rows = capacity.review_rounds(conn, task["id"])
+        rounds = {row["request_id"]: row for row in rows}
+        order = {row["request_id"]: index for index, row in enumerate(rows)}
+        # In the order the rounds were opened, never by their random ids.
+        afters = sorted(afters, key=lambda record: order.get(record["request_id"], len(order)))
+        return [{"request_id": record["request_id"],
+                 "outcome": _recover_after(conn, task, record, rounds.get(record["request_id"]), lock_fd, now)}
+                for record in afters]
+
+
+def _recover_after(conn, task: dict, record: dict, row: Optional[dict], lock_fd: int, now: Optional[int]) -> str:
+    """One round's unfinished after record (see _auto_recover). row is the round, from capacity.review_rounds."""
+    task_id, request_id, owl_id = task["id"], record["request_id"], record["owl_id"]
+    if record["state"] == "review" and (row is None or not row["has_verdict"]):
+        # Its review ended with no verdict (no live review holds this lock), so nothing follows it. Its handoff, if
+        # still unfinished, gets its next try as any other.
+        owl_post.write_after(task_id, request_id, owl_id, "done")
+        return "its round recorded no verdict, so nothing follows it"
+    if row is not None and row["has_verdict"]:
+        if owl_id is not None and owl_id in owl_post.unfinished_handoffs(task_id):
+            # Its verdict is in, so the handoff is never reviewed again.
+            owl_post.finish_handoff(task_id, owl_id, f"round {row['round']} at {row['sha'][:12]} recorded"
+                                    f" {row['verdict']}")
+        settle_verdict(conn, task, row["reviewer"], row["verdict"], row["sha"])
+    if record["state"] == "review":
+        # Nothing after the verdict had begun, so it starts now, once.
+        result = {"verdict": row["verdict"], "round": row["round"], "sha": row["sha"], "request_id": request_id,
+                  "handoff_owl": owl_id}
+        return _after_verdict(conn, pensieve.get_task(conn, task_id), result, lock_fd, now, checked_owl=owl_id)
+    return _interrupted(conn, task, record, row, now)
+
+
+def _interrupted(conn, task: dict, record: dict, row: Optional[dict], now: Optional[int]) -> str:
+    """Ryan hears, once, that a step after a verdict had begun when the loop was cut off, so it may or may not have
+    happened, and what to look at. It never runs again by itself. A push or PR whose own ending was already told
+    (push:draft-pr or push:auto-failed) is left as told."""
+    task_id, desk = task["id"], task["desk"]
+    step = record["step"] if row is not None and row["has_verdict"] else None
+    sha = None if step is None else row["sha"]
+    told = step in ("push", "pr") and any(pensieve.events_with_key_prefix(conn, f"{kind}:{task_id}:{sha}")
+                                          for kind in ("push:draft-pr", "push:auto-failed"))
+    if step == "fix-round":
+        text = (f"round {row['round']} of task {task_id} recorded CHANGES, and the review loop was stopped while it"
+                f" started the fix round, so {desk} may or may not have started on it; nothing was started again:"
+                f" fleet build {task_id} starts it if no run of {desk} on it is going")
+    elif step == "push":
+        text = (f"task {task_id} passed review at {sha[:12]}, and the review loop was stopped while it pushed it, so"
+                " it may or may not be pushed, and no draft PR was opened; nothing was tried again: look at the"
+                f" task's branch, and fleet push {task_id} pushes it by hand")
+    elif step == "pr":
+        text = (f"task {task_id} passed review and {sha[:12]} is pushed, but the review loop was stopped while it"
+                " opened the draft PR, so it may or may not be open; nothing was tried again: look at the repo's"
+                " pull requests, and open it by hand if it is not there")
+    else:
+        text = (f"the review loop was stopped part way through what follows a review round of task {task_id}, and"
+                " its record of where it was cannot be read, so nothing was tried again: look at the task's"
+                " worktree, branch and pull requests")
+    if not told:
+        pensieve.add_event(conn, desk, "review.interrupted", "headmaster", common.one_line(text, 480),
+                           task_id=task_id, dedupe_key=f"review:interrupted:{record['request_id']}", now=now)
+    owl_post.write_after(task_id, record["request_id"], record["owl_id"], "done")
+    if told:
+        return "its ending was already told"
+    return f"interrupted ({step or 'unknown step'}): Ryan heard it may or may not have happened"
 
 
 def _auto_finish(conn, task: dict, owl_id: str, text: str, verdict: str, now: Optional[int]) -> dict:
@@ -701,50 +851,63 @@ def _reviewer_busy(conn, reviewer: str, now: Optional[int]) -> bool:
     return len(going) >= run_desk.run_slots(reviewer) or pensieve.blocking_task(conn, reviewer) is not None
 
 
-def _after_verdict(conn, task: dict, result: dict, now: Optional[int], checked_owl: Optional[str] = None) -> str:
-    """What the review loop starts after an automatic review's verdict, under the task's review lock. checked_owl
-    is the handoff the loop checked before the review; only a review that read that same handoff can push."""
-    verdict, round_no, task_id = result["verdict"], result["round"], task["id"]
+def _after_verdict(conn, task: dict, result: dict, lock_fd: int, now: Optional[int],
+                   checked_owl: Optional[str] = None) -> str:
+    """What the review loop starts after its own round's verdict, under the task's review lock (lock_fd), which a
+    fix round's run is handed. The round's after record says acting, with the step, before a fix round, a push or a
+    PR begins, and done once all of it has ended and Ryan heard what he must, so a kill at any point leaves the next
+    pass to finish it (_recover_after) and none of them ever starts twice. checked_owl is the handoff the loop
+    checked before the review; only a review that read that same handoff can push."""
+    verdict, round_no, task_id, request_id = result["verdict"], result["round"], task["id"], result["request_id"]
+    owl_id = result.get("handoff_owl")
     if verdict == "HEADMASTER":
-        return "nothing more starts: the reviewer handed the decision to Ryan"
-    if verdict == "PASS":
-        return _after_pass(conn, task, result, now, checked_owl)
-    if capacity.needs_allowance(conn, task_id, config.REVIEW_ROUND_CAP):
+        outcome = "nothing more starts: the reviewer handed the decision to Ryan"
+    elif verdict == "PASS":
+        outcome = _after_pass(conn, task, result, now, checked_owl)
+    elif capacity.needs_allowance(conn, task_id, config.REVIEW_ROUND_CAP):
         pensieve.add_event(conn, task["desk"], "review.loop-stopped", "headmaster",
                            f"task {task_id} has used its {config.REVIEW_ROUND_CAP} review rounds and round"
                            f" {round_no} recorded {verdict}, so the review loop stopped and no fix round started;"
                            f" castle task allow-round {task_id} allows one more, then fleet build {task_id} starts it",
                            task_id=task_id, dedupe_key=f"review:loop-stopped:{task_id}:{round_no}", now=now)
-        return "stopped at the review round cap"
-    try:
-        started = worktree.build(conn, task_id)["desk"]
-    except (FleetError, StoreError, OSError) as exc:
-        started = f"it did not start ({common.one_line(exc, 200)})"
-    if not started.startswith(f"started {task['desk']} "):
-        pensieve.add_event(conn, task["desk"], "review.fix-round", "headmaster",
-                           common.one_line(pensieve.scrub(f"round {round_no} of task {task_id} recorded {verdict}, but"
-                                                          f" its fix round did not start: {started}; fleet build"
-                                                          f" {task_id} starts it"), 480),
-                           task_id=task_id, dedupe_key=f"review:fix-round:{task_id}:{round_no}", now=now)
-    return started
+        outcome = "stopped at the review round cap"
+    else:
+        owl_post.write_after(task_id, request_id, owl_id, "acting", "fix-round")
+        try:
+            outcome = worktree.build(conn, task_id, lock_fd)["desk"]
+        except (FleetError, StoreError, OSError) as exc:
+            outcome = f"it did not start ({common.one_line(exc, 200)})"
+        if not outcome.startswith(f"started {task['desk']} "):
+            pensieve.add_event(conn, task["desk"], "review.fix-round", "headmaster",
+                               common.one_line(pensieve.scrub(f"round {round_no} of task {task_id} recorded {verdict},"
+                                                              f" but its fix round did not start: {outcome}; fleet"
+                                                              f" build {task_id} starts it"), 480),
+                               task_id=task_id, dedupe_key=f"review:fix-round:{task_id}:{round_no}", now=now)
+    owl_post.write_after(task_id, request_id, owl_id, "done")
+    return outcome
 
 
 def _after_pass(conn, task: dict, result: dict, now: Optional[int], checked_owl: Optional[str] = None) -> str:
     """A PASS starts no build or review. Without Ryan's opt-in he hears the task is ready for his push. With it, the
     reviewed commit is pushed and a draft PR opened, once, and he hears its URL or why it stopped. Either way it is
-    one headmaster event. A review that read a newer handoff than the one the loop checked never pushes."""
+    one headmaster event. A review that read a newer handoff than the one the loop checked never pushes. The push
+    and the PR are each recorded as begun in the round's after record before they start (see _after_verdict)."""
     task_id, sha = task["id"], result["sha"]
     if not push.auto_draft_pr_on() or checked_owl is None or result.get("handoff_owl") != checked_owl:
         pensieve.add_event(conn, task["desk"], "review.ready-for-push", "headmaster",
                            f"task {task_id} passed review at {sha[:12]} and is ready for push: fleet push {task_id}",
                            task_id=task_id, dedupe_key=f"review:ready:{task_id}:{sha}", now=now)
         return "ready for push"
+
+    def begun(step: str) -> None:
+        owl_post.write_after(task_id, result["request_id"], checked_owl, "acting", step)
+
     try:
         if result.get("handoff_owl") is None:
             raise FleetError("the review had no handoff to take the PR text from")
         handoff = owl_body(conn, result["handoff_owl"])
         title, _ = commit_message(handoff, check_words=False)
-        pushed = push.push_draft_pr(conn, task_id, sha, title, pr_body(handoff))
+        pushed = push.push_draft_pr(conn, task_id, sha, title, pr_body(handoff), on_step=begun)
     except (FleetError, StoreError, OSError) as exc:
         reason = common.one_line(pensieve.scrub(str(exc) if not isinstance(exc, OSError) else type(exc).__name__),
                                  300)

@@ -702,7 +702,7 @@ class SlotFolderTests(RunDeskCase):
             (user_temp / name).mkdir(parents=True)
             self.write_file(user_temp / name / "stale.txt", "from an earlier run\n")
         self.enable("harry")
-        owl_id, _ = self.request("harry")
+        owl_id, task_id = self.request("harry")
         seen = {}
 
         def desk(argv, **kwargs):
@@ -717,7 +717,8 @@ class SlotFolderTests(RunDeskCase):
         self.assertEqual(result["exit_code"], 0)
         self.assertEqual(seen, {"cwd": f"{self.castle}/desks/harry/work.slot1",
                                 "tmpdir": f"{user_temp}/hogwarts-harry.slot1",
-                                "locks": sorted(["desk-harry.slot1.lock", config.UPDATE_LOCK])})
+                                "locks": sorted(["desk-harry.slot1.lock", config.UPDATE_LOCK,
+                                                 run_desk.task_lock_name(task_id)])})
         self.assertEqual(os.listdir(user_temp / "hogwarts-harry.slot1"), [])
         self.assertEqual(os.listdir(user_temp / "hogwarts-harry"), ["stale.txt"])
 

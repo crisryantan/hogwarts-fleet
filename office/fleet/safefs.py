@@ -278,7 +278,8 @@ def held_lock(dir_fd: int, name: str, blocking: bool, timeout: Optional[float] =
               shared: bool = False) -> Iterator[int]:
     """An exclusive lock, or a shared one that only an exclusive holder excludes, yielding its fd. blocking
     with a timeout waits at most that long, then raises Busy. A process that inherits the fd keeps the lock
-    held after this one dies without unlocking it."""
+    held after this one dies without unlocking it. One handed over (hand_over) is only closed here, never
+    unlocked, so the process that took it keeps it."""
     check_component(name)
     fd = os.open(name, LOCK_FLAGS, 0o600, dir_fd=dir_fd)
     try:
@@ -290,6 +291,35 @@ def held_lock(dir_fd: int, name: str, blocking: bool, timeout: Optional[float] =
         try:
             yield fd
         finally:
-            fcntl.flock(fd, fcntl.LOCK_UN)
+            if not os.get_inheritable(fd):  # see hand_over
+                fcntl.flock(fd, fcntl.LOCK_UN)
     finally:
         os.close(fd)
+
+
+def hand_over(fd: int) -> None:
+    """Leave a lock that held_lock holds to the process it was just passed to (Popen pass_fds), which shares it. The
+    fd is marked inheritable, which only this call does to a lock fd, so the held_lock block that took it only
+    closes its own copy as it ends: the lock is never let go of in between, and stays with that process."""
+    os.set_inheritable(fd, True)
+
+
+@contextlib.contextmanager
+def handed_lock(dir_fd: int, name: str, fd: int) -> Iterator[int]:
+    """A lock this process was handed (see hand_over) as fd: fd must be the lock file name in dir_fd, a regular file
+    of the current user's, and this process must hold it, which taking it again here without waiting confirms; Busy
+    when another process holds it instead. Unlocked as the block ends, like held_lock."""
+    check_component(name)
+    try:
+        st = os.fstat(fd)
+    except (OSError, TypeError, OverflowError):
+        raise Unsafe("the handed lock is not an open file") from None
+    named = lstat(dir_fd, name)
+    if named is None or not stat.S_ISREG(st.st_mode) or not os.path.samestat(st, named):
+        raise Unsafe("the handed fd is not that lock")
+    _check_owned(st, "lock")
+    _take_lock(fd, False, None)
+    try:
+        yield fd
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)

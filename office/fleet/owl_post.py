@@ -29,6 +29,8 @@ For each regular *.json file in /Users/crisryantan/hogwarts/desks/<sender>/outbo
 After the outboxes, each pass starts again the automatic review of every handoff the review loop took and has
 not finished with, when no automatic review of its task holds that task's loop lock: one killed part way, or
 one that is waiting for its author's run to end, its reviewer to be free or another review of the task to end.
+It does the same for a task with a round whose after record is not done (write_after): a review killed after its
+verdict, whose fix round, push or PR the review loop then finishes or reports, never twice.
 The review counts its own tries and gives up, telling Ryan, after config.AUTO_REVIEW_MAX_TRIES of them.
 
 A rerun after a crash at any step stores nothing twice. File content is only parsed
@@ -78,6 +80,14 @@ HANDOFF_HEADER = re.compile(r"HANDOFF (tk_[0-9a-f]{16})(?:\s.*)?")
 # auto-<owl>.pending once the Owl Post hands the handoff to the review loop, auto-<owl>.try<n> each time an
 # automatic review starts work on it, and auto-<owl>.done once a review is finished with it, whatever came of it.
 HANDOFF_RECORD = re.compile(r"auto-(owl_[0-9a-f]{16})\.(pending|done|try[1-9])")
+# And after-<request>.json for each round the review loop opens: where it is with what follows that round's verdict.
+# "review" from before the reviewer starts, "acting" with the step (fix-round, push or pr) before anything that reaches
+# outside the office starts, and "done" once it has ended and said what it must. Written whole, so a reader sees the
+# old record or the new one.
+AFTER_RECORD = re.compile(r"after-(rq_[0-9a-f]{16})\.json")
+AFTER_STATES = ("review", "acting", "done")
+AFTER_STEPS = ("fix-round", "push", "pr")
+AFTER_MAX_BYTES = 1024
 REVIEW_STARTED = "review started"
 
 
@@ -371,6 +381,54 @@ def give_back_try(task_id: str, owl_id: str, number: int) -> None:
         os.unlink(f"auto-{ids.check('owl', owl_id)}.try{int(number)}", dir_fd=fd)
 
 
+def write_after(task_id: str, request_id: str, owl_id: Optional[str], state: str, step: Optional[str] = None) -> None:
+    """Record where the review loop is with what follows the verdict of its round request_id, opened for the handoff
+    owl_id (None only when an unreadable record is finished). Written through a temp file and a rename."""
+    acting = state == "acting"
+    if state not in AFTER_STATES or (step in AFTER_STEPS) != acting or (not acting and step is not None):
+        raise FleetError("an after record needs a known state, and a known step only while acting")
+    data = {"request_id": ids.check("request", request_id), "owl_id": ids.optional("owl", owl_id), "state": state,
+            "step": step}
+    raw = (json.dumps(data, ensure_ascii=True, sort_keys=True) + "\n").encode("ascii")
+    name = f"after-{data['request_id']}.json"
+    with _handoff_dir(task_id, create=True) as fd:
+        temp = f".{name}.{secrets.token_hex(4)}.tmp"
+        safefs.write_new(fd, temp, raw)
+        safefs.move(fd, temp, fd, name)
+
+
+def unfinished_afters(task_id: str) -> list:
+    """The task's after records that are not done, each {request_id, owl_id, state, step}. One that cannot be read
+    whole comes back with owl_id, state and step None, so it is never passed over: it is finished as uncertain."""
+    try:
+        with _handoff_dir(task_id) as fd:
+            found = []
+            for name in sorted(os.listdir(fd)):
+                match = AFTER_RECORD.fullmatch(name)
+                if match is not None:
+                    record = _read_after(fd, name, match.group(1))
+                    if record["state"] != "done":
+                        found.append(record)
+    except Missing:
+        return []
+    return found
+
+
+def _read_after(fd: int, name: str, request_id: str) -> dict:
+    unknown = {"request_id": request_id, "owl_id": None, "state": None, "step": None}
+    try:
+        data = common.strict_json(safefs.read_regular(fd, name, AFTER_MAX_BYTES, "after record"))
+    except (FleetError, UnicodeDecodeError, ValueError):
+        return unknown
+    if not isinstance(data, dict) or set(data) != set(unknown) or data["request_id"] != request_id \
+            or data["state"] not in AFTER_STATES or (data["state"] == "acting") != (data["step"] in AFTER_STEPS) \
+            or (data["state"] != "acting" and data["step"] is not None) \
+            or not (data["owl_id"] is None or (isinstance(data["owl_id"], str)
+                                               and ids.PATTERNS["owl"].fullmatch(data["owl_id"]))):
+        return unknown
+    return data
+
+
 @contextlib.contextmanager
 def auto_review_lock(task_id: str, wait: float = 0) -> Iterator[None]:
     """The task's loop lock, held by an automatic review of the task for its whole life, so two never run at once
@@ -391,14 +449,15 @@ def auto_review_running(task_id: str) -> bool:
         return True
 
 
-def _spawn_review(conn, desk: str, task_id: str, owl_id: str, now: Optional[int]) -> str:
+def _spawn_review(conn, desk: str, task_id: str, key: str, now: Optional[int]) -> str:
+    """Start the task's automatic review; key (a handoff owl or a round's request) names its event if it cannot."""
     try:
         run_desk.spawn_review(task_id)
     except (FleetError, OSError):
         pensieve.add_event(conn, desk, "owlpost.review-failed", "headmaster",
                            f"the Owl Post could not start the automatic review of task {task_id}; each pass tries"
                            f" again, and fleet review {task_id} runs it by hand",
-                           task_id=task_id, dedupe_key=f"owlpost:review-failed:{owl_id}", now=now)
+                           task_id=task_id, dedupe_key=f"owlpost:review-failed:{key}", now=now)
         return "the review could not start"
     return REVIEW_STARTED
 
@@ -429,19 +488,21 @@ def _start_review(conn, owl: dict, newly_delivered: bool, now: Optional[int]) ->
 
 def resume_reviews(conn, now: Optional[int] = None, started: tuple = ()) -> list:
     """Start again the automatic review of each open build task that has a handoff the review loop took and is not
-    finished with, when no automatic review of that task holds its loop lock. started names the tasks whose review
-    this pass has just started, which may not hold their lock yet."""
+    finished with, or a round whose after record is not done (what follows its verdict, cut off by a kill), when no
+    automatic review of that task holds its loop lock. started names the tasks whose review this pass has just
+    started, which may not hold their lock yet."""
     resumed = []
     for desk in config.WORKTREE_DESKS:
         for task in pensieve.list_tasks(conn, desk=desk, open_only=True):
             if task["id"] in started:
                 continue
             try:
-                unfinished = unfinished_handoffs(task["id"])
-                if not unfinished or auto_review_running(task["id"]):
+                keys = unfinished_handoffs(task["id"]) + [record["request_id"]
+                                                          for record in unfinished_afters(task["id"])]
+                if not keys or auto_review_running(task["id"]):
                     continue
                 resumed.append({"task_id": task["id"],
-                                "review": _spawn_review(conn, desk, task["id"], unfinished[-1], now)})
+                                "review": _spawn_review(conn, desk, task["id"], min(keys), now)})
             except (FleetError, StoreError, OSError) as exc:
                 resumed.append({"task_id": task["id"],
                                 "error": _reason(exc) if not isinstance(exc, OSError) else type(exc).__name__})

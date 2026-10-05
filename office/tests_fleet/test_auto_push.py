@@ -8,16 +8,18 @@ from __future__ import annotations
 import os
 from unittest import mock
 
-from fleet import config, gitops, push, review
+from fleet import config, gitops, owl_post, push, review
 from fleet.safefs import FleetError
 from tests_fleet.test_push import GateCase
-from tests_fleet.test_review_chain import ChainCase
+from tests_fleet.test_review_chain import ChainCase, Killed
 from tests_fleet.test_review_loop import HANDOFF, REPO_ID
 
 REAL_RUN_GH_PR = gitops.run_gh_pr  # captured before any test replaces it
 PR_URL = "https://github.com/acme/web-app/pull/7"
 TOKEN = "gh" + "p_" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8"  # shaped like a GitHub token, built so no scanner trips
 EMAIL = "a.person" + "@" + "example.invalid"
+# A password whose quoted value holds scrub's own [secret] mark, so scrubbing it leaves as many marks as it found.
+HIDDEN = "pass" + 'word="hunter22 [secret]"'
 
 
 class AutoPushCase(ChainCase, GateCase):
@@ -110,8 +112,8 @@ class CheckedHandoffTests(AutoPushCase):
         self.opt_in()
         real = review._review_build
 
-        def read_another(conn, task_id, lock_fd):
-            return {**real(conn, task_id, lock_fd), "handoff_owl": "owl_" + "0" * 16}
+        def read_another(conn, task_id, lock_fd, handoff_owl=None):
+            return {**real(conn, task_id, lock_fd, handoff_owl), "handoff_owl": "owl_" + "0" * 16}
 
         with mock.patch.object(review, "_review_build", side_effect=read_another):
             ran = self.passed()
@@ -249,4 +251,152 @@ class FailureStopsAndTellsRyanTests(AutoPushCase):
         self.gh_answer = (0, "https://github.com/someone/else/pull/3\n", "")
         self.passed()
         self.assertIn("gh named no PR of this repo", self.failed_event()["summary"])
+        self.assertEqual(len(self.gh_calls), 1)
+
+
+class SensitiveTextTests(AutoPushCase):
+    def test_a_mark_already_in_the_text_never_hides_a_credential(self):
+        for text in (HIDDEN, "pass" + "word=[secret]", f"[email] {EMAIL}", f"[token] {TOKEN}",
+                     f"https://[credentials]@x:{TOKEN}@github.com/acme/web-app"):
+            with self.subTest(text=text[:12]):
+                self.assertIsNotNone(push.sensitive_mark(text))
+        self.assertEqual(push.sensitive_mark(HIDDEN), "secret")
+        self.assertIsNone(push.sensitive_mark("[secret] and [email] are only words here, at 1.2.3.4"))
+
+    def test_failure_stops_and_tells_ryan_when_the_pr_text_hides_a_credential_behind_a_mark(self):
+        self.opt_in()
+        self.passed(body=HANDOFF.format(task_id=self.task["id"]).replace("Adds the widget.",
+                                                                          f"Adds the widget. {HIDDEN}"))
+        self.assertIn("the PR text holds what looks like a credential or personal data (secret)",
+                      self.failed_event()["summary"])
+        self.assert_nothing_pushed()
+
+    def test_failure_stops_and_tells_ryan_when_a_commit_message_hides_a_credential_behind_a_mark(self):
+        self.opt_in()
+        self.passed(body=HANDOFF.format(task_id=self.task["id"]).replace("It holds the widget.",
+                                                                          f"It holds the widget. {HIDDEN}"))
+        self.assertIn("a commit message holds what looks like a credential or personal data (secret)",
+                      self.failed_event()["summary"])
+        self.assert_nothing_pushed()
+
+    failed_event = FailureStopsAndTellsRyanTests.failed_event
+
+
+class WholeOutputTests(AutoPushCase):
+    """Every scan reads all that git or gh printed, or refuses: nothing past a cut is ever passed unread."""
+
+    def committed_with_pass(self, message: str, text: str = "more\n") -> str:
+        """A commit on top of a passed one, its message and its file as given, with a pass of its own."""
+        self.passed()
+        self.write_file(self.wt / "more.txt", text)
+        self.git("add", "more.txt", cwd=self.wt)
+        self.git("commit", "-q", "-m", message, cwd=self.wt)
+        sha = self.git("rev-parse", "HEAD", cwd=self.wt)
+        self.grant_pass(sha)
+        return sha
+
+    def test_every_commit_message_is_scanned_whole_for_a_credential(self):
+        sha = self.committed_with_pass("More of it\n\n" + "A line of padding.\n" * 40 + f"Ask {EMAIL}.")
+        self.opt_in()
+        with mock.patch.object(gitops, "OUTPUT_MAX_CHARS", 200), \
+                self.assertRaisesRegex(FleetError, r"a commit message holds .* \(email\)"):
+            push.push_draft_pr(self.conn, self.task["id"], sha, "Add the widget file", "Adds the widget.\n")
+        self.assert_nothing_pushed()
+
+    def test_every_commit_message_and_added_line_is_scanned_whole_for_a_fleet_word(self):
+        sha = self.committed_with_pass("More of it\n\n" + "A line of padding.\n" * 40 + "Ask hogwarts.")
+        with mock.patch.object(gitops, "OUTPUT_MAX_CHARS", 200), \
+                self.assertRaisesRegex(FleetError, r"a commit message contains a fleet word \(hogwarts\)"):
+            push.check(self.conn, self.task["id"])
+        self.git("commit", "-q", "--amend", "-m", "More of it", cwd=self.wt)
+        self.write_file(self.wt / "more.txt", "a line of padding\n" * 40 + "the hogwarts line\n")
+        self.git("commit", "-q", "-a", "-m", "Still more", cwd=self.wt)
+        self.grant_pass(self.git("rev-parse", "HEAD", cwd=self.wt))
+        with mock.patch.object(gitops, "OUTPUT_MAX_CHARS", 200), \
+                self.assertRaisesRegex(FleetError, r"added lines contain fleet words: more.txt:41 \(hogwarts\)"):
+            push.check(self.conn, self.task["id"])
+        self.assertEqual(self.remote(), "")
+
+    def test_output_too_long_to_scan_whole_is_refused(self):
+        sha = self.committed_with_pass("More of it\n\n" + "A line of padding.\n" * 40)
+        self.opt_in()
+        with mock.patch.object(gitops, "SCAN_MAX_CHARS", 200), \
+                self.assertRaisesRegex(FleetError, "too much to check whole"):
+            push.push_draft_pr(self.conn, self.task["id"], sha, "Add the widget file", "Adds the widget.\n")
+        self.assert_nothing_pushed()
+
+    def test_gh_output_that_may_have_been_cut_is_never_read(self):
+        def cut(last: str) -> str:
+            """Text as long as run_gh_pr keeps, so it may have been cut, ending in last."""
+            return "x" * (gitops.OUTPUT_MAX_CHARS - len(last) - 1) + "\n" + last
+
+        for answer in ((0, cut(PR_URL), ""), (1, "", cut(f"last {TOKEN[:12]}"))):
+            with self.subTest(code=answer[0]):
+                self.gh_answer = answer
+                with self.assertRaisesRegex(FleetError, "printed more than the fleet reads") as caught:
+                    gitops.open_draft_pr(REPO_ID, "fix/widget", "main", "Add the widget file", "Adds it.\n")
+                self.assertNotIn(PR_URL, str(caught.exception))
+                self.assertNotIn(TOKEN[:12], str(caught.exception))
+
+
+class InterruptedPushTests(AutoPushCase):
+    """A push or a PR the loop began is never begun again after a kill: Ryan hears once that it may or may not have
+    happened. One the loop had not begun runs on the next pass, once."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.opt_in()
+        self.spawned_reviews.side_effect = None  # the first review is run, and killed, by each test
+        self.post(1, "widget")
+
+    def interrupted_event(self) -> dict:
+        [event] = self.new_events()
+        self.assertEqual(event["kind"], "review.interrupted")
+        return event
+
+    def test_killed_while_it_pushed_the_push_is_never_repeated_and_ryan_hears_once(self):
+        self.killed_review("PASS", push, "_push_exact")
+        with mock.patch.object(push, "_push_exact", side_effect=AssertionError("pushed again")):
+            self.next_pass()
+            self.next_pass()
+        summary = self.interrupted_event()["summary"]
+        self.assertIn("it may or may not be pushed, and no draft PR was opened", summary)
+        self.assertIn(f"fleet push {self.task['id']} pushes it by hand", summary)
+        self.assert_nothing_pushed()
+
+    def test_killed_while_it_opened_the_pr_the_pr_is_never_repeated_and_ryan_hears_once(self):
+        self.killed_review("PASS", gitops, "run_gh_pr")
+        sha = self.git("rev-parse", "HEAD", cwd=self.wt)
+        with mock.patch.object(gitops, "run_gh_pr", side_effect=AssertionError("gh ran again")), \
+                mock.patch.object(push, "_push_exact", side_effect=AssertionError("pushed again")):
+            self.next_pass()
+            self.next_pass()
+        summary = self.interrupted_event()["summary"]
+        self.assertIn(f"{sha[:12]} is pushed, but the review loop was stopped while it opened the draft PR", summary)
+        self.assertEqual(self.remote(), f"refs/heads/fix/widget {sha}")
+
+    def test_killed_before_the_push_began_it_runs_on_the_next_pass_once(self):
+        self.killed_review("PASS", owl_post, "finish_handoff")
+        self.assert_nothing_pushed()
+        self.next_pass()
+        self.next_pass()
+        [event] = self.new_events()
+        self.assertEqual(event["kind"], "push.draft-pr")
+        self.assertEqual(len(self.gh_calls), 1)
+        self.assertEqual(self.remote(), f"refs/heads/fix/widget {self.git('rev-parse', 'HEAD', cwd=self.wt)}")
+
+    def test_killed_after_the_pr_was_told_nothing_more_is_said(self):
+        real = owl_post.write_after
+
+        def write_after(task_id, request_id, owl_id, state, step=None):
+            if state == "done":
+                raise Killed("killed")
+            return real(task_id, request_id, owl_id, state, step)
+
+        with self.fake_reviewer("PASS"), mock.patch.object(owl_post, "write_after", side_effect=write_after), \
+                self.assertRaises(Killed):
+            review.auto_review(self.conn, self.task["id"])
+        self.next_pass()
+        self.assertEqual([event["kind"] for event in self.new_events()], ["push.draft-pr"])
+        self.assertEqual(owl_post.unfinished_afters(self.task["id"]), [])
         self.assertEqual(len(self.gh_calls), 1)

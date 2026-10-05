@@ -371,8 +371,8 @@ class BuildDeskTests(ManyCase):
         self.assertEqual(sorted(task["id"] for task in pensieve.list_tasks(self.conn, desk="harry", status="active")),
                          sorted([first["id"], second["id"]]))
         self.assertNotEqual(created["worktree"], created_two["worktree"])
-        with mock.patch.object(run_desk, "spawn") as again:
-            self.assertIn("started harry", worktree.build(self.conn, first["id"])["desk"])
+        with mock.patch.object(run_desk, "spawn") as again, run_desk.task_lock(first["id"]) as lock_fd:
+            self.assertIn("started harry", worktree.build(self.conn, first["id"], lock_fd)["desk"])
         again.assert_called_once()
 
     def test_a_second_open_build_task_under_one_task_md_is_refused_before_any_worktree(self):

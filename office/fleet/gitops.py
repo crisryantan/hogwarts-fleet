@@ -59,6 +59,9 @@ HARDENING = (
     "-c", "core.quotePath=true",  # unusual path names come back escaped, one per line
 )
 OUTPUT_MAX_CHARS = 200_000
+# A scan (git(..., whole=True)) reads every character git printed, up to this many, and refuses more rather than
+# check only part of it.
+SCAN_MAX_CHARS = 20_000_000
 CLEAN_MAX_PATHS = 200
 CLEAN_MAX_CHARS = 50_000
 
@@ -182,17 +185,20 @@ TRUE_HISTORY_ENV = {"GIT_NO_REPLACE_OBJECTS": "1", "GIT_GRAFT_FILE": "/dev/null/
 
 
 def git(args: list, git_dir: Optional[str], work_tree: Optional[str] = None, check: bool = True,
-        timeout: Optional[int] = None, folder: Optional[str] = None) -> str:
-    """Run one git command with the hardening flags. Returns stdout. Never uses a shell."""
-    code, out, err = _run(args, git_dir, work_tree, timeout, folder)
+        timeout: Optional[int] = None, folder: Optional[str] = None, whole: bool = False) -> str:
+    """Run one git command with the hardening flags. Returns stdout, cut at OUTPUT_MAX_CHARS. Never uses a shell.
+    whole is for output that is checked, such as the commit messages and the diff a push scans: all of stdout comes
+    back, and more than SCAN_MAX_CHARS is refused, so nothing past a cut is ever passed unread."""
+    code, out, err = _run(args, git_dir, work_tree, timeout, folder, whole=whole)
     if check and code != 0:
         raise FleetError(f"git {args[0]} failed: {common.one_line(err, 300)}")
     return out
 
 
 def _run(args: list, git_dir: Optional[str], work_tree: Optional[str], timeout: Optional[int],
-         folder: Optional[str], true_history: bool = False) -> tuple:
-    """(exit code, stdout, stderr) of one hardened git command. true_history reads commits as written."""
+         folder: Optional[str], true_history: bool = False, whole: bool = False) -> tuple:
+    """(exit code, stdout, stderr) of one hardened git command. true_history reads commits as written. whole returns
+    all of stdout, or refuses it past SCAN_MAX_CHARS (see git)."""
     if git_dir is not None:
         argv = [config.GIT_BIN, "--git-dir", git_dir]
         if work_tree is not None:
@@ -209,8 +215,10 @@ def _run(args: list, git_dir: Optional[str], work_tree: Optional[str], timeout: 
                               capture_output=True, timeout=timeout or config.GIT_TIMEOUT_SECONDS, check=False)
     except subprocess.TimeoutExpired:
         raise FleetError(f"git {args[0]} timed out") from None
-    return (done.returncode, done.stdout.decode("utf-8", "replace")[:OUTPUT_MAX_CHARS],
-            done.stderr.decode("utf-8", "replace"))
+    out = done.stdout.decode("utf-8", "replace")
+    if whole and len(out) > SCAN_MAX_CHARS:
+        raise FleetError(f"git {args[0]} printed more than {SCAN_MAX_CHARS} characters, too much to check whole")
+    return done.returncode, out if whole else out[:OUTPUT_MAX_CHARS], done.stderr.decode("utf-8", "replace")
 
 
 # The draft PR
@@ -263,10 +271,14 @@ def run_gh_pr(argv: list, body: bytes) -> tuple:
 
 def open_draft_pr(repo: str, head: str, base: str, title: str, body: str) -> str:
     """Open a draft PR from head into base and return its URL. It runs once and is never retried. A login problem is
-    named without anything gh printed, and any other failure keeps only gh's last line, scrubbed."""
+    named without anything gh printed, and any other failure keeps only gh's last line, scrubbed. Output that may
+    have been cut at OUTPUT_MAX_CHARS is never read for a login word, a line to repeat or the PR's URL."""
     if not isinstance(body, str) or not body.strip() or len(body) > PR_BODY_MAX or "\x00" in body:
         raise FleetError(f"the PR body must be text of at most {PR_BODY_MAX} characters")
     code, out, err = run_gh_pr(draft_pr_argv(repo, head, base, title), body.encode("utf-8"))
+    if len(out) >= OUTPUT_MAX_CHARS or len(err) >= OUTPUT_MAX_CHARS:
+        raise FleetError(f"gh exited {code} and printed more than the fleet reads, so nothing it printed is repeated"
+                         " and the PR may or may not be open: look at the repo's pull requests")
     if code != 0:
         if code == GH_AUTH_EXIT or GH_AUTH_WORDS.search(err):
             raise FleetError("gh is not signed in to GitHub, or GitHub refused its login: check gh auth status in"

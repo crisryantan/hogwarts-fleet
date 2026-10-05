@@ -96,9 +96,10 @@ def run(conn, args: argparse.Namespace) -> object:
         return worktree.create(conn, args.task, args.repo_dir, args.branch, args.base, fetch=not args.no_fetch)
     if args.command == "build":
         # The review lock every review of the task holds, the automatic one included, so a fix round never starts
-        # while a review is committing, checking or judging the desk's work.
-        with review.task_review_lock(args.task):
-            return worktree.build(conn, args.task)
+        # while a review is committing, checking or judging the desk's work. The run is handed it, so no review
+        # starts until the run has ended either.
+        with review.task_review_lock(args.task) as lock_fd:
+            return worktree.build(conn, args.task, lock_fd)
     if args.command == "worktree-remove":
         return worktree.remove(conn, args.task)
     if args.command == "verify":

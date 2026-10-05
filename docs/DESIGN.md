@@ -114,7 +114,7 @@ Every headless desk has a daily cap on runs, and the headless Claude desks a cap
 - A cap day resets all at once, so a desk busy on both sides of the reset can use up to two days' cap within hours. There's no rolling 24 hour guard on top.
 - Nothing waits in line. A second review of a task that's already being reviewed stops at once and changes nothing.
 - A review whose reviewer is busy (other runs hold every one of its run slots) or at its cap is queued. The next review of that same task replaces it, so only a task's newest commit gets reviewed. Reviews of other tasks never replace it.
-- The review the Owl Post starts on Harry's handoff holds no place in any line either. While it can't start (Harry's run still going, the reviewer busy, another review of the task running) it ends at once, and the Owl Post starts it again on each pass, for up to four hours, then tells you.
+- The review the Owl Post starts on Harry's handoff holds no place in any line either. While it can't start (Harry's run still going, the reviewer busy, another review of the task running) it ends at once, and the Owl Post starts it again on each pass, for up to four hours, then tells you. What follows its verdict is written down before it starts, so a review killed after its verdict is finished on the next pass without another round, and a fix round, push or PR it had begun is never started twice: you hear once that it may or may not have happened.
 - A task gets three review rounds, and only a round where the reviewer recorded a verdict counts. A fourth waits for `castle task allow-round`.
 - Every stop says which limit it was. The fleet's cap is yours to lift. The Claude or Codex plan's own usage limit isn't, and no bump pretends to lift it.
 
