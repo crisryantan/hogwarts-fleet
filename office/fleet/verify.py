@@ -3,8 +3,10 @@
   fleet verify <task-id>
 
 - Finds TASK.md up the task chain (the nearest task with one) and the task's worktree record.
-- Reads lines shaped "AC-<n> <what must be true> | check: <check>". A check wrapped in backticks is
-  a command. Anything else is an observation for the reviewer to judge, recorded as not run.
+- Reads lines shaped "AC-<n> <what must be true> | check: <check>". A check that is one backtick command
+  and nothing else is a command. A check with no backticks is an observation for the reviewer to judge,
+  recorded as not run. A check that holds backticks any other way, such as a backtick command plus other
+  text, is malformed: it is not run, the evidence gives the plain reason, and SUMMARY counts it on its own.
 - Refuses to run on a worktree with uncommitted changes, so the evidence belongs to one commit.
   Then removes every git-ignored path except the dependency links, and the evidence names each one,
   so no check can lean on a file the commit doesn't hold. Ignored content git clean would skip, such
@@ -41,6 +43,8 @@ COMMAND = re.compile(r"`([^`\x00-\x1f]{1,1000})`")
 TASK_CHAIN_LIMIT = 16
 TASK_MD_MAX_BYTES = 65536
 PROFILE_NAME = "fleet-verify"
+MALFORMED_HINT = ("Write the check as one backtick command and nothing else, which verify runs, or as plain words"
+                  " with no backticks, which the reviewer judges")
 
 
 def task_md(conn, task_id: str) -> tuple:
@@ -61,7 +65,9 @@ def read_task_md(holder_id: str) -> bytes:
 
 
 def parse_checks(text: str) -> list:
-    """Each acceptance criterion as {id, what, check, command or None}, in file order."""
+    """Each acceptance criterion as {id, what, check, command, malformed}, in file order. command is set only
+    for a check that is one backtick command and nothing else. malformed is the plain reason a check that holds
+    backticks is not that, and None for a command or for an observation, which has no backticks at all."""
     checks = []
     for line in text.splitlines():
         match = AC_LINE.fullmatch(line.strip())
@@ -69,8 +75,23 @@ def parse_checks(text: str) -> list:
             continue
         command = COMMAND.fullmatch(match.group(3))
         checks.append({"id": f"AC-{match.group(1)}", "what": match.group(2), "check": match.group(3),
-                       "command": None if command is None else command.group(1)})
+                       "command": None if command is None else command.group(1),
+                       "malformed": None if command is not None else malformed_reason(match.group(3))})
     return checks
+
+
+def malformed_reason(check: str) -> Optional[str]:
+    """Why a check that is not one backtick command still holds backticks, or None when it has none. What
+    counts as a command stays COMMAND alone, so a malformed check is never run."""
+    if "`" not in check:
+        return None
+    found = COMMAND.findall(check)
+    if len(found) > 1:
+        return f"it holds {len(found)} backtick commands, and a check runs only one"
+    if found:
+        return "it holds a backtick command plus other text"
+    return ("its backticks hold no command verify can run (empty, unclosed, over 1000 characters or with"
+            " control characters)")
 
 
 def sandbox_argv(record: dict, scratch: str, command: str) -> list:
@@ -141,6 +162,7 @@ def render(task_id: str, sha: str, record: dict, md_digest: str, checks: list, r
     when = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now))
     ran = sum(1 for check in checks if check["command"] is not None)
     passed = sum(1 for check in checks if check["command"] is not None and results[check["id"]]["exit_code"] == 0)
+    malformed = sum(1 for check in checks if check.get("malformed") is not None)
     lines = [
         f"EVIDENCE {task_id} @ {sha}",
         f"TASK.md sha256 {md_digest}",
@@ -154,13 +176,17 @@ def render(task_id: str, sha: str, record: dict, md_digest: str, checks: list, r
     lines += [
         (f"RAN {when} under codex sandbox: worktree write, repo .git read, no network, no office" if sandboxed else
          f"RAN {when} without the Codex sandbox, because Ryan's own session wrote this code; throwaway HOME and TMPDIR"),
-        f"SUMMARY {passed} of {ran} commands exited 0, {len(checks) - ran} observations for the reviewer",
+        (f"SUMMARY {passed} of {ran} commands exited 0, {malformed} malformed checks not run,"
+         f" {len(checks) - ran - malformed} observations for the reviewer"),
         "",
     ]
     if not checks:
         lines.append("No acceptance criteria with a check were found in TASK.md.")
     for check in checks:
         lines += [f"{check['id']} {check['what']}", f"check: {check['check']}"]
+        if check.get("malformed") is not None:
+            lines += [f"not run: malformed, {check['malformed']}. {MALFORMED_HINT}", ""]
+            continue
         if check["command"] is None:
             lines += ["not run: an observation for the reviewer to judge", ""]
             continue
@@ -218,7 +244,8 @@ def verify(conn, task_id: str, now: Optional[int] = None) -> dict:
                   sandboxed, cleaned)
     paths = write_evidence(task["id"], holder_id, sha, text)
     failed = [check["id"] for check in checks if check["command"] is not None and results[check["id"]]["exit_code"] != 0]
-    return {"task_id": task["id"], "sha": sha, "checks": len(checks), "failed": failed,
+    malformed = [check["id"] for check in checks if check["malformed"] is not None]
+    return {"task_id": task["id"], "sha": sha, "checks": len(checks), "failed": failed, "malformed": malformed,
             "left_changes": gitops.dirty(record), "evidence": paths}
 
 

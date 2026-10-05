@@ -39,6 +39,12 @@ holds both until its reviewer's process ends too. Then, for either:
 6. on PASS the author's task moves to awaiting_close, which is what the push gate checks.
    CHANGES leaves it active for a fix round. HEADMASTER leaves it active and tells Ryan.
 
+A build desk's review is refused before anything changes when it would read exactly what the task's last verdict
+judged: HEAD is that round's commit and the desk's latest handoff is the same text. Each round that runs records,
+in the office reviews folder, the commit and the sha256 of the handoff it was opened for. A round with no readable
+record (one from before records were kept) never refuses a review, so the guard can only stop a repeat, never a
+new commit or a new handoff.
+
 The verdict is recorded on its round in the same transaction that stores it, so the round counts even
 if publishing the review afterwards fails. A review holds one run slot of the reviewer desk from before its
 round opens until its reviewer task is closed as superseded, once its verdict is recorded or its run fails,
@@ -88,6 +94,8 @@ its first round opens is closed as abandoned, unless its commit was already reco
 from __future__ import annotations
 
 import contextlib
+import hashlib
+import json
 import os
 import re
 import secrets
@@ -109,6 +117,12 @@ OWN_DESK = config.OWN_SESSION_DESK
 REVIEW_RUNNING = "a review of this task is already running; run it again when it ends"
 OWN_LINEAGE_LOCK = "review-own-lineage.lock"
 OWN_LINEAGE_WAIT_SECONDS = 120
+ROUND_RECORD_MAX_BYTES = 1024
+SHA256 = re.compile(r"[0-9a-f]{64}")
+
+
+class Unchanged(FleetError):
+    """A build desk's review refused because HEAD and the desk's latest handoff are what the last verdict judged."""
 
 
 # Reading desk output
@@ -172,19 +186,82 @@ def commit_message(handoff: str, check_words: bool = True) -> tuple:
     return subject, body
 
 
-def latest_result(conn, task: dict) -> Optional[str]:
-    """The body of the newest result owl the desk posted for its own request."""
+def latest_result_owl(conn, task: dict) -> Optional[dict]:
+    """The newest result owl the desk posted for its own request, or None."""
     if task["request_id"] is None:
         return None
     results = [owl for owl in owlery.request_owls(conn, task["request_id"])
                if owl["kind"] == "result" and owl["sender"] == task["desk"]]
     if not results:
         return None
-    newest = max(results, key=lambda owl: (owl["created_at"], owl["id"]))
+    return max(results, key=lambda owl: (owl["created_at"], owl["id"]))
+
+
+def latest_result(conn, task: dict) -> Optional[str]:
+    """The body of the newest result owl the desk posted for its own request."""
+    newest = latest_result_owl(conn, task)
+    if newest is None:
+        return None
     row = owlery._owl(conn, newest["id"])  # a plain lookup, so McGonagall's copy stays unread
     if row is None or row["body"] is None:
         raise FleetError("the desk's handoff owl has no body, or it was purged")
     return row["body"]
+
+
+def handoff_digest(handoff: Optional[str]) -> Optional[str]:
+    """The sha256 of a handoff's text, or None for no handoff."""
+    return None if handoff is None else hashlib.sha256(handoff.encode("utf-8")).hexdigest()
+
+
+# What each round was opened to review
+
+
+def _round_record_name(request_id: str) -> str:
+    return f"round-{ids.check('request', request_id)}.json"
+
+
+def record_round_inputs(task_id: str, request_id: str, sha: str, handoff_sha256: Optional[str]) -> None:
+    """Keep, in the office where no desk can write, the commit and the handoff a round was opened for. Written
+    whole through a temp file and a rename, so a reader sees the old file or the new one, never part of one."""
+    data = {"request_id": request_id, "sha": ids.check("sha", sha), "handoff_sha256": handoff_sha256}
+    raw = (json.dumps(data, ensure_ascii=True, sort_keys=True) + "\n").encode("ascii")
+    with safefs.opened_dir(config.OFFICE_ROOT, "reviews", ids.check("task", task_id), create=True) as fd:
+        _replace(fd, _round_record_name(request_id), raw)
+
+
+def round_inputs(task_id: str, request_id: str) -> Optional[dict]:
+    """What a round was opened to review, {sha, handoff_sha256}, or None when its record is missing or cannot be
+    read whole. None only ever lets a review through, as it did before records were kept."""
+    try:
+        with safefs.opened_dir(config.OFFICE_ROOT, "reviews", ids.check("task", task_id)) as fd:
+            raw = safefs.read_regular(fd, _round_record_name(request_id), ROUND_RECORD_MAX_BYTES, "round record")
+        data = common.strict_json(raw)
+    except (FleetError, UnicodeDecodeError, ValueError):
+        return None
+    if not isinstance(data, dict) or set(data) != {"request_id", "sha", "handoff_sha256"} \
+            or data["request_id"] != request_id or not isinstance(data["sha"], str) \
+            or gitops.SHA.fullmatch(data["sha"]) is None:
+        return None
+    digest = data["handoff_sha256"]
+    if digest is not None and (not isinstance(digest, str) or SHA256.fullmatch(digest) is None):
+        return None
+    return {"sha": data["sha"], "handoff_sha256": digest}
+
+
+def refuse_unchanged(conn, task: dict, sha: str, handoff: Optional[str]) -> None:
+    """Refuse a review whose reviewer would read exactly what the task's last verdict judged: HEAD is that round's
+    commit and the desk's latest handoff is the same text. A new commit or a new handoff always gets through, and
+    so does a last round whose record is missing."""
+    judged = [row for row in capacity.review_rounds(conn, task["id"]) if row["has_verdict"]]
+    if not judged or judged[-1]["sha"] != sha:
+        return
+    last = judged[-1]
+    inputs = round_inputs(task["id"], last["request_id"])
+    if inputs is None or inputs["sha"] != sha or inputs["handoff_sha256"] != handoff_digest(handoff):
+        return
+    raise Unchanged(f"nothing new to review: HEAD {sha[:12]} and {task['desk']}'s latest handoff are what round"
+                    f" {last['round']} already judged ({last['verdict']}), so no round was opened; a new commit or a"
+                    f" new handoff from {task['desk']} opens the next one")
 
 
 # Writing files
@@ -356,9 +433,9 @@ def _review_and_record(conn, task: dict, record: dict, sha: str, holder_id: str,
 
 
 def run_review(conn, task: dict, record: dict, sha: str, holder_id: str, handoff: bool, task_lock_fd: int,
-               now: Optional[int] = None) -> dict:
+               now: Optional[int] = None, inputs: Optional[dict] = None) -> dict:
     """The review of one sha, called under the author task's review lock (task_lock_fd) once the worktree is
-    at that sha."""
+    at that sha. inputs, {handoff_sha256}, is recorded with the round that runs, before its reviewer starts."""
     author = pensieve.get_desk(conn, task["desk"])
     reviewer = config.REVIEWER_FOR_FAMILY.get(author["family"])
     if reviewer is None:
@@ -371,7 +448,8 @@ def run_review(conn, task: dict, record: dict, sha: str, holder_id: str, handoff
     pensieve.record_commit(conn, task["id"], record["repo"], sha)
     body = _request_body(task, sha, record, holder_id, handoff)
     result = {"task_id": task["id"], "sha": sha, "repo": record["repo"], "reviewer": reviewer, "queued": None,
-              "evidence": evidence["evidence"]["castle"], "failed_checks": evidence["failed"]}
+              "evidence": evidence["evidence"]["castle"], "failed_checks": evidence["failed"],
+              "malformed_checks": evidence["malformed"]}
     with contextlib.ExitStack() as held:
         try:
             slot = held.enter_context(run_desk.desk_lock(reviewer, wait=False))
@@ -382,6 +460,9 @@ def run_review(conn, task: dict, record: dict, sha: str, holder_id: str, handoff
             return _queued(conn, task, reviewer, sha, body, now, result)
         opened = _open_and_deliver(conn, task, reviewer, sha, body, now, slot.index)
         request_id, reviewer_task_id, owl_id = opened["request"]["id"], opened["task"]["id"], opened["owl"]["id"]
+        if inputs is not None:
+            # Before the reviewer starts: a round whose record cannot be written never runs, and stays waiting.
+            record_round_inputs(task["id"], request_id, sha, inputs["handoff_sha256"])
         if run_desk.over_daily_cap(conn, reviewer, now) is not None:
             run_desk.report_cap(conn, reviewer, now)
             raise run_desk.Capped(f"{reviewer} is at its fleet daily cap, so round {opened['round']} of {task['id']}"
@@ -435,9 +516,14 @@ def _review_build(conn, task_id: str, lock_fd: int) -> dict:
         raise FleetError("this task has no worktree with an office record")
     holder_id, _ = verify.task_md(conn, task["id"])
     handoff = latest_result(conn, task)
+    dirty = gitops.dirty(record)
+    if not dirty:
+        # Uncommitted work always makes a new commit. A clean worktree is refused here, before anything changes,
+        # when it and the handoff are what the last verdict judged.
+        refuse_unchanged(conn, task, gitops.rev(record), handoff)
     if handoff is not None:
         _castle_task_file(holder_id, "handoff.md", handoff)
-    if gitops.dirty(record):
+    if dirty:
         if handoff is None:
             raise FleetError("the worktree has changes but the desk posted no handoff with a commit message")
         subject, body = commit_message(handoff, check_words=record["repo"] not in config.FLEET_WORDS_ALLOWED_REPOS)
@@ -447,7 +533,8 @@ def _review_build(conn, task_id: str, lock_fd: int) -> dict:
     sha = gitops.rev(record)
     if sha == gitops.rev(record, record["base"]):
         raise FleetError("there is nothing to review: HEAD is still the base")
-    return run_review(conn, task, record, sha, holder_id, handoff is not None, lock_fd)
+    return run_review(conn, task, record, sha, holder_id, handoff is not None, lock_fd,
+                      inputs={"handoff_sha256": handoff_digest(handoff)})
 
 
 def _write_own_task_md(task_id: str, title: str, intent: str) -> str:

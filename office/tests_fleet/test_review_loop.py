@@ -12,7 +12,7 @@ import subprocess
 from pathlib import Path
 from unittest import mock
 
-from hogwarts import ids, owlery, pensieve
+from hogwarts import capacity, ids, owlery, pensieve
 
 from fleet import config, gitops, owl_post, review, run_desk, verify, worktree
 from fleet.safefs import FleetError
@@ -516,3 +516,87 @@ class ParsingTests(LoopCase):
                     "COMMIT MESSAGE\n" + "x" * 101 + "\n"):
             with self.subTest(bad=bad[:24]), self.assertRaises(FleetError):
                 review.commit_message(bad)
+
+
+class RepeatReviewTests(LoopCase):
+    """A build task's review is refused when HEAD and the desk's latest handoff are what the last verdict judged."""
+
+    def changes_round(self) -> tuple:
+        """A build task whose first review recorded CHANGES: (parent, task, worktree, first result)."""
+        parent, task, _, created, _ = self.build()
+        wt = Path(created["worktree"])
+        self.write_file(wt / "widget.txt", "widget\n")
+        self.handoff(task, HANDOFF.format(task_id=task["id"]))
+        self.enable("hermione")
+        with self.fake_reviewer("CHANGES"):
+            first = review.review_build(self.conn, task["id"])
+        return parent, task, wt, first
+
+    def hermione_requests(self) -> list:
+        return [owl for owl in owlery.inbox(self.conn, "hermione", include_acked=True) if owl["kind"] == "request"]
+
+    def next_handoff(self, task: dict, round_no: int, checkpoint: str = "done") -> None:
+        """Harry's handoff for a later round, in an owl file of its own, so the store keeps it as a new owl."""
+        text = HANDOFF.format(task_id=task["id"]).replace("round 1", f"round {round_no}").replace(
+            "CHECKPOINT\ndone", f"CHECKPOINT\n{checkpoint}")
+        self.write_file(self.outbox("harry") / f"handoff-r{round_no}.md", text)
+        self.write_owl("harry", f"result-r{round_no}.json", {
+            "to": "mcgonagall", "kind": "result", "subject": f"round {round_no} ready", "task_id": task["id"],
+            "request_id": task["request_id"], "body_path": self.outbox_path("harry", f"handoff-r{round_no}.md")})
+        owl_post.run_pass(self.conn)
+
+    def test_unchanged_sha_and_handoff_open_no_round_and_say_why(self):
+        parent, task, wt, first = self.changes_round()
+        handoff_file = self.castle / "tasks" / parent / "handoff.md"
+        os.unlink(handoff_file)
+        requests = self.hermione_requests()
+        with mock.patch.object(run_desk, "run", side_effect=AssertionError("a reviewer ran")), \
+                mock.patch.object(verify, "verify", side_effect=AssertionError("verify ran")):
+            with self.assertRaisesRegex(review.Unchanged, f"nothing new to review: HEAD {first['sha'][:12]} and harry's"
+                                        " latest handoff are what round 1 already judged \\(CHANGES\\)"):
+                review.review_build(self.conn, task["id"])
+        self.assertEqual([row["round"] for row in capacity.review_rounds(self.conn, task["id"])], [1])
+        self.assertEqual(self.hermione_requests(), requests)
+        self.assertFalse(handoff_file.exists())
+        self.assertEqual(self.git("rev-parse", "HEAD", cwd=wt), first["sha"])
+
+    def test_unchanged_sha_and_handoff_after_headmaster_is_refused_too(self):
+        _, task, _, _ = self.changes_round()
+        self.next_handoff(task, 2)
+        with self.fake_reviewer("HEADMASTER"):
+            second = review.review_build(self.conn, task["id"])
+        with self.assertRaisesRegex(review.Unchanged, "what round 2 already judged \\(HEADMASTER\\)"):
+            review.review_build(self.conn, task["id"])
+        self.assertEqual(second["round"], 2)
+
+    def test_new_handoff_or_sha_new_handoff_on_the_same_sha_opens_a_round(self):
+        _, task, _, first = self.changes_round()
+        self.next_handoff(task, 2, "the finding is wrong: the widget is already there")
+        with self.fake_reviewer("PASS"):
+            second = review.review_build(self.conn, task["id"])
+        self.assertEqual((second["sha"], second["round"], second["verdict"]), (first["sha"], 2, "PASS"))
+
+    def test_new_handoff_or_sha_new_sha_with_the_same_handoff_opens_a_round(self):
+        _, task, wt, first = self.changes_round()
+        self.write_file(wt / "widget.txt", "a better widget\n")
+        with self.fake_reviewer("CHANGES"):
+            second = review.review_build(self.conn, task["id"])
+        self.assertNotEqual(second["sha"], first["sha"])
+        self.assertEqual(second["round"], 2)
+
+    def test_a_round_without_a_readable_record_never_blocks_a_review(self):
+        _, task, _, first = self.changes_round()
+        record = self.office / "reviews" / task["id"] / f"round-{first['request_id']}.json"
+        self.assertEqual(json.loads(record.read_text()), {
+            "request_id": first["request_id"], "sha": first["sha"],
+            "handoff_sha256": review.handoff_digest(HANDOFF.format(task_id=task["id"]))})
+        for broken in ("{not json", json.dumps({"request_id": first["request_id"], "sha": first["sha"]}), None):
+            with self.subTest(broken=broken):
+                if broken is None:
+                    os.unlink(record)
+                else:
+                    self.write_file(record, broken)
+                self.assertIsNone(review.round_inputs(task["id"], first["request_id"]))
+        with self.fake_reviewer("CHANGES"):
+            again = review.review_build(self.conn, task["id"])
+        self.assertEqual((again["sha"], again["round"]), (first["sha"], 2))

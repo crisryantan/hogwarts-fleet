@@ -108,7 +108,7 @@ Every `fleet` command prints one JSON object with `"ok": true` or `"ok": false` 
 
 `--repo-dir` below is the main checkout of your repo: a folder inside your home folder, outside the office and the castle, with its own `.git` folder and no symlink on the way.
 
-1. McGonagall writes TASK.md, you say go, and you register her task as in (d).
+1. McGonagall writes TASK.md, you say go, and you register her task as in (d). Each acceptance check is either one backtick command and nothing else, which verify runs, or plain words with no backticks, which the reviewer judges. A check that mixes a backtick command with other text is marked malformed in the evidence and never runs.
 2. She posts a request to Harry. The Owl Post holds it and you get a headmaster event: a build task is waiting for its worktree.
 3. Give Harry's task a worktree on a new branch. If Harry is enabled, his run starts:
 
