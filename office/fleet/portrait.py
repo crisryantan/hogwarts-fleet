@@ -58,6 +58,7 @@ EXPORT_FAILED_SUMMARY = ("the nightly Pensieve export for {date} failed, so Dumb
 JOB_LOCK = "portrait-job.lock"
 EXTRACT_FETCH_LIMIT = 2000
 CANDIDATES_PER_FACT = 3
+CANDIDATES_TOTAL = 300  # pairs in one export; the rest are counted in fact_candidates_left_out
 LINE_CHUNK = 500
 EXTRACT_KEYS = ("id", "session_id", "desk", "project", "role", "seq", "created_at")
 FACT_KEYS = ("id", "scope", "subject_key", "text", "tier", "lookup", "expires_at", "valid_from", "recorded_at",
@@ -83,17 +84,30 @@ def _castle_file(name: str, folder: str) -> str:
     return f"{ids.desk_root(DESK)}/{folder}/{name}"
 
 
+def _scrubbed(value: object) -> object:
+    """A store-derived value with every string run through the store's scrubber, so nothing that looks like a
+    secret or personal data reaches the model-readable inbox, whatever the store let in."""
+    if isinstance(value, str):
+        return pensieve.scrub(value)
+    if isinstance(value, list):
+        return [_scrubbed(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _scrubbed(item) for key, item in value.items()}
+    return value
+
+
 def build_export(conn, date: str, since: int, now: int) -> dict:
     """The export for one day: its extracts up to the byte budget, its fact candidates and the current facts."""
     extracts, used = [], 0
     rows = pensieve.extracts_between(conn, since, now + 1, EXTRACT_FETCH_LIMIT)
     for row in rows:
-        item = {**{key: row[key] for key in EXTRACT_KEYS}, "lines": _lines(row["text"])}
+        item = _scrubbed({**{key: row[key] for key in EXTRACT_KEYS}, "lines": _lines(row["text"])})
         used += len(json.dumps(item, ensure_ascii=True))
         if used > config.PORTRAIT_EXPORT_MAX_BYTES:
             break
         extracts.append(item)
-    current = [{key: row[key] for key in FACT_KEYS} for row in facts.current_facts(conn, now=now)]
+    current = [_scrubbed({key: row[key] for key in FACT_KEYS}) for row in facts.current_facts(conn, now=now)]
+    candidates = facts.contradiction_candidates(conn, since, CANDIDATES_PER_FACT, now=now)
     return {
         "format": EXPORT_FORMAT,
         "date": date,
@@ -105,7 +119,8 @@ def build_export(conn, date: str, since: int, now: int) -> dict:
         "extracts": extracts,
         "extracts_left_out": len(rows) - len(extracts),
         "extracts_may_have_more": len(rows) == EXTRACT_FETCH_LIMIT,
-        "fact_candidates": facts.contradiction_candidates(conn, since, CANDIDATES_PER_FACT, now=now),
+        "fact_candidates": [_scrubbed(pair) for pair in candidates[:CANDIDATES_TOTAL]],
+        "fact_candidates_left_out": max(0, len(candidates) - CANDIDATES_TOTAL),
         "current_facts": current[:config.PORTRAIT_EXPORT_MAX_FACTS],
         "current_facts_left_out": max(0, len(current) - config.PORTRAIT_EXPORT_MAX_FACTS),
     }

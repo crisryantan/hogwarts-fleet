@@ -171,10 +171,17 @@ def _line(value: object, field: str, limit: int) -> str:
     return value
 
 
+def _unscrubbed(value: str, field: str) -> str:
+    """A keyed value the store's scrubber would leave alone: its pattern alone admits IPs, long hex and tokens."""
+    if pensieve.scrub(value) != value:
+        raise ValidationError(f"{field} holds what looks like a secret or personal data, which never goes in a patch")
+    return value
+
+
 def _tags(value: object) -> list:
     if not isinstance(value, list) or len(value) > MAX_TAGS:
         raise ValidationError(f"tags must be a list of at most {MAX_TAGS} tags")
-    tags = [ids.check("tag", tag) for tag in value]
+    tags = [_unscrubbed(ids.check("tag", tag), "a tag") for tag in value]
     if len(set(tags)) != len(tags):
         raise ValidationError("tags repeat a tag")
     return tags
@@ -190,7 +197,7 @@ def _field(name: str, value: object, kind: str) -> object:
     if name == "tier":
         return ids.check_enum(value, db.FACT_TIERS, "tier")
     if name == "subject_key":
-        return ids.check("subject_key", value)
+        return _unscrubbed(ids.check("subject_key", value), "subject_key")
     if name == "lookup":
         return _line(value, "lookup", db.LOOKUP_LIMIT)
     if name == "expires_at":
@@ -217,7 +224,8 @@ def check_op(op: dict) -> dict:
         raise ValidationError("missing " + ", ".join(missing))
     extra = sorted(set(op) - set(COMMON_FIELDS + required + optional))
     if extra:
-        raise ValidationError(f"{kind} does not take " + ", ".join(common.one_line(name, 40) for name in extra[:3]))
+        # The names are untrusted text, so they are counted, never shown.
+        raise ValidationError(f"{kind} was given {len(extra)} field(s) it does not take")
     checked = {"id": op["id"], "type": kind, "reason": _line(op["reason"], "reason", REASON_LIMIT),
                "source": _line(op["source"], "source", SOURCE_LIMIT)}
     for name in required + optional:

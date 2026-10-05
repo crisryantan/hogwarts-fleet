@@ -99,6 +99,30 @@ class ExportTests(PortraitCase):
         self.assertTrue(export["morning_note_file"].endswith(f"/desks/portrait/outbox/morning-{DATE}.md"))
         self.assertIn("instruction", export["note"])
 
+    def test_store_text_is_scrubbed_before_it_reaches_the_inbox(self):
+        # The store keeps fact text as written, so the export scrubs every string it takes from the store.
+        self.extract("ping someone@example.com about 10.1.2.3", NOW - 60)
+        old = self.fact("mail someone@example.com before deploys", key="host:10.1.2.3", now=DAY_START - DAY)
+        new = self.fact("mail someone@example.com after deploys", now=NOW - 30)
+        portrait.export_day(self.conn, now=NOW)
+        export = self.export_file()
+        text = json.dumps(export)
+        for value in ("someone@example.com", "10.1.2.3"):
+            with self.subTest(value=value):
+                self.assertNotIn(value, text)
+        self.assertEqual([(pair["fact_id"], pair["candidate_id"]) for pair in export["fact_candidates"]], [(new, old)])
+        self.assertIn("[email]", export["fact_candidates"][0]["candidate_text"])
+        self.assertIn("[email]", export["extracts"][0]["lines"][0])
+        self.assertEqual(export["fact_candidates_left_out"], 0)
+
+    def test_candidates_past_the_total_budget_are_counted(self):
+        pairs = [{"scope": "fleet", "fact_id": n, "fact_text": "a", "candidate_id": n + 1, "candidate_text": "b",
+                  "score": -1.0} for n in range(portrait.CANDIDATES_TOTAL + 5)]
+        with mock.patch.object(portrait.facts, "contradiction_candidates", return_value=pairs):
+            export = portrait.build_export(self.conn, DATE, DAY_START, NOW)
+        self.assertEqual((len(export["fact_candidates"]), export["fact_candidates_left_out"]),
+                         (portrait.CANDIDATES_TOTAL, 5))
+
     def test_the_owl_comes_from_the_owl_post_with_its_inbox_copy(self):
         owl_id = portrait.export_day(self.conn, now=NOW)["owl_id"]
         [owl] = owlery.inbox(self.conn, "portrait")
@@ -359,6 +383,33 @@ class PatchTests(PortraitCase):
                     portrait_patch.apply(self.conn, DATE, sha, only=only, now=NOW)
         self.assertEqual(self.counts(), before)
 
+    def test_keys_and_tags_that_hold_secrets_are_shown_out_of_schema_and_never_applied(self):
+        risky = [op("k1", "fact_add", scope="fleet", text="the box is slow", tier="aging", subject_key="host:10.1.2.3"),
+                 op("t1", "memory_note_add", text="the box is slow", tags=["ab" * 16])]
+        sha = self.write_patch(self.ops + risky)
+        shown = portrait_patch.show(self.conn, DATE, now=NOW)
+        statuses = {item["id"]: item["status"] for item in shown["ops"]}
+        self.assertEqual((statuses["k1"], statuses["t1"]), ("out of schema", "out of schema"))
+        self.assertNotIn("10.1.2.3", json.dumps(shown))
+        self.assertNotIn("ab" * 16, json.dumps(shown))
+        before = self.counts()
+        for only in (["k1"], ["t1"], None):
+            with self.subTest(only=only):
+                with self.assertRaises(ValidationError):
+                    portrait_patch.apply(self.conn, DATE, sha, only=only, now=NOW)
+        self.assertEqual(self.counts(), before)
+
+    def test_unknown_field_names_are_counted_never_shown(self):
+        secret = "ghp_" + "a" * 30
+        sha = self.write_patch(self.ops + [op("s1", "archive_move", entry="e", to="t", **{secret: "x"})])
+        shown = portrait_patch.show(self.conn, DATE, now=NOW)
+        [entry] = [item for item in shown["ops"] if item["id"] == "s1"]
+        self.assertEqual(entry["status"], "out of schema")
+        self.assertNotIn(secret, json.dumps(shown))
+        with self.assertRaises(ValidationError) as caught:
+            portrait_patch.apply(self.conn, DATE, sha, now=NOW)
+        self.assertNotIn(secret, str(caught.exception))
+
     def test_only_must_name_ops_of_the_patch(self):
         sha = self.write_patch(self.ops)
         for only in (["zz"], ["F1"], ["f1", "f1"], ["f1,f1"], [","], ["f1;n1"]):
@@ -442,6 +493,12 @@ class PatchTests(PortraitCase):
             "too many tags": op("a", "memory_note_add", text="t", tags=[f"t{n}" for n in range(9)]),
             "a repeated tag": op("a", "memory_note_add", text="t", tags=["x", "x"]),
             "a bad tag": op("a", "memory_note_add", text="t", tags=["Bad Tag"]),
+            "a subject key holding an ip": op("a", "fact_add", scope="fleet", text="t", tier="aging",
+                                              subject_key="host:10.1.2.3"),
+            "a subject key holding long hex": op("a", "fact_add", scope="fleet", text="t", tier="aging",
+                                                 subject_key="hash." + "ab" * 20),
+            "a tag holding an ip": op("a", "memory_note_add", text="t", tags=["10.1.2.3"]),
+            "a tag holding long hex": op("a", "memory_note_add", text="t", tags=["ab" * 16]),
             "an entry too long": op("a", "archive_move", entry="e" * 201, to="t"),
             "a target that is a path list": op("a", "archive_move", entry="e", to=["a", "b"]),
         }

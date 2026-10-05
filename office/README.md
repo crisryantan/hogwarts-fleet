@@ -297,7 +297,7 @@ Every command except `init` and `doctor` needs an existing database. `init` is s
 
 ### Dumbledore's patches
 
-Each weeknight `fleet/portrait.py` exports the day into the portrait's inbox and runs him. He writes `~/hogwarts/desks/portrait/outbox/patch-<YYYY-MM-DD>.ops`, one JSON object:
+Each weeknight `fleet/portrait.py` exports the day into the portrait's inbox, scrubbing every string it takes from the store, and runs him. A patch's subject keys and tags must pass the same scrubber as its text, and an error never shows a field name the schema does not know. He writes `~/hogwarts/desks/portrait/outbox/patch-<YYYY-MM-DD>.ops`, one JSON object:
 
 ```
 {"format": "portrait-patch-1", "date": "2027-01-15", "ops": [
