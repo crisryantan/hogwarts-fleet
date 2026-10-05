@@ -917,11 +917,22 @@ def spawn(desk: str, owl_id: str) -> None:
     owl_id = ids.check("owl", owl_id)
     if not is_enabled(desk):
         raise FleetError(f"{desk} is not enabled")
+    _detach("run_desk", [desk, "--owl", owl_id], f"run-desk-{desk}.log")
+
+
+def spawn_review(task_id: str) -> None:
+    """Start a detached automatic review of a build task's newest handoff through the wrapper line (see
+    review.auto_review). Used by the Owl Post. Like a run, it inherits no fd, so no lock the Owl Post holds."""
+    _detach("review", [ids.check("task", task_id)], "review-auto.log")
+
+
+def _detach(module: str, args: list, log_name: str) -> None:
+    """Start fleet.<module>'s main with args in a new session, with an empty environment, logging to the office."""
     boot = ("import sys; sys.path.insert(0, " + json.dumps(config.OFFICE_ROOT)
-            + "); from fleet.run_desk import main; sys.exit(main())")
-    argv = [*config.PYTHON_WRAPPER, "-c", boot, desk, "--owl", owl_id]
+            + f"); from fleet.{module} import main; sys.exit(main())")
+    argv = [*config.PYTHON_WRAPPER, "-c", boot, *args]
     with safefs.opened_dir(config.OFFICE_ROOT, "logs", create=True) as logs_fd:
-        log_fd = safefs.open_append(logs_fd, f"run-desk-{desk}.log", "run log")
+        log_fd = safefs.open_append(logs_fd, log_name, "run log")
         try:
             subprocess.Popen(argv, cwd=config.OFFICE_ROOT, env={}, stdin=subprocess.DEVNULL,
                              stdout=log_fd, stderr=log_fd, start_new_session=True, close_fds=True)

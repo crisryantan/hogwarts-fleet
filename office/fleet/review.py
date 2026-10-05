@@ -1,6 +1,7 @@
 """The review script: the cross-model review for one commit, recorded from the reviewer's own output.
 
-Ryan runs it from his terminal.
+The Owl Post starts it when a build desk posts its handoff (the review loop, below), and Ryan runs it from his
+terminal as the fallback.
 
   fleet review <task-id>
       A build desk's task (Harry, Codex). Commits the desk's uncommitted work with the message from
@@ -38,6 +39,24 @@ holds both until its reviewer's process ends too. Then, for either:
    is recorded with the review file in the office, where no desk can change it;
 6. on PASS the author's task moves to awaiting_close, which is what the push gate checks.
    CHANGES leaves it active for a fix round. HEADMASTER leaves it active and tells Ryan.
+
+The review loop. When Harry posts the handoff for his own active task, the Owl Post records it and starts
+auto_review for that task in a process of its own (main). Under the task's loop lock, so one runs per task, it
+takes the task's newest handoff the Owl Post recorded, and the older ones are finished as superseded. It checks the
+handoff again, waits up to AUTO_REVIEW_AUTHOR_WAIT_SECONDS for the run that posted it to end, and then runs the same
+review as fleet review <task-id> under the same task review lock, so a manual review, a manual fleet build and the
+loop never open two rounds at once. What it cannot do yet (the author's run still going, the reviewer's run slots
+all busy, another review of the task running) it leaves to the Owl Post's next pass, for at most
+AUTO_REVIEW_WAIT_LIMIT_SECONDS. Each try it starts work on is counted, so a review killed part way is started
+again at most AUTO_REVIEW_MAX_TRIES times in all. Any other ending, a verdict, a refusal or an error, finishes the
+handoff for good, and every ending that needs Ryan raises one headmaster event. After a verdict:
+- CHANGES starts Harry's fix round through the same path as fleet build, unless the task has used its
+  REVIEW_ROUND_CAP rounds with no allowance left: then nothing starts, and Ryan hears the task and its verdict.
+  Harry's next handoff starts the next review the same way.
+- PASS starts nothing more. The task awaits close, as it does after any PASS, and Ryan hears it is ready for push.
+- HEADMASTER starts nothing more, and Ryan hears it as he does from any review.
+A handoff is finished before anything after its verdict starts, so a killed review never reviews a fix round
+that is still being written. A review Ryan runs with fleet review stops at its verdict, as it always has.
 
 A build desk's review is refused before anything changes when it would read exactly what the task's last verdict
 judged: HEAD is that round's commit and the desk's latest handoff is the same text. Each round that runs records,
@@ -99,10 +118,12 @@ import json
 import os
 import re
 import secrets
+import sys
+import time
 from typing import Iterator, Optional
 
 from hogwarts import capacity, ids, owlery, pensieve
-from hogwarts.errors import ConflictError
+from hogwarts.errors import ConflictError, StoreError
 
 from fleet import common, config, gitops, owl_post, run_desk, safefs, verify, worktree
 from fleet.safefs import FleetError
@@ -118,6 +139,7 @@ REVIEW_RUNNING = "a review of this task is already running; run it again when it
 OWN_LINEAGE_LOCK = "review-own-lineage.lock"
 OWN_LINEAGE_WAIT_SECONDS = 120
 ROUND_RECORD_MAX_BYTES = 1024
+AUTHOR_POLL_SECONDS = 2
 SHA256 = re.compile(r"[0-9a-f]{64}")
 
 
@@ -200,9 +222,12 @@ def latest_result_owl(conn, task: dict) -> Optional[dict]:
 def latest_result(conn, task: dict) -> Optional[str]:
     """The body of the newest result owl the desk posted for its own request."""
     newest = latest_result_owl(conn, task)
-    if newest is None:
-        return None
-    row = owlery._owl(conn, newest["id"])  # a plain lookup, so McGonagall's copy stays unread
+    return None if newest is None else owl_body(conn, newest["id"])
+
+
+def owl_body(conn, owl_id: str) -> str:
+    """A handoff owl's text."""
+    row = owlery._owl(conn, owl_id)  # a plain lookup, so McGonagall's copy stays unread
     if row is None or row["body"] is None:
         raise FleetError("the desk's handoff owl has no body, or it was purged")
     return row["body"]
@@ -515,7 +540,8 @@ def _review_build(conn, task_id: str, lock_fd: int) -> dict:
     if record is None:
         raise FleetError("this task has no worktree with an office record")
     holder_id, _ = verify.task_md(conn, task["id"])
-    handoff = latest_result(conn, task)
+    newest = latest_result_owl(conn, task)
+    handoff = None if newest is None else owl_body(conn, newest["id"])
     dirty = gitops.dirty(record)
     if not dirty:
         # Uncommitted work always makes a new commit. A clean worktree is refused here, before anything changes,
@@ -533,8 +559,185 @@ def _review_build(conn, task_id: str, lock_fd: int) -> dict:
     sha = gitops.rev(record)
     if sha == gitops.rev(record, record["base"]):
         raise FleetError("there is nothing to review: HEAD is still the base")
-    return run_review(conn, task, record, sha, holder_id, handoff is not None, lock_fd,
-                      inputs={"handoff_sha256": handoff_digest(handoff)})
+    result = run_review(conn, task, record, sha, holder_id, handoff is not None, lock_fd,
+                        inputs={"handoff_sha256": handoff_digest(handoff)})
+    return {**result, "handoff_owl": None if newest is None else newest["id"]}
+
+
+# The review loop
+
+
+def auto_review(conn, task_id: str, now: Optional[int] = None) -> dict:
+    """The review the Owl Post starts when a build desk posts a handoff (see the module notes). Never raises for
+    a refused or failed review: each ending is in the result, and what needs Ryan is an event."""
+    task_id = ids.check("task", task_id)
+    with contextlib.ExitStack() as held:
+        try:
+            held.enter_context(owl_post.auto_review_lock(task_id, wait=config.AUTO_REVIEW_LOCK_WAIT_SECONDS))
+        except safefs.Busy:
+            return {"task_id": task_id, "outcome": "another automatic review of this task is running"}
+        return _auto_review(conn, task_id, now)
+
+
+def _auto_review(conn, task_id: str, now: Optional[int]) -> dict:
+    task = pensieve.get_task(conn, task_id)
+    newest = latest_result_owl(conn, task)
+    newest_id = None if newest is None else newest["id"]
+    unfinished = owl_post.unfinished_handoffs(task_id)
+    for owl_id in unfinished:
+        if owl_id != newest_id:
+            owl_post.finish_handoff(task_id, owl_id, "superseded by a newer handoff from the same desk")
+    if newest_id not in unfinished:
+        return {"task_id": task_id, "outcome": "no handoff of this task waits for its review"}
+    problem = owl_post.handoff_problem(conn, newest)
+    if problem is not None:
+        return _auto_finish(conn, task, newest_id, f"no review: {problem}", "routine", now)
+    if not _author_run_over(conn, task, now, wait=True):
+        return _auto_wait(conn, task, newest, f"{task['desk']}'s run on it is still going", now)
+    reviewer = config.REVIEWER_FOR_FAMILY[pensieve.get_desk(conn, task["desk"])["family"]]
+    if _reviewer_busy(conn, reviewer, now):
+        return _auto_wait(conn, task, newest, f"{reviewer} is busy with other reviews", now)
+    with contextlib.ExitStack() as held:
+        try:
+            lock_fd = held.enter_context(task_review_lock(task_id))
+        except FleetError:
+            return _auto_wait(conn, task, newest, "another review of this task is running", now)
+        # Again under the lock, which a manual fleet build also takes: no run of the author may have begun since.
+        if not _author_run_over(conn, task, now, wait=False):
+            return _auto_wait(conn, task, newest, f"{task['desk']}'s run on it is still going", now)
+        tried = owl_post.take_try(task_id, newest_id)
+        if tried is None:
+            return _auto_finish(conn, task, newest_id, f"the automatic review stopped: it started"
+                                f" {config.AUTO_REVIEW_MAX_TRIES} times and each try ended without finishing (killed,"
+                                f" or the Mac stopped); run fleet review {task_id}", "headmaster", now)
+        try:
+            result = _review_build(conn, task_id, lock_fd)
+        except Unchanged as exc:
+            return _auto_finish(conn, task, newest_id, str(exc), "routine", now)
+        except (FleetError, StoreError) as exc:
+            return _auto_finish(conn, task, newest_id, f"the automatic review stopped: {common.one_line(exc, 300)};"
+                                f" once that is sorted, fleet review {task_id} runs it", "headmaster", now)
+        except Exception as exc:  # noqa: BLE001 - an unexpected error still finishes the handoff and tells Ryan
+            return _auto_finish(conn, task, newest_id, f"the automatic review stopped on an unexpected"
+                                f" {type(exc).__name__}; fleet review {task_id} runs it", "headmaster", now)
+        if result["queued"] is not None:
+            owl_post.give_back_try(task_id, newest_id, tried)
+            return {**_auto_wait(conn, task, newest, f"{reviewer} became busy", now), "review": result}
+        # Finished before anything starts after the verdict, so no later try reviews a fix round mid-write.
+        owl_post.finish_handoff(task_id, newest_id, f"round {result['round']} at {result['sha'][:12]} recorded"
+                                f" {result['verdict']}")
+        after = _after_verdict(conn, task, result, now)
+    return {"task_id": task_id, "owl_id": newest_id, "outcome": f"reviewed: {result['verdict']}", "next": after,
+            "review": result}
+
+
+def _auto_finish(conn, task: dict, owl_id: str, text: str, verdict: str, now: Optional[int]) -> dict:
+    """Finish a handoff for good, the event first, so a review killed in between tells Ryan once on its retry. An
+    error's text can quote git, so it is scrubbed of anything shaped like a credential before it is kept."""
+    text = pensieve.scrub(text)
+    pensieve.add_event(conn, task["desk"], "review.auto", verdict, common.one_line(f"task {task['id']}: {text}", 480),
+                       task_id=task["id"], dedupe_key=f"review:auto:{owl_id}", now=now)
+    owl_post.finish_handoff(task["id"], owl_id, text)
+    return {"task_id": task["id"], "owl_id": owl_id, "outcome": text}
+
+
+def _auto_wait(conn, task: dict, owl: dict, why: str, now: Optional[int]) -> dict:
+    """Leave a handoff for the Owl Post's next pass, unless it has waited AUTO_REVIEW_WAIT_LIMIT_SECONDS since it
+    was posted: then it is finished, and Ryan hears why."""
+    waited = common.now_stamp(now) - owl["created_at"]
+    if waited >= config.AUTO_REVIEW_WAIT_LIMIT_SECONDS:
+        hours = config.AUTO_REVIEW_WAIT_LIMIT_SECONDS // 3600
+        return _auto_finish(conn, task, owl["id"], f"the automatic review waited {hours} hours and gave up, since"
+                            f" {why}; fleet review {task['id']} runs it", "headmaster", now)
+    return {"task_id": task["id"], "owl_id": owl["id"],
+            "outcome": f"waiting: {why}; the Owl Post tries again on its next pass"}
+
+
+def _author_running(conn, task: dict, now: Optional[int]) -> bool:
+    """Whether a launch of the author desk for this task has recorded no usage yet and may still be running."""
+    since = common.now_stamp(now) - config.RUNNING_WINDOW_SECONDS
+    return any(row["task_id"] == task["id"] and row["metric_id"] is None and row["launched_at"] > since
+               for row in capacity.list_launches(conn, task["desk"]))
+
+
+def _author_run_over(conn, task: dict, now: Optional[int], wait: bool) -> bool:
+    """Whether no run of the author desk is going on this task, waiting up to AUTO_REVIEW_AUTHOR_WAIT_SECONDS when
+    wait is set, so the review never commits work its author is still writing."""
+    deadline = time.monotonic() + (config.AUTO_REVIEW_AUTHOR_WAIT_SECONDS if wait else 0)
+    while _author_running(conn, task, now):
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(AUTHOR_POLL_SECONDS)
+    return True
+
+
+def _reviewer_busy(conn, reviewer: str, now: Optional[int]) -> bool:
+    """Whether the reviewer looks busy from the store alone: as many runs going as it has run slots, or, for a
+    reviewer that takes one task at a time, an active task. It takes no lock, so it never makes the reviewer look
+    busy to another review; run_review still decides for itself."""
+    since = common.now_stamp(now) - config.RUNNING_WINDOW_SECONDS
+    going = [row for row in capacity.open_launches(conn, reviewer) if row["launched_at"] > since]
+    return len(going) >= run_desk.run_slots(reviewer) or pensieve.blocking_task(conn, reviewer) is not None
+
+
+def _after_verdict(conn, task: dict, result: dict, now: Optional[int]) -> str:
+    """What the review loop starts after an automatic review's verdict, under the task's review lock."""
+    verdict, round_no, task_id = result["verdict"], result["round"], task["id"]
+    if verdict == "HEADMASTER":
+        return "nothing more starts: the reviewer handed the decision to Ryan"
+    if verdict == "PASS":
+        return _after_pass(conn, task, result, now)
+    if capacity.needs_allowance(conn, task_id, config.REVIEW_ROUND_CAP):
+        pensieve.add_event(conn, task["desk"], "review.loop-stopped", "headmaster",
+                           f"task {task_id} has used its {config.REVIEW_ROUND_CAP} review rounds and round"
+                           f" {round_no} recorded {verdict}, so the review loop stopped and no fix round started;"
+                           f" castle task allow-round {task_id} allows one more, then fleet build {task_id} starts it",
+                           task_id=task_id, dedupe_key=f"review:loop-stopped:{task_id}:{round_no}", now=now)
+        return "stopped at the review round cap"
+    try:
+        started = worktree.build(conn, task_id)["desk"]
+    except (FleetError, StoreError, OSError) as exc:
+        started = f"it did not start ({common.one_line(exc, 200)})"
+    if not started.startswith(f"started {task['desk']} "):
+        pensieve.add_event(conn, task["desk"], "review.fix-round", "headmaster",
+                           common.one_line(pensieve.scrub(f"round {round_no} of task {task_id} recorded {verdict}, but"
+                                                          f" its fix round did not start: {started}; fleet build"
+                                                          f" {task_id} starts it"), 480),
+                           task_id=task_id, dedupe_key=f"review:fix-round:{task_id}:{round_no}", now=now)
+    return started
+
+
+def _after_pass(conn, task: dict, result: dict, now: Optional[int]) -> str:
+    """A PASS starts nothing more. The task awaits close, and Ryan hears it is ready for his push."""
+    pensieve.add_event(conn, task["desk"], "review.ready-for-push", "headmaster",
+                       f"task {task['id']} passed review at {result['sha'][:12]} and is ready for push: fleet push"
+                       f" {task['id']}", task_id=task["id"], dedupe_key=f"review:ready:{task['id']}:{result['sha']}",
+                       now=now)
+    return "ready for push"
+
+
+def main(argv: Optional[list] = None) -> int:
+    """The automatic review the Owl Post starts (run_desk.spawn_review): one argument, the build task's id. Prints
+    one JSON object, like the fleet command."""
+    args = sys.argv[1:] if argv is None else argv
+    if len(args) != 1 or not isinstance(args[0], str) or ids.PATTERNS["task"].fullmatch(args[0]) is None:
+        sys.stderr.write("the automatic review takes one build task id\n")
+        return 2
+    try:
+        conn = common.connect()
+    except StoreError as exc:
+        sys.stdout.write(json.dumps({"ok": False, "error": common.one_line(exc, 300)}, ensure_ascii=True) + "\n")
+        return 1
+    try:
+        with common.ended_by_signals():
+            data = auto_review(conn, args[0])
+        sys.stdout.write(json.dumps({"ok": True, "data": data}, ensure_ascii=True) + "\n")
+        return 0
+    except (FleetError, StoreError) as exc:
+        sys.stdout.write(json.dumps({"ok": False, "error": common.one_line(exc, 600)}, ensure_ascii=True) + "\n")
+        return 1
+    finally:
+        conn.close()
 
 
 def _write_own_task_md(task_id: str, title: str, intent: str) -> str:

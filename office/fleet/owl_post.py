@@ -16,8 +16,20 @@ For each regular *.json file in /Users/crisryantan/hogwarts/desks/<sender>/outbo
    headless desk under its daily cap starts run_desk. No other owl starts a run. A desk that
    builds in a worktree (Harry) is not started until its task has one: Ryan gets a headmaster
    event instead, and the worktree script starts the run once the worktree is attached.
-8. Move the file, and any body file, into outbox/.sent/. A refused file goes to
+8. A result owl from a build desk (Harry) that carries the handoff for its own active task starts that
+   task's review: the Owl Post records the handoff in the task's office reviews folder (auto-<owl>.pending,
+   made only once, so a second delivery of the same owl starts nothing) and starts review.auto_review in a
+   process of its own, which the review loop takes from there. The sender is the one stamped from the
+   outbox folder, so an owl from any other desk never starts a review, and the owl's task must be its
+   request's task and the desk's own. A handoff that starts nothing says why in the pass's output, and the
+   first delivery of it also leaves a routine event.
+9. Move the file, and any body file, into outbox/.sent/. A refused file goes to
    outbox/.rejected/ with a .reason file, and Ryan gets a headmaster event.
+
+After the outboxes, each pass starts again the automatic review of every handoff the review loop took and has
+not finished with, when no automatic review of its task holds that task's loop lock: one killed part way, or
+one that is waiting for its author's run to end, its reviewer to be free or another review of the task to end.
+The review counts its own tries and gives up, telling Ryan, after config.AUTO_REVIEW_MAX_TRIES of them.
 
 A rerun after a crash at any step stores nothing twice. File content is only parsed
 as JSON and passed to the store as data. Nothing in it is executed or evaluated.
@@ -27,6 +39,7 @@ Run it with the wrapper line:
 """
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
@@ -35,7 +48,7 @@ import secrets
 import stat
 import sys
 import time
-from typing import Optional
+from typing import Iterator, Optional
 
 if __name__ == "__main__" and "/Users/crisryantan/.hogwarts" not in sys.path:
     sys.path.insert(0, "/Users/crisryantan/.hogwarts")
@@ -59,6 +72,13 @@ LOCK_NAME = "owl-post.lock"
 REPLY_KINDS = ("answer", "result")
 TASK_CHAIN_LIMIT = 16
 WORKTREE_SUMMARY = "a build task is waiting for its worktree: run fleet worktree for this task in your terminal"
+# A handoff's first line, as a build desk's brief writes it: HANDOFF <its own task id> round <n>.
+HANDOFF_HEADER = re.compile(r"HANDOFF (tk_[0-9a-f]{16})(?:\s.*)?")
+# The review loop's records of each handoff, in its task's office reviews folder, where no desk can write:
+# auto-<owl>.pending once the Owl Post hands the handoff to the review loop, auto-<owl>.try<n> each time an
+# automatic review starts work on it, and auto-<owl>.done once a review is finished with it, whatever came of it.
+HANDOFF_RECORD = re.compile(r"auto-(owl_[0-9a-f]{16})\.(pending|done|try[1-9])")
+REVIEW_STARTED = "review started"
 
 
 class Rejected(Exception):
@@ -253,6 +273,181 @@ def _ring(conn, recipient: str, owl: dict, newly_delivered: bool, now: Optional[
     return "event"
 
 
+# The review loop's start
+
+
+def handoff_task(body: Optional[str]) -> Optional[str]:
+    """The task id a handoff's first line names (HANDOFF <task id> ...), or None when the text is no handoff."""
+    for line in (body or "").splitlines():
+        if line.strip():
+            match = HANDOFF_HEADER.fullmatch(line.strip())
+            return None if match is None else match.group(1)
+    return None
+
+
+def handoff_problem(conn, owl: dict) -> Optional[str]:
+    """Why a result owl from a build desk starts no review, or None when it starts its task's review: the owl is
+    the handoff of the stamped sender's own active task with a worktree, it names that task in its first line and
+    in its task field, its task is its request's task, and the task's reviewer is enabled."""
+    if owl["kind"] != "result" or owl["sender"] not in config.WORKTREE_DESKS:
+        return "only a build desk's result owl starts a review"
+    if owl["task_id"] is None or owl["request_id"] is None:
+        return "the owl names no task or no request"
+    request = owlery.get_request(conn, owl["request_id"])
+    task = pensieve.get_task(conn, owl["task_id"])
+    if request["task_id"] != task["id"] or task["request_id"] != request["id"]:
+        return "the owl's task is not the task its request opened"
+    if request["recipient"] != owl["sender"] or task["desk"] != owl["sender"]:
+        return f"the task is not {owl['sender']}'s own"
+    if task["status"] != "active":
+        return f"the task is {task['status'].replace('_', ' ')}, not active"
+    if not task["worktree"]:
+        return "the task has no worktree"
+    row = owlery._owl(conn, owl["id"])  # a plain lookup, so the recipient's copy stays unread
+    named = handoff_task(None if row is None else row["body"])
+    if named is None:
+        return "the owl carries no handoff: its text does not start with a HANDOFF line"
+    if named != task["id"]:
+        return "the handoff names another task"
+    reviewer = config.REVIEWER_FOR_FAMILY.get(pensieve.get_desk(conn, task["desk"])["family"])
+    if reviewer is None or not run_desk.is_enabled(reviewer):
+        return f"its reviewer ({reviewer}) is not enabled, so run fleet review for this task once it is"
+    return None
+
+
+def _handoff_dir(task_id: str, create: bool = False):
+    return safefs.opened_dir(config.OFFICE_ROOT, "reviews", ids.check("task", task_id), create=create)
+
+
+def claim_handoff(task_id: str, owl_id: str) -> bool:
+    """Record that a handoff went to the review loop: True the first time, False when it already had."""
+    with _handoff_dir(task_id, create=True) as fd:
+        try:
+            os.close(safefs.create_new(fd, f"auto-{ids.check('owl', owl_id)}.pending"))
+        except FileExistsError:
+            return False
+    return True
+
+
+def unfinished_handoffs(task_id: str) -> list:
+    """The ids of the task's handoffs the review loop took and is not finished with."""
+    try:
+        with _handoff_dir(task_id) as fd:
+            names = os.listdir(fd)
+    except Missing:
+        return []
+    kinds: dict = {}
+    for name in names:
+        match = HANDOFF_RECORD.fullmatch(name)
+        if match is not None:
+            kinds.setdefault(match.group(1), set()).add(match.group(2))
+    return sorted(owl_id for owl_id, found in kinds.items() if "pending" in found and "done" not in found)
+
+
+def finish_handoff(task_id: str, owl_id: str, outcome: str) -> None:
+    """Record that the review loop is finished with a handoff, and what came of it. Nothing tries it again."""
+    with _handoff_dir(task_id, create=True) as fd:
+        safefs.write_new(fd, f"auto-{ids.check('owl', owl_id)}.done",
+                         (common.one_line(outcome, 600) + "\n").encode("ascii"))
+
+
+def take_try(task_id: str, owl_id: str) -> Optional[int]:
+    """The next try, 1 to AUTO_REVIEW_MAX_TRIES, of a handoff's automatic review, taken before it starts work, or
+    None when every try was taken by a review that never finished (killed, or its machine stopped)."""
+    owl_id = ids.check("owl", owl_id)
+    with _handoff_dir(task_id, create=True) as fd:
+        for number in range(1, min(config.AUTO_REVIEW_MAX_TRIES, 9) + 1):
+            try:
+                os.close(safefs.create_new(fd, f"auto-{owl_id}.try{number}"))
+            except FileExistsError:
+                continue
+            return number
+    return None
+
+
+def give_back_try(task_id: str, owl_id: str, number: int) -> None:
+    """Hand back a try that only found the reviewer busy, so waiting never uses one up."""
+    with _handoff_dir(task_id) as fd, contextlib.suppress(FileNotFoundError):
+        os.unlink(f"auto-{ids.check('owl', owl_id)}.try{int(number)}", dir_fd=fd)
+
+
+@contextlib.contextmanager
+def auto_review_lock(task_id: str, wait: float = 0) -> Iterator[None]:
+    """The task's loop lock, held by an automatic review of the task for its whole life, so two never run at once
+    and a pass can tell a live one from one that was killed. safefs.Busy when another process holds it past
+    wait seconds. No process the review starts inherits it."""
+    with safefs.opened_dir(config.OFFICE_ROOT, "locks", create=True) as locks_fd, \
+            safefs.held_lock(locks_fd, f"auto-review-{ids.check('task', task_id)}.lock", blocking=wait > 0,
+                             timeout=wait if wait > 0 else None):
+        yield
+
+
+def auto_review_running(task_id: str) -> bool:
+    """Whether a process holds the task's loop lock. A review starting just now waits a moment for this probe."""
+    try:
+        with auto_review_lock(task_id):
+            return False
+    except safefs.Busy:
+        return True
+
+
+def _spawn_review(conn, desk: str, task_id: str, owl_id: str, now: Optional[int]) -> str:
+    try:
+        run_desk.spawn_review(task_id)
+    except (FleetError, OSError):
+        pensieve.add_event(conn, desk, "owlpost.review-failed", "headmaster",
+                           f"the Owl Post could not start the automatic review of task {task_id}; each pass tries"
+                           f" again, and fleet review {task_id} runs it by hand",
+                           task_id=task_id, dedupe_key=f"owlpost:review-failed:{owl_id}", now=now)
+        return "the review could not start"
+    return REVIEW_STARTED
+
+
+def _start_review(conn, owl: dict, newly_delivered: bool, now: Optional[int]) -> Optional[str]:
+    """Start the review of a build desk's handoff, or say why it starts none. None for any other owl."""
+    if owl["kind"] != "result" or owl["sender"] not in config.WORKTREE_DESKS:
+        return None
+    problem = handoff_problem(conn, owl)
+    if problem is not None:
+        if newly_delivered:
+            pensieve.add_event(conn, owl["sender"], "review.auto-skipped", "routine",
+                               f"a handoff from {owl['sender']} started no review: {problem}",
+                               task_id=owl["task_id"], dedupe_key=f"review:auto-skipped:{owl['id']}", now=now)
+        return f"no review: {problem}"
+    try:
+        claimed = claim_handoff(owl["task_id"], owl["id"])
+    except (FleetError, OSError):
+        pensieve.add_event(conn, owl["sender"], "owlpost.review-failed", "headmaster",
+                           f"the Owl Post could not record a handoff for the review loop, so task {owl['task_id']}"
+                           f" was not reviewed; fleet review {owl['task_id']} runs it by hand",
+                           task_id=owl["task_id"], dedupe_key=f"owlpost:review-failed:{owl['id']}", now=now)
+        return "the review could not start"
+    if not claimed:
+        return "no review: this handoff already went to the review loop"
+    return _spawn_review(conn, owl["sender"], owl["task_id"], owl["id"], now)
+
+
+def resume_reviews(conn, now: Optional[int] = None, started: tuple = ()) -> list:
+    """Start again the automatic review of each open build task that has a handoff the review loop took and is not
+    finished with, when no automatic review of that task holds its loop lock. started names the tasks whose review
+    this pass has just started, which may not hold their lock yet."""
+    resumed = []
+    for desk in config.WORKTREE_DESKS:
+        for task in pensieve.list_tasks(conn, desk=desk, open_only=True):
+            if task["id"] in started:
+                continue
+            try:
+                unfinished = unfinished_handoffs(task["id"])
+                if not unfinished or auto_review_running(task["id"]):
+                    continue
+                resumed.append({"task_id": task["id"],
+                                "review": _spawn_review(conn, desk, task["id"], unfinished[-1], now)})
+            except (FleetError, StoreError, OSError) as exc:
+                resumed.append({"task_id": task["id"],
+                                "error": _reason(exc) if not isinstance(exc, OSError) else type(exc).__name__})
+    return resumed
+
+
 def _ack_replied(conn, sender: str, owl: dict, now: Optional[int]) -> None:
     """An answer or result from the asked desk acknowledges the owl it replies to.
 
@@ -315,14 +510,18 @@ def deliver_file(conn, sender: str, outbox_fd: int, fname: str, now: Optional[in
     finally:
         os.close(inbox_fd)
     rang = _ring(conn, owl["recipient"], owl, newly, now)
+    reviewing = _start_review(conn, owl, newly, now)
     _ack_replied(conn, sender, owl, now)
     _flag_forged_sender(conn, sender, message, owl, now)
     with safefs.opened_dir(config.CASTLE_ROOT, "desks", sender, "outbox", SENT_DIR, create=True) as sent_fd:
         safefs.move(outbox_fd, fname, sent_fd, f"{owl['id']}-{fname}")
         if body_file is not None and safefs.lstat(outbox_fd, body_file["name"]) is not None:
             safefs.move(outbox_fd, body_file["name"], sent_fd, f"{owl['id']}-{body_file['name']}")
-    return {"file": fname, "owl_id": owl["id"], "from": sender, "to": owl["recipient"],
-            "new": newly, "doorbell": rang}
+    delivered = {"file": fname, "owl_id": owl["id"], "from": sender, "to": owl["recipient"],
+                 "new": newly, "doorbell": rang}
+    if reviewing is not None:
+        delivered.update(review=reviewing, task_id=owl["task_id"])
+    return delivered
 
 
 def reject_file(sender: str, outbox_fd: int, fname: str, reason: str, now: Optional[int] = None) -> str:
@@ -366,7 +565,7 @@ def drain_outbox(conn, sender: str, outbox_fd: int, summary: dict, now: Optional
 
 
 def run_pass(conn, now: Optional[int] = None) -> dict:
-    summary: dict = {"delivered": [], "rejected": [], "waiting": [], "errors": []}
+    summary: dict = {"delivered": [], "rejected": [], "waiting": [], "errors": [], "reviews": []}
     for desk in pensieve.list_desks(conn):
         sender = desk["name"]
         if sender not in config.CASTLE_DESKS:
@@ -382,6 +581,8 @@ def run_pass(conn, now: Optional[int] = None) -> dict:
             drain_outbox(conn, sender, outbox_fd, summary, now)
         finally:
             os.close(outbox_fd)
+    started = tuple(entry["task_id"] for entry in summary["delivered"] if entry.get("review") == REVIEW_STARTED)
+    summary["reviews"] = resume_reviews(conn, now, started)
     return summary
 
 

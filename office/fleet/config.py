@@ -100,6 +100,17 @@ CAP_WARN_FRACTION = 0.8
 # Review rounds per author task. The next one waits for Ryan's castle task allow-round. Only a reviewer
 # run that recorded a verdict uses up a round; the daily run caps bound retries of runs that did not.
 REVIEW_ROUND_CAP = 3
+# The review loop (review.auto_review). When a build desk posts a handoff, the Owl Post starts its task's review
+# in a process of its own. That review first waits this long for the run that posted the handoff to end.
+AUTO_REVIEW_AUTHOR_WAIT_SECONDS = 120
+# A handoff whose review cannot start yet (its author's run still going, the reviewer busy, another review of the
+# task running) is tried again on each Owl Post pass, for at most this long after it was posted. Then Ryan hears.
+AUTO_REVIEW_WAIT_LIMIT_SECONDS = 4 * 3600
+# An automatic review killed part way is started again on the next Owl Post pass, at most this many tries in
+# all (at most 9). A review that ends any other way, with a verdict or a refusal, is never tried again by itself.
+AUTO_REVIEW_MAX_TRIES = 3
+# How long a starting automatic review waits for another one of the same task to let go of the task's loop lock.
+AUTO_REVIEW_LOCK_WAIT_SECONDS = 10
 # A failed run whose error text matches one of these hit the vendor's own usage, rate, quota or credit
 # limit, not a fleet cap. Matched without case against Claude's result text when is_error is set, and
 # against the message that ended a failed Codex run (its last turn.failed, else its last error event).

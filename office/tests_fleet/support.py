@@ -166,6 +166,11 @@ class FleetCase(unittest.TestCase):
         never = mock.patch.object(run_desk, "start_child", side_effect=AssertionError("no desk process may start"))
         never.start()
         self.addCleanup(never.stop)
+        # No automatic review process ever starts either. The Owl Post's starts are recorded here, and a test that
+        # wants the review runs review.auto_review itself.
+        reviews = mock.patch.object(run_desk, "spawn_review")
+        self.spawned_reviews = reviews.start()
+        self.addCleanup(reviews.stop)
         # A desk run empties its private folder under the per-user temp folder, so every test gets its own temp
         # folder there unless it sets one. Without this a faked Harry run empties the real hogwarts-harry folder.
         user_temp = self.tmp / "user-temp"

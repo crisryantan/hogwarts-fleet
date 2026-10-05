@@ -86,7 +86,7 @@ None of these uses a model.
 1. You ask McGonagall. She writes a TASK.md with your words as the Intent, plus numbered acceptance criteria, each with a check. You read it, say go, and register it with `castle task create`.
 2. The task gets a fresh git worktree, and Harry builds there. Work from your own Claude sessions joins at the next step, through `fleet review own`.
 3. `fleet verify` runs each acceptance check and records the command, exit code and output for that commit.
-4. `fleet review` sends Codex-written work to Hermione and Claude-written work to Moody. A pass counts only for that exact commit, and only when the reviewer's family differs from the author's.
+4. `fleet review` sends Codex-written work to Hermione and Claude-written work to Moody. A pass counts only for that exact commit, and only when the reviewer's family differs from the author's. Harry's handoff starts his review by itself, and CHANGES starts his fix round, up to the round cap.
 5. You run `fleet push`, which pushes exactly the reviewed commit and prints the `gh` command for a draft PR. You open the PR yourself. The push gate blocks any agent's own `git push` that has no pass.
 6. The patrol (the Map, Ron and Hermione's bot pass) watches CI and review comments. You merge and deploy, then close the task by typing `Mischief managed <task-id>`.
 

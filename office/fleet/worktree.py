@@ -17,7 +17,9 @@ Then it fetches the base (unless --no-fetch), adds ~/hogwarts/worktrees/<task-id
 writes the office record, attaches the worktree to the task, starts the task and its request, and
 starts the desk's run if Ryan has enabled the desk.
 
-  fleet build <task-id>     starts the desk again on the same task, for a fix round after a review.
+  fleet build <task-id>     starts the desk again on the same task, for a fix round after a review. The review
+                            loop starts a fix round through build() itself after a CHANGES verdict, so this is the
+                            fallback. Both run under the task's review lock, so neither starts the desk mid-review.
   fleet worktree-remove <task-id>   removes a closed task's worktree. It never deletes the branch.
 
 castle task start goes through start_task for a build desk's task, which makes the same TASK.md check, so it is

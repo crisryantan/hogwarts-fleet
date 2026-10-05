@@ -47,7 +47,7 @@ File: `b-owlpost-launchctl.txt`. It has the exact commands, a test and the undo.
 
 The Owl Post runs whenever a desk outbox changes (`WatchPaths` on all seven outboxes), and every five minutes to sweep up a file it left for later. It runs the same wrapper line as `castle`, logs to `~/.hogwarts/logs` with a 077 umask, and needs no network. Load it only after the castle exists, because launchd watches the outbox folders.
 
-Only McGonagall's request owls start a headless run. Any other owl waits in the inbox. A refused owl file raises a headmaster event, so you see it in the digest.
+Only McGonagall's request owls start a headless run. Any other owl waits in the inbox. The one other thing an owl starts is a review: Harry's handoff for his own active task starts that task's review, as in (g). A refused owl file raises a headmaster event, so you see it in the digest.
 
 Most of the other jobs have setup scripts in the kit. `scripts/patrol-setup.sh` loads the patrol's five plists from `launchd/` (map, morning, keeper, scoreboard, gringotts) in shadow mode, at onboarding stage 5.2. `scripts/portrait-setup.sh` loads Dumbledore's, at onboarding stage 5.3. You load Ollivander's job by hand at onboarding stage 5.5.
 
@@ -116,19 +116,19 @@ Every `fleet` command prints one JSON object with `"ok": true` or `"ok": false` 
 ~/.hogwarts/bin/fleet worktree <harry-task-id> --repo-dir <path-to-your-checkout> --branch <new-branch>
 ```
 
-4. Harry leaves his changes uncommitted and posts a handoff with a COMMIT MESSAGE section. The review script commits for him outside his sandbox, runs the acceptance checks, and runs Hermione:
+4. Harry leaves his changes uncommitted and posts a handoff with a COMMIT MESSAGE section. Once Hermione is enabled, the Owl Post starts the review on its own: the review script commits for him outside his sandbox, runs the acceptance checks, and runs Hermione. Only a handoff the Owl Post stamped as Harry's, for his own active task with a worktree, starts one, and only once. A handoff that starts nothing leaves a routine event saying why. The review first waits for Harry's run to end. While Hermione's run slots are all busy, or another review of the task is running, it waits and tries again on each Owl Post pass, for up to four hours. A review that dies part way is started again on the next pass, three tries at most. When it gives up or fails, you get a headmaster event. Run it by hand only then, or when the Owl Post is off:
 
 ```
 ~/.hogwarts/bin/fleet review <harry-task-id>
 ```
 
-5. On CHANGES, start Harry's fix round, then review again. He reads `review-latest.md` next to TASK.md:
+5. On CHANGES, the review starts Harry's fix round on its own. He reads `review-latest.md` next to TASK.md, and his next handoff starts the next review. After `REVIEW_ROUND_CAP` rounds (three) the loop stops, and you get one headmaster event naming the task and its last verdict. On HEADMASTER nothing more starts, and you get the event as before. A review whose commit and handoff are what the last verdict already judged is refused before anything changes. `fleet build` and every review of a task, by hand or automatic, take the same per-task lock, so a fix round never starts mid-review and two reviews never run at once. Start a fix round by hand after `castle task allow-round <harry-task-id>` at the cap, when the loop could not start one (Harry disabled or at his daily cap, which you hear about), or after a review you ran by hand, which stops at its verdict:
 
 ```
 ~/.hogwarts/bin/fleet build <harry-task-id>
 ```
 
-6. On PASS, push exactly the reviewed commit. It shows the commits and waits for you to type the branch name, then prints the `gh` command for a draft PR. Read the PR text before you run that:
+6. On PASS, nothing more starts. The task awaits close, and the review loop gives you one headmaster event saying it is ready for push. Push exactly the reviewed commit. It shows the commits and waits for you to type the branch name, then prints the `gh` command for a draft PR. Read the PR text before you run that:
 
 ```
 ~/.hogwarts/bin/fleet push <harry-task-id>
