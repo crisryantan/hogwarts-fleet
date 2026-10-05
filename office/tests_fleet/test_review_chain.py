@@ -914,3 +914,62 @@ class UnpublishedVerdictTests(ChainCase):
         holder, _ = verify.task_md(self.conn, self.task["id"])
         self.assertIn(f"@ {first}", (self.castle / "tasks" / holder / f"review-{first[:12]}-hermione.md").read_text())
         self.assertEqual(len(self.result_owls(1)), 1)
+
+
+class NewerVerdictTests(ChainCase):
+    """A loop round whose review was killed after its verdict is history once a newer round of the task has been
+    opened, by hand or otherwise: recovery keeps its review published but acts on nothing, so no fix round, no
+    settled PASS and no decision for Ryan follows a verdict a newer one replaced."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.spawned_reviews.side_effect = None  # the first review is run, and killed, by each test
+
+    def manual_round(self, verdict: str) -> None:
+        """A review Ryan runs by hand on a new commit, which stops at its verdict."""
+        self.write_file(self.wt / "widget.txt", "widget by hand\n")
+        with self.fake_reviewer(verdict):
+            review.review_build(self.conn, self.task["id"])
+
+    def test_an_older_changes_starts_no_fix_round_after_a_newer_headmaster(self):
+        self.post(1, "widget")
+        self.killed_review("CHANGES", owl_post, "finish_handoff")
+        self.manual_round("HEADMASTER")
+        self.assertEqual(self.rounds(), [(1, "CHANGES"), (2, "HEADMASTER")])
+        self.next_pass()
+        self.harry_runs.assert_not_called()
+        self.assertEqual(self.rounds(), [(1, "CHANGES"), (2, "HEADMASTER")])
+        self.assertEqual(owl_post.unfinished_afters(self.task["id"]), [])
+        self.assertIn(f"REVIEW {self.task['id']} @ {self.head()}", self.latest_review() or "")
+
+    def test_an_older_pass_is_never_settled_after_a_newer_changes(self):
+        self.post(1, "widget")
+        self.killed_review("PASS", review, "settle_verdict")
+        self.assertEqual(pensieve.get_task(self.conn, self.task["id"])["status"], "active")
+        self.manual_round("CHANGES")
+        self.next_pass()
+        self.assertEqual(pensieve.get_task(self.conn, self.task["id"])["status"], "active")
+        self.assertEqual([event["kind"] for event in self.new_events()], [])
+        self.harry_runs.assert_not_called()
+        self.assertEqual(owl_post.unfinished_afters(self.task["id"]), [])
+
+    def test_an_older_headmaster_published_late_tells_ryan_nothing_after_a_newer_round(self):
+        self.post(1, "widget")
+        real = review._castle_task_file
+
+        def castle_file(holder_id, name, text):
+            if name == "review-latest.md":
+                raise Killed("killed")
+            return real(holder_id, name, text)
+
+        with self.fake_reviewer("HEADMASTER"), \
+                mock.patch.object(review, "_castle_task_file", side_effect=castle_file), self.assertRaises(Killed):
+            review.auto_review(self.conn, self.task["id"])
+        self.manual_round("CHANGES")
+        newer = self.latest_review()
+        self.next_pass()
+        self.assertEqual([event["kind"] for event in self.new_events()], [])
+        self.assertEqual(self.latest_review(), newer)
+        first = capacity.review_rounds(self.conn, self.task["id"])[0]
+        self.assertEqual(owlery.get_request(self.conn, first["request_id"])["phase"], "cleaned")
+        self.harry_runs.assert_not_called()

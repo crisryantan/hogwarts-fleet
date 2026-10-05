@@ -74,10 +74,12 @@ loop finishes it first, under the task review lock and without opening a round (
 recorded no verdict needs nothing; one with a verdict has its handoff finished, and an ending Ryan already heard
 (_told: the step's own ending, a failure before a push began included, or the loop's stop) is left as told and
 never tried again. Otherwise its review is published again from the copy in the office if it was stopped before
-that (restore_publication), or Ryan hears once why it cannot be and nothing follows the verdict; then what every
-review does after a verdict is done again (settle_verdict), and a step that had not begun starts then, once. A step
-that had begun may or may not have happened, so it is never started again by itself: Ryan hears so once. A review
-Ryan runs with fleet review stops at its verdict, as it always has.
+that (restore_publication), or Ryan hears once why it cannot be and nothing follows the verdict. Once a newer round
+of the task has been opened, the verdict is history: nothing more is done on it, neither the task's status nor any
+step that had not begun, nor a decision for Ryan. Otherwise what every review does after a verdict is done again
+(settle_verdict), and a step that had not begun starts then, once. A step that had begun may or may not have
+happened, so it is never started again by itself: Ryan hears so once. A review Ryan runs with fleet review stops at
+its verdict, as it always has.
 
 A build desk's review is refused before anything changes when it would read exactly what the task's last verdict
 judged: HEAD is that round's commit and the desk's latest handoff is the same text. Each round that runs records,
@@ -799,7 +801,8 @@ def _pending_handoff(conn, task: dict, now: Optional[int]) -> tuple:
 def _auto_recover(conn, task: dict, afters: list, now: Optional[int]) -> Optional[list]:
     """Finish what followed a verdict of the loop's own rounds that a kill cut off (afters, from
     owl_post.unfinished_afters), under the task's review lock, or None while another review or a build run holds it.
-    It never opens a round. A step that had not begun starts now, once; one that had begun may or may not have
+    It never opens a round. A step that had not begun starts now, once, unless a newer round of the task has been
+    opened since, which leaves the older verdict as history; one that had begun may or may not have
     happened, so it never runs again by itself and Ryan hears so, once (_interrupted)."""
     with contextlib.ExitStack() as held:
         try:
@@ -819,6 +822,7 @@ def _auto_recover(conn, task: dict, afters: list, now: Optional[int]) -> Optiona
 def _recover_after(conn, task: dict, record: dict, row: Optional[dict], lock_fd: int, now: Optional[int]) -> str:
     """One round's unfinished after record (see _auto_recover). row is the round, from capacity.review_rounds."""
     task_id, request_id, owl_id = task["id"], record["request_id"], record["owl_id"]
+    later = None
     if record["state"] == "review" and (row is None or not row["has_verdict"]):
         # Its review ended with no verdict (no live review holds this lock), so nothing follows it. Its handoff, if
         # still unfinished, gets its next try as any other.
@@ -840,13 +844,27 @@ def _recover_after(conn, task: dict, record: dict, row: Optional[dict], lock_fd:
                                task_id=task_id, dedupe_key=f"review:unpublished:{request_id}", now=now)
             owl_post.write_after(task_id, request_id, owl_id, "done")
             return "stopped: its review could not be published"
-        settle_verdict(conn, task, row["reviewer"], row["verdict"], row["sha"])
+        later = _later_round(conn, task_id, request_id)
+        if later is None:
+            settle_verdict(conn, task, row["reviewer"], row["verdict"], row["sha"])
     if record["state"] == "review":
+        if later is not None:
+            # A newer round was opened since, so this verdict is history: its review stays published, and nothing
+            # follows it, neither the task's status, a fix round, a push nor a decision for Ryan.
+            owl_post.write_after(task_id, request_id, owl_id, "done")
+            return f"round {later['round']} was opened after it, so nothing follows its verdict"
         # Nothing after the verdict had begun, so it starts now, once.
         result = {"verdict": row["verdict"], "round": row["round"], "sha": row["sha"], "request_id": request_id,
                   "handoff_owl": owl_id}
         return _after_verdict(conn, pensieve.get_task(conn, task_id), result, lock_fd, now, checked_owl=owl_id)
     return _interrupted(conn, task, record, row, now)
+
+
+def _later_round(conn, task_id: str, request_id: str) -> Optional[dict]:
+    """The first review round of the task opened after the round of request_id, or None when it is the newest."""
+    rows = capacity.review_rounds(conn, task_id)
+    index = next(index for index, row in enumerate(rows) if row["request_id"] == request_id)
+    return rows[index + 1] if index + 1 < len(rows) else None
 
 
 def _told(conn, task: dict, record: dict, row: dict) -> bool:

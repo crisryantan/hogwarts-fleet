@@ -13,9 +13,10 @@ from unittest import mock
 from hogwarts import capacity, ids, owlery, pensieve
 from tests.support import NOW
 
-from fleet import config, gitops, owl_post, review, run_desk, safefs, verify
+from fleet import common, config, gitops, owl_post, review, run_desk, safefs, verify
 from tests_fleet.support import FleetCase, claude_settings, fake_children
 
+REAL_POPEN = subprocess.Popen
 BYPASS_WORDS = ("dangerously", "bypass", "skip-permissions", "danger-full-access", "approve-for-me", "yolo")
 
 
@@ -420,6 +421,55 @@ class BuildRunTaskLockTests(RunDeskCase):
             with self.assertRaisesRegex(safefs.FleetError, "is not task .* review lock"):
                 run_desk.run(self.conn, "harry", self.owl_id, now=NOW, task_lock_fd=other.fd)
         started.assert_not_called()
+
+    def sleeper(self, kwargs: dict) -> subprocess.Popen:
+        """A real process in place of the desk's, inheriting what the run's would: /bin/sleep, never a desk CLI."""
+        child = REAL_POPEN(["/bin/sleep", "60"], stdin=subprocess.DEVNULL, stdout=kwargs["stdout"],
+                                 stderr=kwargs["stderr"], pass_fds=kwargs["pass_fds"], close_fds=True)
+        self.addCleanup(child.wait)
+        self.addCleanup(child.kill)
+        return child
+
+    def signalled_start(self, children: list):
+        """start_child, where SIGTERM lands once the process has started and before its handle is returned."""
+
+        def start(argv, **kwargs):
+            children.append(self.sleeper(kwargs))
+            os.kill(os.getpid(), signal.SIGTERM)
+            return children[-1]
+
+        return mock.patch.object(run_desk, "start_child", side_effect=start)
+
+    def test_a_signal_as_the_desk_process_starts_ends_it_before_the_review_lock_is_let_go(self):
+        children = []
+        with common.ended_by_signals(), self.signalled_start(children), self.assertRaises(SystemExit):
+            run_desk.run(self.conn, "harry", self.owl_id, now=NOW)
+        [child] = children
+        self.assertIsNotNone(child.poll(), "the desk process outlived the review lock it held")
+        self.assertTrue(self.review_free())
+
+    def test_a_signal_as_a_handed_run_starts_ends_it_before_the_handed_lock_is_let_go(self):
+        children = []
+        with review.task_review_lock(self.task_id) as lock_fd:
+            with common.ended_by_signals(), self.signalled_start(children), self.assertRaises(SystemExit):
+                run_desk.run(self.conn, "harry", self.owl_id, now=NOW, task_lock_fd=lock_fd)
+            [child] = children
+            self.assertIsNotNone(child.poll(), "the desk process outlived the review lock it was handed")
+
+    def test_a_signal_before_the_wait_begins_still_ends_the_desk_process(self):
+        children = []
+
+        def start(argv, **kwargs):
+            children.append(self.sleeper(kwargs))
+            return children[-1]
+
+        with mock.patch.object(run_desk, "start_child", side_effect=start), \
+                mock.patch.object(run_desk, "wait_child", side_effect=SystemExit(128 + signal.SIGTERM)), \
+                self.assertRaises(SystemExit):
+            run_desk.run(self.conn, "harry", self.owl_id, now=NOW)
+        [child] = children
+        self.assertIsNotNone(child.poll(), "the desk process outlived the review lock it held")
+        self.assertTrue(self.review_free())
 
 
 class LockInheritanceTests(FleetCase):

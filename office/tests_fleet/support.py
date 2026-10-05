@@ -105,6 +105,9 @@ class FakeChild:
             self.returncode = self._fake(self.args, timeout=timeout, check=False, **self._kwargs).returncode
         return self.returncode
 
+    def poll(self):
+        return self.returncode
+
     def kill(self) -> None:
         if self.returncode is None:
             self.returncode = -9

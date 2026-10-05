@@ -47,6 +47,25 @@ def ended_by_signals() -> Iterator[None]:
             signal.signal(number, signal.SIG_DFL if handler is None else handler)
 
 
+@contextlib.contextmanager
+def signals_held() -> Iterator[None]:
+    """Hold back SIGTERM, SIGHUP and SIGINT for a step that must never be cut in two, such as starting a process and
+    keeping its handle, then raise each one that came, once, to the handler that was there before, as the block ends."""
+    if threading.current_thread() is not threading.main_thread():
+        yield
+        return
+    came = []
+    previous = {number: signal.signal(number, lambda signum, frame: came.append(signum))
+                for number in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT)}
+    try:
+        yield
+    finally:
+        for number, handler in previous.items():
+            signal.signal(number, signal.SIG_DFL if handler is None else handler)
+        for number in dict.fromkeys(came):
+            signal.raise_signal(number)
+
+
 def _no_constants(name: str) -> None:
     raise ValueError("NaN and Infinity are not allowed")
 

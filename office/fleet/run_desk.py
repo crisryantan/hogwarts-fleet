@@ -1620,6 +1620,13 @@ def wait_child(child, timeout: int) -> int:
         raise
 
 
+def stop_child(child) -> None:
+    """Kill the process if it is still running, and reap it."""
+    if child.poll() is None:
+        child.kill()
+    child.wait()
+
+
 def _run_output(run_fd: int, run_id: str) -> bytes:
     """What the desk's process wrote to its output file, or nothing when that cannot be read, so usage then
     records as zero. The run log keeps the full output."""
@@ -1739,12 +1746,17 @@ def _launch(conn, plan: dict, now: Optional[int], keep_fds: tuple = (), own: Opt
         try:
             if own is not None:
                 own.keep = True
-            child = start_child(plan["argv"], cwd=plan["cwd"], env=plan.get("env") or child_env(),
-                                stdin=subprocess.DEVNULL, stdout=out_fd, stderr=err_fd, pass_fds=tuple(keep_fds))
+            with common.signals_held():  # a process that started always has its handle here, to be killed below
+                child = start_child(plan["argv"], cwd=plan["cwd"], env=plan.get("env") or child_env(),
+                                    stdin=subprocess.DEVNULL, stdout=out_fd, stderr=err_fd, pass_fds=tuple(keep_fds))
             exit_code = wait_child(child, config.RUN_TIMEOUT_SECONDS)
         except BaseException:
             settled = child is None  # it never started, so it spent nothing
-            if child is not None:  # started, and wait_child has killed it: record what it did, then keep unwinding
+            if child is not None:
+                # Ended before the locks it inherited are let go, wherever the signal landed, then what it did is
+                # recorded and the unwinding goes on.
+                with common.signals_held():
+                    stop_child(child)
                 settled = _record_interrupted(conn, plan, run_fd, started, now)
             if own is not None and settled:
                 own.keep = False
