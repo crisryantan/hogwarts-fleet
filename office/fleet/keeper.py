@@ -4,10 +4,11 @@ The script reads, with the patrol's read-only GitHub queries (fleet/patrol.py), 
 and on the newest main-branch commit of each watched repo, and writes what it found to
 patrol/keeper/<date>-<HHMM>.md.
 
-- All green, or only reds Ron has already judged: no model runs.
+- All green, or only reds Ron has already judged or still has on his pending owl: no model runs.
 - A new red (a PR or main commit, at its sha, with its failing checks): it wakes Ron, on the fast tier, who
   calls each one REAL, FLAKY, INFRA or UNSURE and writes a fix brief for each REAL one. His words land in the
-  same file. Ron never retries or unblocks anything.
+  same file. A red counts as judged only once the patrol has taken his file (patrol.finish); until then a
+  later Map round sends his owl again. Ron never retries or unblocks anything.
 - A gate waiting on a person (a check run waiting for approval, or one that asks for action) is a row for Ryan.
 
 In shadow mode the file is all. Once Ryan removes the shadow file, each new gate, and each watch where Ron
@@ -30,8 +31,7 @@ from hogwarts.errors import StoreError  # noqa: E402
 from fleet import common, patrol  # noqa: E402
 from fleet.safefs import FleetError  # noqa: E402
 
-JUDGED = "judged.json"
-JUDGED_KEEP = 500
+JUDGED = patrol.KEEPER_JUDGED
 MAIN_LOOKBACK_SECONDS = 7 * 86400
 
 
@@ -60,7 +60,7 @@ def watched(seen: dict, ts: int) -> tuple:
     return items, errors
 
 
-def render(reds: list, fresh: list, gates: list, errors: list, ts: int) -> str:
+def render(reds: list, fresh: list, gates: list, errors: list, ts: int, sent: tuple = ()) -> str:
     def rows(items: list) -> list:
         return [(item["where"], item["sha"][:12], patrol.checks_text(item), item["url"]) for item in items]
 
@@ -69,7 +69,11 @@ def render(reds: list, fresh: list, gates: list, errors: list, ts: int) -> str:
         parts.append("All green. No model ran.\n")
     if fresh:
         parts += ["## New reds for Ron to call\n\n", patrol.table(("where", "sha", "checks", "link"), rows(fresh))]
-    old = [item for item in reds if item not in fresh]
+    waiting = [item for item in reds if item not in fresh and signature(item) in sent]
+    if waiting:
+        parts += ["\n## Reds already sent to Ron, his call not taken yet\n\n",
+                  patrol.table(("where", "sha", "checks", "link"), rows(waiting))]
+    old = [item for item in reds if item not in fresh and item not in waiting]
     if old:
         parts += ["\n## Reds Ron already called\n\n", patrol.table(("where", "sha", "checks", "link"), rows(old))]
     if gates:
@@ -86,13 +90,16 @@ def watch(conn, now: Optional[int] = None) -> dict:
     shadow = patrol.shadow_on()
     seen = patrol.fetch_prs()
     items, errors = watched(seen, ts)
+    if not seen["complete"]:
+        errors.append("your open PRs: GitHub's list could not be read to its end")
     reds = [item for item in items if item["checks"] in patrol.RED]
     gates = [item for item in items if item["waiting"]]
     judged = patrol.read_state("keeper", JUDGED, [])
     judged = [value for value in judged if isinstance(value, str)] if isinstance(judged, list) else []
-    fresh = [item for item in reds if signature(item) not in judged]
+    sent = patrol.in_flight("keeper").get("", set())
+    fresh = [item for item in reds if signature(item) not in judged and signature(item) not in sent]
     out = f"{patrol.file_stamp(ts)}.md"
-    text = render(reds, fresh, gates, errors, ts)
+    text = render(reds, fresh, gates, errors, ts, tuple(sent))
     path = patrol.write_text("keeper", out, text)
     for gate in gates:
         patrol.tell_ryan(conn, shadow, "gate", f"{gate['where']}: a gate waits on a person"
@@ -100,9 +107,9 @@ def watch(conn, now: Optional[int] = None) -> dict:
                          f"patrol:gate:{gate['where']}:{gate['sha']}:{','.join(gate['waiting'])}", now)
     woke = None
     if fresh:
-        patrol.write_state("keeper", JUDGED, (judged + [signature(item) for item in fresh])[-JUDGED_KEEP:])
         try:
-            woke = patrol.wake(conn, "ron", "keeper", "keeper's watch", text, out, now, shadow=shadow)
+            woke = patrol.wake(conn, "ron", "keeper", "keeper's watch", text, out, now, shadow=shadow,
+                               marks=[signature(item) for item in fresh])
         except (FleetError, StoreError) as exc:
             woke = {"launched": False, "clean": False, "error": common.one_line(exc, 200)}
     return {"ok": True, "shadow": shadow, "file": path, "reds": len(reds), "new_reds": len(fresh),

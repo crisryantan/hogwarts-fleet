@@ -1,8 +1,8 @@
-"""Gringotts: the nightly backup leaves credentials out and blanks env values, keeps 14 days, and its restore
-drill restores into a temp folder inside the backups folder and checks every file.
+"""Gringotts: the nightly backup leaves credentials and git metadata out and blanks secret-named values, keeps
+14 days, and its restore drill restores into a temp folder inside the backups folder and checks every file.
 
 The Claude and Codex folders, the office and the castle are temp folders from tests_fleet.support, so the real
-ones are never read. Time is always injected.
+ones are never read. Git runs only inside the temp castle, with a temp home. Time is always injected.
 """
 from __future__ import annotations
 
@@ -10,7 +10,9 @@ import io
 import json
 import os
 import stat
+import subprocess
 import tarfile
+import zlib
 from unittest import mock
 
 from tests.support import NOW
@@ -63,6 +65,15 @@ class GringottsCase(FleetCase):
         with tarfile.open(path, "r:gz") as tar:
             return {member.name: tar.extractfile(member).read() for member in tar.getmembers() if member.isreg()}
 
+    def git(self, *args, cwd=None) -> None:
+        subprocess.run([config.GIT_BIN, *args], cwd=cwd or self.castle, capture_output=True, check=True,
+                       env={"HOME": str(self.tmp), "PATH": config.CHILD_PATH, "GIT_CONFIG_NOSYSTEM": "1"})
+
+
+def scrubbed_toml(text: str):
+    out = gringotts._scrub_toml(text.encode("utf-8"))
+    return None if out is None else out.decode("utf-8")
+
 
 class BackupTests(GringottsCase):
     def test_the_archive_is_private_and_leaves_secrets_out(self):
@@ -110,6 +121,112 @@ class BackupTests(GringottsCase):
         kept = gringotts._scrub_toml(b'[profiles.fast]\nmodel = "x"\n')
         self.assertEqual(kept, b'[profiles.fast]\nmodel = "x"\n')
 
+    def test_toml_blanks_a_value_when_any_part_of_its_full_path_is_secret_named(self):
+        cases = {
+            "a dotted key under an MCP server table":
+                ('[mcp_servers.x]\ncommand = "npx"\nhttp_headers.Authorization = "%s"\n',
+                 '[mcp_servers.x]\ncommand = "npx"\nhttp_headers.Authorization = ""\n'),
+            "a dotted key at the top": ('mcp_servers.x.env.TOKEN = "%s"\n', 'mcp_servers.x.env.TOKEN = ""\n'),
+            "an env table": ('[mcp_servers.x.env]\nANY = "%s"\n', '[mcp_servers.x.env]\nANY = ""\n'),
+            "a quoted headers table": ('[mcp_servers."my server".http_headers]\n"Authorization" = \'%s\'\n',
+                                       '[mcp_servers."my server".http_headers]\n"Authorization" = ""\n'),
+            "an inline env table": ('[mcp_servers.x]\nenv = { A = "%s", B = { C = "%s" } }\n',
+                                    '[mcp_servers.x]\nenv = {}\n'),
+            "an array of tables": ('[[mcp_servers.x.tools]]\napi_key = "%s"\nname = "t"\n',
+                                   '[[mcp_servers.x.tools]]\napi_key = ""\nname = "t"\n'),
+            "a secret-named array": ('tokens = ["%s", "b"]\n', 'tokens = []\n'),
+            "an escaped quote in the value": ('api_key = "a\\"%s"\n', 'api_key = ""\n'),
+            "the shell environment set table":
+                ('[shell_environment_policy]\nset = { PATH = "%s" }\ninherit = "core"\n',
+                 '[shell_environment_policy]\nset = {}\ninherit = "core"\n'),
+            "a commented-out secret": ('# api_key = "%s"\nmodel = "m" # %s\n', '\nmodel = "m"\n'),
+            "a key named key": ('[srv]\nkey = "%s"\nmonkey = "kept"\n', '[srv]\nkey = ""\nmonkey = "kept"\n'),
+            "numbers and dates stay": ('max_output_tokens = 4000\nwhen = 1979-05-27T07:32:00Z\n',
+                                       'max_output_tokens = 4000\nwhen = 1979-05-27T07:32:00Z\n'),
+        }
+        for name, (given, expected) in cases.items():
+            with self.subTest(form=name):
+                self.assertEqual(scrubbed_toml(given.replace("%s", SECRET)), expected)
+                self.assertFalse(gringotts._toml_left(expected.encode("utf-8")))
+
+    def test_toml_forms_the_scrubber_does_not_fully_understand_leave_the_file_out(self):
+        for name, text in (
+            ("an inline parent table",
+             '[mcp_servers]\nx = { command = "a", http_headers = { Authorization = "%s" } }\n'),
+            ("an inline table in an array", 'servers = [{ token = "%s" }]\n'),
+            ("a multi-line string", 'notes = """\n%s\n"""\n'),
+            ("a one-line triple-quoted string", "notes = \'\'\'%s\'\'\'\n"),
+            ("a multi-line array", 'args = [\n"%s",\n]\n'),
+            ("an array of tables it cannot place", '[[mcp_servers.x]\ntoken = "%s"\n'),
+            ("a table header with junk after it", '[mcp_servers.x] junk\ntoken = "%s"\n'),
+            ("a quoted key with an escape", '"\\u0074oken" = "%s"\n'),
+            ("a bare word", "token = %s\n"),
+            ("a line that is not TOML", "%s\n"),
+        ):
+            with self.subTest(form=name):
+                self.assertIsNone(scrubbed_toml(text.replace("%s", SECRET)))
+
+    def test_json_blanks_every_secret_named_value_at_any_depth(self):
+        given = {"apiKeyHelper": SECRET, "includeCoAuthoredBy": True, "permissions": {"deny": ["Read(x)"]},
+                 "mcpServers": {"x": {"command": "npx", "args": ["-y", "server"], "timeout": 30,
+                                      "requestInit": {"Authorization": f"Bearer {SECRET}"},
+                                      "nested": {"clientSecret": SECRET, "list": [{"password": SECRET}]},
+                                      "env": {"N": SECRET}, "headers": {"X": [SECRET]}}}}
+        out = json.loads(gringotts._scrub_json(json.dumps(given).encode("utf-8")))
+        self.assertNotIn(SECRET, json.dumps(out))
+        server = out["mcpServers"]["x"]
+        self.assertEqual((out["apiKeyHelper"], server["requestInit"], server["nested"]),
+                         ("", {"Authorization": ""}, {"clientSecret": "", "list": [{"password": ""}]}))
+        self.assertEqual((server["env"], server["headers"]), ({"N": ""}, {"X": [""]}))
+        self.assertEqual((out["includeCoAuthoredBy"], out["permissions"], server["args"], server["timeout"]),
+                         (True, {"deny": ["Read(x)"]}, ["-y", "server"], 30))
+
+    def test_scrubbed_files_reach_the_archive_and_the_rest_is_left_out(self):
+        self.write_file(self.castle / ".mcp.json", json.dumps({"mcpServers": {"x": {"apiKey": SECRET}}}))
+        self.write_file(self.codex / "config.toml", '[mcp_servers]\nx = { http_headers = { Authorization = "%s" } }\n'
+                        % SECRET)
+        result = gringotts.backup(now=NOW)
+        members = self.members(result["archive"])
+        self.assertEqual(json.loads(members["castle/.mcp.json"]), {"mcpServers": {"x": {"apiKey": ""}}})
+        self.assertNotIn("codex/config.toml", members)
+        manifest = json.loads(members[gringotts.MANIFEST])
+        self.assertIn({"path": "codex/config.toml", "why": "could not be scrubbed, so it was left out"},
+                      manifest["skipped"])
+        for name, data in members.items():
+            with self.subTest(secret_in=name):
+                self.assertNotIn(SECRET.encode(), data)
+
+    def test_git_history_never_enters_the_archive(self):
+        notes = self.castle / "desks" / "ron" / "notes.md"
+        self.write_file(notes, f"token {SECRET}\n")
+        self.git("init", "-q")
+        self.git("add", "desks/ron/notes.md")
+        self.git("-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-q", "-m", "notes")
+        self.write_file(notes, "nothing secret now\n")
+        nested = self.castle / "desks" / "ron" / "checkout"
+        nested.mkdir(mode=0o700)
+        self.write_file(nested / ".git", "gitdir: /somewhere/else\n")
+        bare = self.castle / "desks" / "ron" / "mirror"
+        for part in ("objects", "refs"):
+            (bare / part).mkdir(mode=0o700, parents=True)
+        self.write_file(bare / "HEAD", "ref: refs/heads/main\n")
+        self.write_file(bare / "objects" / "loose", SECRET)
+        result = gringotts.backup(now=NOW)
+        members = self.members(result["archive"])
+        self.assertEqual(members["castle/desks/ron/notes.md"], b"nothing secret now\n")
+        self.assertEqual([name for name in members if ".git" in name.split("/") or "/mirror/" in name], [])
+        for name, data in members.items():
+            with self.subTest(secret_in=name):
+                self.assertNotIn(SECRET.encode(), data)
+                try:
+                    self.assertNotIn(SECRET.encode(), zlib.decompress(data))
+                except zlib.error:
+                    pass
+        skipped = {item["path"]: item["why"] for item in json.loads(members[gringotts.MANIFEST])["skipped"]}
+        for path in ("castle/.git", "castle/desks/ron/checkout/.git", "castle/desks/ron/mirror"):
+            with self.subTest(left_out=path):
+                self.assertEqual(skipped.get(path), "git metadata")
+
 
 class DrillTests(GringottsCase):
     def test_the_drill_restores_into_a_temp_folder_and_passes(self):
@@ -145,6 +262,20 @@ class DrillTests(GringottsCase):
         result = gringotts.drill(now=NOW + 60)
         self.assertFalse(result["ok"])
         self.assertIn("claude/CLAUDE.md does not match the manifest", result["problems"])
+
+    def test_the_drill_finds_a_secret_left_in_json_or_toml_and_git_metadata(self):
+        archive = gringotts.backup(now=NOW)["archive"]
+        extra = [("claude/settings.json", json.dumps({"mcpServers": {"x": {"apiKey": "left"}}}).encode()),
+                 ("codex/config.toml", b'[mcp_servers.x]\nhttp_headers.Authorization = "left"\n'),
+                 ("castle/.git/config", b"[core]\n")]
+        names = {name for name, _ in extra}
+        self.rewrite(archive, lambda files: [(name, data) for name, data in files if name not in names] + extra)
+        problems = gringotts.drill(now=NOW + 60)["problems"]
+        for problem in ("claude/settings.json still has a value under a secret-named key",
+                        "codex/config.toml still has a value under a secret-named key",
+                        "castle/.git/config is git metadata"):
+            with self.subTest(problem=problem):
+                self.assertIn(problem, problems)
 
     def test_the_drill_refuses_odd_entries_and_credentials(self):
         archive = gringotts.backup(now=NOW)["archive"]

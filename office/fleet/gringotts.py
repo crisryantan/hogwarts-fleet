@@ -10,19 +10,27 @@ that folder anywhere, and this script never copies an archive anywhere else. It 
 - castle/: the castle except its git worktrees;
 - MANIFEST.json, last: each file's size and sha256, and what was left out.
 
-Left out everywhere: any file or folder named like a credential, token or auth file (CREDENTIAL_NAMES), links,
-files with more than one hard link, anything that isn't a plain file or folder, and files over
-BACKUP_FILE_MAX_BYTES. In every settings or MCP JSON file, each value under "env" or "headers" is blanked. In
-config.toml, the env tables and every key named like a token, secret, password or key are blanked. A file
-that ought to be scrubbed but can't be is left out, never kept as it was.
+Left out everywhere: any file or folder named like a credential, token or auth file (CREDENTIAL_NAMES), git
+metadata at any depth (anything named .git, and any folder laid out like one, with HEAD, objects and refs),
+links, files with more than one hard link, anything that isn't a plain file or folder, and files over
+BACKUP_FILE_MAX_BYTES. Git metadata goes because a credential once committed stays in its objects even after
+the working file is scrubbed.
+
+In every settings or MCP JSON file, each string under a key named env or headers, or named like a token,
+secret, password, key, auth or cookie (SECRET_KEY), at any depth, is blanked. In config.toml, a value is
+blanked when any part of its full dotted path, the table header and the dotted key together, is such a name,
+and comments are dropped. The TOML scrubber reads only plain one-line forms. When it meets one it does not
+fully understand, such as a multi-line string or array, an inline table it would keep, an odd table header
+or a quoted key with an escape, it leaves the whole file out. A file that ought to be scrubbed but can't be
+is left out, never kept as it was.
 
 Archives older than BACKUP_KEEP_DAYS are deleted, always keeping the newest one.
 
 The restore drill (--drill [ARCHIVE]) takes the newest archive, or the one named, and restores it into a
 fresh folder inside the backups folder, never over the live folders. It checks the archive's own mode, that
 every entry is a plain file with a plain relative name, every file against the manifest, that nothing named
-like a credential is inside, that every settings env value is blank and that the database copy passes
-SQLite's integrity check. Then it removes the folder.
+like a credential and no git metadata is inside, that every scrubbed JSON and TOML file has no secret-named
+value left and that the database copy passes SQLite's integrity check. Then it removes the folder.
 
 In shadow mode a failure only reaches the job's log. Once Ryan removes the patrol shadow file, a failed
 backup or drill is also a headmaster event.
@@ -77,11 +85,24 @@ CODEX_TAKE = ("config.toml", "AGENTS.md", "prompts", "rules")
 OFFICE_SKIP = ("logs", "runs", "locks", "state", config.BACKUP_DIR)
 CASTLE_SKIP = ("worktrees",)
 SCRUB_MAX_BYTES = 1024 * 1024
-SECRET_KEY = re.compile(r"token|secret|password|passwd|api[_-]?key|bearer|credential", re.IGNORECASE)
-TOML_TABLE = re.compile(r"\[\[?\s*([^\]]+?)\s*\]\]?\s*(?:#.*)?")
-TOML_KEY = re.compile(r"(\s*)((?:\"[^\"]*\"|'[^']*'|[A-Za-z0-9_-]+)(?:\s*\.\s*(?:\"[^\"]*\"|'[^']*'|[A-Za-z0-9_-]+))*)\s*=\s*(.*)")
-ENV_KEYS = ("env", "http_headers", "env_http_headers")
-BLANKED_KEYS = ("env", "headers")
+SECRET_KEY = re.compile(r"token|secret|password|passwd|passphrase|api[_-]?key|private[_-]?key|access[_-]?key"
+                        r"|(?:^|[_-])key$|bearer|credential|auth|cookie", re.IGNORECASE)
+# Keys whose whole value is blanked, whatever is under them.
+BLANKED_KEYS = ("env", "headers", "http_headers", "env_http_headers")
+GIT_DIR_PARTS = ("HEAD", "objects", "refs")
+# The plain one-line TOML forms the scrubber reads. A quoted key with a backslash is not one of them.
+_TOML_PART = r"(?:[A-Za-z0-9_-]+|\"[^\"\\\x00-\x1f\x7f]*\"|'[^'\x00-\x1f\x7f]*')"
+TOML_PART = re.compile(_TOML_PART)
+TOML_DOTTED = re.compile(rf"{_TOML_PART}(?:[ \t]*\.[ \t]*{_TOML_PART})*")
+TOML_HEADER = re.compile(rf"(\[\[?)[ \t]*({TOML_DOTTED.pattern})[ \t]*(\]\]?)")
+TOML_STRING = re.compile(r"\"(?:[^\"\\\x00-\x08\x0a-\x1f\x7f]|\\.)*\"|'[^'\x00-\x08\x0a-\x1f\x7f]*'")
+TOML_BARE = re.compile(r"[A-Za-z0-9_.:+-]+")
+TOML_SCALAR = re.compile(
+    r"true|false|[+-]?(?:inf|nan)|0x[0-9A-Fa-f_]+|0o[0-7_]+|0b[01_]+"
+    r"|[+-]?[0-9][0-9_]*(?:\.[0-9_]+)?(?:[eE][+-]?[0-9_]+)?"
+    r"|[0-9]{4}-[0-9]{2}-[0-9]{2}(?:[Tt][0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]+)?(?:[Zz]|[+-][0-9]{2}:[0-9]{2})?)?"
+    r"|[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]+)?")
+TOML_BLANKS = ('""', "''", "[]", "{}")
 
 
 class Problem(FleetError):
@@ -93,72 +114,239 @@ def credential_name(name: str) -> bool:
     return any(fnmatch.fnmatchcase(lowered, pattern) for pattern in CREDENTIAL_NAMES)
 
 
-def _scrub_json(data: bytes) -> Optional[bytes]:
-    """Every value under an env or headers object blanked. None when the file is not JSON."""
+def secret_name(key: str) -> bool:
+    """A key whose value is blanked whole: env or headers, or named like a credential."""
+    return key.lower() in BLANKED_KEYS or SECRET_KEY.search(key) is not None
+
+
+def _blank(node):
+    """Every string under node made empty. Numbers, booleans and nulls hold no credential and stay."""
+    if isinstance(node, str):
+        return ""
+    if isinstance(node, dict):
+        return {key: _blank(value) for key, value in node.items()}
+    if isinstance(node, list):
+        return [_blank(item) for item in node]
+    return node
+
+
+def _has_text(node) -> bool:
+    if isinstance(node, str):
+        return node != ""
+    if isinstance(node, dict):
+        return any(_has_text(value) for value in node.values())
+    if isinstance(node, list):
+        return any(_has_text(item) for item in node)
+    return False
+
+
+def _parse_json(data: bytes):
     try:
-        parsed = json.loads(data.decode("utf-8"))
+        return json.loads(data.decode("utf-8")), True
     except (UnicodeDecodeError, ValueError, RecursionError):
+        return None, False
+
+
+def _scrub_json(data: bytes) -> Optional[bytes]:
+    """Every value under a secret-named key (secret_name), at any depth, blanked. None when the file is not
+    JSON."""
+    parsed, ok = _parse_json(data)
+    if not ok:
         return None
 
-    def blank(node):
+    def walk(node):
         if isinstance(node, dict):
-            return {key: ({inner: "" for inner in value} if key in BLANKED_KEYS and isinstance(value, dict)
-                          else blank(value)) for key, value in node.items()}
+            return {key: _blank(value) if secret_name(key) else walk(value) for key, value in node.items()}
         if isinstance(node, list):
-            return [blank(item) for item in node]
+            return [walk(item) for item in node]
         return node
 
-    return (json.dumps(blank(parsed), indent=2, ensure_ascii=False) + "\n").encode("utf-8")
+    try:
+        return (json.dumps(walk(parsed), indent=2, ensure_ascii=False) + "\n").encode("utf-8")
+    except RecursionError:
+        return None
 
 
-def _one_line_value(value: str) -> bool:
-    """A TOML value that ends on its own line: no open multi-line string or array."""
-    stripped = value.strip()
-    if stripped.startswith(('"""', "'''")):
-        return len(stripped) >= 6 and stripped.endswith(stripped[:3])
-    return stripped.count("[") == stripped.count("]") and stripped.count("{") == stripped.count("}")
+def _json_left(data: bytes) -> bool:
+    """True when a restored JSON file still has text under a secret-named key, or does not parse."""
+    parsed, ok = _parse_json(data)
+    if not ok:
+        return True
+
+    def left(node) -> bool:
+        if isinstance(node, dict):
+            return any((secret_name(key) and _has_text(value)) or left(value) for key, value in node.items())
+        if isinstance(node, list):
+            return any(left(item) for item in node)
+        return False
+
+    try:
+        return left(parsed)
+    except RecursionError:
+        return True
 
 
-def _scrub_toml(data: bytes) -> Optional[bytes]:
-    """config.toml with env tables and secret-named keys blanked, line by line. None when a value that needs
-    blanking spans lines, so it could not be blanked whole."""
+def _toml_path_secret(path: list) -> bool:
+    """True when any part of a full TOML path is secret-named, or is the set table of shell_environment_policy."""
+    return any(secret_name(part) or (part == "set" and index and path[index - 1] == "shell_environment_policy")
+               for index, part in enumerate(path))
+
+
+def _toml_parts(dotted: str) -> list:
+    return [part[1:-1] if part[0] in "\"'" else part for part in TOML_PART.findall(dotted)]
+
+
+def _skip_blank(text: str, pos: int) -> int:
+    while pos < len(text) and text[pos] in " \t":
+        pos += 1
+    return pos
+
+
+def _toml_value(text: str, pos: int, depth: int = 0) -> Optional[tuple]:
+    """Where the one-line TOML value at pos ends, and whether it holds an inline table. None for a value the
+    scrubber does not fully understand: a multi-line string, an array or table that does not close on this
+    line, or a bare word that is not a TOML number, boolean, date or time."""
+    if depth > 16 or text.startswith(('"""', "'''"), pos):
+        return None
+    match = TOML_STRING.match(text, pos)
+    if match is not None:
+        return match.end(), False
+    match = TOML_BARE.match(text, pos)
+    if match is not None:
+        return (match.end(), False) if TOML_SCALAR.fullmatch(match.group()) else None
+    opener = text[pos:pos + 1]
+    if opener not in ("[", "{"):
+        return None
+    closer, tables, pos = ("]" if opener == "[" else "}"), opener == "{", _skip_blank(text, pos + 1)
+    while not text.startswith(closer, pos):
+        if opener == "{":
+            key = TOML_DOTTED.match(text, pos)
+            if key is None:
+                return None
+            pos = _skip_blank(text, key.end())
+            if not text.startswith("=", pos):
+                return None
+            pos = _skip_blank(text, pos + 1)
+        found = _toml_value(text, pos, depth + 1)
+        if found is None:
+            return None
+        pos, inner = found[0], found[1]
+        tables = tables or inner
+        pos = _skip_blank(text, pos)
+        if text.startswith(",", pos):
+            pos = _skip_blank(text, pos + 1)
+        elif not text.startswith(closer, pos):
+            return None
+    return pos + 1, tables
+
+
+def _toml_lines(data: bytes) -> Optional[list]:
+    """config.toml as (head, value, secret) per line: for a key line, head is the line up to its value, value
+    the value's text and secret whether its full path, header and dotted key together, is secret-named; for
+    any other line, value is None. Comments are dropped. None when a line is not a form the scrubber fully
+    understands: a multi-line value, an inline table under a path it would keep, an odd table header, a
+    quoted key with an escape, or anything else."""
     try:
         text = data.decode("utf-8")
     except UnicodeDecodeError:
         return None
-    table, out = "", []
-    for line in text.splitlines():
-        header = TOML_TABLE.fullmatch(line.strip())
+    lines = text.split("\n")
+    if lines and lines[-1] == "":
+        lines.pop()
+    table: list = []
+    found = []
+    for raw in lines:
+        line = raw[:-1] if raw.endswith("\r") else raw
+        start = _skip_blank(line, 0)
+        indent, body = line[:start], line[start:]
+        if body == "" or body.startswith("#"):
+            found.append(("", None, False))
+            continue
+        header = TOML_HEADER.match(body)
         if header is not None:
-            table = header.group(1)
-            out.append(line)
+            rest = body[header.end():].strip()
+            if len(header.group(1)) != len(header.group(3)) or (rest and not rest.startswith("#")):
+                return None
+            table = _toml_parts(header.group(2))
+            found.append((indent + header.group(0), None, False))
             continue
-        match = TOML_KEY.fullmatch(line)
-        if match is None:
-            out.append(line)
-            continue
-        indent, key, value = match.groups()
-        last = key.split(".")[-1].strip().strip("\"'")
-        in_env = table.split(".")[-1].strip().strip("\"'") in ENV_KEYS
-        is_env = last in ENV_KEYS or (last == "set" and table.strip() == "shell_environment_policy")
-        if not (in_env or is_env or SECRET_KEY.search(key)):
-            out.append(line)
-            continue
-        if not _one_line_value(value):
+        if body.startswith("["):
             return None
-        out.append(f"{indent}{key} = " + ("{}" if is_env and value.strip().startswith("{") else '""'))
+        key = TOML_DOTTED.match(body)
+        if key is None:
+            return None
+        pos = _skip_blank(body, key.end())
+        if not body.startswith("=", pos):
+            return None
+        pos = _skip_blank(body, pos + 1)
+        value = _toml_value(body, pos)
+        if value is None:
+            return None
+        rest = body[value[0]:].strip()
+        if rest and not rest.startswith("#"):
+            return None
+        secret = _toml_path_secret(table + _toml_parts(key.group()))
+        if value[1] and not secret:
+            return None
+        found.append((f"{indent}{key.group()} = ", body[pos:value[0]], secret))
+    return found
+
+
+def _toml_blank(value: str) -> str:
+    """A secret-named TOML value made empty, keeping its kind: a number, boolean, date or time stays."""
+    if value[0] in "\"'":
+        return '""'
+    if value[0] in "[{":
+        return "[]" if value[0] == "[" else "{}"
+    return value
+
+
+def _scrub_toml(data: bytes) -> Optional[bytes]:
+    """config.toml with every value under a secret-named path blanked and its comments dropped. None leaves
+    the file out, when any line is a form the scrubber does not fully understand."""
+    found = _toml_lines(data)
+    if found is None:
+        return None
+    out = [head if value is None else head + (_toml_blank(value) if secret else value)
+           for head, value, secret in found]
     return ("\n".join(out) + "\n").encode("utf-8")
+
+
+def _toml_left(data: bytes) -> bool:
+    """True when a restored config.toml still has a value under a secret-named path, or cannot be read."""
+    found = _toml_lines(data)
+    if found is None:
+        return True
+    return any(secret and value is not None and value not in TOML_BLANKS and _toml_blank(value) != value
+               for _, value, secret in found)
+
+
+def scrub_kind(name: str) -> Optional[str]:
+    """json for a settings or MCP JSON file, toml for a Codex config.toml, None for a file kept as it is."""
+    lowered = name.lower()
+    if lowered.endswith(".json") and (lowered.startswith("settings") or "mcp" in lowered):
+        return "json"
+    return "toml" if lowered == "config.toml" else None
 
 
 def scrub(name: str, data: bytes) -> Optional[bytes]:
     """The bytes to keep for one file, scrubbed when it is a settings, MCP or Codex config file. None leaves
     the file out."""
-    lowered = name.lower()
-    if lowered.endswith(".json") and (lowered.startswith("settings") or "mcp" in lowered):
-        return None if len(data) > SCRUB_MAX_BYTES else _scrub_json(data)
-    if lowered == "config.toml":
-        return None if len(data) > SCRUB_MAX_BYTES else _scrub_toml(data)
-    return data
+    kind = scrub_kind(name)
+    if kind is None:
+        return data
+    if len(data) > SCRUB_MAX_BYTES:
+        return None
+    return _scrub_json(data) if kind == "json" else _scrub_toml(data)
+
+
+def git_name(name: str) -> bool:
+    return name.lower() == ".git"
+
+
+def git_folder(dir_fd: int) -> bool:
+    """A folder laid out like a git folder (a bare repo, or a .git under another name): HEAD, objects, refs."""
+    return all(safefs.lstat(dir_fd, part) is not None for part in GIT_DIR_PARTS)
 
 
 # Making the archive
@@ -219,6 +407,9 @@ class Builder:
             if any(ord(char) < 32 for char in name):
                 self.skipped.append({"path": prefix + "/?", "why": "a name with a control character"})
                 continue
+            if git_name(name):
+                self.skipped.append({"path": arcname, "why": "git metadata"})
+                continue
             try:
                 info = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
             except OSError:
@@ -233,7 +424,10 @@ class Builder:
                     self.skipped.append({"path": arcname, "why": "could not be opened as a plain folder"})
                     continue
                 try:
-                    self.add_tree(child, arcname)
+                    if git_folder(child):
+                        self.skipped.append({"path": arcname, "why": "git metadata"})
+                    else:
+                        self.add_tree(child, arcname)
                 finally:
                     os.close(child)
             elif stat.S_ISREG(info.st_mode):
@@ -387,24 +581,6 @@ def _restore(root_fd: int, parts: list, data: bytes) -> None:
         os.close(fd)
 
 
-def _env_left(data: bytes) -> bool:
-    """True when a restored settings file still has a value under env or headers."""
-    try:
-        parsed = json.loads(data.decode("utf-8"))
-    except (UnicodeDecodeError, ValueError, RecursionError):
-        return True
-
-    def left(node) -> bool:
-        if isinstance(node, dict):
-            return any((key in BLANKED_KEYS and isinstance(value, dict) and any(item != "" for item in value.values()))
-                       or left(value) for key, value in node.items())
-        if isinstance(node, list):
-            return any(left(item) for item in node)
-        return False
-
-    return left(parsed)
-
-
 def _check_database(path: str) -> Optional[str]:
     try:
         conn = sqlite3.connect("file:" + quote(path, safe="/") + "?mode=ro", uri=True)
@@ -435,8 +611,11 @@ def _drill_archive(raw, root_fd: int, folder: str) -> tuple:
                 continue
             if credential_name(parts[-1]):
                 problems.append(f"{member.name} is named like a credential")
-            if parts[-1].lower().startswith("settings") and parts[-1].lower().endswith(".json") and _env_left(data):
-                problems.append(f"{member.name} still has env or headers values")
+            if any(git_name(part) for part in parts):
+                problems.append(f"{member.name} is git metadata")
+            kind = scrub_kind(parts[-1])
+            if (kind == "json" and _json_left(data)) or (kind == "toml" and _toml_left(data)):
+                problems.append(f"{member.name} still has a value under a secret-named key")
             _restore(root_fd, parts, data)
             restored[member.name] = {"size": len(data), "sha256": hashlib.sha256(data).hexdigest()}
     try:

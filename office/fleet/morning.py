@@ -106,8 +106,8 @@ def render(seen: dict, reds: list, errors: list, note: Optional[dict], ts: int, 
              else "No reds.\n"]
     if errors:
         parts.append("\nNot read: " + "; ".join(errors) + "\n")
-    if seen["more"]:
-        parts.append("\nGitHub found more PRs than one query returns, so this list is cut.\n")
+    if not seen["complete"]:
+        parts.append("\nGitHub's list of open PRs could not be read to its end, so this list is cut.\n")
     parts.append("\n## The portrait's note\n\n")
     if note is None:
         parts.append("No note from the portrait this morning.\n")

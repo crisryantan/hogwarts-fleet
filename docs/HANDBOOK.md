@@ -260,15 +260,15 @@ Plain scripts patrol your PRs, and Ron and Hermione only judge what the scripts 
 | Ron's keeper's watch | 09:00, 13:00 and 17:00 on weekdays | `patrol/keeper/`: no model while everything is green. A new red gets Ron's REAL, FLAKY, INFRA or UNSURE call and a fix brief for a real failure. A gate waiting on a person is a row for you. |
 | Ron's weekly scoreboard | Mondays 09:00 | `patrol/scoreboard/<date>.md`: PRs merged, time to first review, review rounds, red rate on main, cost per desk and the share of Map rounds that ran no model, all from a script. Ron writes only the words. |
 | Hermione's bot pass | A Map round, once a PR is 15 minutes old and has review threads she hasn't seen | `patrol/bot-pass/`: a triage table and a reply draft per thread. Drafts only. |
-| Gringotts - Backup | Daily 23:30 | `backups/gringotts-<date>.tar.gz`, mode 0600, 14 days kept and never synced anywhere: your Claude, Codex and fleet setup with credentials, tokens, auth files and settings `env` values left out. |
+| Gringotts - Backup | Daily 23:30 | `backups/gringotts-<date>.tar.gz`, mode 0600, 14 days kept and never synced anywhere: your Claude, Codex and fleet setup with credentials, tokens, auth files and git history left out, and every `env`, headers or secret-named value in settings, MCP and Codex config blanked. |
 
 The folders are in the office, `~/.hogwarts`. Read them in the Terminal, since your own Claude sessions are denied the office.
 
-**Shadow mode.** While `~/.hogwarts/patrol/shadow` is there, which it is from install, those files are all the patrol writes: no rows in McGonagall's digest and no owls to anyone. Compare each morning's lineup with `gh`. After three weekdays that match, delete the file to go live. Then each for-me row, each gate, each keeper's watch Ron marked headmaster and each day's lineup and scoreboard also reach you as a row. Put the file back to return to shadow mode.
+**Shadow mode.** While `~/.hogwarts/patrol/shadow` is there, which it is from install, those files are all the patrol writes: no rows in McGonagall's digest and no owls to anyone. That includes the cap and vendor-limit notes from Ron's and Hermione's patrol runs, which land in the job's file instead. Compare each morning's lineup with `gh`. After three weekdays that match, delete the file to go live. Then each for-me row, each gate, each keeper's watch Ron marked headmaster and each day's lineup and scoreboard also reach you as a row. Put the file back to return to shadow mode.
 
-**A desk that didn't run.** If Ron or Hermione didn't pick a run up, because the desk was off, at its cap or busy, the next Map round half an hour later sends it again, twice at most, then gives you a row.
+**A desk that didn't run.** If Ron or Hermione didn't pick a run up, because the desk was off, at its cap or busy, or a run left no file the patrol could take, the next Map round half an hour later sends it again, twice at most, then gives you a row. A keeper's red counts as called, and a bot pass's threads as seen, only once the patrol has taken the file.
 
-**The restore drill.** `fleet gringotts --drill` restores the newest archive into a fresh folder inside `~/.hogwarts/backups`, checks every file against the archive's manifest, that nothing credential-shaped is inside and that the database copy is sound, then removes the folder. It never touches your live folders. `fleet gringotts` takes a backup now.
+**The restore drill.** `fleet gringotts --drill` restores the newest archive into a fresh folder inside `~/.hogwarts/backups`, checks every file against the archive's manifest, that nothing credential-shaped and no git metadata is inside, that no secret-named value is left in a settings, MCP or Codex config file and that the database copy is sound, then removes the folder. It never touches your live folders. `fleet gringotts` takes a backup now.
 
 ## Watch live, run short
 

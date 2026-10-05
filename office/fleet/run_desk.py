@@ -64,7 +64,9 @@ A refusal by a cap tells Ryan which cap, how
 many requests wait and when it resets, once per cap and effective limit a day; a desk at 80% of
 a cap gets one warning per effective limit a day. A run that exits 0 reads and acks its owl.
 A run that fails raises a headmaster event, labelled claude_plan or codex_plan when the
-vendor's own usage limit stopped it. No bypass flag is ever built, and the guard refuses one
+vendor's own usage limit stopped it. A patrol run in shadow mode (shadow=True) keeps its cap, near-cap
+and vendor-limit notes out of the events and hands them back in the result's held list; its caps and its
+spend accounting are exactly the same. No bypass flag is ever built, and the guard refuses one
 if it appears.
 
 This is the only fleet module that starts processes.
@@ -642,9 +644,10 @@ def _limit_key(status: dict, cap: str) -> str:
     return repr(float(status["spend_limit_usd"]))
 
 
-def report_cap(conn, desk: str, now: Optional[int] = None) -> None:
+def report_cap(conn, desk: str, now: Optional[int] = None, held: Optional[list] = None) -> None:
     """Record a refusal by a fleet cap. Ryan hears once per desk, cap, effective limit and day: which cap,
-    what waits, when it resets. After a bump, reaching the raised limit is news again."""
+    what waits, when it resets. After a bump, reaching the raised limit is news again. With held (the
+    patrol's shadow mode), the note goes on that list instead of reaching Ryan."""
     status = cap_status(conn, desk, now)
     cap = status["reached"] or "runs"
     capacity.record_cap_hit(conn, desk, cap, "fleet", now=now)
@@ -652,14 +655,18 @@ def report_cap(conn, desk: str, now: Optional[int] = None) -> None:
     summary = (f"{desk} was not started: its fleet daily {cap} cap is reached ({_used_text(status, cap)}),"
                f" cap_source fleet. {waiting} request(s) waiting for {desk}. The cap resets at"
                f" {status['resets_at_local']}; castle desk cap {desk} {CAP_FLAGS[cap]} lifts it until then")
+    if held is not None:
+        held.append(summary)
+        return
     pensieve.add_event(conn, desk, "rundesk.cap", "headmaster", summary,
                        dedupe_key=f"rundesk:cap:{desk}:{cap}:{_limit_key(status, cap)}:{status['day_start']}",
                        now=now)
 
 
-def warn_near_cap(conn, desk: str, now: Optional[int] = None) -> list:
+def warn_near_cap(conn, desk: str, now: Optional[int] = None, held: Optional[list] = None) -> list:
     """One headmaster event per desk, cap, effective limit and day once today's runs or spend reach
-    CAP_WARN_FRACTION of it, so a bumped limit warns again near its own end."""
+    CAP_WARN_FRACTION of it, so a bumped limit warns again near its own end. With held (the patrol's
+    shadow mode), each warning goes on that list instead and no event is made."""
     status = cap_status(conn, desk, now)
     caps = [("runs", status["runs_used"], status["runs_limit"])]
     if status["spend_limit_usd"] is not None:
@@ -670,6 +677,9 @@ def warn_near_cap(conn, desk: str, now: Optional[int] = None) -> list:
             continue
         summary = (f"{desk} has used {_used_text(status, cap)} of its fleet daily {cap} cap today;"
                    f" the cap resets at {status['resets_at_local']}")
+        if held is not None:
+            held.append(summary)
+            continue
         event = pensieve.add_event(conn, desk, "rundesk.cap-near", "headmaster", summary,
                                    dedupe_key=f"rundesk:cap-near:{desk}:{cap}:{_limit_key(status, cap)}"
                                               f":{status['day_start']}", now=now)
@@ -678,13 +688,18 @@ def warn_near_cap(conn, desk: str, now: Optional[int] = None) -> list:
     return warned
 
 
-def report_plan_limit(conn, desk: str, cap_source: str, run_id: str, now: Optional[int] = None) -> None:
-    """A run the vendor's own usage or rate limit stopped. No fleet bump lifts that, and the event says so."""
+def report_plan_limit(conn, desk: str, cap_source: str, run_id: str, now: Optional[int] = None,
+                      held: Optional[list] = None) -> None:
+    """A run the vendor's own usage or rate limit stopped. No fleet bump lifts that, and the event says so.
+    With held (the patrol's shadow mode), the note goes on that list instead of reaching Ryan."""
     capacity.record_cap_hit(conn, desk, "plan", cap_source, run_id=run_id, now=now)
     day_start, _ = capacity.day_bounds(common.now_stamp(now), config.CAP_RESET_UTC_SECONDS)
     summary = (f"{desk} stopped at the {PLAN_NAMES[cap_source]}'s own usage or rate limit, cap_source"
                f" {cap_source}. This is the vendor's limit, not a fleet cap: castle desk cap does not lift it,"
                f" and it clears only on the vendor's own reset")
+    if held is not None:
+        held.append(summary)
+        return
     pensieve.add_event(conn, desk, "rundesk.plan-limit", "headmaster", summary,
                        dedupe_key=f"rundesk:plan-limit:{desk}:{cap_source}:{day_start}", now=now)
 
@@ -1145,12 +1160,16 @@ def launch_gate() -> Iterator[int]:
 
 
 def run(conn, desk: str, owl_id: str, mcp_job: Optional[str] = None, now: Optional[int] = None,
-        on_start: Optional[Callable[[], None]] = None, lock_held: bool = False, keep_fds: tuple = ()) -> dict:
+        on_start: Optional[Callable[[], None]] = None, lock_held: bool = False, keep_fds: tuple = (),
+        shadow: bool = False) -> dict:
     """Run one desk on one owl. on_start is called under the desk lock once the caps allow the run,
     just before it launches, so a caller's own bookkeeping never runs for a refused run. lock_held
     means the caller already holds this desk's lock (the review script does, from before its round
     opens until its reviewer task closes) and passes its fd in keep_fds. The desk's process inherits
-    every fd in keep_fds, so the locks they hold outlive this process if it is killed mid-run."""
+    every fd in keep_fds, so the locks they hold outlive this process if it is killed mid-run. shadow is
+    the patrol's shadow mode: the cap, near-cap and vendor-limit notes go in the result's held list, not
+    to Ryan (a cap refusal's own reason is the Capped error), and the caps and accounting are unchanged."""
+    notes = [] if shadow else None
     desk = ids.check("desk", desk)
     if not is_enabled(desk):
         raise FleetError(f"{desk} is not enabled; Ryan enables a headless desk by hand")
@@ -1168,7 +1187,7 @@ def run(conn, desk: str, owl_id: str, mcp_job: Optional[str] = None, now: Option
         _check_stop()
         cap = over_daily_cap(conn, desk, now)
         if cap is not None:
-            report_cap(conn, desk, now)
+            report_cap(conn, desk, now, notes)
             raise Capped(cap)
         plan = build_plan(conn, desk, owl_id, mcp_job)
         _refuse_closed(plan)
@@ -1182,11 +1201,13 @@ def run(conn, desk: str, owl_id: str, mcp_job: Optional[str] = None, now: Option
         if on_start is not None:
             on_start()
         result = _launch(conn, plan, now, keep_fds)
-    warn_near_cap(conn, plan["desk"], now)
+    warn_near_cap(conn, plan["desk"], now, notes)
     if result["cap_source"] is not None:
-        report_plan_limit(conn, plan["desk"], result["cap_source"], run_id=result["run_id"], now=now)
+        report_plan_limit(conn, plan["desk"], result["cap_source"], run_id=result["run_id"], now=now, held=notes)
     elif result["exit_code"] == 0:
         _ack_owl(conn, plan["desk"], plan["owl_id"], now)
+    if notes is not None:
+        result["held"] = notes
     return result
 
 

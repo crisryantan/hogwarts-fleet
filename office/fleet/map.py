@@ -1,24 +1,29 @@
 """The Marauder's Map - PR Watcher: one round, every 15 minutes on weekdays from 08:00 to 19:00.
 
-No model of its own. A round reads Ryan's open PRs, and the open PRs asking him for a review, with one
-read-only GitHub query (fleet/patrol.py), compares them with the last snapshot and writes, in the office
-patrol/map folder:
+No model of its own. A round reads Ryan's open PRs, and the open PRs asking him for a review, with the
+patrol's read-only GitHub queries (fleet/patrol.py), page by page, compares them with the last snapshot and
+writes, in the office patrol/map folder:
 - snapshot.json, what the next round compares against;
 - outcomes.jsonl, one row per change, marked routine or for-me;
 - rounds.jsonl, one row per round, saying whether any model ran in it.
+
+A round that could not read either list to its end changes nothing: no snapshot, no rows, no wake. Its
+round row says it was incomplete, and once live Ryan hears once a day.
 
 A round with a for-me row wakes Ron, on the fast tier, with the round's rows, and his words land in
 round-<stamp>.md next to them. A round with only routine rows, or with no change, runs no model. The first
 round, with no snapshot or a new GITHUB_ACCOUNT, only takes a baseline.
 
 For-me rows: checks went red, a gate waits on a person, a PR was approved or got changes requested, a person
-opened a review thread, or someone asked Ryan for a review. Everything else is routine.
+opened a review thread, or someone asked Ryan for a review. A PR first seen after the baseline counts each of
+these it already has. Everything else is routine.
 
 Hermione's bot pass, in draft mode: once a PR is BOT_PASS_DELAY_SECONDS old, a round that finds unresolved
 review threads she has not seen fetches that PR's threads and wakes her. She writes a triage table and reply
-drafts, which land in patrol/bot-pass. Nothing is ever posted anywhere.
+drafts, which land in patrol/bot-pass. The threads count as seen only once the patrol has taken her drafts;
+until then they wait on her pending owl and are not sent again. Nothing is ever posted anywhere.
 
-Last, the round sends again each patrol owl nobody picked up (patrol.resend_pending).
+Last, the round sends again each patrol owl whose file the patrol has not taken yet (patrol.resend_pending).
 
 In shadow mode that is all. Once Ryan removes the shadow file, each for-me row is also a headmaster event,
 with a summary the script builds from the repo, the PR number and the kind of change.
@@ -42,7 +47,7 @@ from fleet.safefs import FleetError  # noqa: E402
 SNAPSHOT = "snapshot.json"
 OUTCOMES = "outcomes.jsonl"
 ROUNDS = "rounds.jsonl"
-BOT_PASS_STATE = "bot-pass.json"
+BOT_PASS_STATE = patrol.BOT_PASS_STATE
 FOR_ME, ROUTINE = "for-me", "routine"
 COMMENT_MAX = 3000
 HUNK_MAX = 1500
@@ -59,12 +64,21 @@ def _names(values) -> str:
 
 def pr_changes(key: str, was: Optional[dict], now: Optional[dict]) -> list:
     """The rows for one of Ryan's PRs between two rounds."""
-    if was is None:
+    if was is None:  # first seen after the baseline: every signal it already has counts
         rows = [_row(key, "opened", "now watched", ROUTINE)]
         if now["checks"] in patrol.RED:
             rows.append(_row(key, "checks red", _names(now["failing"]), FOR_ME))
         if now["waiting"]:
             rows.append(_row(key, "waiting on a person", _names(now["waiting"]), FOR_ME))
+        if now["decision"] == "APPROVED":
+            rows.append(_row(key, "approved", f"{now['approvals']} approval(s), waiting on you", FOR_ME))
+        elif now["decision"] == "CHANGES_REQUESTED":
+            rows.append(_row(key, "changes requested", f"{now['changes']} reviewer(s)", FOR_ME))
+        people = set(now["human_threads"])
+        if people:
+            rows.append(_row(key, "review thread from a person", f"{len(people)} new", FOR_ME))
+        if set(now["open_threads"]) - people:
+            rows.append(_row(key, "bot review thread", f"{len(set(now['open_threads']) - people)} new", ROUTINE))
         return rows
     if now is None:
         return [_row(key, "left", "merged or closed", ROUTINE)]
@@ -182,35 +196,37 @@ def seed_bot_passes(seen: dict, ts: int) -> None:
                                                for key, record in seen["prs"].items()})
 
 
-def bot_passes(conn, seen: dict, ts: int, now: Optional[int] = None) -> list:
-    """Wake Hermione for each PR old enough to have its bot reviews with threads she has not seen yet."""
+def bot_passes(conn, seen: dict, ts: int, now: Optional[int] = None, shadow: bool = True) -> list:
+    """Wake Hermione for each PR old enough to have its bot reviews with threads she has not seen yet. A
+    thread counts as seen once the patrol has taken her drafts for it (patrol.finish); until then it waits
+    on her pending owl and no second pass sends it."""
     state = patrol.read_state("map", BOT_PASS_STATE, {})
     state = {key: value for key, value in (state.items() if isinstance(state, dict) else ())
              if key in seen["prs"] and isinstance(value, dict) and isinstance(value.get("threads"), list)}
+    patrol.write_state("map", BOT_PASS_STATE, state)
+    sent = patrol.in_flight("bot-pass")
     due = []
     for key, record in sorted(seen["prs"].items()):
         if not record["created_at"] or ts - record["created_at"] < config.BOT_PASS_DELAY_SECONDS:
             continue
-        done = set(state.get(key, {}).get("threads", []))
+        done = set(state.get(key, {}).get("threads", [])) | sent.get(key, set())
         fresh = [thread for thread in record["open_threads"] if thread not in done]
         if fresh:
-            due.append((key, record, done, fresh))
+            due.append((key, record, fresh))
     passes = []
     if due and not run_desk.is_enabled("hermione"):
         due, passes = [], [{"skipped": "hermione is not enabled", "due": len(due)}]
-    for key, record, done, fresh in due[:config.BOT_PASS_MAX_PER_ROUND]:
+    for key, record, fresh in due[:config.BOT_PASS_MAX_PER_ROUND]:
         tag = f"{record['repo'].replace('/', '--')}-{record['number']}"
         out = f"{tag}-{patrol.file_stamp(now)}.md"
         try:
             text = render_threads(key, record, fetch_threads(record), fresh)
             patrol.write_text("bot-pass", out, text)
-            state[key] = {"threads": sorted(done | set(record["open_threads"])), "at": ts}
-            patrol.write_state("map", BOT_PASS_STATE, state)
-            woke = patrol.wake(conn, "hermione", "bot-pass", "bot pass", text, out, now, tag=tag)
+            woke = patrol.wake(conn, "hermione", "bot-pass", "bot pass", text, out, now, tag=tag, shadow=shadow,
+                               marks=record["open_threads"], subject=key)
         except (FleetError, StoreError) as exc:
             woke = {"launched": False, "clean": False, "error": common.one_line(exc, 200)}
         passes.append({"pr": key, "file": patrol.file_path("bot-pass", out), **woke})
-    patrol.write_state("map", BOT_PASS_STATE, state)
     return passes
 
 
@@ -230,6 +246,13 @@ def run_round(conn, now: Optional[int] = None) -> dict:
         patrol.tell_ryan(conn, shadow, "map-failed", f"the Map could not read GitHub: {error}",
                          f"patrol:map-failed:{patrol.local_day(now)}", now)
         return {"ok": False, "error": error}
+    if not seen["complete"]:
+        error = "GitHub's list of open PRs could not be read to its end, so the snapshot was left as it was"
+        patrol.append_row("map", ROUNDS, {"ts": ts, "ok": False, "incomplete": True, "shadow": shadow, "error": error,
+                                          "prs": len(seen["prs"]), "asked": len(seen["asked"]), "model": False})
+        patrol.tell_ryan(conn, shadow, "map-incomplete", f"the Map read only part of your PRs: {error}",
+                         f"patrol:map-incomplete:{patrol.local_day(now)}", now)
+        return {"ok": False, "incomplete": True, "error": error}
     before = patrol.read_state("map", SNAPSHOT, None)
     baseline = not isinstance(before, dict) or before.get("account") != login or not isinstance(before.get("prs"), dict)
     rows = [] if baseline else changes(before, seen)
@@ -253,12 +276,11 @@ def run_round(conn, now: Optional[int] = None) -> dict:
         seed_bot_passes(seen, ts)
         passes = []
     else:
-        passes = bot_passes(conn, seen, ts, now)
+        passes = bot_passes(conn, seen, ts, now, shadow)
     resent = patrol.resend_pending(conn, shadow, now)
     model = bool(woke and woke.get("launched")) or any(item.get("launched") for item in passes) or resent["launched"]
     row = {"ts": ts, "ok": True, "shadow": shadow, "baseline": baseline, "prs": len(seen["prs"]),
-           "asked": len(seen["asked"]), "more": seen["more"], "changes": len(rows), "for_me": len(for_me),
-           "model": model}
+           "asked": len(seen["asked"]), "changes": len(rows), "for_me": len(for_me), "model": model}
     patrol.append_row("map", ROUNDS, row)
     return {**row, "woke": woke, "bot_passes": passes, "resent": resent}
 

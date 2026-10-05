@@ -320,6 +320,50 @@ class PlanLimitTests(CapCase):
                 self.assertIsNotNone(re.compile(pattern))
 
 
+class ShadowRunTests(CapCase):
+    """run(shadow=True) is the patrol's shadow mode: the cap, near-cap and vendor-limit notes come back in the
+    result instead of reaching Ryan. Every other caller leaves shadow off and keeps its events."""
+
+    def test_a_shadow_run_holds_its_notes_and_keeps_the_caps_and_accounting(self):
+        self.enable("portrait")
+        owl_id, _ = self.request("portrait")
+        self.runs("portrait", 2)
+        with self.fake_output(claude_out(CLAUDE_OK), 0):
+            result = run_desk.run(self.conn, "portrait", owl_id, now=NOW, shadow=True)
+        self.assertEqual((result["exit_code"], result["cap_source"]), (0, None))
+        [note] = result["held"]
+        self.assertIn("portrait has used 3 of 3 runs of its fleet daily runs cap today", note)
+        self.assertEqual(run_desk.cap_status(self.conn, "portrait", NOW)["runs_used"], 3)
+        with self.assertRaises(run_desk.Capped):
+            run_desk.run(self.conn, "portrait", owl_id, now=NOW + 60, shadow=True)
+        self.assertEqual([(hit["cap"], hit["cap_source"]) for hit in capacity.list_cap_hits(self.conn, "portrait")],
+                         [("runs", "fleet")])
+        self.assertEqual([event for event in self.events() if event["kind"].startswith("rundesk.")], [])
+
+    def test_a_shadow_vendor_limit_is_recorded_but_held(self):
+        self.enable("hermione")
+        owl_id, _ = self.request("hermione")
+        with self.fake_output(claude_out(CLAUDE_USAGE_LIMIT), 1):
+            result = run_desk.run(self.conn, "hermione", owl_id, now=NOW, shadow=True)
+        self.assertEqual(result["cap_source"], "claude_plan")
+        self.assertIn("cap_source claude_plan", result["held"][0])
+        self.assertEqual(self.events_of("rundesk.plan-limit"), [])
+        self.assertEqual([(hit["cap"], hit["cap_source"]) for hit in capacity.list_cap_hits(self.conn, "hermione")],
+                         [("plan", "claude_plan")])
+
+    def test_without_shadow_the_same_runs_still_tell_ryan(self):
+        self.enable("portrait")
+        owl_id, _ = self.request("portrait")
+        self.runs("portrait", 2)
+        with self.fake_output(claude_out(CLAUDE_OK), 0):
+            result = run_desk.run(self.conn, "portrait", owl_id, now=NOW)
+        self.assertNotIn("held", result)
+        self.assertEqual(len(self.events_of("rundesk.cap-near")), 1)
+        with self.assertRaises(run_desk.Capped):
+            run_desk.run(self.conn, "portrait", owl_id, now=NOW + 60)
+        self.assertEqual(len(self.events_of("rundesk.cap")), 1)
+
+
 class PlanLimitFalsePositiveTests(CapCase):
     def test_a_codex_run_that_exits_0_is_never_a_plan_limit(self):
         self.assertIsNone(run_desk.plan_limit("codex", codex_out(CODEX_RETRIED), False))

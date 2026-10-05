@@ -247,8 +247,9 @@ PATROL_LOCK_WAIT_SECONDS = 1500
 PATROL_STATE_MAX_BYTES = 4 * 1024 * 1024
 GH_TIMEOUT_SECONDS = 60
 GH_OUTPUT_MAX_BYTES = 16 * 1024 * 1024
-# A patrol owl whose run did not end cleanly is sent again by a later Map round this long after its last
-# try, at most this many times. Then it goes to Ryan as a row.
+# A patrol owl whose file the patrol has not taken (its run did not end cleanly, or left no file it could
+# take) is sent again by a later Map round this long after its last try, at most this many times. Then it
+# goes to Ryan as a row.
 PATROL_RESEND_AFTER_SECONDS = 1800
 PATROL_MAX_RESENDS = 2
 # Hermione's bot pass waits this long after a PR opens, so the review bots have posted, and takes at
