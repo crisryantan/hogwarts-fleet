@@ -709,6 +709,10 @@ def collect(desk: str, owl_id: str, job: str, out_name: str, note_missing: bool 
                                    f"{common.one_line(exc, 200)}.\n")
         return {"collected": False, "headmaster_rows": 0}
     text = clean(raw.decode("utf-8", "replace")).strip()
+    if not text:
+        # An empty file holds no call and no drafts, so the work stays pending for a retry.
+        append_text(job, out_name, f"\n## {role}\n\nThe file for owl {owl_id} was empty.\n")
+        return {"collected": False, "headmaster_rows": 0}
     append_text(job, out_name, f"\n## {role}\n\n{text}\n")
     return {"collected": True, "headmaster_rows": headmaster_rows(text)}
 

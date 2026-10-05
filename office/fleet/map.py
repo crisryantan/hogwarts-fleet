@@ -170,24 +170,36 @@ def fetch_threads(record: dict) -> list:
     return threads
 
 
-def render_threads(key: str, record: dict, threads: list, fresh: list) -> str:
-    parts = [f"# Bot pass for {key}\n\n", f"Title: {record['title']}\n", f"Link: {record['url'] or '-'}\n",
-             f"Unresolved review threads: {len(threads)}, of which {len(set(fresh))} are new since the last pass.\n"]
+def render_threads(key: str, record: dict, threads: list, fresh: list) -> tuple:
+    """The pass's input and the ids of the threads it carries. Threads are carried whole up to THREADS_TEXT_MAX
+    and the rest are left out, not cut, so they stay unseen for a later pass. Only a first thread that is too
+    big on its own is cut, so a pass always carries something."""
+    head = "".join([f"# Bot pass for {key}\n\n", f"Title: {record['title']}\n", f"Link: {record['url'] or '-'}\n",
+                    f"Unresolved review threads: {len(threads)}, of which {len(set(fresh))} are new since the last"
+                    " pass.\n"])
+    parts, carried, size = [head], [], len(head)
     for number, thread in enumerate(threads, 1):
         marks = (" NEW" if thread["id"] in fresh else "") + (" OUTDATED" if thread["outdated"] else "")
         where = thread["path"] + (f":{thread['line']}" if thread["line"] else "")
-        parts.append(f"\n## Thread {number}{marks}: {where}\n")
+        block = [f"\n## Thread {number}{marks}: {where}\n"]
         hunk = thread["comments"][0]["hunk"] if thread["comments"] else ""
         if hunk:
-            parts.append("\n```diff\n" + hunk.replace("```", "'''") + "\n```\n")
+            block.append("\n```diff\n" + hunk.replace("```", "'''") + "\n```\n")
         for comment in thread["comments"]:
             who = comment["author"] + ("" if comment["person"] else " (bot)")
             quoted = "\n".join("> " + line for line in comment["body"].splitlines()) or "> (empty)"
-            parts.append(f"\n{who}, {comment['url'] or '-'}:\n{quoted}\n")
-    text = "".join(parts)
-    if len(text) > THREADS_TEXT_MAX:
-        text = text[:THREADS_TEXT_MAX] + "\n\n(cut here: the threads above are all the pass carries)\n"
-    return text
+            block.append(f"\n{who}, {comment['url'] or '-'}:\n{quoted}\n")
+        text = "".join(block)
+        if size + len(text) > THREADS_TEXT_MAX:
+            if carried:
+                break
+            text = text[:THREADS_TEXT_MAX - size] + "\n\n(cut here: this one thread is longer than a pass carries)\n"
+        parts.append(text)
+        size += len(text)
+        carried.append(thread["id"])
+    if len(carried) < len(threads):
+        parts.append(f"\n\n({len(threads) - len(carried)} more thread(s) did not fit; a later pass carries them.)\n")
+    return "".join(parts), carried
 
 
 def seed_bot_passes(seen: dict, ts: int) -> None:
@@ -220,10 +232,15 @@ def bot_passes(conn, seen: dict, ts: int, now: Optional[int] = None, shadow: boo
         tag = f"{record['repo'].replace('/', '--')}-{record['number']}"
         out = f"{tag}-{patrol.file_stamp(now)}.md"
         try:
-            text = render_threads(key, record, fetch_threads(record), fresh)
+            threads = fetch_threads(record)
+            text, carried = render_threads(key, record, threads, fresh)
+            # Seen once taken: the threads this pass carries, and open ones the fetch no longer returns (resolved
+            # since, or unreadable), which no pass could carry. Threads left out for size wait for a later pass.
+            fetched = {thread["id"] for thread in threads}
+            marks = carried + [thread for thread in record["open_threads"] if thread not in fetched]
             patrol.write_text("bot-pass", out, text)
             woke = patrol.wake(conn, "hermione", "bot-pass", "bot pass", text, out, now, tag=tag, shadow=shadow,
-                               marks=record["open_threads"], subject=key)
+                               marks=marks, subject=key)
         except (FleetError, StoreError) as exc:
             woke = {"launched": False, "clean": False, "error": common.one_line(exc, 200)}
         passes.append({"pr": key, "file": patrol.file_path("bot-pass", out), **woke})

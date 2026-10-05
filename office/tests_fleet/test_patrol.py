@@ -596,6 +596,37 @@ class BotPassTests(PatrolCase):
     def test_refused_drafts_are_asked_for_again(self):
         self.drafts_wait_then_come(self.desk_leaves(link_to=str(self.write_file(self.tmp / "x.md", "x\n"))))
 
+    def test_empty_drafts_are_asked_for_again(self):
+        self.drafts_wait_then_come(self.desk_writes("\n  \n"))
+
+    def test_threads_that_do_not_fit_stay_unseen_for_a_later_pass(self):
+        big = {"id": "T2", "isResolved": False, "isOutdated": False, "path": "src/big.py", "line": 1,
+               "comments": {"nodes": [{"author": {"__typename": "Bot", "login": "lint-bot"}, "body": "x" * 900,
+                                       "createdAt": iso(NOW), "url": None, "diffHunk": ""}]}}
+        self.github.threads[self.key].append(big)
+        self.github.prs = [pr_node(created=NOW - 3000, threads=(thread("T1", "lint-bot", person=False),
+                                                                thread("T2", "lint-bot", person=False)))]
+        with mock.patch.object(patrol_map, "THREADS_TEXT_MAX", 900), self.desk_writes(DRAFTS):
+            [first] = self.round(NOW)["bot_passes"]
+        text = read_file(first["file"])
+        self.assertIn("Thread 1 NEW: src/retry.py:7", text)
+        self.assertNotIn("src/big.py", text)
+        self.assertIn("1 more thread(s) did not fit", text)
+        self.assertEqual(json.loads(self.read("map", "bot-pass.json"))[self.key]["threads"], ["T1"])
+        with self.desk_writes(DRAFTS) as started:
+            [second] = self.round(NOW + 900)["bot_passes"]
+        self.assertEqual(started.call_count, 1)
+        self.assertIn("src/big.py", read_file(second["file"]))
+        self.assertEqual(json.loads(self.read("map", "bot-pass.json"))[self.key]["threads"], ["T1", "T2"])
+
+    def test_a_first_thread_too_big_alone_is_cut_and_carried(self):
+        threads = [{"id": "T9", "path": "a.py", "line": None, "outdated": False,
+                    "comments": [{"author": "lint-bot", "person": False, "url": None, "body": "y" * 5000, "hunk": ""}]}]
+        with mock.patch.object(patrol_map, "THREADS_TEXT_MAX", 1000):
+            text, carried = patrol_map.render_threads("k", {"title": "t", "url": None}, threads, ["T9"])
+        self.assertEqual(carried, ["T9"])
+        self.assertIn("this one thread is longer than a pass carries", text)
+
     def test_no_pass_while_hermione_is_off(self):
         os.unlink(self.office / "desks" / "hermione" / config.ENABLED_MARKER)
         self.github.prs = [pr_node(created=NOW - 3000, threads=(thread("T1", "lint-bot", person=False),))]
@@ -696,6 +727,9 @@ class KeeperTests(PatrolCase):
 
     def test_a_refused_file_leaves_the_red_unjudged_until_a_good_one(self):
         self.red_judged_after_collection(self.desk_leaves(link_to=str(self.write_file(self.tmp / "x.md", "x\n"))))
+
+    def test_an_empty_file_leaves_the_red_unjudged_until_a_good_one(self):
+        self.red_judged_after_collection(self.desk_writes(" \n\t\n"))
 
     def test_a_red_main_commit_is_read_from_the_watched_repos(self):
         self.github.main[REPO] = [commit_node(SHA2, NOW - HOUR, "FAILURE", (check("deploy-check"),)),
