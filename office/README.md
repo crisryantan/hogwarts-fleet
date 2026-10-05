@@ -67,10 +67,15 @@ The store has none of these:
   tests_fleet/                          the fleet's unittest suite
   run_suites.py                         runs both test suites fast, one process per test module
   state/pensieve.db                     the real database, created by castle init
-  logs/                                 the fleet's job and script logs
+  logs/                                 the fleet's job and script logs, review-auto.log for the review loop
   runs/<desk>/                          each headless run's output, which fleet feed follows
-  locks/                                lock files for run slots, launches, the patrol and Ollivander's updates
-  reviews/<task>/                       review files and verify evidence, which no desk can write
+  locks/                                lock files for run slots, launches, reviews, the review loop, the patrol and
+                                        Ollivander's updates
+  reviews/<task>/                       review files and verify evidence, which no desk can write, what each review
+                                        round was opened for (round-<request>.json), and the review loop's record of
+                                        each handoff (auto-<owl>.pending, .try<n>, .done)
+  auto-draft-pr                         while it holds exactly "on", the review loop pushes and opens a draft PR after
+                                        its PASS (off when missing)
   patrol/shadow                         while it is here, the patrol and Gringotts only write files (shadow mode)
   patrol/<job>/                         the Map's snapshot and rows, lineups, keeper's watches, scoreboards, bot passes
   backups/                              Gringotts' archives, mode 0600, kept 14 days, never synced anywhere

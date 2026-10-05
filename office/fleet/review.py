@@ -53,7 +53,10 @@ handoff for good, and every ending that needs Ryan raises one headmaster event. 
 - CHANGES starts Harry's fix round through the same path as fleet build, unless the task has used its
   REVIEW_ROUND_CAP rounds with no allowance left: then nothing starts, and Ryan hears the task and its verdict.
   Harry's next handoff starts the next review the same way.
-- PASS starts nothing more. The task awaits close, as it does after any PASS, and Ryan hears it is ready for push.
+- PASS starts no build or review. The task awaits close, as it does after any PASS. While Ryan has opted in
+  (push.auto_draft_pr_on, one file in the office), the reviewed commit is pushed and a draft PR opened from the
+  handoff's COMMIT MESSAGE and PR BODY DRAFT through push.push_draft_pr, and Ryan hears its URL, or why it stopped.
+  It is never retried, never ready for review and never merged. Without the opt-in, Ryan hears it is ready for push.
 - HEADMASTER starts nothing more, and Ryan hears it as he does from any review.
 A handoff is finished before anything after its verdict starts, so a killed review never reviews a fix round
 that is still being written. A review Ryan runs with fleet review stops at its verdict, as it always has.
@@ -125,7 +128,7 @@ from typing import Iterator, Optional
 from hogwarts import capacity, ids, owlery, pensieve
 from hogwarts.errors import ConflictError, StoreError
 
-from fleet import common, config, gitops, owl_post, run_desk, safefs, verify, worktree
+from fleet import common, config, gitops, owl_post, push, run_desk, safefs, verify, worktree
 from fleet.safefs import FleetError
 
 REVIEW_HEADER = re.compile(r"REVIEW (tk_[0-9a-f]{16}) @ ([0-9a-f]{40})")
@@ -206,6 +209,24 @@ def commit_message(handoff: str, check_words: bool = True) -> tuple:
     if word:
         raise FleetError(f"the commit message contains a fleet word ({word})")
     return subject, body
+
+
+def pr_body(handoff: str) -> str:
+    """The PR BODY DRAFT section of a build desk's handoff, as the body of its draft PR."""
+    lines = handoff.splitlines()
+    try:
+        start = next(index for index, line in enumerate(lines) if line.strip() == "PR BODY DRAFT") + 1
+    except StopIteration:
+        raise FleetError("the handoff has no PR BODY DRAFT section") from None
+    section = []
+    for line in lines[start:]:
+        if SECTION_HEADER.fullmatch(line.strip()):
+            break
+        section.append(line.rstrip())
+    body = "\n".join(section).strip()
+    if not body:
+        raise FleetError("the handoff's PR BODY DRAFT section is empty")
+    return body + "\n"
 
 
 def latest_result_owl(conn, task: dict) -> Optional[dict]:
@@ -626,7 +647,7 @@ def _auto_review(conn, task_id: str, now: Optional[int]) -> dict:
         # Finished before anything starts after the verdict, so no later try reviews a fix round mid-write.
         owl_post.finish_handoff(task_id, newest_id, f"round {result['round']} at {result['sha'][:12]} recorded"
                                 f" {result['verdict']}")
-        after = _after_verdict(conn, task, result, now)
+        after = _after_verdict(conn, task, result, now, checked_owl=newest_id)
     return {"task_id": task_id, "owl_id": newest_id, "outcome": f"reviewed: {result['verdict']}", "next": after,
             "review": result}
 
@@ -680,13 +701,14 @@ def _reviewer_busy(conn, reviewer: str, now: Optional[int]) -> bool:
     return len(going) >= run_desk.run_slots(reviewer) or pensieve.blocking_task(conn, reviewer) is not None
 
 
-def _after_verdict(conn, task: dict, result: dict, now: Optional[int]) -> str:
-    """What the review loop starts after an automatic review's verdict, under the task's review lock."""
+def _after_verdict(conn, task: dict, result: dict, now: Optional[int], checked_owl: Optional[str] = None) -> str:
+    """What the review loop starts after an automatic review's verdict, under the task's review lock. checked_owl
+    is the handoff the loop checked before the review; only a review that read that same handoff can push."""
     verdict, round_no, task_id = result["verdict"], result["round"], task["id"]
     if verdict == "HEADMASTER":
         return "nothing more starts: the reviewer handed the decision to Ryan"
     if verdict == "PASS":
-        return _after_pass(conn, task, result, now)
+        return _after_pass(conn, task, result, now, checked_owl)
     if capacity.needs_allowance(conn, task_id, config.REVIEW_ROUND_CAP):
         pensieve.add_event(conn, task["desk"], "review.loop-stopped", "headmaster",
                            f"task {task_id} has used its {config.REVIEW_ROUND_CAP} review rounds and round"
@@ -707,13 +729,37 @@ def _after_verdict(conn, task: dict, result: dict, now: Optional[int]) -> str:
     return started
 
 
-def _after_pass(conn, task: dict, result: dict, now: Optional[int]) -> str:
-    """A PASS starts nothing more. The task awaits close, and Ryan hears it is ready for his push."""
-    pensieve.add_event(conn, task["desk"], "review.ready-for-push", "headmaster",
-                       f"task {task['id']} passed review at {result['sha'][:12]} and is ready for push: fleet push"
-                       f" {task['id']}", task_id=task["id"], dedupe_key=f"review:ready:{task['id']}:{result['sha']}",
-                       now=now)
-    return "ready for push"
+def _after_pass(conn, task: dict, result: dict, now: Optional[int], checked_owl: Optional[str] = None) -> str:
+    """A PASS starts no build or review. Without Ryan's opt-in he hears the task is ready for his push. With it, the
+    reviewed commit is pushed and a draft PR opened, once, and he hears its URL or why it stopped. Either way it is
+    one headmaster event. A review that read a newer handoff than the one the loop checked never pushes."""
+    task_id, sha = task["id"], result["sha"]
+    if not push.auto_draft_pr_on() or checked_owl is None or result.get("handoff_owl") != checked_owl:
+        pensieve.add_event(conn, task["desk"], "review.ready-for-push", "headmaster",
+                           f"task {task_id} passed review at {sha[:12]} and is ready for push: fleet push {task_id}",
+                           task_id=task_id, dedupe_key=f"review:ready:{task_id}:{sha}", now=now)
+        return "ready for push"
+    try:
+        if result.get("handoff_owl") is None:
+            raise FleetError("the review had no handoff to take the PR text from")
+        handoff = owl_body(conn, result["handoff_owl"])
+        title, _ = commit_message(handoff, check_words=False)
+        pushed = push.push_draft_pr(conn, task_id, sha, title, pr_body(handoff))
+    except (FleetError, StoreError, OSError) as exc:
+        reason = common.one_line(pensieve.scrub(str(exc) if not isinstance(exc, OSError) else type(exc).__name__),
+                                 300)
+        pensieve.add_event(conn, task["desk"], "push.auto-failed", "headmaster",
+                           common.one_line(f"task {task_id} passed review at {sha[:12]}, but the automatic draft PR"
+                                           f" stopped and was not retried: {reason}; fleet push {task_id} pushes it by"
+                                           " hand", 480),
+                           task_id=task_id, dedupe_key=f"push:auto-failed:{task_id}:{sha}", now=now)
+        return f"the automatic draft PR stopped: {reason}"
+    pensieve.add_event(conn, task["desk"], "push.draft-pr", "headmaster",
+                       common.one_line(f"task {task_id} passed review: {sha[:12]} is pushed to {pushed['branch']} and"
+                                       f" draft PR {pushed['pr_url']} is open; read it, and mark it ready yourself",
+                                       480),
+                       task_id=task_id, dedupe_key=f"push:draft-pr:{task_id}:{sha}", now=now)
+    return f"opened draft PR {pushed['pr_url']}"
 
 
 def main(argv: Optional[list] = None) -> int:

@@ -111,6 +111,11 @@ AUTO_REVIEW_WAIT_LIMIT_SECONDS = 4 * 3600
 AUTO_REVIEW_MAX_TRIES = 3
 # How long a starting automatic review waits for another one of the same task to let go of the task's loop lock.
 AUTO_REVIEW_LOCK_WAIT_SECONDS = 10
+# The automatic draft PR after the review loop's PASS (push.push_draft_pr), off by default. It is on only while
+# this plain file in the office, which no desk can write, holds exactly "on". Ryan writes it from his terminal:
+#   echo on > ~/.hogwarts/auto-draft-pr
+# A file anywhere else, a link, a file someone else owns or can write, or any other text leaves it off.
+AUTO_DRAFT_PR_FILE = "auto-draft-pr"
 # A failed run whose error text matches one of these hit the vendor's own usage, rate, quota or credit
 # limit, not a fleet cap. Matched without case against Claude's result text when is_error is set, and
 # against the message that ended a failed Codex run (its last turn.failed, else its last error event).

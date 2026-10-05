@@ -67,7 +67,7 @@ Four scripts use no model. The **Owl Post - Message Router** moves owls between 
 3. **Build.** A script makes a fresh worktree, based on the commit its base names at that moment, so a later merge to main never changes what a review compares against. Harry implements, checks his change against the four kinds of problem reviews keep finding, and writes a handoff note.
 4. **Evidence.** A verify script runs every acceptance check and records the command, exit code and output for that commit.
 5. **Cross-model review.** Codex-written work goes to Hermione and Claude-written work goes to Moody. A reviewer who finds one instance of a problem checks its siblings and lists them all, so one fix round covers the whole kind. The review script records the verdict from the reviewer's own output. The store counts a pass only when the families differ, and any new commit voids it. For Harry's work this is a loop that runs by itself: his handoff starts the review, CHANGES starts his fix round, and it stops at the round cap, on PASS or on HEADMASTER, each time telling you.
-6. **Push and PR.** A hook asks the store for a pass on HEAD and blocks any agent's `git push` without one. Opening a ready PR waits for your yes, because it notifies people.
+6. **Push and PR.** A hook asks the store for a pass on HEAD and blocks any agent's `git push` without one. You push with `fleet push`, unless you opt in with one file in the office: then the review loop pushes the reviewed commit after its PASS and opens a draft PR from Harry's commit message and PR body draft. Opening a ready PR waits for your yes, because it notifies people.
 7. **Patrol.** Ron watches CI and files bot comments. Hermione reproduces or rebuts each one.
 8. **Merge.** You merge and deploy, then type "Mischief managed <task-id>".
 
@@ -176,7 +176,7 @@ Three things usually dominate token use: what loads before you type, how long a 
 - Security and config: permissions, hooks, settings, MCP, plugins and sandbox. Desks propose a diff and you apply it.
 - Installs. Homebrew only, after you've read `brew info`.
 - Anything sent to a person: chat, email, tickets, PR threads, review requests and opening a ready PR.
-- Public repo text: branch names, commits and PR text before the first push. Character names never leave the fleet.
+- Public repo text: branch names, commits and PR text before the first push. The one exception is the draft PR you opt in to (`~/.hogwarts/auto-draft-pr`), which pushes a reviewed commit and opens a draft from Harry's text after a fleet-word and credential check. Character names never leave the fleet.
 - Scope: editing Intent, adding criteria, splitting a PR.
 - Force pushes and deletions, including branches, PRs and memory.
 

@@ -57,6 +57,8 @@ KNOWN_FLAGS = {
     "--effort", "--version", "--help", "--cask",
     # Gringotts' restore drill
     "--drill",
+    # the review loop's draft PR, gh pr create --draft with its body on stdin (gitops.draft_pr_argv)
+    "--draft", "--repo", "--head", "--body-file",
     # Dumbledore's nightly job: the export alone, with no owl and no run
     "--export-only",
 }

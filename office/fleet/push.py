@@ -13,6 +13,15 @@ It then shows the repo, branch, commit and commit list, and waits for Ryan to ty
 (--yes skips that). It pushes exactly the reviewed commit, `git push origin <sha>:refs/heads/<branch>`,
 never with --force, so a remote branch that moved makes git refuse. It opens no PR: it prints the
 gh command for a draft PR, which Ryan runs after reading the PR text.
+
+push_draft_pr is the review loop's push after a PASS, only while Ryan has opted in with the one file
+config.AUTO_DRAFT_PR_FILE in the office (auto_draft_pr_on). His opt-in stands in for the typed branch name;
+every other check is check()'s, run the same way. It pushes only the commit that passed, to the branch the
+worktree record holds, then opens a draft PR whose title is the handoff's commit subject and whose body is
+its PR BODY DRAFT, through gitops.open_draft_pr. Before anything is pushed, the PR text and the commit
+messages are refused when they hold a fleet word or anything shaped like a credential, key or email. It
+never opens a ready PR, merges, forces or retries. Any failure stops it where it is and raises a
+FleetError naming what was and was not done.
 """
 from __future__ import annotations
 
@@ -21,11 +30,15 @@ from typing import Callable, Optional
 
 from hogwarts import ids, owlery, pensieve
 
-from fleet import config, gitops, worktree
+from fleet import common, config, gitops, safefs, worktree
 from fleet.safefs import FleetError
 
 ADDED_LINE_PREFIX = "+"
 MAX_LISTED = 20
+OPT_IN_MAX_BYTES = 64
+# What pensieve.scrub puts in place of a credential, key or email. Text it would change this way never goes out
+# by itself. Its hex and IP address marks are left out, since commit shas and version numbers look like them.
+SENSITIVE_MARKS = ("[private_key]", "[credentials]", "[jwt]", "[token]", "[secret]", "[aws_key]", "[email]")
 
 
 def _fleet_word_hits(record: dict, sha: str) -> list:
@@ -85,16 +98,87 @@ def push(conn, task_id: str, confirm: Optional[Callable[[str], str]] = None) -> 
         answer = confirm(summary + "Type the branch name to push it, or anything else to stop: ")
         if answer.strip() != branch:
             raise FleetError("not pushed: the branch name was not typed")
-    refspec = f"{sha}:refs/heads/{branch}"
-    try:
-        gitops.git(["push", "origin", refspec], record["git_dir"], record["path"])
-    except FleetError as exc:
-        raise FleetError(f"{exc}. To push by hand: git -C {record['path']} push origin {refspec}") from None
+    _push_exact(record, sha, branch)
     subject = gitops.git(["log", "-1", "--format=%s", sha], record["git_dir"], record["path"]).strip()
     title = subject.replace("\\", "").replace('"', "'")
     draft = f'gh pr create --draft --repo {record["repo"]} --head {branch} --title "{title}" --body-file <file>'
     return {"task_id": plan["task"]["id"], "repo": record["repo"], "branch": branch, "sha": sha,
             "draft_pr_command": draft}
+
+
+def _push_exact(record: dict, sha: str, branch: str) -> str:
+    """git push origin <sha>:refs/heads/<branch>: exactly that commit, never forced, so a remote branch that moved
+    makes git refuse."""
+    refspec = f"{sha}:refs/heads/{branch}"
+    try:
+        gitops.git(["push", "origin", refspec], record["git_dir"], record["path"])
+    except FleetError as exc:
+        raise FleetError(f"{exc}. To push by hand: git -C {record['path']} push origin {refspec}") from None
+    return refspec
+
+
+def auto_draft_pr_on() -> bool:
+    """Whether Ryan opted in to the automatic draft PR: the plain file config.AUTO_DRAFT_PR_FILE in the office, his
+    own and writable by no one else, reached with no link on the way, holds exactly "on". It is read from nowhere
+    else, so nothing a desk can write turns it on. Missing, unreadable or anything else is off."""
+    try:
+        with safefs.opened_dir(config.OFFICE_ROOT) as fd:
+            raw = safefs.read_regular(fd, config.AUTO_DRAFT_PR_FILE, OPT_IN_MAX_BYTES, "the draft PR opt-in")
+    except (FleetError, OSError):
+        return False
+    return raw.strip() == b"on"
+
+
+def sensitive_mark(text: str) -> Optional[str]:
+    """What text holds that looks like a credential, key or email, or None."""
+    scrubbed = pensieve.scrub(text)
+    return next((mark.strip("[]") for mark in SENSITIVE_MARKS if scrubbed.count(mark) > text.count(mark)), None)
+
+
+def pr_base(record: dict) -> str:
+    """The branch the PR asks to merge into: the origin branch the worktree's base named."""
+    base_ref = record.get("base_ref")
+    if not isinstance(base_ref, str) or not base_ref.startswith("origin/"):
+        raise FleetError("the worktree's base is not a branch of origin, so the PR has no base branch to name")
+    return gitops.check_ref(base_ref[len("origin/"):], "PR base")
+
+
+def check_pr_text(record: dict, title: str, body: str) -> None:
+    """Refuse PR text that holds a fleet word (outside the kit's own repo) or anything shaped like a credential."""
+    gitops.check_pr_title(title)
+    if not isinstance(body, str) or not body.strip() or len(body) > gitops.PR_BODY_MAX or "\x00" in body:
+        raise FleetError(f"the PR body must be text of at most {gitops.PR_BODY_MAX} characters")
+    if record["repo"] not in config.FLEET_WORDS_ALLOWED_REPOS:
+        word = gitops.fleet_words_in(title + "\n" + body)
+        if word:
+            raise FleetError(f"the PR text contains a fleet word ({word})")
+    mark = sensitive_mark(title + "\n" + body)
+    if mark is not None:
+        raise FleetError(f"the PR text holds what looks like a credential or personal data ({mark}); read it and"
+                         " open the PR by hand")
+
+
+def push_draft_pr(conn, task_id: str, sha: str, title: str, body: str) -> dict:
+    """Push exactly the commit that passed review and open a draft PR for it (see the module notes). Nothing is
+    pushed unless every check passes first, and a draft PR that fails to open after the push says so."""
+    plan = check(conn, task_id)
+    record, branch = plan["record"], plan["branch"]
+    if not isinstance(sha, str) or gitops.SHA.fullmatch(sha) is None or plan["sha"] != sha:
+        raise FleetError("HEAD is not the commit that passed review, so nothing was pushed")
+    base = pr_base(record)
+    check_pr_text(record, title, body)
+    messages = gitops.git(["log", "--format=%B", f"{record['base']}..{sha}"], record["git_dir"], record["path"])
+    mark = sensitive_mark(messages)
+    if mark is not None:
+        raise FleetError(f"a commit message holds what looks like a credential or personal data ({mark}), so"
+                         " nothing was pushed")
+    _push_exact(record, sha, branch)
+    try:
+        url = gitops.open_draft_pr(record["repo"], branch, base, title, body)
+    except FleetError as exc:
+        raise FleetError(f"{sha[:12]} is pushed to {branch}, but the draft PR did not open: {exc}") from None
+    return {"task_id": plan["task"]["id"], "repo": record["repo"], "branch": branch, "base": base, "sha": sha,
+            "pr_url": common.one_line(url, 200)}
 
 
 def ask_terminal(prompt: str) -> str:

@@ -128,11 +128,24 @@ Every `fleet` command prints one JSON object with `"ok": true` or `"ok": false` 
 ~/.hogwarts/bin/fleet build <harry-task-id>
 ```
 
-6. On PASS, nothing more starts. The task awaits close, and the review loop gives you one headmaster event saying it is ready for push. Push exactly the reviewed commit. It shows the commits and waits for you to type the branch name, then prints the `gh` command for a draft PR. Read the PR text before you run that:
+6. On PASS, no build or review starts, and the task awaits close. What happens next depends on one opt-in, which is off by default.
+
+   With it off, the review loop gives you one headmaster event saying the task is ready for push. Push exactly the reviewed commit yourself. It shows the commits and waits for you to type the branch name, then prints the `gh` command for a draft PR. Read the PR text before you run that:
 
 ```
 ~/.hogwarts/bin/fleet push <harry-task-id>
 ```
+
+   With it on, the review loop does that push for you after its own PASS: exactly the reviewed commit, to the branch the worktree was made on, through every check `fleet push` makes, and never forced. Then it opens a draft PR with your `gh` login, titled with the handoff's COMMIT MESSAGE subject, with the handoff's PR BODY DRAFT as its body. Before it pushes anything, it refuses PR text or commit messages that hold a fleet word, or anything shaped like a token, key or email. You get one headmaster event with the PR's URL. If anything fails, such as a push check, the remote, `gh` or its login, it stops there, retries nothing, and you get one headmaster event saying why. It never reads or prints a credential. Push by hand with `fleet push` as above. The PR stays a draft: marking it ready, requesting reviews and merging stay yours. A review you start by hand with `fleet review` never pushes.
+
+   The opt-in is one file in the office, which no desk can write. Turn it on from your terminal, and off by deleting the file:
+
+```
+echo on > ~/.hogwarts/auto-draft-pr
+rm ~/.hogwarts/auto-draft-pr
+```
+
+   It counts only while it is a plain file you own that no one else can write, holding exactly `on`. A file anywhere else, a desk folder, a task folder, an owl, TASK.md or `standing-orders.md`, is ignored. Write the same order in `standing-orders.md` for people to read, but code never parses it.
 
 7. For a commit from one of your own Claude sessions, Moody reviews it in a detached worktree. On PASS, that session's `git push` gets through the gate. For a fix round, pass `--task <id>` instead of `--title`:
 

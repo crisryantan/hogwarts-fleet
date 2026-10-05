@@ -11,7 +11,10 @@ hook folders such as .husky. So every git call here:
 Office records live in ~/.hogwarts/worktrees/<name>.json, one per castle worktree, written only by
 the worktree and review scripts. They name the main checkout, its .git folder, the branch and base.
 
-This module and run_desk are the only fleet modules that start git or a desk.
+This module and run_desk are the only fleet modules that start git or a desk. This module also runs the one gh
+command that writes to GitHub: gh pr create --draft for the review loop's automatic draft PR (open_draft_pr), which
+a guard holds to that exact shape. It runs in the office with a fixed environment and the PR body on stdin, never
+in a worktree, so no file a desk wrote can steer it, and nothing gh prints about a login reaches an event.
 """
 from __future__ import annotations
 
@@ -39,6 +42,13 @@ GITHUB_URL = re.compile(
     r"([A-Za-z0-9._-]{1,100})/([A-Za-z0-9._-]{1,100}?)(?:\.git)?/?"
 )
 SHA = re.compile(r"[0-9a-f]{40}")
+PR_URL = re.compile(r"https://github\.com/([A-Za-z0-9._-]{1,100})/([A-Za-z0-9._-]{1,100})/pull/[0-9]{1,10}")
+PR_TITLE_MAX = 100
+PR_BODY_MAX = 20000
+# gh exits 4 when it needs a login. Any of these words in what it printed is treated as a login problem too, so its
+# text is never repeated.
+GH_AUTH_EXIT = 4
+GH_AUTH_WORDS = re.compile(r"(?i)auth|log ?in|token|credential|password|\b40[13]\b|forbidden|saml|sso|permission")
 WORD_SPLIT = re.compile(r"[^a-z0-9]+")
 HARDENING = (
     "-c", "core.hooksPath=/dev/null",
@@ -201,6 +211,74 @@ def _run(args: list, git_dir: Optional[str], work_tree: Optional[str], timeout: 
         raise FleetError(f"git {args[0]} timed out") from None
     return (done.returncode, done.stdout.decode("utf-8", "replace")[:OUTPUT_MAX_CHARS],
             done.stderr.decode("utf-8", "replace"))
+
+
+# The draft PR
+
+
+def check_pr_title(title: object) -> str:
+    """One printable line of at most PR_TITLE_MAX characters that cannot be read as a flag."""
+    if not isinstance(title, str) or not title or len(title) > PR_TITLE_MAX \
+            or common.one_line(title, PR_TITLE_MAX) != title or title.startswith("-"):
+        raise FleetError("the PR title must be one printable line of at most 100 characters, not starting with -")
+    return title
+
+
+def draft_pr_argv(repo: str, head: str, base: str, title: str) -> list:
+    """gh pr create for a draft PR, with the body read from stdin. Nothing in it can mark the PR ready or merge it."""
+    return [config.GH_BIN, "pr", "create", "--draft", "--repo", ids.check("repo", repo), "--head", check_branch(head),
+            "--base", check_ref(base, "PR base"), "--title", check_pr_title(title), "--body-file", "-"]
+
+
+def check_draft_pr_argv(argv: object) -> None:
+    """Refuse every gh command but the exact draft PR shape draft_pr_argv builds, checked again field by field."""
+    if not isinstance(argv, list) or len(argv) != 14 or argv[:4] != [config.GH_BIN, "pr", "create", "--draft"] \
+            or argv[4::2] != ["--repo", "--head", "--base", "--title", "--body-file"] or argv[13] != "-":
+        raise FleetError("the fleet runs no gh command but gh pr create --draft with its fixed flags")
+    if draft_pr_argv(argv[5], argv[7], argv[9], argv[11]) != argv:
+        raise FleetError("the draft PR command has a value it does not allow")
+
+
+def gh_env() -> dict:
+    """git's fixed environment, plus the account name, which gh finds its keychain login under, and no prompts."""
+    account = os.path.basename(config.USER_HOME_DIR)
+    return {**child_env(), "USER": account, "LOGNAME": account, "GH_PROMPT_DISABLED": "1",
+            "GH_NO_UPDATE_NOTIFIER": "1", "NO_COLOR": "1"}
+
+
+def run_gh_pr(argv: list, body: bytes) -> tuple:
+    """(exit code, stdout, stderr) of the checked draft PR command, run once in the office. Tests replace this."""
+    check_draft_pr_argv(argv)
+    try:
+        done = subprocess.run(argv, cwd=config.OFFICE_ROOT, env=gh_env(), input=body, capture_output=True,
+                              timeout=config.GH_TIMEOUT_SECONDS, check=False)
+    except subprocess.TimeoutExpired:
+        raise FleetError("gh did not answer in time, so the PR may or may not be open: look at the repo's pull"
+                         " requests") from None
+    except OSError:
+        raise FleetError(f"gh is not at {config.GH_BIN}; set GH_BIN in fleet/config.py") from None
+    return (done.returncode, done.stdout.decode("utf-8", "replace")[:OUTPUT_MAX_CHARS],
+            done.stderr.decode("utf-8", "replace")[:OUTPUT_MAX_CHARS])
+
+
+def open_draft_pr(repo: str, head: str, base: str, title: str, body: str) -> str:
+    """Open a draft PR from head into base and return its URL. It runs once and is never retried. A login problem is
+    named without anything gh printed, and any other failure keeps only gh's last line, scrubbed."""
+    if not isinstance(body, str) or not body.strip() or len(body) > PR_BODY_MAX or "\x00" in body:
+        raise FleetError(f"the PR body must be text of at most {PR_BODY_MAX} characters")
+    code, out, err = run_gh_pr(draft_pr_argv(repo, head, base, title), body.encode("utf-8"))
+    if code != 0:
+        if code == GH_AUTH_EXIT or GH_AUTH_WORDS.search(err):
+            raise FleetError("gh is not signed in to GitHub, or GitHub refused its login: check gh auth status in"
+                             " your terminal")
+        last = [line for line in err.splitlines() if line.strip()]
+        raise FleetError("gh pr create failed: " + common.one_line(pensieve.scrub(last[-1] if last else
+                                                                                  f"exit {code}"), 200))
+    lines = [line.strip() for line in out.splitlines() if line.strip()]
+    match = PR_URL.fullmatch(lines[-1]) if lines else None
+    if match is None or f"{match.group(1)}/{match.group(2)}".lower() != repo.lower():
+        raise FleetError("gh named no PR of this repo, so it may or may not be open: look at the repo's pull requests")
+    return lines[-1]
 
 
 def is_ancestor(git_dir: str, ancestor: str, sha: str) -> Optional[bool]:
