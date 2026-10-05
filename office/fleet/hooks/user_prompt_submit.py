@@ -52,6 +52,9 @@ only for a task id the store does not know yet whose TASK.md is at
   "base: <ref>", in that order, each once. Anything else refuses with a plain reason;
 - checks them as fleet worktree checks --repo-dir, --branch and --base, and fetches the
   base before any store write, so no network wait holds the store;
+- takes the lock on making that branch in that repo without waiting (worktree.branch_claim),
+  and holds it until its transaction commits or its take-back ends, so a fleet worktree or
+  another go for the same branch, under any TASK.md, is refused at once meanwhile;
 - then, in one store transaction: registers the task on McGonagall's desk with its
   TASK.md, records the repo folder, branch, base and the TASK.md sha256 with it
   (pensieve.record_spec, never changed after), opens the request to Harry, which makes
@@ -65,8 +68,13 @@ A refusal anywhere before the commit, or SIGTERM or SIGHUP (a hook timeout), rol
 store back and takes back the worktree, however far git got with it, its branch, its record
 and the inbox copy, so a go that did not get through leaves nothing and can be typed again.
 The go owns that take-back from before git makes anything: worktree.create fills its claim
-first and leaves the take-back to the go. A signal after the commit keeps it all, since the
-store holds the task, the worktree and the owl by then. A kill no process can catch
+first and leaves the take-back to the go. The take-back removes the branch only when git made
+it for this go, and names a branch it did not see git make instead. Whatever a go leaves
+behind, its refusal names, even when a signal stopped it. A signal after the commit
+keeps it all, since the store holds the task, the worktree and the owl by then. When the store
+cannot say whether the go committed, the go takes back nothing and its refusal names the
+worktree, the branch, the record and the inbox copy, to remove by hand only if castle task
+show finds Harry's task without its worktree. A kill no process can catch
 (SIGKILL) between the worktree and the commit leaves that worktree and its branch with no task,
 and the next go refuses because the branch exists until Ryan removes them. Nothing a go prints
 carries a token, the prompt's id or the TASK.md hash. A go Ryan's typing could not confirm
@@ -319,7 +327,7 @@ def _undo(claim: dict, inbox_copy: Optional[str], exc: BaseException) -> Optiona
         worktree.take_back(claim, exc)
     except FleetError as undo:
         return str(undo) if stuck is None else f"{undo}; remove {stuck} by hand too"
-    return None if stuck is None else f"{exc}; removing {stuck} also failed, so remove it by hand"
+    return None if stuck is None else f"{worktree.cause(exc)}; removing {stuck} also failed, so remove it by hand"
 
 
 def _go(conn, task_id: str, now: int) -> tuple:
@@ -336,31 +344,38 @@ def _go(conn, task_id: str, now: int) -> tuple:
         raise FleetError(f"there is no TASK.md at ~/hogwarts/tasks/{task_id}/TASK.md") from None
     drafted = read_spec(raw, task_id)
     worktree.fetch_base(drafted["repo_dir"], drafted["base"])
-    claim, inbox_copy = {}, None
-    try:
-        with db.transaction(conn):
-            pensieve.create_task(conn, TASK_DESK, drafted["title"], intent_path=ids.intent_path(task_id),
-                                 task_id=task_id, now=now)
-            spec = pensieve.record_spec(conn, task_id, drafted["repo_dir"], drafted["branch"], drafted["base"],
-                                        hashlib.sha256(raw).hexdigest(), now=now)
-            body = _request_body(task_id, drafted["title"], spec)
-            opened = owlery.open_request(conn, TASK_DESK, BUILD_DESK, drafted["title"], body=body,
-                                         parent_task_id=task_id, idempotency_key=f"go:{task_id}", now=now)
-            _unchanged(task_id, spec)
-            # The worktree is this go's to take back from before git makes it until this transaction commits:
-            # create fills claim before its first git change and never takes back what a claim holds.
-            made = worktree.create(conn, opened["task"]["id"], spec["repo_dir"], spec["branch"], spec["base"],
-                                   fetch=False, start=False, claim=claim)
-            inbox_copy = f"{opened['owl']['id']}.json"
-            _deliver(conn, opened["owl"], body, now)
-            _unchanged(task_id, spec)
-    except BaseException as exc:
-        if worktree.kept(conn, claim):
-            raise  # stopped after the commit: the store holds the task, the worktree and the owl now
-        stuck = _undo(claim, inbox_copy, exc)
-        if stuck is not None and isinstance(exc, Exception):
-            raise FleetError(stuck) from exc
-        raise
+    inbox_copy = None
+    # The branch's lock is held from before create checks the branch is new until this transaction commits or
+    # the take-back ends, so no other command makes the branch meanwhile or finds it missing.
+    with worktree.branch_claim(drafted["repo_dir"], drafted["branch"]) as claim:
+        try:
+            with db.transaction(conn):
+                pensieve.create_task(conn, TASK_DESK, drafted["title"], intent_path=ids.intent_path(task_id),
+                                     task_id=task_id, now=now)
+                spec = pensieve.record_spec(conn, task_id, drafted["repo_dir"], drafted["branch"], drafted["base"],
+                                            hashlib.sha256(raw).hexdigest(), now=now)
+                body = _request_body(task_id, drafted["title"], spec)
+                opened = owlery.open_request(conn, TASK_DESK, BUILD_DESK, drafted["title"], body=body,
+                                             parent_task_id=task_id, idempotency_key=f"go:{task_id}", now=now)
+                _unchanged(task_id, spec)
+                # The worktree is this go's to take back from before git makes it until this transaction commits:
+                # create fills claim before its first git change and never takes back what a claim holds.
+                made = worktree.create(conn, opened["task"]["id"], spec["repo_dir"], spec["branch"], spec["base"],
+                                       fetch=False, start=False, claim=claim)
+                inbox_copy = f"{opened['owl']['id']}.json"
+                _deliver(conn, opened["owl"], body, now)
+                _unchanged(task_id, spec)
+        except BaseException as exc:
+            owned = worktree.kept(conn, claim)
+            if owned:
+                raise  # stopped after the commit: the store holds the task, the worktree and the owl now
+            if owned is None:  # the store cannot say whether it committed, so everything is kept and named
+                copy = [] if inbox_copy is None else [f"the inbox copy desks/{BUILD_DESK}/inbox/{inbox_copy}"]
+                raise worktree.unsure(claim, exc, *copy) from exc
+            stuck = _undo(claim, inbox_copy, exc)
+            if stuck is not None:
+                raise FleetError(stuck) from exc  # what is left is named, even when a signal stopped the go
+            raise
     build_id = made["task_id"]
     lines = [f"Go: {task_id} is registered, and Harry's task {build_id} has its worktree on the new branch"
              f" {spec['branch']} from {spec['base']} in {made['repo']}."]
@@ -382,7 +397,7 @@ def start_build(conn, data: dict, task_id: str, now: int) -> tuple:
         with common.ended_by_signals():
             return _go(conn, task_id, now)
     except (FleetError, StoreError) as exc:
-        return [f"Go was not applied to {task_id}: {common.one_line(exc, 400)}"], False
+        return [f"Go was not applied to {task_id}: {common.one_line(exc, 600)}"], False
     except Exception as exc:  # noqa: BLE001 - the go has rolled back and taken back what it made; say so
         return [f"Go was not applied to {task_id}: it stopped on {type(exc).__name__}"], False
 

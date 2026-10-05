@@ -13,12 +13,13 @@ import json
 import os
 import re
 import signal
+import sqlite3
 import subprocess
 import types
 from unittest import mock
 
 from hogwarts import db, ids, owlery, pensieve
-from hogwarts.errors import ConflictError
+from hogwarts.errors import ConflictError, NotFoundError, StoreError
 from tests.support import NOW
 
 from fleet import common, config, gitops, owl_post, run_desk, toolchain, worktree
@@ -569,6 +570,40 @@ def committed_then_terminated() -> types.SimpleNamespace:
     return types.SimpleNamespace(transaction=transaction)
 
 
+def committed_then_unreadable(state: dict) -> types.SimpleNamespace:
+    """A db whose transaction commits, after which the store cannot read a task (see unreadable_tasks), and then
+    SIGTERM arrives before the code after it runs."""
+    @contextlib.contextmanager
+    def transaction(conn):
+        with db.transaction(conn):
+            yield conn
+        state["unreadable"] = True
+        signal.raise_signal(signal.SIGTERM)
+    return types.SimpleNamespace(transaction=transaction)
+
+
+def unreadable_tasks(state: dict) -> object:
+    """pensieve.get_task that fails as a store that cannot be read does, once state["unreadable"] is set."""
+    real = pensieve.get_task
+
+    def get_task(conn, task_id):
+        if state.get("unreadable"):
+            raise sqlite3.OperationalError("disk I/O error")
+        return real(conn, task_id)
+    return get_task
+
+
+def first_git_change_runs(other) -> object:
+    """gitops.git that runs other() once, just before the first git command that makes a branch or a worktree."""
+    real, ran = gitops.git, []
+
+    def git(args, *rest, **kwargs):
+        if not ran and (args[:1] == ["branch"] or args[:2] == ["worktree", "add"]):
+            ran.append(other())
+        return real(args, *rest, **kwargs)
+    return git
+
+
 def stopped_at(phase: str, stop) -> object:
     """owlery.advance that runs stop() instead of moving the request to phase."""
     real = owlery.advance
@@ -587,12 +622,11 @@ def refused(error: Exception):
 
 
 def git_stopped_after_the_branch():
-    """gitops.git where git worktree add makes the new branch, then stops before the worktree."""
+    """gitops.git where git makes the new branch, then git worktree add stops before the worktree."""
     real = gitops.git
 
     def git(args, *rest, **kwargs):
-        if args[:3] == ["worktree", "add", "-b"]:
-            real(["branch", args[3], args[5]], *rest, **kwargs)
+        if args[:2] == ["worktree", "add"]:
             raise FleetError("git worktree failed: stopped")
         return real(args, *rest, **kwargs)
     return git
@@ -618,12 +652,20 @@ class GoTakeBackTests(GoCase):
         self.assertEqual(code, 0, err)
         return json.loads(out)["systemMessage"], False
 
-    def routed_by_hand(self) -> dict:
+    def routed_by_hand(self, task_id: str = TASK_ID) -> dict:
         """Harry's queued task under a TASK.md registered with castle task create, as fleet worktree finds it."""
-        pensieve.create_task(self.conn, "mcgonagall", "registered by hand", intent_path=ids.intent_path(TASK_ID),
-                             task_id=TASK_ID, now=NOW)
+        self.task_md(task_id)
+        pensieve.create_task(self.conn, "mcgonagall", "registered by hand", intent_path=ids.intent_path(task_id),
+                             task_id=task_id, now=NOW)
         return owlery.open_request(self.conn, "mcgonagall", "harry", "build it", body="see TASK.md",
-                                   parent_task_id=TASK_ID, now=NOW)["task"]
+                                   parent_task_id=task_id, now=NOW)["task"]
+
+    def fleet_worktree_outcome(self, task: dict) -> object:
+        """fleet worktree for task: what it returned, or the FleetError it refused with."""
+        try:
+            return self.fleet_worktree(task)
+        except FleetError as exc:
+            return exc
 
     def fleet_worktree(self, task: dict) -> dict:
         """fleet worktree for task, with SIGTERM handled as the fleet command handles it and no desk process."""
@@ -729,6 +771,169 @@ class GoTakeBackTests(GoCase):
         task = self.routed_by_hand()
         with mock.patch.object(worktree, "db", committed_then_terminated()), self.assertRaises(SystemExit):
             self.fleet_worktree(task)
+        task = pensieve.get_task(self.conn, task["id"])
+        self.assertEqual((task["status"], task["worktree"]), ("active", f"{ids.WORKTREES_ROOT}/{task['id']}"))
+        self.assertTrue(os.path.isdir(config.worktree_dir(task["id"])))
+        self.assertEqual(gitops.read_record(task["id"])["branch"], BRANCH)
+        self.assertEqual(owlery.get_request(self.conn, task["request_id"])["phase"], "running")
+
+    def test_a_second_command_for_the_branch_under_another_task_md_is_refused_and_takes_nothing(self):
+        first, second = self.routed_by_hand(), self.routed_by_hand(OTHER_ID)
+        outcomes = []
+        # The second command runs whole just before git makes the first one's branch, after its check found none.
+        with mock.patch.object(gitops, "git", side_effect=first_git_change_runs(
+                lambda: outcomes.append(self.fleet_worktree_outcome(second)))):
+            made = self.fleet_worktree_outcome(first)
+        # No command takes back a branch another one made.
+        self.assertEqual(self.git("for-each-ref", "--format=%(refname)", "refs/heads"),
+                         f"refs/heads/{BRANCH}\nrefs/heads/main")
+        self.assertEqual([str(outcome) for outcome in outcomes], [worktree.BRANCH_RUNNING])
+        self.assertEqual(pensieve.get_task(self.conn, second["id"])["status"], "queued")
+        self.assertFalse(os.path.lexists(config.worktree_dir(second["id"])))
+        self.assertFalse(os.path.lexists(self.office / "worktrees" / f"{second['id']}.json"))
+        self.assertEqual(made["task_id"], first["id"])
+        self.assertEqual(self.git("rev-parse", "--abbrev-ref", "HEAD", cwd=config.worktree_dir(first["id"])), BRANCH)
+
+    def test_a_go_for_the_branch_a_worktree_command_is_making_is_refused_and_takes_nothing(self):
+        first = self.routed_by_hand(OTHER_ID)
+        heard = []
+
+        def go():
+            with mock.patch.object(run_desk, "spawn", side_effect=AssertionError("spawned")):
+                heard.append(self.said(f"go {TASK_ID}")[0])
+
+        with mock.patch.object(gitops, "git", side_effect=first_git_change_runs(go)):
+            made = self.fleet_worktree_outcome(first)
+        # No command takes back a branch another one made.
+        self.assertEqual(self.git("for-each-ref", "--format=%(refname)", "refs/heads"),
+                         f"refs/heads/{BRANCH}\nrefs/heads/main")
+        self.assertEqual(len(heard), 1)
+        self.assertIn(f"Go was not applied to {TASK_ID}: {worktree.BRANCH_RUNNING}", heard[0])
+        with self.assertRaises(NotFoundError):
+            pensieve.get_task(self.conn, TASK_ID)
+        self.assertEqual(made["task_id"], first["id"])
+        self.assertEqual(self.git("rev-parse", "--abbrev-ref", "HEAD", cwd=config.worktree_dir(first["id"])), BRANCH)
+
+    def test_a_worktree_command_for_the_branch_a_go_is_making_is_refused_and_takes_nothing(self):
+        other = self.routed_by_hand(OTHER_ID)
+        outcomes = []
+        # The command runs whole inside the go's store transaction, just before git makes the go's branch.
+        with mock.patch.object(gitops, "git", side_effect=first_git_change_runs(
+                lambda: outcomes.append(self.fleet_worktree_outcome(other)))):
+            self.go_ok()
+        self.assertEqual([str(outcome) for outcome in outcomes], [worktree.BRANCH_RUNNING])
+        self.assertEqual(pensieve.get_task(self.conn, other["id"])["status"], "queued")
+        self.assertFalse(os.path.lexists(config.worktree_dir(other["id"])))
+        built = self.harry_task()
+        self.assertEqual(self.git("rev-parse", "--abbrev-ref", "HEAD", cwd=config.worktree_dir(built["id"])), BRANCH)
+
+    def test_a_command_for_the_branch_while_another_takes_it_back_is_refused(self):
+        first, second = self.routed_by_hand(), self.routed_by_hand(OTHER_ID)
+        before = self.snapshot()
+        outcomes, real = [], gitops.git
+
+        def git(args, *rest, **kwargs):
+            if args[:2] == ["update-ref", "-d"] and not outcomes:  # the first takes its own branch back
+                outcomes.append(self.fleet_worktree_outcome(second))
+            return real(args, *rest, **kwargs)
+
+        with mock.patch.object(pensieve, "set_worktree", side_effect=ConflictError("refused late")), \
+                mock.patch.object(gitops, "git", side_effect=git), \
+                self.assertRaisesRegex(ConflictError, "refused late"):
+            self.fleet_worktree(first)
+        self.assertEqual([str(outcome) for outcome in outcomes], [worktree.BRANCH_RUNNING])
+        self.assert_unchanged(before)
+        self.assertEqual(self.fleet_worktree(second)["branch"], BRANCH)
+
+    def test_a_branch_git_was_not_seen_to_make_is_never_taken_back(self):
+        task = self.routed_by_hand(OTHER_ID)
+        base = self.git("rev-parse", "origin/main")
+        kept = re.escape(f"; branch {BRANCH} is kept, since this command never saw git make it: remove it by hand"
+                         " only if nothing else made it")
+
+        def by_hand():
+            self.git("branch", BRANCH, base)  # made outside the fleet, after the check found no branch
+
+        def git_branch_then_terminated():
+            real = gitops.git
+
+            def git(args, *rest, **kwargs):
+                done = real(args, *rest, **kwargs)
+                if args[:1] == ["branch"]:
+                    signal.raise_signal(signal.SIGTERM)  # git made it, but the command never saw it return
+                return done
+            return git
+
+        stops = (("made by hand after the check", lambda: first_git_change_runs(by_hand),
+                  f"git branch failed: .*already exists{kept}"),
+                 ("SIGTERM as git makes it", git_branch_then_terminated, f"it was stopped by a signal{kept}"))
+        for label, git, reason in stops:
+            with self.subTest(command="fleet worktree", stop=label):
+                with mock.patch.object(gitops, "git", side_effect=git()), \
+                        self.assertRaisesRegex(FleetError, f"^{reason}$"):
+                    self.fleet_worktree(task)
+                self.assertEqual(self.git("rev-parse", f"refs/heads/{BRANCH}"), base)
+                self.assertEqual(pensieve.get_task(self.conn, task["id"])["status"], "queued")
+                self.assertFalse(os.path.lexists(config.worktree_dir(task["id"])))
+                self.assertFalse(os.path.lexists(self.office / "worktrees" / f"{task['id']}.json"))
+                self.git("branch", "-D", BRANCH)
+            with self.subTest(command="go", stop=label):
+                with mock.patch.object(gitops, "git", side_effect=git()), \
+                        mock.patch.object(run_desk, "spawn", side_effect=AssertionError("spawned")):
+                    shown, _, _ = self.said(f"go {TASK_ID}")
+                self.assertRegex(shown, f"(?m)^Go was not applied to {TASK_ID}: {reason}$")
+                self.assertEqual(self.git("rev-parse", f"refs/heads/{BRANCH}"), base)
+                with self.assertRaises(NotFoundError):
+                    pensieve.get_task(self.conn, TASK_ID)
+                self.assertEqual(os.listdir(self.castle / "worktrees"), [])
+                self.git("branch", "-D", BRANCH)
+
+    def test_kept_says_yes_or_no_only_when_the_store_does(self):
+        task = self.routed_by_hand()
+        claim = {"record": {"task_id": task["id"]}}
+        self.assertIs(worktree.kept(self.conn, {}), False)  # nothing made yet
+        self.assertIs(worktree.kept(self.conn, claim), False)  # the task has no worktree
+        self.assertIs(worktree.kept(self.conn, {"record": {"task_id": OTHER_ID}}), False)  # no such task
+        with db.transaction(self.conn):
+            self.assertIsNone(worktree.kept(self.conn, claim))  # a transaction that may still roll back
+        for error in (sqlite3.OperationalError("disk I/O error"), StoreError("the store is busy")):
+            with self.subTest(error=error), mock.patch.object(pensieve, "get_task", side_effect=error):
+                self.assertIsNone(worktree.kept(self.conn, claim))
+        pensieve.set_worktree(self.conn, task["id"], f"{ids.WORKTREES_ROOT}/{task['id']}")
+        self.assertIs(worktree.kept(self.conn, claim), True)
+
+    def test_a_go_stopped_after_its_commit_keeps_everything_when_the_store_cannot_say(self):
+        state = {}
+        with mock.patch.object(user_prompt_submit, "db", committed_then_unreadable(state)), \
+                mock.patch.object(pensieve, "get_task", side_effect=unreadable_tasks(state)), \
+                mock.patch.object(run_desk, "spawn", side_effect=AssertionError("spawned")):
+            shown, context, _ = self.said(f"go {TASK_ID}")
+        built = self.harry_task()
+        [owl] = owlery.inbox(self.conn, "harry")
+        self.assertIn(f"Go was not applied to {TASK_ID}: it was stopped by a signal; the store could not say whether"
+                      f" task {built['id']} kept its worktree, so nothing was taken back: if castle task show"
+                      f" {built['id']} lists none, remove the worktree {config.worktree_dir(built['id'])} and branch"
+                      f" {BRANCH} and the record {built['id']}.json and the inbox copy"
+                      f" desks/harry/inbox/{owl['id']}.json by hand", shown)
+        self.assertNotIn(user_prompt_submit.GO_CONTEXT, context)
+        self.assertEqual((built["status"], built["worktree"]), ("active", f"{ids.WORKTREES_ROOT}/{built['id']}"))
+        self.assertTrue(os.path.isdir(config.worktree_dir(built["id"])))
+        self.assertEqual(gitops.read_record(built["id"])["branch"], BRANCH)
+        self.assertEqual(self.git("rev-parse", "--abbrev-ref", "HEAD", cwd=config.worktree_dir(built["id"])), BRANCH)
+        self.assertTrue((self.inbox("harry") / f"{owl['id']}.json").is_file())
+
+    def test_fleet_worktree_stopped_after_its_commit_keeps_it_when_the_store_cannot_say(self):
+        task = self.routed_by_hand()
+        state = {}
+        with mock.patch.object(worktree, "db", committed_then_unreadable(state)), \
+                mock.patch.object(pensieve, "get_task", side_effect=unreadable_tasks(state)), \
+                self.assertRaises(FleetError) as refused:
+            self.fleet_worktree(task)
+        self.assertEqual(str(refused.exception),
+                         f"it was stopped by a signal; the store could not say whether task {task['id']} kept its"
+                         f" worktree, so nothing was taken back: if castle task show {task['id']} lists none, remove"
+                         f" the worktree {config.worktree_dir(task['id'])} and branch {BRANCH} and the record"
+                         f" {task['id']}.json by hand")
         task = pensieve.get_task(self.conn, task["id"])
         self.assertEqual((task["status"], task["worktree"]), ("active", f"{ids.WORKTREES_ROOT}/{task['id']}"))
         self.assertTrue(os.path.isdir(config.worktree_dir(task["id"])))

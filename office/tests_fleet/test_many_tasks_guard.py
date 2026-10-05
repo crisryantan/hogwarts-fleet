@@ -10,6 +10,8 @@ import contextlib
 import io
 import re
 import shlex
+import signal
+import sqlite3
 import stat
 import subprocess
 import threading
@@ -21,7 +23,7 @@ from hogwarts import capacity, cli, db, ids, owlery, pensieve
 from hogwarts.errors import ConflictError, ValidationError
 from tests.support import NOW, temp_dir
 
-from fleet import config, gitops, owl_post, push, review, run_desk, verify, worktree
+from fleet import common, config, gitops, owl_post, push, review, run_desk, verify, worktree
 from fleet.hooks import pre_compact, session_start
 from fleet.safefs import FleetError
 from tests_fleet.support import IN_KIT, MANY_TASK_DESKS, ONLY_IN_KIT, every_slot, fake_children
@@ -391,3 +393,30 @@ class OwnSessionGuardTests(ManyCase):
                     self.assertEqual(sorted(os.listdir(folder)) if folder.exists() else [], [])
                 self.assertEqual(self.git("worktree", "list", "--porcelain").count("worktree "), 1)
         self.assertEqual(self.own_review()["round"], 1)
+
+    def test_a_new_task_stopped_once_it_holds_its_worktree_keeps_it_when_the_store_cannot_say(self):
+        self.commit("first")
+        state, real_attach, real_get = {}, pensieve.set_worktree, pensieve.get_task
+
+        def attached_then_stopped(*args, **kwargs):
+            real_attach(*args, **kwargs)
+            state["unreadable"] = True
+            signal.raise_signal(signal.SIGTERM)  # stopped once the attach committed, with a store that cannot be read
+
+        def get_task(conn, task_id):
+            if state.get("unreadable"):
+                raise sqlite3.OperationalError("disk I/O error")
+            return real_get(conn, task_id)
+
+        with mock.patch.object(pensieve, "set_worktree", side_effect=attached_then_stopped), \
+                mock.patch.object(pensieve, "get_task", side_effect=get_task), common.ended_by_signals():
+            with self.assertRaisesRegex(FleetError, r"^it was stopped by a signal; the store could not say whether"
+                                                    r" task (tk_[0-9a-f]{16}) kept its worktree, so nothing was taken"
+                                                    r" back: if castle task show \1 lists none, remove the worktree"
+                                                    r" \S+/\1 and the record \1\.json by hand$"):
+                self.own_review()
+        [task_id] = self.own_tasks()
+        self.assertEqual(pensieve.get_task(self.conn, task_id)["worktree"], f"{ids.WORKTREES_ROOT}/{task_id}")
+        self.assertTrue(os.path.isdir(config.worktree_dir(task_id)))
+        self.assertEqual(gitops.read_record(task_id)["task_id"], task_id)
+        self.assertEqual(self.git("worktree", "list", "--porcelain").count("worktree "), 2)

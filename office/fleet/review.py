@@ -506,8 +506,7 @@ def _review_own(conn, repo_dir: str, title: Optional[str], intent: Optional[str]
                 task = pensieve.set_worktree(conn, task["id"], f"{ids.WORKTREES_ROOT}/{task['id']}")
             except BaseException as exc:
                 _abandon_unreviewed(conn, task["id"])
-                if not worktree.kept(conn, made):
-                    worktree.take_back(made, exc)  # the task never got it, so nothing else would remove it
+                worktree.settle(conn, made, exc)  # a task the store says never got it leaves nothing behind
                 raise
         try:
             return _review_own_at(conn, task, record, sha, lock_fd)

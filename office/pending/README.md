@@ -80,7 +80,7 @@ branch: <new-branch>
 base: origin/main
 ```
 
-`repo:` gets the same checks as `--repo-dir` below, `branch:` the same as `--branch`, and `base:` the same as `--base`. The go stores the three values and the TASK.md's sha256 with the task. The worktree is made from the stored values only, so editing TASK.md afterwards changes none of them. If TASK.md changes while the go runs, or anything refuses before the go finishes, nothing is registered, routed or made, and you can type the go again. A go for a task that's already registered changes nothing.
+`repo:` gets the same checks as `--repo-dir` below, `branch:` the same as `--branch`, and `base:` the same as `--base`. The go stores the three values and the TASK.md's sha256 with the task. The worktree is made from the stored values only, so editing TASK.md afterwards changes none of them. If TASK.md changes while the go runs, or anything refuses before the go finishes, nothing is registered, routed or made, and you can type the go again. A go for a task that's already registered changes nothing. A go or a `fleet worktree` for a branch that another one is still making in the same repo is refused at once, so run it again when that one ends. If one says the store couldn't say whether its task kept the worktree, it took nothing back: check the task with `castle task show`, and remove what it names by hand only if the task has no worktree.
 
 The hook prints what happened, or why nothing did. A go only works in McGonagall's session: in any other session, your own included, it says so and changes nothing. When it can't confirm you typed the go, it says so and changes nothing too. Register the task by hand instead:
 
