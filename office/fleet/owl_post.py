@@ -584,6 +584,10 @@ def deliver_file(conn, sender: str, outbox_fd: int, fname: str, now: Optional[in
         if newly:
             text = ids.clean_text(body, "body", owlery.BODY_LIMIT, keep_format=True)
             mcgonagall_inbox.mark_pending(owl)  # before delivery: an event this pass loses is announced on a later one
+            try:
+                owl_report.mark(owl)  # with owl reports on: a failed or killed reporter is retried from this marker
+            except (FleetError, OSError):
+                pass  # no marker: the plain notification is not held back for this owl
             copy = _inbox_copy(owl, text, body_file, task_context(conn, owl["task_id"]))
             safefs.write_new(inbox_fd, f"{owl['id']}.json", copy)
             owlery.mark_delivered(conn, owl["id"], now=now)
@@ -591,10 +595,6 @@ def deliver_file(conn, sender: str, outbox_fd: int, fname: str, now: Optional[in
         os.close(inbox_fd)
     rang = _ring(conn, owl["recipient"], owl, newly, now)
     if newly:  # after the delivery is stored: McGonagall hears of every owl sent to her, and nothing here undoes it
-        try:
-            owl_report.mark(owl)  # before any reporter starts, so a failed or killed one is retried
-        except (FleetError, OSError):
-            pass
         mcgonagall_inbox.announce(conn, owl, text, now)
     reviewing = _start_review(conn, owl, newly, now)
     _ack_replied(conn, sender, owl, now)

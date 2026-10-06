@@ -77,6 +77,12 @@ def plain_text(owl: dict, body: Optional[str]) -> str:
     return f"{owl['sender']} on {owl['task_id'] or '-'}: {status(owl['kind'], owl['subject'], body)}"
 
 
+def _reported(owl_id: str) -> bool:
+    from fleet import owl_report  # here: owl_report builds on this module
+
+    return owl_report.on() and owl_report.marked(owl_id)
+
+
 def announce(conn, owl: dict, body: Optional[str], now: Optional[int] = None, notify: bool = True) -> bool:
     """The headmaster event, and with notify the notification, for one owl delivered to McGonagall. Called after its
     delivery is stored, never inside a transaction; nothing here can undo the delivery. Its pending marker goes once
@@ -94,7 +100,7 @@ def announce(conn, owl: dict, body: Optional[str], now: Optional[int] = None, no
         recorded = False
     if recorded:
         _announced(owl["id"])
-    if notify and not common.opt_in_on(config.OWL_REPORTS_FILE):  # with owl reports on, her report is the notice
+    if notify and not _reported(owl["id"]):  # an owl a reporter will report gets her report as its notice
         try:
             run_desk.notify_desktop(f"{owl['sender']} on {task}: {said}")
         except Exception:  # noqa: BLE001 - a notification never matters to the delivery

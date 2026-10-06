@@ -317,8 +317,9 @@ DESKTOP_NOTIFY = True
 DESKTOP_NOTIFY_TIMEOUT_SECONDS = 5
 # The headless owl-report turn: its settings file in McGonagall's office folder, tools, model (the cheapest alias the
 # fleet already runs), budget, timeout and how much of its output is read. One reporter runs at a time
-# (OWL_REPORT_LOCK), takes at most OWL_REPORT_BATCH owls a turn and OWL_REPORT_MAX_BATCHES turns a run, and an owl
-# her output skips is reported with a fallback line after OWL_REPORT_MAX_TRIES turns.
+# (OWL_REPORT_LOCK, handed to each turn's process), one owl per turn, in its own folder under OWL_REPORT_ROOT, at most
+# OWL_REPORT_MAX_TURNS turns a run. An owl her output skips is reported with a fallback line after
+# OWL_REPORT_MAX_TRIES turns, and a notification that fails is tried OWL_REPORT_NOTIFY_TRIES times.
 OWL_REPORT_SETTINGS_FILE = "owl-report-settings.json"
 OWL_REPORT_TOOLS = "Read,Grep,Glob"
 OWL_REPORT_MODEL = "haiku"
@@ -326,9 +327,11 @@ OWL_REPORT_MAX_BUDGET_USD = "0.25"
 OWL_REPORT_TIMEOUT_SECONDS = 90
 OWL_REPORT_OUTPUT_MAX_BYTES = 65536
 OWL_REPORT_LOCK = "owl-report.lock"
-OWL_REPORT_BATCH = 10
-OWL_REPORT_MAX_BATCHES = 3
+# Outside the office and the castle, so the turn's sandbox may read it, and writable by no desk.
+OWL_REPORT_ROOT = "/Users/crisryantan/Library/Caches/hogwarts-owl-report"
+OWL_REPORT_MAX_TURNS = 15
 OWL_REPORT_MAX_TRIES = 3
+OWL_REPORT_NOTIFY_TRIES = 3
 # How many new owls in McGonagall's inbox the prompt hook lists at once, with a count of the rest.
 INBOX_NOTICE_CAP = 10
 # A seen marker a prompt hook left pending this long, or whose hook process is gone, is taken over by the next hook.

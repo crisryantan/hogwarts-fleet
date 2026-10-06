@@ -1,10 +1,7 @@
 {
   "disableAllHooks": true,
   "permissions": {
-    "allow": [
-      "Read(~/hogwarts/desks/mcgonagall/inbox/**)",
-      "Read(~/hogwarts/desks/mcgonagall/owl-report-batch.json)"
-    ],
+    "allow": [],
     "deny": [
       "Read(~/.hogwarts/**)",
       "Edit(~/.hogwarts/**)",

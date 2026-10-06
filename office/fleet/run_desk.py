@@ -129,6 +129,7 @@ import math
 import os
 import re
 import secrets
+import select
 import shutil
 import sqlite3
 import subprocess
@@ -1060,59 +1061,121 @@ def notify_desktop(text: str, title: str = "Hogwarts") -> bool:
     return done.returncode == 0
 
 
-def owl_report_argv(brief: str, prompt: str) -> tuple:
-    """(argv, cwd) for one headless McGonagall owl-report turn: claude -p under the report-only settings file, no MCP,
-    only Read, Grep and Glob, the fixed brief and the fixed prompt. The settings file is checked first as every Claude
-    desk's is, and more: no hooks, no write anywhere, and every other tool denied."""
+def notifications_on() -> bool:
+    """Whether notify_desktop shows anything at all here (macOS, and DESKTOP_NOTIFY on)."""
+    return sys.platform == "darwin" and bool(config.DESKTOP_NOTIFY)
+
+
+def owl_report_argv(brief: str, prompt: str) -> list:
+    """argv for one headless McGonagall owl-report turn on the one owl in its working folder: claude -p --restricted
+    (file tools confined to the working folder) under the report-only settings file, no MCP, only Read, Grep and Glob,
+    the fixed brief and the fixed prompt, and JSON output so a failure is told apart from a report. The settings file
+    is checked first (check_report_settings)."""
     desk = config.HOOK_DESK
     check_report_settings(_read_office(desk, config.OWL_REPORT_SETTINGS_FILE, config.SETTINGS_MAX_BYTES,
                                        "owl report settings"))
-    argv = [config.CLAUDE_BIN, "-p", "--restricted", "--settings",
+    return [config.CLAUDE_BIN, "-p", "--restricted", "--settings",
             f"{config.office_desk_dir(desk)}/{config.OWL_REPORT_SETTINGS_FILE}", "--strict-mcp-config",
             "--tools", config.OWL_REPORT_TOOLS, "--permission-mode", "dontAsk", "--model", config.OWL_REPORT_MODEL,
-            "--append-system-prompt", brief, "--output-format", "text",
+            "--append-system-prompt", brief, "--output-format", "json",
             "--max-budget-usd", config.OWL_REPORT_MAX_BUDGET_USD, prompt]
-    return argv, config.castle_desk_dir(desk)
 
 
-REPORT_DENIED_TOOLS = ("Edit", "Write", "Bash", "WebFetch", "WebSearch", "Task", "NotebookEdit")
+# The exact shape the report-only settings must have. Anything broader is refused.
+REPORT_REQUIRED_DENY = ("Read(~/.hogwarts/**)", "Edit(~/.hogwarts/**)", "Write(~/.hogwarts/**)", "Edit", "Write",
+                        "Bash", "WebFetch", "WebSearch", "Task", "NotebookEdit")
+REPORT_REQUIRED_DENY_READ = ("/.hogwarts", "/.ssh", "/.aws", "/.codex", "/.claude.json", "/.claude/.credentials.json",
+                             "/.claude/settings.json", "/.claude/settings.local.json", "/.claude/history.jsonl",
+                             "/.claude/projects", "/.netrc", "/.npmrc", "/.docker", "/.kube", "/.gnupg", "/.config/gh")
+REPORT_KEYS = {"disableAllHooks", "permissions", "sandbox"}
+REPORT_PERMISSION_KEYS = {"allow", "deny", "disableBypassPermissionsMode"}
 
 
 def check_report_settings(raw: bytes) -> dict:
-    """The report-only settings: a locked-down Claude desk's (check_claude_settings), with no hooks, no write allowed
-    anywhere and every tool but Read, Grep and Glob denied."""
+    """The report-only settings: a locked-down Claude desk's (check_claude_settings), and exactly this shape: an empty
+    allow list, every required deny rule, every required protected path in the sandbox's denyRead, hooks off and none
+    set, no write allowed anywhere, no network, and no other key."""
     data = check_claude_settings(raw, config.HOOK_DESK)
-    if data.get("hooks") not in (None, {}) or data.get("disableAllHooks") is not True:
-        raise FleetError("the owl report settings must add no hooks and set disableAllHooks")
-    filesystem = data["sandbox"].get("filesystem") or {}
-    if filesystem.get("allowWrite") not in (None, []):
-        raise FleetError("the owl report settings must allow no writes")
-    deny = data["permissions"].get("deny") or []
-    allow = data["permissions"].get("allow") or []
-    if any(tool not in deny for tool in REPORT_DENIED_TOOLS):
-        raise FleetError("the owl report settings must deny every tool but Read, Grep and Glob")
-    if any(not isinstance(rule, str) or not rule.startswith(("Read(", "Grep(", "Glob(")) for rule in allow):
-        raise FleetError("the owl report settings may allow only reads")
+    account_root = os.path.dirname(ids.OFFICE_ROOT)  # the real home the settings name, as required_deny_write uses
+    if set(data) - REPORT_KEYS or data.get("disableAllHooks") is not True:
+        raise FleetError("the owl report settings must set disableAllHooks and nothing but permissions and sandbox")
+    permissions = data["permissions"]
+    if set(permissions) - REPORT_PERMISSION_KEYS or permissions.get("allow") != []:
+        raise FleetError("the owl report settings must allow nothing")
+    deny = permissions.get("deny") or []
+    missing = [rule for rule in REPORT_REQUIRED_DENY if rule not in deny]
+    if missing:
+        raise FleetError(f"the owl report settings must deny {missing[0]}")
+    sandbox = data["sandbox"]
+    filesystem = sandbox.get("filesystem") if isinstance(sandbox.get("filesystem"), dict) else {}
+    if filesystem.get("allowWrite") != [] or filesystem.get("allowRead") not in (None, []):
+        raise FleetError("the owl report settings must allow no writes and no extra reads")
+    deny_read = filesystem.get("denyRead") if isinstance(filesystem.get("denyRead"), list) else []
+    lost = [path for path in REPORT_REQUIRED_DENY_READ if account_root + path not in deny_read]
+    if lost:
+        raise FleetError(f"the owl report settings must deny sandbox reads of ~{lost[0]}")
+    network = sandbox.get("network") if isinstance(sandbox.get("network"), dict) else {}
+    if network.get("allowedDomains") not in (None, []) or network.get("allowAllUnixSockets") is True \
+            or network.get("allowLocalBinding") is True or network.get("allowUnixSockets") not in (None, []):
+        raise FleetError("the owl report settings must allow no network")
     return data
 
 
-def run_report_turn(argv: list, cwd: str) -> tuple:
-    """(exit status, stdout, auth failed) for one owl-report turn, run to its end or killed at the timeout (status
-    None). stderr is read only to classify an auth failure; its text is never kept, printed or logged."""
+# Exact messages the claude CLI gives when it cannot sign in. Only a run that failed (exit status or is_error) and
+# whose result is one of these, or whose API status is 401, counts as an auth failure.
+AUTH_MESSAGES = ("Invalid API key", "Not logged in", "OAuth token has expired", "OAuth token revoked",
+                 "Please run /login", "Invalid bearer token")
+
+
+def run_report_turn(argv: list, cwd: str, lock_fd: Optional[int] = None) -> tuple:
+    """(outcome, text) for one owl-report turn. outcome is "ok" with the result text, "auth" when claude could not
+    sign in, or "failed". stdout is read as it comes, at most OWL_REPORT_OUTPUT_MAX_BYTES, and the process is killed on
+    overflow, at the timeout, or when this process is stopped. stderr is never read. lock_fd, the reporter's lock, is
+    handed to the child, so no other reporter starts while it lives, even if this process dies first."""
+    if lock_fd is not None:
+        safefs.hand_over(lock_fd)
     try:
-        done = subprocess.run(argv, cwd=cwd, env=child_env(), stdin=subprocess.DEVNULL, capture_output=True,
-                              timeout=config.OWL_REPORT_TIMEOUT_SECONDS, check=False, close_fds=True,
-                              start_new_session=True)
-    except subprocess.TimeoutExpired:
-        return None, b"", False
+        child = subprocess.Popen(argv, cwd=cwd, env=child_env(), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                 stderr=subprocess.DEVNULL, close_fds=True,
+                                 pass_fds=() if lock_fd is None else (lock_fd,))
     except OSError:
-        return None, b"", False
-    lowered = (done.stderr[-65536:] + done.stdout[-4096:]).decode("utf-8", "replace").lower()
-    auth = done.returncode != 0 and any(word in lowered for word in AUTH_WORDS)
-    return done.returncode, done.stdout[:config.OWL_REPORT_OUTPUT_MAX_BYTES], auth
-
-
-AUTH_WORDS = ("login", "log in", "auth", "401", "credential")
+        return "failed", ""
+    chunks, total, deadline = [], 0, time.monotonic() + config.OWL_REPORT_TIMEOUT_SECONDS
+    try:
+        fd = child.stdout.fileno()
+        while True:
+            left = deadline - time.monotonic()
+            if left <= 0:
+                return "failed", ""
+            ready, _, _ = select.select([fd], [], [], left)
+            if not ready:
+                continue
+            chunk = os.read(fd, 65536)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > config.OWL_REPORT_OUTPUT_MAX_BYTES:
+                return "failed", ""
+            chunks.append(chunk)
+        code = child.wait(timeout=max(1.0, deadline - time.monotonic()))
+    except subprocess.TimeoutExpired:
+        return "failed", ""
+    finally:
+        if child.poll() is None:
+            child.kill()
+            try:
+                child.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                pass
+        child.stdout.close()
+    result = claude_result(b"".join(chunks))
+    text = result.get("result") if isinstance(result.get("result"), str) else ""
+    failed = code != 0 or result.get("is_error") is True or result.get("subtype") not in (None, "success")
+    if failed:
+        auth = result.get("api_error_status") == 401 or any(text.strip().startswith(message)
+                                                           for message in AUTH_MESSAGES)
+        return ("auth" if auth else "failed"), ""
+    return "ok", text
 
 
 def spawn_owl_report() -> None:

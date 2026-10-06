@@ -1,18 +1,19 @@
-"""Owl reports: with the owl-reports switch on, a headless McGonagall turn reads each owl delivered to her and its
-one-line report reaches Ryan as a notification. The claude binary is a fake script these tests write, which records
-its argv and prints what each test asks for."""
+"""Owl reports: with the owl-reports switch on, a headless McGonagall turn reads each owl delivered to her, one owl a
+turn in its own folder, and her one-line report reaches Ryan as a notification. The claude binary is a fake script
+these tests write: it records its argv, its folder and what it could read there, and prints what each test asks."""
 from __future__ import annotations
 
 import json
 import os
 import shutil
 import stat
+import subprocess
 from unittest import mock
 
 from hogwarts import pensieve
 from tests.support import NOW
 
-from fleet import config, mcgonagall_inbox, owl_post, owl_report, run_desk
+from fleet import config, markers, mcgonagall_inbox, owl_post, owl_report, run_desk
 from fleet.safefs import FleetError
 from tests_fleet.support import OFFICE, FleetCase
 
@@ -22,21 +23,35 @@ FAKE = """#!/usr/bin/python3
 import json, os, sys
 state = {state!r}
 mode = open(os.path.join(state, "mode")).read().strip()
-with open(os.path.join(state, "argv.jsonl"), "a") as handle:
-    handle.write(json.dumps({{"argv": sys.argv, "cwd": os.getcwd()}}) + "\\n")
-batch = json.load(open("owl-report-batch.json"))["owls"]
+owl = json.load(open("owl.json"))
+with open(os.path.join(state, "runs.jsonl"), "a") as handle:
+    handle.write(json.dumps({{"argv": sys.argv, "cwd": os.getcwd(), "files": sorted(os.listdir(".")),
+                             "owl": owl["owl_id"]}}) + "\\n")
+def result(text, error=False, subtype="success", **extra):
+    print(json.dumps({{"type": "result", "subtype": subtype, "is_error": error, "result": text, **extra}}))
 if mode == "auth":
-    sys.stderr.write("Invalid API key. Please run /login\\n")
+    result("Invalid API key \\u00b7 Please run /login", error=True)
+    sys.exit(1)
+if mode == "auth401":
+    result("Request failed", error=True, api_error_status=401)
     sys.exit(1)
 if mode == "fail":
     sys.exit(2)
-if mode == "skip-first":
-    batch = batch[1:]
-print("Here are the reports:")
-for owl in batch:
-    summary = "ron says the build is green" if mode != "secret" else "token " + {secret!r} + "\\nsecond line"
-    print(json.dumps({{"owl": owl, "summary": summary, "title": "EVIL TITLE"}}))
-print(json.dumps({{"owl": "owl_00000000000000ff", "summary": "not in the batch"}}))
+if mode == "overloaded":
+    result("Overloaded", error=True)
+    sys.exit(1)
+if mode == "big":
+    sys.stdout.write("x" * 70000)
+    sys.exit(0)
+if mode == "skip:" + owl["owl_id"]:
+    result("   ")
+    sys.exit(0)
+if mode == "secret":
+    result("token " + {secret!r} + "\\nsecond line")
+elif mode == "login-words":
+    result("Hermione says the build passed; please run /login is not needed")
+else:
+    result(owl["from"] + " says " + owl["subject"])
 """
 
 
@@ -53,10 +68,14 @@ class OwlReportCase(FleetCase):
         self.mode("ok")
         binary = self.write_file(self.state / "claude", FAKE.format(state=str(self.state), secret=SECRET), mode=0o700)
         os.chmod(binary, stat.S_IRWXU)
-        for name, value in (("CLAUDE_BIN", str(binary)),):
+        self.root = self.tmp / "owl-report-root"
+        for name, value in (("CLAUDE_BIN", str(binary)), ("OWL_REPORT_ROOT", str(self.root))):
             patcher = mock.patch.object(config, name, value)
             patcher.start()
             self.addCleanup(patcher.stop)
+        darwin = mock.patch.object(run_desk, "notifications_on", return_value=True)
+        darwin.start()
+        self.addCleanup(darwin.stop)
         spawn = mock.patch.object(run_desk, "spawn_owl_report")
         self.spawned = spawn.start()
         self.addCleanup(spawn.stop)
@@ -71,183 +90,316 @@ class OwlReportCase(FleetCase):
         self.write_owl(sender, f"o{self.count:02d}.json", {"to": "mcgonagall", "kind": "fyi", "subject": subject,
                                                            "body": f"body text {self.count}",
                                                            "task_id": self.task["id"]})
-        delivered = owl_post.run_pass(self.conn, now=NOW)["delivered"]
-        return delivered[-1]["owl_id"]
+        return owl_post.run_pass(self.conn, now=NOW)["delivered"][-1]["owl_id"]
 
     def runs(self) -> list:
-        path = self.state / "argv.jsonl"
+        path = self.state / "runs.jsonl"
         return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
 
     def log(self) -> list:
         path = self.castle / "desks" / "mcgonagall" / owl_report.LOG_FILE
         return path.read_text().splitlines() if path.exists() else []
 
-    def pending(self) -> list:
-        folder = self.office / owl_report.MARKER_DIR
-        return sorted(path.name for path in folder.iterdir() if path.name.startswith("owl_")) if folder.exists() else []
+    def folder(self):
+        return self.office / owl_report.MARKER_DIR
+
+    def pending(self) -> dict:
+        folder = self.folder()
+        if not folder.exists():
+            return {}
+        return {path.name: json.loads(path.read_text()) for path in folder.iterdir() if path.name.startswith("owl_")}
 
     def reports(self) -> list:
-        return [call for call in self.notified.call_args_list if len(call[0]) == 2]
+        return [call for call in self.notified.call_args_list if call[0][1:2] and call[0][1].startswith("Owl: ")]
+
+    def plain(self) -> list:
+        return [call for call in self.notified.call_args_list if not (call[0][1:2] and call[0][1].startswith("Owl: "))]
 
 
 class HappyPathTests(OwlReportCase):
-    def test_each_owl_gets_one_notification_and_one_log_line_with_the_title_from_the_store(self):
+    def test_one_owl_a_turn_in_its_own_folder_one_notification_and_one_log_line_each(self):
         first, second = self.send(subject="first"), self.send("hermione", subject="second")
-        self.assertEqual(self.spawned.call_count, 2)  # one per pass that had owls pending
-        self.assertEqual(self.pending(), sorted([first, second]))
-        self.assertEqual(owl_report.run(self.conn, NOW), ["done"])
-        titles = sorted(call[0][1] for call in self.reports())
-        self.assertEqual(titles, [f"Owl: hermione {self.task['id']}", f"Owl: ron {self.task['id']}"])
-        self.assertTrue(all(call[0][0] == "ron says the build is green" for call in self.reports()))
-        lines = self.log()
-        self.assertEqual(len(lines), 2)
-        for owl_id, sender in ((first, "ron"), (second, "hermione")):
-            [line] = [line for line in lines if owl_id in line]
-            self.assertRegex(line, rf"^\d{{4}}-\d\d-\d\dT\d\d:\d\d:\d\dZ {sender} {self.task['id']} {owl_id}"
-                                   r" ron says the build is green$")
-        self.assertEqual(self.pending(), [])
-        self.assertNotIn("EVIL", "\n".join(lines) + json.dumps([call[0] for call in self.notified.call_args_list]))
-        self.assertEqual(owl_report.run(self.conn, NOW), [])  # nothing left: no second report
-        self.assertEqual(len(self.reports()), 2)
+        self.assertEqual(self.spawned.call_count, 2)
+        self.assertEqual(owl_report.run(self.conn), ["done", "done"])
+        runs = self.runs()
+        self.assertEqual(sorted(run["owl"] for run in runs), sorted([first, second]))
+        self.assertNotEqual(runs[0]["cwd"], runs[1]["cwd"])
+        for run in runs:
+            self.assertEqual(run["files"], ["owl.json"])
+            self.assertTrue(run["cwd"].startswith(str(self.root) + "/turn-"))
+        self.assertEqual(os.listdir(self.root), [])  # each folder went after its turn
+        self.assertEqual(sorted((call[0][1], call[0][0]) for call in self.reports()),
+                         [(f"Owl: hermione {self.task['id']}", "hermione says second"),
+                          (f"Owl: ron {self.task['id']}", "ron says first")])
+        self.assertEqual(sorted(line.split()[3] for line in self.log()), sorted([first, second]))
+        self.assertEqual(self.pending(), {})
+        self.assertEqual(owl_report.run(self.conn), [])
 
-    def test_argv_and_prompt_carry_no_owl_text_or_id_and_only_read_tools(self):
+    def test_argv_and_prompt_carry_no_owl_text_or_id(self):
         owl_id = self.send(subject="SUBJECT-MARKER")
-        owl_report.run(self.conn, NOW)
+        owl_report.run(self.conn)
         [run] = self.runs()
         argv = run["argv"]
-        joined = " ".join(argv)
         for marker in (owl_id, "SUBJECT-MARKER", "body text", self.task["id"]):
-            self.assertNotIn(marker, joined)
+            self.assertNotIn(marker, " ".join(argv))
         self.assertEqual(argv[-1], owl_report.PROMPT)
         self.assertEqual(argv[1:4], ["-p", "--restricted", "--settings"])
         self.assertEqual(argv[4], f"{self.office}/desks/mcgonagall/{config.OWL_REPORT_SETTINGS_FILE}")
         self.assertEqual(argv[argv.index("--tools") + 1], "Read,Grep,Glob")
+        self.assertEqual(argv[argv.index("--output-format") + 1], "json")
+        self.assertEqual(argv[argv.index("--permission-mode") + 1], "dontAsk")
         self.assertIn("--strict-mcp-config", argv)
-        self.assertNotIn("--mcp-config", argv)
-        self.assertEqual(argv[argv.index("--model") + 1], config.OWL_REPORT_MODEL)
-        self.assertEqual(run["cwd"], str(self.castle / "desks" / "mcgonagall"))
-        batch = json.loads((self.castle / "desks" / "mcgonagall" / owl_report.BATCH_FILE).read_text())
-        self.assertEqual(batch, {"owls": [owl_id]})
+        for flag in ("--mcp-config", "--add-dir", "--allowed-tools", "--allowedTools"):
+            self.assertNotIn(flag, argv)
 
-    def test_the_report_settings_refuse_anything_but_reads(self):
-        raw = (OFFICE / "desks" / "mcgonagall" / config.OWL_REPORT_SETTINGS_FILE).read_bytes()
-        data = run_desk.check_report_settings(raw)
-        self.assertEqual(data["permissions"]["allow"], ["Read(~/hogwarts/desks/mcgonagall/inbox/**)",
-                                                        "Read(~/hogwarts/desks/mcgonagall/owl-report-batch.json)"])
-        base = json.loads(raw)
-        changes = (
-            ("a hook", lambda d: d.update(hooks={"Stop": []})),
-            ("hooks left on", lambda d: d.pop("disableAllHooks")),
-            ("a write allowed", lambda d: d["sandbox"]["filesystem"].update(allowWrite=["/tmp"])),
-            ("Bash not denied", lambda d: d["permissions"]["deny"].remove("Bash")),
-            ("an edit allowed", lambda d: d["permissions"]["allow"].append("Edit(~/hogwarts/**)")),
-            ("sandbox off", lambda d: d["sandbox"].update(enabled=False)),
-        )
-        for label, change in changes:
-            with self.subTest(change=label):
-                data = json.loads(json.dumps(base))
-                change(data)
-                with self.assertRaises(FleetError):
-                    run_desk.check_report_settings(json.dumps(data).encode())
-        # A settings file that fails the check runs nothing, and the owl gets the plain notification once.
-        self.write_file(self.office / "desks" / "mcgonagall" / config.OWL_REPORT_SETTINGS_FILE,
-                        json.dumps({**base, "hooks": {"Stop": []}}))
-        self.send()
-        self.assertEqual(owl_report.run(self.conn, NOW), ["failed"])
-        self.assertEqual(self.runs(), [])
-        self.assertEqual(len([call for call in self.notified.call_args_list if len(call[0]) == 1]), 1)
-
-    def test_a_credential_in_her_summary_is_scrubbed_to_one_line(self):
+    def test_her_answer_is_scrubbed_cut_to_its_first_line_and_bound_to_the_owl_it_ran(self):
         self.mode("secret")
-        self.send()
-        owl_report.run(self.conn, NOW)
+        owl_id = self.send()
+        owl_report.run(self.conn)
         [call] = self.reports()
-        self.assertNotIn(SECRET, call[0][0])
-        self.assertNotIn("second line", call[0][0])
         self.assertTrue(call[0][0].startswith("token "))
-        self.assertNotIn(SECRET, "\n".join(self.log()))
+        for text in (call[0][0], "\n".join(self.log())):
+            self.assertNotIn(SECRET, text)
+            self.assertNotIn("second line", text)
+        self.assertEqual(call[0][1], f"Owl: ron {self.task['id']}")
+        self.assertIn(f" {owl_id} token ", self.log()[0])
+
+    def test_a_folder_a_killed_run_left_is_removed_before_the_next_turn(self):
+        stale = self.root / "turn-00000000000000aa"
+        stale.mkdir(parents=True)
+        self.write_file(stale / "owl.json", "{}")
+        self.send()
+        owl_report.run(self.conn)
+        self.assertEqual(os.listdir(self.root), [])
+
+    def test_the_lock_is_handed_to_the_turn_so_it_outlives_a_dead_reporter(self):
+        self.send()
+        real = subprocess.Popen
+        seen = []
+
+        def spy(*args, **kwargs):
+            seen.append(kwargs.get("pass_fds"))
+            return real(*args, **kwargs)
+
+        with mock.patch.object(run_desk.subprocess, "Popen", side_effect=spy):
+            owl_report.run(self.conn)
+        [fds] = seen
+        self.assertEqual(len(fds), 1)
+        self.assertFalse(owl_report._running())  # released once the reporter and its turn are done
+
+
+class SettingsTests(OwlReportCase):
+    def settings(self) -> dict:
+        return json.loads((OFFICE / "desks" / "mcgonagall" / config.OWL_REPORT_SETTINGS_FILE).read_text())
+
+    def refused(self, data: dict) -> None:
+        with self.assertRaises(FleetError):
+            run_desk.check_report_settings(json.dumps(data).encode())
+
+    def test_the_kit_file_has_the_exact_shape(self):
+        data = run_desk.check_report_settings(json.dumps(self.settings()).encode())
+        self.assertEqual(data["permissions"]["allow"], [])
+
+    def test_every_tool_and_every_required_entry_is_checked(self):
+        for rule in run_desk.REPORT_REQUIRED_DENY:
+            with self.subTest(missing_deny=rule):
+                data = self.settings()
+                data["permissions"]["deny"].remove(rule)
+                self.refused(data)
+        for path in run_desk.REPORT_REQUIRED_DENY_READ:
+            with self.subTest(missing_deny_read=path):
+                data = self.settings()
+                data["sandbox"]["filesystem"]["denyRead"] = [entry for entry in data["sandbox"]["filesystem"]["denyRead"]
+                                                             if not entry.endswith(path)]
+                self.refused(data)
+        for tool in ("Read", "Grep", "Glob", "Edit", "Write", "Bash", "WebFetch", "Task", "mcp__any__tool"):
+            with self.subTest(allowed=tool):
+                data = self.settings()
+                data["permissions"]["allow"] = [f"{tool}(~/**)"]
+                self.refused(data)
+        broader = (
+            ("a hook", lambda d: d.update(hooks={"Stop": []})),
+            ("hooks on", lambda d: d.update(disableAllHooks=False)),
+            ("an extra key", lambda d: d.update(env={"X": "1"})),
+            ("a write", lambda d: d["sandbox"]["filesystem"].update(allowWrite=["/tmp"])),
+            ("an extra read", lambda d: d["sandbox"]["filesystem"].update(allowRead=["/tmp"])),
+            ("a domain", lambda d: d["sandbox"]["network"].update(allowedDomains=["example.com"])),
+            ("sandbox off", lambda d: d["sandbox"].update(enabled=False)),
+            ("a mode", lambda d: d["permissions"].update(defaultMode="acceptEdits")),
+        )
+        for label, change in broader:
+            with self.subTest(broader=label):
+                data = self.settings()
+                change(data)
+                self.refused(data)
+
+    def test_a_refused_settings_file_runs_nothing_and_sends_the_plain_notification(self):
+        data = self.settings()
+        data["permissions"]["allow"] = ["Read(~/**)"]
+        self.write_file(self.office / "desks" / "mcgonagall" / config.OWL_REPORT_SETTINGS_FILE, json.dumps(data))
+        self.send()
+        self.assertEqual(owl_report.run(self.conn), ["failed"])
+        self.assertEqual(self.runs(), [])
+        self.assertEqual(len(self.plain()), 1)
 
 
 class RetryTests(OwlReportCase):
-    def test_an_owl_her_output_skips_is_retried_then_reported_with_the_fallback(self):
-        owls = {self.send(subject="first"), self.send(subject="second")}
-        self.mode("skip-first")
-        self.assertEqual(owl_report.run(self.conn, NOW), ["done"] * config.OWL_REPORT_MAX_TRIES)
-        self.assertEqual(len(self.runs()), config.OWL_REPORT_MAX_TRIES)
-        texts = sorted(call[0][0] for call in self.reports())
-        self.assertEqual(texts, sorted(["ron says the build is green", owl_report.FALLBACK]))
-        lines = self.log()
-        self.assertEqual(sorted(line.split()[3] for line in lines), sorted(owls))
-        self.assertEqual(sum(line.endswith(owl_report.FALLBACK) for line in lines), 1)
-        self.assertEqual(self.pending(), [])
+    def test_a_skipped_owl_is_tried_three_times_then_reported_with_the_fallback(self):
+        skipped = self.send(subject="first")
+        other = self.send(subject="second")
+        self.mode(f"skip:{skipped}")
+        owl_report.run(self.conn)
+        self.assertEqual(sum(run["owl"] == skipped for run in self.runs()), config.OWL_REPORT_MAX_TRIES)
+        texts = {call[0][0] for call in self.reports()}
+        self.assertEqual(texts, {"ron says second", owl_report.FALLBACK})
+        self.assertEqual(sorted(line.split()[3] for line in self.log()), sorted([skipped, other]))
+        self.assertEqual(self.pending(), {})
 
-    def test_a_killed_reporter_is_retried_by_the_next_pass_with_no_duplicate(self):
+    def test_an_owl_out_of_tries_gets_its_fallback_without_another_turn(self):
+        owl_id = self.send()
+        self.write_file(self.folder() / owl_id, json.dumps({"state": "pending", "tries": 3}))
+        self.assertEqual(owl_report.run(self.conn), ["fallback"])
+        self.assertEqual(self.runs(), [])
+        self.assertTrue(self.log()[0].endswith(owl_report.FALLBACK))
+
+    def test_a_reporter_killed_while_notifying_finishes_on_the_next_run_with_no_duplicate(self):
         first, second = self.send(subject="first"), self.send(subject="second")
         calls = []
 
         def killed_on_the_second(text, title="Hogwarts"):
             calls.append(text)
             if len(calls) == 2:
-                raise SystemExit(143)  # SIGTERM while the second report is being shown
+                raise SystemExit(143)
             return True
 
         self.notified.side_effect = killed_on_the_second
         with self.assertRaises(SystemExit):
-            owl_report.run(self.conn, NOW)
-        self.assertEqual(len(self.pending()), 1)
+            owl_report.run(self.conn)
         self.notified.side_effect = None
+        self.notified.return_value = True
+        [(left, marker)] = self.pending().items()
+        self.assertEqual(marker["state"], "logged")
         spawned = self.spawned.call_count
-        owl_post.run_pass(self.conn, now=NOW)  # the next pass finds the owl still pending
+        owl_post.run_pass(self.conn, now=NOW)
         self.assertEqual(self.spawned.call_count, spawned + 1)
-        owl_report.run(self.conn, NOW)
-        self.assertEqual(self.pending(), [])
+        owl_report.run(self.conn)
+        self.assertEqual(self.pending(), {})
+        self.assertEqual(len(self.runs()), 2)  # no second turn for the owl already reported
         for owl_id in (first, second):
             self.assertEqual(len([line for line in self.log() if owl_id in line]), 1)
 
-    def test_a_failed_turn_sends_the_plain_notification_once_and_retries(self):
-        self.send(subject="first")
-        self.mode("fail")
-        self.assertEqual(owl_report.run(self.conn, NOW), ["failed"])
-        self.assertEqual(owl_report.run(self.conn, NOW), ["failed"])
-        plain = [call for call in self.notified.call_args_list if len(call[0]) == 1]
-        self.assertEqual(len(plain), 1)
-        self.assertEqual(plain[0][0][0], f"ron on {self.task['id']}: fyi: first")
-        self.mode("ok")
-        owl_report.run(self.conn, NOW)
-        self.assertEqual(self.pending(), [])
+    def test_a_kill_between_the_log_line_and_its_marker_never_logs_twice(self):
+        owl_id = self.send()
+        real = markers.replace
+
+        def killed_after_logging(fd, name, data):
+            if data.get("state") == "logged":
+                raise SystemExit(143)
+            return real(fd, name, data)
+
+        with mock.patch.object(owl_report.markers, "replace", side_effect=killed_after_logging), \
+                self.assertRaises(SystemExit):
+            owl_report.run(self.conn)
+        self.assertEqual(self.pending()[owl_id]["state"], "logging")
+        owl_report.run(self.conn)
         self.assertEqual(len(self.log()), 1)
+        self.assertEqual(len(self.reports()), 1)
+        self.assertEqual(len(self.runs()), 1)
+
+    def test_a_failed_notification_is_retried_then_dropped_with_its_log_line_kept(self):
+        owl_id = self.send()
+        self.notified.return_value = False
+        owl_report.run(self.conn)
+        self.assertEqual(self.pending()[owl_id], {"state": "logged", "summary": "ron says status", "notify_tries": 1})
+        owl_report.run(self.conn)
+        self.assertEqual(self.pending()[owl_id]["notify_tries"], 2)
+        owl_report.run(self.conn)
+        self.assertEqual(self.pending(), {})
+        self.assertEqual(len(self.reports()), config.OWL_REPORT_NOTIFY_TRIES)
+        self.assertEqual(len(self.log()), 1)
+        self.assertEqual(len(self.runs()), 1)
+
+    def test_a_failed_turn_sends_the_plain_notification_once_it_shows(self):
+        owl_id = self.send(subject="first")
+        self.mode("fail")
+        self.notified.return_value = False
+        owl_report.run(self.conn)
+        self.assertNotIn("plain_sent", self.pending()[owl_id])  # it did not show
+        self.notified.return_value = True
+        owl_report.run(self.conn)
+        self.assertTrue(self.pending()[owl_id]["plain_sent"])
+        owl_report.run(self.conn)
+        plain = self.plain()
+        self.assertEqual(len(plain), 2)
+        self.assertEqual(plain[-1][0][0], f"ron on {self.task['id']}: fyi: first")
+        self.assertEqual(self.pending()[owl_id]["tries"], 3)
+        owl_report.run(self.conn)  # out of tries: the fallback, no fourth turn
+        self.assertEqual(len(self.runs()), 3)
+        self.assertTrue(self.log()[0].endswith(owl_report.FALLBACK))
+
+    def test_output_past_the_cap_is_a_failed_turn(self):
+        self.send()
+        self.mode("big")
+        self.assertEqual(owl_report.run(self.conn), ["failed"])
+        self.assertEqual(self.reports(), [])
 
     def test_a_reporter_that_cannot_start_falls_back_to_the_plain_notification_once(self):
         self.spawned.side_effect = OSError("no fork")
         self.send(subject="first")
         owl_post.run_pass(self.conn, now=NOW)
-        plain = [call for call in self.notified.call_args_list if len(call[0]) == 1]
-        self.assertEqual(len(plain), 1)
-        self.assertEqual(len(self.pending()), 1)  # still reported once a reporter can start
+        self.assertEqual(len(self.plain()), 1)
+        self.assertEqual(len(self.pending()), 1)
 
 
 class AuthTests(OwlReportCase):
-    def test_an_auth_failure_tells_once_and_waits_for_the_next_new_owl(self):
+    def test_an_auth_failure_alerts_once_and_waits_for_an_owl_outside_its_snapshot(self):
         first = self.send(subject="first")
         self.mode("auth")
-        self.assertEqual(owl_report.run(self.conn, NOW), ["auth"])
-        self.assertEqual(owl_report.run(self.conn, NOW), [])  # nothing new: no retry
-        events = self.conn.execute("SELECT kind, summary FROM events WHERE kind = 'owl-report.auth'").fetchall()
+        self.assertEqual(owl_report.run(self.conn), ["auth"])
+        self.assertEqual(owl_report.run(self.conn), [])
+        events = self.conn.execute("SELECT summary FROM events WHERE kind = 'owl-report.auth'").fetchall()
         self.assertEqual(len(events), 1)
         self.assertNotIn("API key", events[0]["summary"])
-        notices = [call[0][0] for call in self.notified.call_args_list]
-        self.assertEqual(notices.count("owl watcher: auth failed"), 1)
-        self.assertEqual(self.pending(), [first])
+        self.assertEqual([call[0][0] for call in self.plain()].count("owl watcher: auth failed"), 1)
+        self.assertEqual(self.pending()[first]["tries"], 0)
         spawned = self.spawned.call_count
         owl_post.run_pass(self.conn, now=NOW)
-        self.assertEqual(self.spawned.call_count, spawned)  # still waiting
+        self.assertEqual(self.spawned.call_count, spawned)
         self.mode("ok")
         second = self.send(subject="second")
         self.assertEqual(self.spawned.call_count, spawned + 1)
-        owl_report.run(self.conn, NOW)
-        self.assertEqual(self.pending(), [])
+        owl_report.run(self.conn)
         self.assertEqual(sorted(line.split()[3] for line in self.log()), sorted([first, second]))
-        self.assertEqual(notices.count("owl watcher: auth failed"), 1)
+        self.assertEqual([call[0][0] for call in self.plain()].count("owl watcher: auth failed"), 1)
+
+    def test_an_api_401_is_an_auth_failure_and_report_text_never_is(self):
+        self.send()
+        self.mode("auth401")
+        self.assertEqual(owl_report.run(self.conn), ["auth"])
+        self.mode("login-words")
+        self.send()
+        self.assertEqual(owl_report.run(self.conn), ["done", "done"])
+        self.assertEqual(self.pending(), {})
+
+    def test_a_failure_that_is_not_about_sign_in_blocks_nothing(self):
+        self.send()
+        self.mode("overloaded")
+        self.assertEqual(owl_report.run(self.conn), ["failed"])
+        self.assertFalse((self.folder() / owl_report.BLOCKED).exists())
+
+    def test_an_alert_a_kill_cut_short_is_finished_by_the_next_pass(self):
+        self.send()
+        self.mode("auth")
+        with mock.patch.object(owl_report, "_shown", side_effect=SystemExit(143)), self.assertRaises(SystemExit):
+            owl_report.run(self.conn)
+        blocked = json.loads((self.folder() / owl_report.BLOCKED).read_text())
+        self.assertEqual(blocked["alert"], "pending")
+        owl_post.run_pass(self.conn, now=NOW)
+        owl_post.run_pass(self.conn, now=NOW)
+        self.assertEqual([call[0][0] for call in self.plain()].count("owl watcher: auth failed"), 1)
+        events = self.conn.execute("SELECT COUNT(*) FROM events WHERE kind = 'owl-report.auth'").fetchone()[0]
+        self.assertEqual(events, 1)
+        self.assertEqual(json.loads((self.folder() / owl_report.BLOCKED).read_text())["alert"], "sent")
 
 
 class SwitchTests(OwlReportCase):
@@ -256,13 +408,33 @@ class SwitchTests(OwlReportCase):
         with mock.patch.object(mcgonagall_inbox, "announce", REAL_ANNOUNCE):
             self.send(subject="first")
         self.spawned.assert_not_called()
-        self.assertEqual(self.pending(), [])
-        self.assertEqual([call[0] for call in self.notified.call_args_list],
-                         [(f"ron on {self.task['id']}: fyi: first",)])
+        self.assertEqual(self.pending(), {})
+        self.assertEqual([call[0][0] for call in self.notified.call_args_list],
+                         [f"ron on {self.task['id']}: fyi: first"])
 
-    def test_switched_on_the_plain_notification_is_suppressed_but_the_event_stays(self):
+    def test_switched_on_the_plain_notification_is_held_back_only_for_a_marked_owl(self):
         with mock.patch.object(mcgonagall_inbox, "announce", REAL_ANNOUNCE):
             self.send(subject="first")
-        self.notified.assert_not_called()
+            self.notified.assert_not_called()
+            with mock.patch.object(owl_report, "mark", side_effect=OSError("disk full")):
+                self.send(subject="second")
+        self.assertEqual([call[0][0] for call in self.notified.call_args_list],
+                         [f"ron on {self.task['id']}: fyi: second"])
         events = self.conn.execute("SELECT kind FROM events WHERE kind = 'owl.to-mcgonagall'").fetchall()
-        self.assertEqual(len(events), 1)
+        self.assertEqual(len(events), 2)
+
+    def test_switching_off_mid_run_stops_and_keeps_the_markers(self):
+        self.send(subject="first")
+        self.send(subject="second")
+        real = owl_report.on
+        calls = []
+
+        def off_after_the_first_turn():
+            calls.append(1)
+            return real() if len(self.runs()) < 1 else False
+
+        with mock.patch.object(owl_report, "on", side_effect=off_after_the_first_turn):
+            owl_report.run(self.conn)
+        self.assertEqual(len(self.runs()), 1)
+        self.assertEqual(len(self.pending()), 2)  # the first is held before publishing, the second untouched
+        self.assertEqual(self.reports(), [])
