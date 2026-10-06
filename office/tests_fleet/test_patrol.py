@@ -37,6 +37,10 @@ DAY = 86400
 # Shaped like GitHub tokens, built so no scanner trips on this file.
 TOKEN = "gh" + "p_" + "a" * 36
 TOKEN2 = "gh" + "p_" + "b" * 36
+# A valid GitHub login shaped like an AWS access key id, and a path that reads as a password only once it is ASCII
+# (one_line turns the accented letter into a space, and "password =" is what the scrub masks).
+AWS_LOGIN = "AK" + "IA" + "EXAMPLE0" * 2
+SECRET_PATH = "src/password\u00e9=example-value.py"
 REAL_LINEUP_DUE = patrol_map.lineup_due  # PatrolCase fakes it; the due-time test calls the real one
 
 
@@ -730,6 +734,22 @@ class BotPassTests(PatrolCase):
             self.assertIn("lint-bot (bot), -:\n> Fixed in [hex], see [token]", text)
             self.assertEqual(text.count(SHA2), 1)
 
+    def test_a_path_that_reads_as_a_secret_once_ascii_and_a_key_shaped_login_never_reach_hermione(self):
+        self.github.threads[self.key] = [
+            {"id": "T1", "isResolved": False, "isOutdated": False, "path": SECRET_PATH, "line": 7,
+             "comments": {"nodes": [{"author": {"__typename": "User", "login": AWS_LOGIN}, "body": "Rename it.",
+                                     "createdAt": iso(NOW), "url": "https://github.com/acme/web-app/pull/12#c1",
+                                     "diffHunk": ""}]}}]
+        self.github.prs = [pr_node(created=NOW - 3000, threads=(thread("T1", "lint-bot", person=False),))]
+        with self.desk_writes(DRAFTS):
+            [done] = self.round(NOW)["bot_passes"]
+        [data] = [name for name in os.listdir(self.inbox("hermione")) if name.startswith("patrol-bot-pass-")]
+        for text in (read_file(done["file"]), (self.inbox("hermione") / data).read_text()):
+            for leaked in ("example-value", AWS_LOGIN):
+                self.assertNotIn(leaked, text)
+            self.assertIn("Thread 1 NEW: src/password =[secret]:7", text)
+            self.assertIn("a user, https://github.com/acme/web-app/pull/12#c1:\n> Rename it.", text)
+
     def test_the_baseline_counts_open_threads_as_seen(self):
         self.github.prs = [pr_node(created=NOW - DAY, threads=(thread("T1", "lint-bot", person=False),))]
         os.unlink(self.office / "patrol" / "map" / "snapshot.json")
@@ -1022,3 +1042,98 @@ class ScoreboardTests(PatrolCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SecretShapedNameTests(PatrolCase):
+    """Repository names and logins GitHub gives, which a scrub would change, never reach a file, row, event or name."""
+
+    def everything(self) -> str:
+        """Every file name and file under the patrol folder and in Ron's and Hermione's inboxes, and every event."""
+        parts = []
+        for root in (self.office / "patrol", self.inbox("ron"), self.inbox("hermione")):
+            for folder, _, names in os.walk(root):
+                for name in names:
+                    parts += [name, read_file(os.path.join(folder, name))]
+        return "\n".join(parts + [json.dumps(event) for event in self.events()])
+
+    def test_a_repository_name_shaped_like_a_token_is_refused_before_anything_stores_or_shows_it(self):
+        self.go_live()
+        self.enable("hermione")
+        bad, bad_owner = f"acme/{TOKEN}", f"{TOKEN2}/api"
+        self.round(NOW - 3600)  # the baseline
+        # A snapshot an older patrol wrote may hold such names already: no row names them as gone.
+        snapshot = json.loads(self.read("map", "snapshot.json"))
+        snapshot["prs"][f"{bad}#7"] = patrol.pr_record(pr_node(7))
+        snapshot["asked"][f"{bad_owner}#41"] = patrol.asked_record(asked_node(41))
+        patrol.write_state("map", patrol_map.SNAPSHOT, snapshot)
+        red = {"rollup": "FAILURE", "contexts": (check("build"),)}
+        self.github.prs = [pr_node(**red), pr_node(9, repo=bad, created=NOW - 3000, **red,
+                                                   threads=(thread("T1", "lint-bot", person=False),))]
+        self.github.asked = [asked_node(42, repo=bad_owner)]
+        self.github.threads[f"{bad}#9"] = [
+            {"id": "T1", "isResolved": False, "isOutdated": False, "path": "a.py", "line": 1,
+             "comments": {"nodes": [{"author": {"__typename": "Bot", "login": "lint-bot"}, "body": "x",
+                                     "createdAt": iso(NOW), "url": "", "diffHunk": ""}]}}]
+        self.github.main[bad] = [commit_node(SHA2, NOW - HOUR, "FAILURE", (check("unit"),))]
+        with mock.patch.object(config, "WATCHED_REPOS", (REPO, bad)), self.desk_writes("ok\n"):
+            first = self.round(NOW)
+            second = self.round(NOW + 900)
+            watched = keeper.watch(self.conn, now=NOW + 900)
+            lineup = morning.lineup(self.conn, now=NOW + 900)
+        self.assertNotIn("ghp_", self.everything())
+        self.assertEqual((first["refused"], second["refused"]), (2, 2))
+        left_out = [row for row in self.rows() if row["change"] == "PRs left out"]
+        self.assertEqual([row["detail"] for row in left_out], [patrol.refused_text(2)])
+        self.assertEqual([row for row in self.rows() if row["change"] in ("left", "review request gone")], [])
+        for path in (watched["file"], lineup["file"]):
+            self.assertIn(patrol.refused_text(2), read_file(path))
+        for name, variables in self.github.calls:
+            self.assertNotIn("ghp_", json.dumps(variables), name)
+        with self.assertRaises(FleetError):
+            patrol.main_commits(bad, NOW)
+        with mock.patch.object(config, "WATCHED_REPOS", (REPO, bad)):
+            self.assertEqual(patrol.main_repos({"prs": {}}), [REPO])
+
+    def test_a_review_request_from_a_login_shaped_like_an_access_key_shows_a_placeholder_everywhere(self):
+        self.go_live()
+        self.round(NOW - 900)
+        self.github.asked = [asked_node(author=AWS_LOGIN)]
+        with self.desk_writes("ok\n"):
+            self.round(NOW)
+            lineup = morning.lineup(self.conn, now=NOW)
+        self.assertNotIn(AWS_LOGIN, self.everything())
+        self.assertIn(("review requested from you", "by a user"),
+                      [(row["change"], row["detail"]) for row in self.rows()])
+        self.assertIn("acme/api#40", self.read("map", "snapshot.json"))
+        self.assertIn("| acme/api#40 | Rename the cache flag | a user | 1d 0h |", read_file(lineup["file"]))
+        self.assertIn("| acme/api#40 | Rename the cache flag | a user | 1d 0h |", self.round_text())
+
+    def test_logins_and_repository_names_are_kept_only_when_the_scrub_leaves_them_as_they_are(self):
+        self.assertEqual([patrol.shown_login(value) for value in ("bob", AWS_LOGIN, "not a login", None)],
+                         ["bob", "a user", "unknown", "unknown"])
+        self.assertEqual([patrol.repo_name(value) for value in (REPO, f"acme/{TOKEN}", f"{TOKEN}/api", "acme/..")],
+                         [REPO, None, None, None])
+        self.assertEqual([patrol.pr_key_ok(key) for key in (f"{REPO}#12", f"acme/{TOKEN}#12", f"{REPO}#0", REPO)],
+                         [True, False, False, False])
+
+    def test_a_cell_rows_and_events_are_scrubbed_after_their_last_reformat(self):
+        # A pipe made a slash joins a bearer token; a commit link holds no pipe, so its sha stays.
+        self.assertEqual(patrol.cell("Bearer abc|defghij"), "Bearer [token]")
+        self.assertEqual(patrol.cell(f"https://github.com/{REPO}/commit/{SHA2}", 200),
+                         f"https://github.com/{REPO}/commit/{SHA2}")
+        self.assertNotIn("example-value", patrol_map._row("k", "c", SECRET_PATH, "routine")["detail"])
+        self.assertTrue(patrol.tell_ryan(self.conn, False, "for-me", f"{REPO}#12: {SECRET_PATH}", "d", NOW))
+        [event] = self.events()
+        self.assertNotIn("example-value", event["summary"])
+
+    def test_errors_in_the_lineup_and_its_catch_up_are_scrubbed_on_one_line(self):
+        failed = FleetError(f"gh failed: {SECRET_PATH}")
+        with mock.patch.object(config, "WATCHED_REPOS", (REPO,)), \
+                mock.patch.object(patrol, "main_commits", side_effect=failed):
+            _, errors = morning.main_reds({"prs": {}}, NOW - DAY)
+        self.assertEqual(len(errors), 1)
+        self.assertNotIn("example-value", errors[0])
+        with mock.patch.object(patrol_map, "lineup_due", return_value=True), \
+                mock.patch.object(morning, "lineup", side_effect=failed):
+            caught = patrol_map.catch_up_lineup(self.conn, NOW, NOW)
+        self.assertNotIn("example-value", caught["error"])

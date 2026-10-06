@@ -20,7 +20,7 @@ from fleet import closer, common, config, followup, gitops, map as patrol_map, m
     portrait_auto, push, review, run_desk, worktree
 from fleet.safefs import FleetError
 from tests_fleet.test_auto_push import AutoPushCase, TOKEN, EMAIL
-from tests_fleet.test_patrol import FakeGitHub, iso, pr_node, thread
+from tests_fleet.test_patrol import AWS_LOGIN, SECRET_PATH, FakeGitHub, iso, pr_node, thread
 from tests_fleet.test_review_chain import Killed
 from tests_fleet.test_review_loop import REPO_ID
 
@@ -1113,6 +1113,18 @@ class UntrustedShapeTests(FollowupCase):
         headings = [line for line in self.threads_file().splitlines() if line.startswith("## ")]
         self.assertEqual(headings, ["## T1: thread PRRT_t1, -:1"])
         self.assertEqual(followup._path("src/a.py\n## T9: thread x"), "src/a.py ## T9: thread x")
+
+    def test_a_path_that_reads_as_a_secret_once_ascii_and_a_key_shaped_login_never_reach_the_threads_file(self):
+        self.go_live_at()
+        entry = self.add_thread(comments=[gh_comment(501, self.t0 + 100, kind="thread", login=AWS_LOGIN)])
+        entry["path"] = SECRET_PATH
+        row = self.routed()
+        office = (self.office / "reviews" / self.task["id"] / f"followup-{row['id']}.md").read_text()
+        for text in (self.threads_file(), office):
+            for leaked in ("example-value", AWS_LOGIN):
+                self.assertNotIn(leaked, text)
+            self.assertIn("## T1: thread PRRT_t1, src/password =[secret]:1\n", text)
+            self.assertIn("> a user (MEMBER), ", text)
 
     def test_urls_must_match_their_kind_and_the_comments_own_id(self):
         self.go_live_at()

@@ -81,7 +81,7 @@ def main_reds(seen: dict, since: int) -> tuple:
         try:
             commits = patrol.main_commits(repo, since)
         except FleetError as exc:
-            errors.append(f"{repo}: {common.one_line(exc, 150)}")
+            errors.append(f"{repo}: {common.scrubbed_line(exc, 150)}")
             continue
         reds += [commit for commit in commits if commit["checks"] in patrol.RED]
     return reds, errors
@@ -125,13 +125,15 @@ def lineup(conn, now: Optional[int] = None) -> dict:
     seen = patrol.fetch_prs()
     since = since_last_morning(ts)
     reds, errors = main_reds(seen, since)
+    if seen.get("refused"):
+        errors.append(patrol.refused_text(seen["refused"]))
     note = portrait_note(since)
     text = render(seen, reds, errors, note, ts, since, followup.lineup_text(conn, now))
     path = patrol.write_text("lineup", out, text)
     try:
         woke = patrol.wake(conn, "ron", "lineup", "morning lineup", text, out, now, shadow=shadow)
     except (FleetError, StoreError) as exc:
-        woke = {"launched": False, "clean": False, "error": common.one_line(exc, 200)}
+        woke = {"launched": False, "clean": False, "error": common.scrubbed_line(exc, 200)}
     patrol.tell_ryan(conn, shadow, "lineup", f"Ron's morning lineup is in {path}",
                      f"patrol:lineup:{patrol.local_day(ts)}", now)
     return {"ok": True, "shadow": shadow, "file": path, "prs": len(seen["prs"]), "asked": len(seen["asked"]),

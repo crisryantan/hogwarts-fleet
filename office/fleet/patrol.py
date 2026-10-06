@@ -212,7 +212,7 @@ def tell_ryan(conn, shadow: bool, kind: str, summary: str, dedupe: str, now: Opt
     if shadow:
         return False
     pensieve.add_event(conn, desk or config.PATROL_SENDER, f"patrol.{kind}", "headmaster",
-                       common.one_line(summary, 480), dedupe_key=dedupe_key(dedupe), now=now)
+                       common.scrubbed_line(summary, 480), dedupe_key=dedupe_key(dedupe), now=now)
     return True
 
 
@@ -247,8 +247,13 @@ def sha(value: object) -> Optional[str]:
 
 
 def cell(text: object, limit: int = 120) -> str:
-    """One markdown table cell: one line, no pipes, cut to limit."""
-    return common.one_line(clean(text), limit).replace("|", "/") or "-"
+    """One markdown table cell: one line, no pipes, cut to limit. A pipe becomes a slash, which can join a run the scrub
+    masks (a bearer token split by a pipe), so a cell that held one is scrubbed again after, before the cut. A link
+    never holds a pipe (URL), so a commit link's sha is never masked."""
+    value = common.one_line(clean(text), sys.maxsize)
+    if "|" in value:
+        value = pensieve.scrub(value.replace("|", "/"))
+    return common.one_line(value, limit) or "-"
 
 
 def table(headers: tuple, rows: list) -> str:
@@ -464,9 +469,39 @@ def checks_of(rollup: object) -> dict:
             "failing": sorted(failing)[:20], "waiting": sorted(waiting)[:20]}
 
 
+def shaped_like_secret(value: str) -> bool:
+    """Whether the scrub, read as every file and row is written (common.scrubbed_line), would change this text."""
+    return common.scrubbed_line(value, sys.maxsize) != value
+
+
+def repo_name(value: object) -> Optional[str]:
+    """A repository's owner/name, kept only when it has the repo shape and the scrub leaves it as it is. The patrol uses
+    one name for queries, keys, rows, files and tags alike, and a real repository name never holds a credential's
+    shape, so one that does is refused before anything stores or shows it."""
+    if not isinstance(value, str) or ids.PATTERNS["repo"].fullmatch(value) is None:
+        return None
+    if any(part in (".", "..") for part in value.split("/")) or shaped_like_secret(value):
+        return None
+    return value
+
+
+def refused_repo(node: dict) -> bool:
+    """Whether a PR's repository has the repo shape but a name the scrub would change, so the patrol leaves it out."""
+    repo = get(node, "repository", "nameWithOwner")
+    return isinstance(repo, str) and ids.PATTERNS["repo"].fullmatch(repo) is not None and repo_name(repo) is None
+
+
+def shown_login(value: object, missing: str = "unknown") -> str:
+    """A GitHub login as a file, row or heading shows it: a valid login (LOGIN) the scrub leaves as it is, "a user" for
+    a valid one it would change (shaped like a key), and missing for anything else."""
+    if not isinstance(value, str) or LOGIN.fullmatch(value) is None:
+        return missing
+    return "a user" if shaped_like_secret(value) else value
+
+
 def repo_number(node: dict) -> Optional[tuple]:
-    repo, number = get(node, "repository", "nameWithOwner"), node.get("number")
-    if not isinstance(repo, str) or ids.PATTERNS["repo"].fullmatch(repo) is None:
+    repo, number = repo_name(get(node, "repository", "nameWithOwner")), node.get("number")
+    if repo is None:
         return None
     if type(number) is not int or number <= 0:
         return None
@@ -485,6 +520,14 @@ def safe_url(value: object, oid: Optional[str] = None) -> str:
 
 def pr_key(repo: str, number: int) -> str:
     return f"{repo}#{number}"
+
+
+def pr_key_ok(key: object) -> bool:
+    """Whether a key read back from a state file is one pr_key makes from a repo_name and a PR number."""
+    if not isinstance(key, str) or "#" not in key:
+        return False
+    repo, _, number = key.rpartition("#")
+    return repo_name(repo) is not None and re.fullmatch(r"[1-9][0-9]{0,9}", number) is not None
 
 
 def pr_record(node: dict) -> Optional[dict]:
@@ -528,11 +571,10 @@ def asked_record(node: dict) -> Optional[dict]:
     if found is None:
         return None
     repo, number = found
-    login = get(node, "author", "login")
+    # The author is only shown (snapshot, rows, round files, lineup), never compared, so only its shown form is kept.
     return {"repo": repo, "number": number, "title": common.scrubbed_line(node.get("title") or "", 200),
             "url": safe_url(node.get("url")), "draft": node.get("isDraft") is True,
-            "author": login if isinstance(login, str) and LOGIN.fullmatch(login) else "unknown",
-            "bot": get(node, "author", "__typename") == "Bot",
+            "author": shown_login(get(node, "author", "login")), "bot": get(node, "author", "__typename") == "Bot",
             "created_at": parse_ts(node.get("createdAt")) or 0,
             "updated_at": parse_ts(node.get("updatedAt")) or 0}
 
@@ -557,16 +599,20 @@ def search_all(name: str, field: str, variables: dict) -> tuple:
 
 def fetch_prs() -> dict:
     """Ryan's open PRs and the open PRs that ask him for a review, keyed repo#number. complete is False when
-    either list could not be read to its end."""
+    either list could not be read to its end. refused counts the PRs left out because their repository's name has a
+    credential's shape (repo_name): never stored or shown, only counted."""
     login = account()
     mine, mine_whole = search_all("prs", "mine", {"mine": f"is:pr is:open author:{login} archived:false"})
     asked, asked_whole = search_all("asked", "asked",
                                     # Only requests to Ryan by name: review-requested also matches every
                                     # team he is on, which on a busy org is hundreds of code-owner requests.
                                     {"asked": f"is:pr is:open user-review-requested:{login} archived:false"})
-    seen: dict = {"prs": {}, "asked": {}, "complete": mine_whole and asked_whole}
+    seen: dict = {"prs": {}, "asked": {}, "complete": mine_whole and asked_whole, "refused": 0}
     for found, build, kind in ((mine, pr_record, "prs"), (asked, asked_record, "asked")):
         for node in found:
+            if refused_repo(node):
+                seen["refused"] += 1
+                continue
             record = build(node)
             if record is not None:
                 seen[kind][pr_key(record["repo"], record["number"])] = record
@@ -636,16 +682,24 @@ def asked_table(asked: dict, ts: int) -> str:
     return text
 
 
+def refused_text(count: int) -> str:
+    """The one line a file says for the PRs fetch_prs left out, never naming their repository."""
+    return (f"{count} PR(s) left out: the repository's name has a credential's shape, so the patrol neither stores"
+            " nor shows it")
+
+
 def main_repos(seen: dict) -> list:
-    """The repos whose main branch the patrol reads: WATCHED_REPOS once filled in, else the repos of Ryan's PRs."""
-    named = [repo for repo in config.WATCHED_REPOS
-             if isinstance(repo, str) and ids.PATTERNS["repo"].fullmatch(repo) is not None]
+    """The repos whose main branch the patrol reads: WATCHED_REPOS once filled in, else the repos of Ryan's PRs.
+    Either way only names repo_name keeps."""
+    named = [repo for repo in config.WATCHED_REPOS if repo_name(repo) is not None]
     return sorted(set(named)) if named else sorted({record["repo"] for record in seen["prs"].values()})
 
 
 def main_commits(repo: str, since: int) -> list:
     """The default branch's commits since a time, newest first, each with its check rollup."""
-    owner, name = ids.check("repo", repo).split("/", 1)
+    if repo_name(repo) is None:
+        raise FleetError("refusing a repository name that is not a plain owner/name")
+    owner, name = repo.split("/", 1)
     data = gh_query("main", {"owner": owner, "name": name, "since": iso(since)})
     found = []
     for node in nodes(data, "repository", "defaultBranchRef", "target", "history"):
@@ -734,7 +788,7 @@ def attempt(conn, owl_id: str, now: Optional[int] = None, shadow: bool = True) -
     try:
         result = run_desk.run(conn, entry["desk"], owl_id, now=now, shadow=shadow)
     except (FleetError, StoreError) as exc:
-        error = common.one_line(exc, 200)
+        error = common.scrubbed_line(exc, 200)
         if shadow and isinstance(exc, run_desk.Capped):
             hold(entry, [f"{entry['desk']} was not started: {error}"])
         return {"launched": False, "clean": False, "collected": False, "error": error}
@@ -809,7 +863,7 @@ def collect(desk: str, owl_id: str, job: str, out_name: str, note_missing: bool 
         return {"collected": False, "headmaster_rows": 0}
     except FleetError as exc:
         append_text(job, out_name, f"\n## {role}\n\nThe file for owl {owl_id} was refused: "
-                                   f"{common.one_line(exc, 200)}.\n")
+                                   f"{common.scrubbed_line(exc, 200)}.\n")
         return {"collected": False, "headmaster_rows": 0}
     text = clean(raw.decode("utf-8", "replace")).strip()
     if not text:
@@ -891,7 +945,7 @@ def run_job(name: str, body: Callable, argv: Optional[list]) -> int:
             finally:
                 conn.close()
     except (FleetError, StoreError) as exc:
-        sys.stderr.write(json.dumps({"ok": False, "job": name, "error": common.one_line(exc, 300)},
+        sys.stderr.write(json.dumps({"ok": False, "job": name, "error": common.scrubbed_line(exc, 300)},
                                     ensure_ascii=True) + "\n")
         return 1
     sys.stdout.write(json.dumps({"job": name, **result}, ensure_ascii=True) + "\n")

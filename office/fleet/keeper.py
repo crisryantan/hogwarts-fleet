@@ -92,6 +92,8 @@ def watch(conn, now: Optional[int] = None) -> dict:
     items, errors = watched(seen, ts)
     if not seen["complete"]:
         errors.append("your open PRs: GitHub's list could not be read to its end")
+    if seen.get("refused"):
+        errors.append(patrol.refused_text(seen["refused"]))
     reds = [item for item in items if item["checks"] in patrol.RED]
     gates = [item for item in items if item["waiting"]]
     judged = patrol.read_state("keeper", JUDGED, [])

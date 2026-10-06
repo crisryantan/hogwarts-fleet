@@ -72,7 +72,8 @@ THREADS_TEXT_MAX = 200_000
 
 
 def _row(key: str, change: str, detail: str, mark: str) -> dict:
-    return {"pr": key, "change": change, "detail": common.one_line(detail, 300), "mark": mark}
+    """One outcomes row. Its detail can join GitHub check names and logins, so it is scrubbed again on one line."""
+    return {"pr": key, "change": change, "detail": common.scrubbed_line(detail, 300), "mark": mark}
 
 
 def _names(values) -> str:
@@ -135,13 +136,17 @@ def pr_changes(key: str, was: Optional[dict], now: Optional[dict]) -> list:
 def changes(before: dict, after: dict) -> list:
     """Every row between the last snapshot and this round, Ryan's PRs first, then review requests."""
     rows = []
-    old, new = before.get("prs") or {}, after["prs"]
+    # A key of the last snapshot is used only when it is one this round could have made (patrol.pr_key_ok): a snapshot
+    # an older patrol wrote may hold a repository name it now refuses, which no row names.
+    old = {key: value for key, value in (before.get("prs") or {}).items() if patrol.pr_key_ok(key)}
+    new = after["prs"]
     for key in sorted(set(old) | set(new)):
         was = old.get(key) if isinstance(old.get(key), dict) else None
         if was is None and key not in new:
             continue
         rows += pr_changes(key, was, new.get(key))
     old_asked = before.get("asked") if isinstance(before.get("asked"), dict) else {}
+    old_asked = {key: value for key, value in old_asked.items() if patrol.pr_key_ok(key)}
     for key in sorted(set(after["asked"]) - set(old_asked)):
         asked = after["asked"][key]
         if asked.get("bot"):  # a bot's request is listed in the lineup but never wakes Ron
@@ -169,7 +174,9 @@ def render_round(rows: list, seen: dict, ts: int, followups_text: Optional[str] 
 
 def fetch_threads(record: dict) -> list:
     """The unresolved review threads of one PR, with their comments. Every comment, hunk and path is normalized and
-    scrubbed whole (patrol.github_text) before it is cut, as the PR follow-up's are. A comment's commit is the sha
+    scrubbed whole (patrol.github_text) before it is cut, as the PR follow-up's are; the path is scrubbed again once it
+    is on one line (common.scrubbed_line), since making it ASCII can shape a credential. An author is shown only as
+    patrol.shown_login gives it. A comment's commit is the sha
     GitHub gives in its own field (originalCommit), kept only when it is exactly 40 lowercase hex, and written next to
     the scrubbed text, since the scrub masks a full sha."""
     owner, name = record["repo"].split("/", 1)
@@ -182,9 +189,8 @@ def fetch_threads(record: dict) -> list:
             continue
         comments = []
         for item in patrol.nodes(node, "comments"):
-            login = patrol.get(item, "author", "login")
             comments.append({
-                "author": login if isinstance(login, str) and patrol.LOGIN.fullmatch(login) else "unknown",
+                "author": patrol.shown_login(patrol.get(item, "author", "login")),
                 "person": patrol.is_person(item.get("author")),
                 "url": patrol.safe_url(item.get("url")),
                 "commit": patrol.sha(patrol.get(item, "originalCommit", "oid")),
@@ -192,7 +198,7 @@ def fetch_threads(record: dict) -> list:
                 "hunk": patrol.github_text(item.get("diffHunk"))[:HUNK_MAX],
             })
         line = node.get("line")
-        threads.append({"id": thread_id, "path": common.one_line(patrol.github_text(node.get("path")), 200) or "-",
+        threads.append({"id": thread_id, "path": common.scrubbed_line(patrol.github_text(node.get("path")), 200) or "-",
                         "line": line if type(line) is int else None, "outdated": node.get("isOutdated") is True,
                         "comments": comments})
     return threads
@@ -305,7 +311,7 @@ def catch_up_lineup(conn, ts: int, now: Optional[int]) -> Optional[dict]:
     try:
         return morning.lineup(conn, now)
     except (FleetError, StoreError, OSError) as exc:
-        return {"ok": False, "error": common.one_line(exc, 200)}
+        return {"ok": False, "error": common.scrubbed_line(exc, 200)}
 
 
 def _store_only(conn, ts: int, now: Optional[int]) -> dict:
@@ -352,7 +358,12 @@ def run_round(conn, now: Optional[int] = None) -> dict:
     fu = followup.patrol_round(conn, seen, ts, now, shadow, baseline)
     rows = followup.mark_covered(rows, before if not baseline else {}, seen, fu)
     rows += fu["rows"]
-    patrol.write_state("map", SNAPSHOT, {"account": login, "taken_at": ts, "prs": seen["prs"], "asked": seen["asked"]})
+    # PRs whose repository name the patrol refuses: one row, only when their count changes, never naming the repository.
+    refused = seen.get("refused", 0)
+    if refused and refused != (before.get("refused") if isinstance(before, dict) else None):
+        rows.append(_row("-", "PRs left out", patrol.refused_text(refused), ROUTINE))
+    patrol.write_state("map", SNAPSHOT, {"account": login, "taken_at": ts, "prs": seen["prs"], "asked": seen["asked"],
+                                         "refused": refused})
     for row in rows:
         patrol.append_row("map", OUTCOMES, {"ts": ts, **row})
     for_me = [row for row in rows if row["mark"] == FOR_ME]
@@ -378,7 +389,7 @@ def run_round(conn, now: Optional[int] = None) -> dict:
     model = bool(woke and woke.get("launched")) or any(item.get("launched") for item in passes) or resent["launched"] \
         or bool(lineup and lineup.get("model")) or fu["model"]
     row = {"ts": ts, "ok": True, "shadow": shadow, "baseline": baseline, "prs": len(seen["prs"]),
-           "asked": len(seen["asked"]), "changes": len(rows), "for_me": len(for_me), "model": model,
+           "asked": len(seen["asked"]), "refused": refused, "changes": len(rows), "for_me": len(for_me), "model": model,
            "followups": {"live": fu["live"], "routed": fu["routed"], "errors": fu["errors"]}, "closer": closing}
     if lineup is not None:
         row["lineup"] = "written" if lineup.get("ok") else "failed"

@@ -178,9 +178,10 @@ def _hunk(text: object) -> list:
 
 
 def _path(text: object) -> str:
-    """A path for a heading line: normalized, scrubbed, cleaned and put on one line, so it cannot start a new heading;
-    one that still holds a backtick is left out."""
-    value = common.one_line(_github_text(text), PATH_MAX)
+    """A path for a heading line: normalized, scrubbed, cleaned and put on one line, so it cannot start a new heading,
+    then scrubbed again on that line before the cut (common.scrubbed_line), since making it ASCII can shape a
+    credential; one that still holds a backtick is left out."""
+    value = common.scrubbed_line(_github_text(text), PATH_MAX)
     return "-" if not value or "`" in value else value
 
 
@@ -398,7 +399,7 @@ def make_quote(body: str, repo: str) -> Optional[str]:
 
 
 def _comment_header(binding: dict, comment: dict, kind: str, mark: str) -> str:
-    who = comment["login"] if comment["login"] is not None else "unknown"
+    who = patrol.shown_login(comment["login"])
     if comment["typename"] != "User":
         who += " (bot)" if comment["typename"] == "Bot" else " (not a person)"
     association = comment["association"] or "-"
