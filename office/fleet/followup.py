@@ -865,23 +865,38 @@ def store_round(conn, ts: int, now: Optional[int]) -> dict:
 def patrol_round(conn, seen: dict, ts: int, now: Optional[int], shadow: bool, baseline: bool) -> dict:
     """The follow-up's part of one Map round, before the round writes its snapshot. Never raises for a fleet, store or
     file error: each is an error row. Returns {rows, covered, live, routed, errors, model}: covered maps a PR key to
-    the threads the follow-up takes there (None when the store could not say), for the bot pass and the round's
-    rows; it is empty while the follow-up is not live."""
+    the threads a follow-up took there (None when the store could not say), for the bot pass and the round's rows.
+    Threads a follow-up took stay covered whatever the switch, shadow mode or a failed step says this round, since
+    the follow-up that holds them may still be open; when they could not be loaded, every PR is unknown."""
     result = {"rows": [], "covered": {}, "live": False, "routed": 0, "errors": 0, "model": False}
+    loaded = []
     try:
-        _patrol_round(conn, seen, ts, now, baseline, result)
+        _patrol_round(conn, seen, ts, now, baseline, result, loaded)
     except (FleetError, StoreError) as exc:
         result["errors"] += 1
         result["rows"].append(_row("-", "follow-up error", common.scrubbed_line(exc, 200)))
+        _unknown_unless_loaded(seen, result, loaded)
     except Exception as exc:  # noqa: BLE001 - the Map round must still write its snapshot and its rows
         result["errors"] += 1
         result["rows"].append(_row("-", "follow-up error", type(exc).__name__))
         # What could not be judged is unknown: no thread is taken from the bot pass or a person's row.
+        _unknown_unless_loaded(seen, result, loaded)
         result["covered"] = {key: None for key in result["covered"]}
     return result
 
 
-def _patrol_round(conn, seen: dict, ts: int, now: Optional[int], baseline: bool, result: dict) -> None:
+def _unknown_unless_loaded(seen: dict, result: dict, loaded: list) -> None:
+    """When the round stopped before the threads follow-ups took were loaded, no PR's bot pass may run: each is
+    unknown."""
+    if not loaded:
+        result["covered"] = {key: None for key in seen["prs"]}
+
+
+def _patrol_round(conn, seen: dict, ts: int, now: Optional[int], baseline: bool, result: dict,
+                  loaded: list) -> None:
+    # First, before anything that can stop the round: the threads follow-ups took are never the bot pass's.
+    _covered_routed(conn, seen, result["covered"])
+    loaded.append(True)
     on, shadow = switched_on(), patrol.shadow_on()
     is_live = on and not shadow
     result["live"] = is_live
@@ -901,7 +916,6 @@ def _patrol_round(conn, seen: dict, ts: int, now: Optional[int], baseline: bool,
         return
     if baseline:
         return
-    _covered_routed(conn, seen, result["covered"])
     try:
         candidates = _candidates(conn, seen)
     except StoreError as exc:

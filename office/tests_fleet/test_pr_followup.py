@@ -1370,3 +1370,44 @@ class EndingTests(FollowupCase):
         self.assertEqual(event["verdict"], "headmaster")
         self.assertIn(f"fleet build {self.task['id']}", event["summary"])
         self.assertEqual(followups.get(self.conn, row["id"])["state"], "building")
+
+
+class RoutedThreadsStayCoveredTests(FollowupCase):
+    """Threads a follow-up took never go to Hermione's bot pass while it may still be open, whatever the switch, shadow
+    mode or a failed step says in a later round; a round that stops before it could load them runs no bot pass."""
+
+    def routed_thread(self) -> None:
+        self.go_live_at()
+        self.add_thread()
+        self.assertIsNotNone(self.routed())
+
+    def covered(self, at: int) -> dict:
+        return followup.patrol_round(self.conn, patrol.fetch_prs(), at, at, patrol.shadow_on(), False)["covered"]
+
+    def test_switched_off_after_routing_the_thread_stays_covered(self):
+        self.routed_thread()
+        self.switch_off()
+        self.assertEqual(self.covered(self.clock + 60), {PR_KEY: {"PRRT_t1"}})
+
+    def test_in_shadow_mode_after_routing_the_thread_stays_covered(self):
+        self.routed_thread()
+        self.shadow()
+        self.assertEqual(self.covered(self.clock + 60), {PR_KEY: {"PRRT_t1"}})
+
+    def test_a_live_period_that_cannot_be_recorded_still_covers_the_thread(self):
+        self.routed_thread()
+        with mock.patch.object(followups, "see_live", side_effect=StoreError("the store is locked")):
+            self.assertEqual(self.covered(self.clock + 60), {PR_KEY: {"PRRT_t1"}})
+
+    def test_a_round_that_stops_before_loading_them_leaves_every_pr_unknown(self):
+        self.routed_thread()
+        with mock.patch.object(followup, "_covered_routed", side_effect=RuntimeError("cut")):
+            self.assertEqual(self.covered(self.clock + 60), {PR_KEY: None})
+
+    def test_the_bot_pass_never_gets_a_routed_thread_after_the_switch_goes_off(self):
+        self.routed_thread()
+        self.switch_off()
+        self.enable("hermione")
+        with mock.patch.object(patrol, "wake", side_effect=AssertionError("a bot pass ran")) as wake:
+            self.map_round(self.clock + config.BOT_PASS_DELAY_SECONDS + 60)
+        wake.assert_not_called()
