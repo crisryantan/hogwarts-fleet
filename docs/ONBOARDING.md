@@ -233,7 +233,7 @@ If a step prints FAILED, the lines above it say why. The same steps by hand, wit
 
 ### Leave for later
 
-- `a2` adds the push gate. It blocks an agent's push that has no review pass, so apply it when you reach stage 5.1 and the review loop. Sections (e) and (f) of the pending README add the same gate to your Codex hooks and the desk settings, and (g) walks through a real task.
+- `a2` adds the push gate. It blocks an agent's push that has no review pass, so apply it when you reach stage 5.1 and the review loop. Section (e) of the pending README adds the same gate to your Codex hooks, (f) explains the copy the desk settings already carry, and (g) walks through a real task.
 - `~/.hogwarts/pending/c-codex-approval.txt` explains why Harry and Moody stay off. They send code to OpenAI, so they wait until your organization approves Codex for its source code. They also wait until both boundary tests pass on your Mac: `sh scripts/codex-boundary-test.sh`, then `/usr/bin/python3 -I -B scripts/codex-exec-boundary-test.py`, both from your clone. The second one sends a short prompt to OpenAI, so run it only after the approval.
 - Optional clean-up that saves tokens in every session: switch off connectors and MCP servers you never call, with `/mcp` in a session or in your claude.ai connector settings.
 
@@ -270,11 +270,13 @@ These checks prove the store, the Owl Post and the task flow work before any des
 
 3. Open McGonagall's first session. In the Claude desktop app, open the Code tab, start a session and pick the `hogwarts` folder in your home folder. Or type `cd ~/hogwarts` and then `claude`. Trust the folder when asked. Her first line is "McGonagall - Chief of Staff." and her digest follows. It lists the reply owl you just sent her, and marks that fyi owl as read once it has shown it to you.
 
-4. Ask her for a TASK.md. For example: "Write a TASK.md for: add a short CONTRIBUTING note to one of my repos. Don't route it yet." Claude asks you before she writes the file. Read the draft and say go. She then gives you one `castle task create` command. Run it in Terminal, then check it:
+4. Ask her for a TASK.md. For example: "Write a TASK.md for: add a short CONTRIBUTING note to one of my repos. Don't route it yet." Claude asks you before she writes the file. Read the draft, approve it, and tell her Harry isn't switched on yet. She then gives you one `castle task create` command. Run it in Terminal, then check it:
 
    ```
    ~/.hogwarts/bin/castle task list
    ```
+
+   Don't type `go <task-id>` for this test. In her session that exact prompt starts a build: it registers the task, makes a worktree on a branch in your repo and routes it to Harry. You start builds that way from stage 5.1.
 
    You can also register a test task without her, which proves the same path:
 
@@ -309,14 +311,25 @@ touch ~/.hogwarts/desks/hermione/enabled
 
 Remove the file to switch the desk off again: `rm ~/.hogwarts/desks/hermione/enabled`.
 
+Four automations inside these stages are switched by files in the office too, one each: draft PRs (`auto-draft-pr`, 5.1), follow-ups (`pr-followup`, 5.2), auto-close (`auto-close`, 5.2) and auto-portrait (`auto-portrait`, 5.3). Each is off until you write its file, and it counts only while that is a plain file you own, that no one else can write, holding exactly `on`. A file of that name anywhere else, such as a desk folder, a task folder or `standing-orders.md`, does nothing. Remove the file to switch it off again:
+
+```
+echo on > ~/.hogwarts/auto-draft-pr
+rm ~/.hogwarts/auto-draft-pr
+```
+
 ### 5.1 The review loop
 
 An agent's push goes out only with a pass from the other model family for that exact commit. The push gate is a guardrail, not a wall: pushes you type yourself never reach it.
 
-- What it is: the worktree, verify and review scripts (`fleet worktree`, `fleet verify`, `fleet review`, `fleet build` and `fleet push`), and the push gate at `fleet/hooks/push_gate.py`.
+- What it is: the go, the worktree, verify and review scripts (`fleet worktree`, `fleet verify`, `fleet review`, `fleet build` and `fleet push`), and the push gate at `fleet/hooks/push_gate.py`.
+- How a build runs: McGonagall drafts a TASK.md whose Spec opens with `repo:`, `branch:` and `base:` lines. You type exactly `go <task-id>` as your whole message in her session. The prompt hook registers the task, routes it to Harry, makes his worktree on that branch and starts his run if he's enabled. If he isn't, start it later with `fleet build <harry-task-id>`. His handoff starts Hermione's review, a CHANGES verdict starts his fix round, and the loop stops at PASS, at HEADMASTER or after three review rounds. At the cap, `castle task allow-round <harry-task-id>` allows one more round, and `fleet build <harry-task-id>` starts it. If the hook can't apply a go, it says why: fix the TASK.md and type it again, or register the task by hand as in section (d) of the pending README. McGonagall then routes it by owl, and you give Harry's task its worktree with `fleet worktree`.
+- Acceptance checks: each one is either one backtick command, which verify runs, or plain words, which the reviewer judges. A check that mixes the two is malformed and never runs. A criterion labelled `| after merge:` instead of `| check:` waits until after the merge, and never holds a PASS back.
 - To switch it on: apply `a2` from `~/.hogwarts/pending` to wire the push gate into your user settings, with a fresh `.pre-hogwarts-` backup. Enable Hermione. Enable Harry and Moody only after your organization approves Codex and both `scripts/codex-boundary-test.sh` and `scripts/codex-exec-boundary-test.py` pass on your Mac. Section (g) of the pending README walks through a task.
 
 **You're done when** three PRs have gone out with passes tied to their commits, at least one real finding has changed a diff, and the gate has blocked a test push that had no pass.
+
+**Draft PRs (optional).** On PASS the task awaits close, and you push the reviewed commit yourself with `fleet push <task-id>`, which prints the `gh` command for a draft PR. To have the loop push exactly the reviewed commit and open the draft PR for you, switch on draft PRs with `echo on > ~/.hogwarts/auto-draft-pr`. You get one row with the PR's link, or one saying why it stopped. Marking the PR ready, requesting reviews and merging stay yours. `rm ~/.hogwarts/auto-draft-pr` switches it off.
 
 ### 5.2 Patrol in shadow mode
 
@@ -327,11 +340,13 @@ Prove the cheap jobs are right before they can interrupt you.
 
 **You're done when** the morning lineup has matched `gh` three days running, a spot check of 50 of Ron's verdicts finds nothing urgent marked routine, and at least 75% of Map rounds cost zero tokens. Then delete `~/.hogwarts/patrol/shadow` to let their rows and owls reach you.
 
-**Follow-ups (optional).** Once draft PRs are on, a teammate's review comment on a PR the loop opened can go back to Harry by itself, and the loop pushes his reviewed fix to the same PR and posts his one-line replies in your name.
+**Follow-ups (optional).** Once draft PRs are on, review comments from teammates with write access on a PR the loop opened can go back to Harry by themselves. He fixes or answers each one, Hermione reviews his fix and his replies, and on PASS the loop pushes to the same branch and posts his one-line replies in your name. It never resolves a thread, requests a review, marks the PR ready or merges. They route comments only while Harry and Hermione are enabled and the patrol is out of shadow mode, and Hermione's bot pass leaves the threads a follow-up takes alone.
 
 - Fill `FOLLOWUP_IGNORED_LOGINS` in `~/.hogwarts/fleet/config.py` with your org's CI and service accounts that GitHub lists as people, and check `gh auth status` shows the account in `GITHUB_ACCOUNT`. Replies only ever go out as that account.
 - Switch follow-ups on while the patrol is still in shadow mode, with `echo on > ~/.hogwarts/pr-followup`, and read `~/.hogwarts/patrol/followup/` for a few days: each file lists what a round would have sent Harry, with no comment text. It counts comments from the last seven days as if follow-ups had been live then (`FOLLOWUP_SHADOW_WINDOW_SECONDS`), so it works from your very first round.
 - Then take the patrol out of shadow mode. Only comments written from then on are routed; the ones the dry run counted are not. Switch follow-ups off any time with `rm ~/.hogwarts/pr-followup`: routing stops at once, and so does the next push or reply. An open follow-up is still tidied up by the next Map round, even one that cannot read GitHub.
+
+**Auto-close (optional).** You close a task by hand by typing `Mischief managed <task-id>` in McGonagall's session, with auto-close on or off. To have a merged task close itself, switch on auto-close with `echo on > ~/.hogwarts/auto-close` once the Map's job is loaded. Each Map round then starts the closer, and shadow mode doesn't hold it back. It takes a build your go registered, or a task from your own sessions, and closes it only once scripts prove exactly the reviewed commit merged, CI on the merge commit is green and every after-merge check passes. It runs the after-merge commands at the merge commit, and the reviewer of the other family judges the written ones, so keep that reviewer enabled. You get one row for each close, which also closes McGonagall's go task when nothing else is open under it. It skips a task whose follow-up is still open, and a build you registered by hand stays yours to close. Anything it can't prove stops that task with one row, and `fleet close <task-id>` tries once more. `rm ~/.hogwarts/auto-close` switches it off.
 
 ### 5.3 Dumbledore's nightly review
 
@@ -433,10 +448,12 @@ From here on, the [handbook](HANDBOOK.md) is your guide: which desk to ask, the 
 - [ ] **4** Owl round trip: Hermione's reply reached McGonagall.
 - [ ] **4** McGonagall introduced herself with a digest.
 - [ ] **4** A TASK.md registered with `castle task create`, then closed as abandoned.
-- [ ] **5.1** Review loop on, `a2` applied, Hermione on. Codex desks only after approval and both boundary tests.
+- [ ] **5.1** Review loop on, `a2` applied, Hermione on. Codex desks only after approval and both boundary tests. Builds start with `go <task-id>` in McGonagall's session.
+- [ ] **5.1** Draft PRs, if you want them: `auto-draft-pr` on.
 - [ ] **5.2** Map, Ron and Gringotts in shadow for three days. Restore drill done. Shadow file deleted once the checks pass.
 - [ ] **5.2** Follow-ups, if you want them: `FOLLOWUP_IGNORED_LOGINS` filled, `pr-followup` on in shadow mode, `patrol/followup/` read for a few days.
-- [ ] **5.3** Dumbledore's proposals reviewed twice. RTK go or no-go.
+- [ ] **5.2** Auto-close, if you want it: `auto-close` on, with the Map loaded and the reviewer of the other family enabled.
+- [ ] **5.3** Dumbledore's proposals reviewed twice. RTK go or no-go. Auto-portrait on only after that, if you want it.
 - [ ] **5.4** RTK hook and standing orders, only if the numbers say so.
 - [ ] **5.5** Role cards read, any forbidden models listed, `fleet ollivander --dry-run` read, the daily job loaded, a first pass run, and `castle desk models` shows a tier for every desk that has a role card.
 - [ ] **5.6** `fleet feed --all` prints its first line. `hogwarts-spaces` printed OK or SKIP for all nine spaces.

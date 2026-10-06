@@ -141,6 +141,26 @@ Off by default. Make the plain file `~/.hogwarts/desks/ollivander/update-clis` a
 
 While the stop file `~/.hogwarts/state/ollivander-stop` exists, or an update is running, no headless desk launches. A run that has passed its last check also holds off an update until its process has exited, so an update never swaps a CLI under a desk that's about to run or still running. If runs keep an update waiting for two minutes, that pass skips the update and the next one tries again. If a pass dies part way through an update, the next pass updates nothing, stops every headless desk and tells you, since the CLIs may have moved with no check run. Run `~/.hogwarts/bin/castle ollivander clear` once you've looked. Remove `update-clis` to switch updates off again.
 
+## Switch the automations on and off
+
+Four automations are off by default. Each has its own file in the office, and only you can write there:
+
+| File | While it holds `on` | It also needs |
+| --- | --- | --- |
+| `~/.hogwarts/auto-draft-pr` | After the review loop's own PASS, never one you ran by hand, the loop pushes exactly the reviewed commit and opens a draft PR with your `gh` login. Marking it ready, requesting reviews and merging stay yours | The review loop (onboarding stage 5.1) and `gh` signed in |
+| `~/.hogwarts/pr-followup` | Review comments from teammates with write access on a PR the loop opened go back to Harry. He fixes or answers each one, the other family reviews, and the loop pushes to the same branch and posts his replies. It never resolves a thread | Draft PRs on, the patrol out of shadow mode, Harry and Hermione enabled, `FOLLOWUP_IGNORED_LOGINS` filled and `gh` signed in as `GITHUB_ACCOUNT` |
+| `~/.hogwarts/auto-close` | Each Map round starts the closer. It closes a passed task once scripts prove exactly the reviewed commit merged, CI on the merge commit is green and every after-merge check passes, with one row for each close. It skips a task whose follow-up is still open | The Map's job loaded (stage 5.2), and the reviewer of the other family enabled to judge written after-merge checks |
+| `~/.hogwarts/auto-portrait` | Dumbledore's weeknight job applies the fact and memory note additions in the patch his run wrote that night. Edits, retires and archive moves wait for you, and so does an addition the store refused | His nightly job loaded (stage 5.3) |
+
+Switch one on from your terminal, and off by removing the file:
+
+```
+echo on > ~/.hogwarts/auto-close
+rm ~/.hogwarts/auto-close
+```
+
+A switch counts only while it is a plain file you own, that no one else can write, reached with no link on the way, holding exactly `on`. Any other text, a symlink, or a file of that name anywhere else, such as a desk folder, a task folder or `standing-orders.md`, leaves it off. Write the order in `standing-orders.md` too if you want people to read it, but code never parses that file. Whichever switches are on, `Mischief managed <task-id>` still closes a task by hand and `castle portrait apply` still applies a patch by hand. The full rules for each are in `~/.hogwarts/pending/README.md`, sections (g) and (h).
+
 ## Change a display name or a character
 
 The display name is the desk's job title, such as "Snape - Data Analyst". It appears in:
@@ -205,6 +225,11 @@ All in `~/.hogwarts/fleet/config.py`:
 | `FOLLOWUP_WRITE_ASSOCIATIONS` | Whose comments a follow-up takes, by GitHub's authorAssociation: OWNER, MEMBER and COLLABORATOR |
 | `FOLLOWUP_IGNORED_LOGINS` | Service and CI accounts that GitHub lists as people; their comments are never routed. Empty in the kit: fill it before you switch follow-ups on. Compared without letter case |
 | `FOLLOWUP_SHADOW_WINDOW_SECONDS` | How far back the shadow-mode dry run in `patrol/followup/` counts comments as if follow-ups had been live, seven days. It never opens a live period, so nothing it counts is ever routed |
+| `AUTO_REVIEW_WAIT_LIMIT_SECONDS` | How long the Owl Post keeps trying a handoff whose review can't start yet (Harry's run still going, the reviewer busy or another review of the task running) before you hear, four hours |
+| `AUTO_REVIEW_MAX_TRIES` | Tries for an automatic review killed part way, 3, at most 9. A review that ends with a verdict or a refusal is never tried again by itself |
+| `AUTO_CLOSE_CI_SETTLE_SECONDS` | How long after a merge is first seen before the closer counts green CI, or no checks, 30 minutes. A red stops it at once |
+| `AUTO_CLOSE_MAX_TRIES` | The closer's automatic tries per merge commit for each sandboxed after-merge command and for the judge, 3. An automatic pass starts each of your own sessions' after-merge commands, which run without the sandbox, at most once |
+| `AUTO_CLOSE_STALL_SECONDS`, `AUTO_CLOSE_UNKNOWN_GRACE_SECONDS` | When the closer tells you about a wait that keeps going (CI pending, open work, a busy judge), one day, and about a read that keeps failing, two hours |
 | `RUN_SLOTS` | How many runs a desk may have going at once: Moody 2, Hermione 2 and every other desk 1, so two reviews of different tasks run at once. Each slot has its own lock, Codex work folder and temp folder, and the caps stay per desk across all of them. Raise it only for a desk whose runs never write the same file, at most 8 |
 | `RUN_TIMEOUT_SECONDS` | How long one run may take |
 | `TEMPUS_THRESHOLD` | Context size that triggers the Tempus warning |
@@ -229,7 +254,7 @@ The cap event says whether the fleet's cap or your Claude or Codex plan's own li
 
 ## Change schedules
 
-Each background job is a launchd plist in `~/.hogwarts/launchd/`. The Owl Post sweeps every 300 seconds (`StartInterval`) and also runs whenever an outbox changes. Ollivander's job, `com.hogwarts.ollivander`, runs once a day at 06:00 from one `StartCalendarInterval` entry with an `Hour` and a `Minute`. The other scheduled jobs use the same kind of entry. Gringotts' job runs every day at 23:30. The patrol's jobs and Dumbledore's add a `Weekday` key, with one entry per weekday and time.
+Each background job is a launchd plist in `~/.hogwarts/launchd/`. The Owl Post sweeps every 300 seconds (`StartInterval`) and also runs whenever an outbox changes. Ollivander's job, `com.hogwarts.ollivander`, runs once a day at 06:00 from one `StartCalendarInterval` entry with an `Hour` and a `Minute`. The other scheduled jobs use the same kind of entry. Gringotts' job runs every day at 23:30. The patrol's jobs and Dumbledore's add a `Weekday` key, with one entry per weekday and time. The Map's job, `com.hogwarts.map`, has one entry for every 15 minutes from 08:00 to 19:00 on weekdays. Each Map round also routes PR follow-ups and starts the closer, so follow-ups are routed and automatic closer passes start only in the Map's hours.
 
 1. Edit the template in `~/.hogwarts/launchd/`.
 2. Check it with `plutil -lint`.
@@ -242,7 +267,7 @@ Keep the wrapper line, the `Umask` and the log paths as they are. The fleet test
 The one rule that matters most: **the author and the reviewer must come from different model families.**
 
 - The store enforces it. A review counts as a pass only when the reviewer's family, looked up from the registry, differs from the author's. A same-family pass is refused, so a fleet with only one family can never pass a review.
-- Keep at least one Claude reviewer (Hermione) and one Codex reviewer (Moody). Codex-written work goes to the Claude reviewer, and Claude-written work, including your own sessions, goes to the Codex reviewer.
+- Keep at least one Claude reviewer (Hermione) and one Codex reviewer (Moody). Codex-written work goes to the Claude reviewer, and Claude-written work, including your own sessions, goes to the Codex reviewer. The same reviewer judges a task's written after-merge checks for auto-close, and the store refuses a proven close judged by the author's own family.
 - If you move a builder to the other family, make sure a reviewer of the opposite family still exists for its work.
 - Register every desk under the family of the model it actually runs. The family is what the store trusts.
 - Ollivander never crosses families. A role card whose `family` differs from the registry is refused, and a Claude desk only ever holds a Claude model and a Codex desk a Codex one.

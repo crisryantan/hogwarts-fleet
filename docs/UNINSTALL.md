@@ -1,6 +1,18 @@
 # Uninstall
 
-Everything the fleet adds lives in two folders, a few background jobs and one agent file. Your own Claude and Codex settings only changed if you applied the pending snippets yourself, so undoing those is also yours. The uninstaller shows you exactly what to restore. It never edits those files.
+Everything the fleet adds to your Mac lives in two folders, a few background jobs and one agent file. Your own Claude and Codex settings only changed if you applied the pending snippets yourself, so undoing those is also yours. The uninstaller shows you exactly what to restore. It never edits those files.
+
+## First, switch the automations off
+
+Four files in the office switch on the fleet's automations: `auto-draft-pr`, `pr-followup`, `auto-close` and `auto-portrait`. They go with the office in step 5, but remove them before you start, whether you use the script or not:
+
+```
+rm -f ~/.hogwarts/auto-draft-pr ~/.hogwarts/pr-followup ~/.hogwarts/auto-close ~/.hogwarts/auto-portrait
+```
+
+Stopping the background jobs doesn't end a review or a closer pass that is already running, since each runs in a process of its own. With the files gone, each finds its switch off the next time it checks, so no draft PR, follow-up push or reply, proven close or memory addition starts after that.
+
+The uninstaller never touches GitHub. Branches the review loop pushed, draft PRs it opened and replies it posted in your name stay there. Close or delete them on GitHub yourself if you don't want them.
 
 ## With the script
 
@@ -54,12 +66,14 @@ It exits with 0 when nothing is left for you, with 1 when your settings still me
 
 3. **RTK.** If your settings mention `rtk hook` and you added it for the fleet, remove it with `rtk init -g --uninstall`.
 
-4. **Git worktrees.** Harry works in git worktrees under `~/hogwarts/worktrees`. Remove each one from its repo first, so the repo forgets it. Commit or discard any changes in it before you do.
+4. **Git worktrees.** Harry's builds, Moody's reviews of your own commits and the closer's after-merge checks all use git worktrees under `~/hogwarts/worktrees`. Remove each one from its repo first, so the repo forgets it. Commit or discard any changes in it before you do.
 
    ```
    git -C ~/hogwarts/worktrees/<task> status --short
    git -C <the repo it came from> worktree remove ~/hogwarts/worktrees/<task>
    ```
+
+   A worktree named `<task-id>.merged-<12 hex>` is the closer's, detached at a merge commit with no branch. Any changes in it are files its after-merge checks left. The script stops at it like any other worktree with changes. If you don't need those files, add `--force` to `worktree remove` to take it back.
 
 5. **Archive, then remove the two folders.** Keep a private copy, check it lists both folders, then delete them.
 
@@ -97,7 +111,9 @@ tar -xzf ~/hogwarts-fleet-archive-<timestamp>.tar.gz -C ~
 ~/.hogwarts/bin/castle doctor
 ```
 
-Then switch the Owl Post back on with `sh scripts/owlpost-setup.sh` from your clone, load Ollivander's job again as in [onboarding stage 5.5](ONBOARDING.md#55-ollivander-the-model-keeper), reopen the herdr spaces with `~/.hogwarts/bin/hogwarts-spaces`, and re-apply any settings you restored away in step 2.
+Then switch the Owl Post back on with `sh scripts/owlpost-setup.sh` from your clone, and the patrol and Dumbledore's review with `sh scripts/patrol-setup.sh` and `sh scripts/portrait-setup.sh` if you had them on. Load Ollivander's job again as in [onboarding stage 5.5](ONBOARDING.md#55-ollivander-the-model-keeper), reopen the herdr spaces with `~/.hogwarts/bin/hogwarts-spaces`, and re-apply any settings you restored away in step 2.
+
+`patrol-setup.sh` puts the patrol back in shadow mode when the archive has no `~/.hogwarts/patrol/shadow`, so delete that file again once you're ready, and follow-ups route nothing until you do. The four automation switches come back as the archive held them, so off if you removed them first. Switch on each one you want again with `echo on > ~/.hogwarts/<file>`, as in [CUSTOMISE.md](CUSTOMISE.md#switch-the-automations-on-and-off).
 
 ## Remove the repo
 
