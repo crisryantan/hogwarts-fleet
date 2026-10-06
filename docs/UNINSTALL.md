@@ -4,13 +4,13 @@ Everything the fleet adds to your Mac lives in two folders, a few background job
 
 ## First, switch the automations off
 
-Four files in the office switch on the fleet's automations: `auto-draft-pr`, `pr-followup`, `auto-close` and `auto-portrait`. They go with the office in step 5, but remove them before you start, whether you use the script or not:
+Five files in the office switch on the fleet's automations: `auto-draft-pr`, `pr-followup`, `auto-close`, `worktree-cleanup` and `auto-portrait`. They go with the office in step 5, but remove them before you start, whether you use the script or not:
 
 ```
-rm -f ~/.hogwarts/auto-draft-pr ~/.hogwarts/pr-followup ~/.hogwarts/auto-close ~/.hogwarts/auto-portrait
+rm -f ~/.hogwarts/auto-draft-pr ~/.hogwarts/pr-followup ~/.hogwarts/auto-close ~/.hogwarts/worktree-cleanup ~/.hogwarts/auto-portrait
 ```
 
-Stopping the background jobs doesn't end a review or a closer pass that is already running, since each runs in a process of its own. With the files gone, each finds its switch off the next time it checks, so no draft PR, follow-up push or reply, proven close or memory addition starts after that.
+Stopping the background jobs doesn't end a review or a closer pass that is already running, since each runs in a process of its own. With the files gone, each finds its switch off the next time it checks, so no draft PR, follow-up push or reply, proven close, worktree removal or memory addition starts after that.
 
 The uninstaller never touches GitHub. Branches the review loop pushed, draft PRs it opened and replies it posted in your name stay there. Close or delete them on GitHub yourself if you don't want them.
 
@@ -72,6 +72,8 @@ It exits with 0 when nothing is left for you, with 1 when your settings still me
    git -C ~/hogwarts/worktrees/<task> status --short
    git -C <the repo it came from> worktree remove ~/hogwarts/worktrees/<task>
    ```
+
+   A closed task's worktree may already be gone, removed by auto-close or the worktree cleanup; its branch is still in the repo. A worktree whose removal was cut short shows deleted files: look, then add `--force` to finish it.
 
    A worktree named `<task-id>.merged-<12 hex>` is the closer's, detached at a merge commit with no branch. Any changes in it are files its after-merge checks left. The script stops at it like any other worktree with changes. If you don't need those files, add `--force` to `worktree remove` to take it back.
 

@@ -74,7 +74,11 @@ The store has none of these:
   locks/                                lock files for run slots, launches, reviews, the review loop, the patrol,
                                         Ollivander's updates and the closer (closer.lock)
   worktrees/<task>.json                 each worktree's office record, and <task>.merged-<12 hex>.json for the
-                                        closer's detached worktree at a merge commit, taken back once the task closes
+                                        closer's detached worktree at a merge commit, taken back once the task closes.
+                                        The record stays once its worktree is removed. Removal markers next to it:
+                                        <task>.removing while a removal is under way (who started it and the HEAD it
+                                        checked), <task>.removed once it is done, and <task>.unreported until the
+                                        worktree cleanup's round row has named it
   reviews/<task>/                       review files and verify evidence, which no desk can write, what each review
                                         round was opened for (round-<request>.json), the review loop's record of
                                         each handoff (auto-<owl>.pending, .try<n>, .done) and of what follows each
@@ -99,7 +103,11 @@ The store has none of these:
                                         to the same PR and posts his replies after their PASS (off when missing)
   auto-close                            while it holds exactly "on", each Map round starts the closer, which closes a
                                         passed task once scripts prove its merge, CI and after-merge checks, and never
-                                        one with a PR follow-up still open (off when missing)
+                                        one with a PR follow-up still open (off when missing). A build it closes loses
+                                        its worktree in the same pass when nothing in it can be lost
+  worktree-cleanup                      while it holds exactly "on", each Map round removes the worktree of each build
+                                        task closed at least three days ago, by any path, once it has no uncommitted
+                                        changes and its HEAD is on origin's base or branch (off when missing)
   patrol/shadow                         while it is here, the patrol and Gringotts only write files (shadow mode)
   patrol/<job>/                         the Map's snapshot and rows, lineups, keeper's watches, scoreboards, bot passes,
                                         and in shadow mode what a follow-up would have routed (patrol/followup/)

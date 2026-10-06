@@ -96,11 +96,12 @@ def env_problems(source: str) -> list:
     return found
 
 
-OPT_IN_NAMES = ("auto-draft-pr", "auto-portrait", "pr-followup", "auto-close")
+OPT_IN_NAMES = ("auto-draft-pr", "auto-portrait", "pr-followup", "auto-close", "worktree-cleanup")
 # An opt-in file named as a file: the whole string, or the last part of a path. The feature's name in a message
 # ("auto-portrait applied ...") is not a file name.
 OPT_IN_FILE_SHAPE = re.compile(r"(?:^|/)(?:" + "|".join(map(re.escape, OPT_IN_NAMES)) + r")/?$")
-OPT_IN_ATTRIBUTES = {"AUTO_DRAFT_PR_FILE", "AUTO_PORTRAIT_FILE", "PR_FOLLOWUP_FILE", "AUTO_CLOSE_FILE", "OPT_IN_FILES"}
+OPT_IN_ATTRIBUTES = {"AUTO_DRAFT_PR_FILE", "AUTO_PORTRAIT_FILE", "PR_FOLLOWUP_FILE", "AUTO_CLOSE_FILE",
+                     "WORKTREE_CLEANUP_FILE", "OPT_IN_FILES"}
 
 
 def _docstrings(tree: ast.AST) -> set:
@@ -200,13 +201,15 @@ class EnvironmentTests(unittest.TestCase):
 class OptInTests(unittest.TestCase):
     def test_opt_in_files_are_read_only_through_the_shared_reader(self):
         self.assertEqual(set(config.OPT_IN_FILES), {config.AUTO_DRAFT_PR_FILE, config.AUTO_PORTRAIT_FILE,
-                                                    config.PR_FOLLOWUP_FILE, config.AUTO_CLOSE_FILE})
+                                                    config.PR_FOLLOWUP_FILE, config.AUTO_CLOSE_FILE,
+                                                    config.WORKTREE_CLEANUP_FILE})
         self.assertEqual(len(config.OPT_IN_FILES), len(set(config.OPT_IN_FILES)))
         self.assertEqual(set(OPT_IN_NAMES), set(config.OPT_IN_FILES))
         self.assertIn(FLEET / "hooks" / "session_start.py", SOURCES)
         self.assertIn(FLEET / "portrait_auto.py", SOURCES)
         self.assertIn(FLEET / "followup.py", SOURCES)
         self.assertIn(FLEET / "closer.py", SOURCES)
+        self.assertIn(FLEET / "worktree.py", SOURCES)
         # One reader and one list of switches, wherever a merge may have put a second copy.
         definitions = {(path.name, node.name if isinstance(node, ast.FunctionDef) else target.id)
                        for path in SOURCES for node in ast.parse(path.read_text()).body
@@ -242,6 +245,9 @@ class OptInTests(unittest.TestCase):
             ("closer.py", "raw = safefs.read_regular(fd, config.AUTO_CLOSE_FILE, 64)"),
             ("closer.py", "from fleet.config import AUTO_CLOSE_FILE"),
             ("map.py", 'path = f"{root}/auto-close"'),
+            ("worktree.py", 'x = "worktree-cleanup"'),
+            ("worktree.py", "raw = safefs.read_regular(fd, config.WORKTREE_CLEANUP_FILE, 64)"),
+            ("map.py", "from fleet.config import WORKTREE_CLEANUP_FILE"),
         ):
             with self.subTest(snippet=snippet):
                 self.assertNotEqual(opt_in_problems(name.rsplit("/", 1)[-1], snippet), [])
@@ -253,6 +259,8 @@ class OptInTests(unittest.TestCase):
             ("followup.py", 'STOP = "pr-followup is off"'),
             ("closer.py", "return common.opt_in_on(config.AUTO_CLOSE_FILE)"),
             ("closer.py", 'raise FleetError("auto-close is off; close it by hand")'),
+            ("worktree.py", "return common.opt_in_on(config.WORKTREE_CLEANUP_FILE)"),
+            ("worktree.py", 'KIND = "worktree-cleanup:kept"'),
             ("common.py", "def opt_in_on(name):\n    return safefs.read_regular(fd, name, 64)"),
             ("common.py", 'def other():\n    return safefs.read_regular(fd, "fixed", 64)'),
         ):

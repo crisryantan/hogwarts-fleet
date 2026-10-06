@@ -34,7 +34,18 @@ starts the desk's run if Ryan has enabled the desk.
                             and hand that lock to the run they start, which holds it until its process ends, so no
                             review starts while the desk may still be writing (see run_desk.task_lock). fleet
                             worktree starts the first run the same way.
-  fleet worktree-remove <task-id>   removes a closed task's worktree. It never deletes the branch.
+  fleet worktree-remove <task-id>   removes a closed task's worktree, under the task's review lock. It never deletes
+                                    the branch, and it finishes a removal a kill cut short.
+
+Closed tasks' worktrees also go by themselves, through remove_closed, the same path and checks as the command. The
+closer removes the worktree of a build it closes on proof, in the same pass, under auto-close's switch. With the
+worktree-cleanup switch on, each Map round (sweep_closed) removes the worktree of every build task closed by any path at
+least config.WORKTREE_CLEANUP_AFTER_SECONDS ago. Either one removes a worktree only while git lists it, its folder is a
+plain folder of yours in the castle worktrees folder, it has no uncommitted changes, and its HEAD is somewhere a removal
+cannot lose: the commit the close proved, or a commit on the base or the branch on origin after a fetch. Anything it
+cannot read keeps the worktree, and you hear once. Only git worktree remove runs, without --force: no branch is
+deleted, and git worktree prune never runs. Marker files next to the office records make a removal a kill cut short
+finish on a later round, or tell you once when it cannot.
 
 castle task start goes through start_task for a build desk's task, which makes the same TASK.md check, so it is
 no way round it. Every other desk's task starts as the store allows.
@@ -45,12 +56,15 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import json
 import os
 import re
+import secrets
+import time
 from typing import Iterator, Optional
 
 from hogwarts import db, ids, owlery, pensieve
-from hogwarts.errors import NotFoundError
+from hogwarts.errors import NotFoundError, StoreError
 
 from fleet import common, config, gitops, run_desk, safefs, toolchain, verify
 from fleet.safefs import FleetError
@@ -458,16 +472,372 @@ def remove_merged(build_record: dict, name: str) -> dict:
     return {"name": name, "removed": removed}
 
 
-def remove(conn, task_id: str) -> dict:
-    """Remove a closed task's worktree. Git refuses if it has uncommitted changes. The branch stays."""
+# Removing a closed task's worktree
+
+
+MARKER_MAX_BYTES = 4096
+MARKER = re.compile(r"(tk_[0-9a-f]{16})\.(removing|removed|unreported)")
+# Who started a removal: the closer (auto-close's switch), the sweep (the worktree-cleanup switch), you with fleet
+# worktree-remove, or nobody, for a worktree that was already gone.
+REMOVED_BY = ("closer", "sweep", "hand", "gone")
+# One Map round's batch of removals: its time and a random tag, so two rounds never share one.
+BATCH = re.compile(r"[0-9]{1,12}-[0-9a-f]{8}")
+KEPT_KIND, REMOVED_KIND = "worktree.kept", "worktree.removed"
+IDS_SHOWN = 6
+
+
+class Kept(FleetError):
+    """A closed task's worktree left where it is, and why: whoever removes it automatically tells you once."""
+
+
+def cleanup_on() -> bool:
+    """Whether you switched the worktree cleanup on: the office file config.WORKTREE_CLEANUP_FILE holds exactly "on"."""
+    return common.opt_in_on(config.WORKTREE_CLEANUP_FILE)
+
+
+def _marker(task_id: str, kind: str) -> str:
+    return f"{ids.check('task', task_id)}.{kind}"
+
+
+def read_marker(task_id: str, kind: str) -> Optional[dict]:
+    """A removal marker in the office worktrees folder, or None when there is none. One that cannot be read whole
+    raises, so no failed read is ever taken for no marker."""
+    try:
+        with safefs.opened_dir(config.OFFICE_ROOT, gitops.RECORD_DIR) as fd:
+            raw = safefs.read_regular(fd, _marker(task_id, kind), MARKER_MAX_BYTES, "worktree removal marker")
+    except safefs.Missing:
+        return None
+    try:
+        data = common.strict_json(raw)
+    except (UnicodeDecodeError, ValueError):
+        raise FleetError("a worktree removal marker is not strict JSON") from None
+    if not isinstance(data, dict) or data.get("task_id") != task_id or data.get("by") not in REMOVED_BY \
+            or (kind == "removing" and (not isinstance(data.get("head"), str) or not gitops.SHA.fullmatch(data["head"]))):
+        raise FleetError("a worktree removal marker is malformed")
+    if kind == "unreported" and data.get("batch") is not None and not (isinstance(data["batch"], str)
+                                                                         and BATCH.fullmatch(data["batch"])):
+        raise FleetError("a worktree removal marker is malformed")
+    return data
+
+
+def _write_marker(task_id: str, kind: str, data: dict) -> None:
+    raw = (json.dumps({"task_id": task_id, **data}, ensure_ascii=True, sort_keys=True) + "\n").encode("ascii")
+    with safefs.opened_dir(config.OFFICE_ROOT, gitops.RECORD_DIR, create=True) as fd:
+        safefs.write_new(fd, _marker(task_id, kind), raw)
+
+
+def _drop_marker(task_id: str, kind: str) -> None:
+    with contextlib.suppress(FileNotFoundError, safefs.Missing), \
+            safefs.opened_dir(config.OFFICE_ROOT, gitops.RECORD_DIR) as fd:
+        os.unlink(_marker(task_id, kind), dir_fd=fd)
+
+
+def markers(kind: str) -> list:
+    """The task ids with a removal marker of this kind, sorted. A folder that cannot be listed raises."""
+    try:
+        with safefs.opened_dir(config.OFFICE_ROOT, gitops.RECORD_DIR) as fd:
+            names = os.listdir(fd)
+    except safefs.Missing:
+        return []
+    return sorted(match.group(1) for match in map(MARKER.fullmatch, names)
+                  if match is not None and match.group(2) == kind)
+
+
+def _listed(record: dict) -> bool:
+    """Whether git lists the worktree for its repo. A read git fails raises, never "not listed"."""
+    path = record["path"]
+    return bool({path, os.path.realpath(path)} & set(gitops.worktree_paths(record["common_dir"])))
+
+
+def _present(record: dict) -> bool:
+    """Whether the worktree folder is there, as a plain folder of yours in the castle worktrees folder, with no link
+    on the way. A folder that is there in any other shape keeps the worktree."""
+    try:
+        with safefs.opened_dir(config.CASTLE_ROOT, "worktrees", record["name"]):
+            return True
+    except safefs.Missing:
+        return False
+    except safefs.Unsafe:
+        raise Kept("its folder is not a plain folder of yours in the worktrees folder") from None
+
+
+def _check_head(record: dict, head_ok, resumed: Optional[str] = None) -> str:
+    """The worktree's HEAD once nothing in it would be lost: no uncommitted changes, and HEAD passes head_ok (None
+    skips it, for your own command), or is the HEAD a removal a kill cut short had checked already. Kept otherwise."""
+    if gitops.dirty(record):
+        cut = " (a removal was cut short part way: finish it with git worktree remove --force once nothing in it is" \
+              " yours)" if resumed is not None else ""
+        raise Kept("uncommitted changes" + cut)
+    head = gitops.rev(record)
+    if head_ok is None or head == resumed:
+        return head
+    found = head_ok(record, head)
+    if found is None:
+        raise Kept("its commits could not be confirmed on origin (a fetch or a read failed, or its branch is gone"
+                   " from origin)")
+    if not found:
+        raise Kept("its HEAD has commits that are neither pushed nor merged")
+    return head
+
+
+def why_kept(record: dict, head_ok) -> Optional[str]:
+    """Why remove_closed would keep this worktree now, or None when it would remove it: the closer asks before its
+    close, so the close event can name a worktree it keeps."""
+    try:
+        if not _listed(record):
+            return "git does not list it as a worktree"
+        if not _present(record):
+            return "git lists it but its folder is gone"
+        _check_head(record, head_ok)
+    except (FleetError, OSError) as exc:
+        return str(exc) if isinstance(exc, Kept) else f"it could not be read ({common.scrubbed_line(exc, 160)})"
+    return None
+
+
+def _finished(record: dict, by: str) -> None:
+    """A removal done: an unreported marker first for the sweep's batched row, then the removed marker, then the
+    removing marker goes, so a kill at any point leaves a marker that a later round finishes from."""
+    task_id = record["task_id"]
+    if by == "sweep":
+        _write_marker(task_id, "unreported", {"by": by, "path": record["path"], "batch": None})
+    _write_marker(task_id, "removed", {"by": by, "path": record["path"]})
+    _drop_marker(task_id, "removing")
+
+
+def _relink(record: dict) -> None:
+    with contextlib.suppress(FleetError, OSError):
+        toolchain.link_deps(record, [name for name in record.get("links") or []
+                                     if not os.path.lexists(f"{record['path']}/{name}")])
+
+
+def remove_closed(conn, task_id: str, by: str, head_ok=None) -> dict:
+    """Remove a closed task's worktree, the one path every removal takes. The caller holds the task's review lock,
+    which every run and review of the task holds too, so a worktree in use is never removed.
+
+    The task must be closed, its record its own, its stored worktree in the castle worktrees folder. A worktree git
+    lists, whose folder is there, goes only with no uncommitted changes and a HEAD that passes head_ok(record, head):
+    True to remove, False or None (unknown) to keep. head_ok None is your own command, which keeps git's own rule. A
+    removing marker is written before anything changes, and git worktree remove runs without --force, so git checks
+    once more. A marker left by a kill finishes the removal on a later call: a folder git no longer lists is done, and
+    an entry git lists whose folder is gone is removed by git worktree remove for that path alone. Without such a
+    marker, either is left for you, and nothing is ever deleted by path. Kept, or a FleetError for a failed read, says
+    what stays. {task_id, removed, branch_kept, state}: removed, gone (it was gone already) or already."""
+    if by not in REMOVED_BY[:3]:
+        raise FleetError("a worktree removal must say who started it")
     task = pensieve.get_task(conn, ids.check("task", task_id))
     if task["status"] != "closed":
         raise FleetError("only a closed task's worktree can be removed")
     record = gitops.find_record(castle_path(task["worktree"]))
     if record is None:
         raise FleetError("this task has no worktree record")
-    if gitops.dirty(record):
-        raise FleetError("the worktree has uncommitted changes; git would refuse to remove it")
+    if record["name"] != task["id"] or record["task_id"] != task["id"]:
+        raise FleetError("this task's worktree record is not the task's own worktree")
+    path, common_dir = record["path"], record["common_dir"]
+    result = {"task_id": task["id"], "removed": path, "branch_kept": record["branch"]}
+    if read_marker(task["id"], "removed") is not None:
+        return {**result, "state": "already"}
+    removing = read_marker(task["id"], "removing")
+    listed, present = _listed(record), _present(record)
+    if not listed:
+        if present:
+            raise Kept("its folder is not a worktree git lists, so it was left for you")
+        _finished(record, removing["by"] if removing else "gone")
+        return {**result, "state": "removed" if removing else "gone"}
+    if not present:
+        if removing is None:
+            raise Kept("git lists it but its folder is gone; nothing removes that entry but you")
+        gitops.git(["worktree", "remove", path], common_dir)  # the folder is gone: git drops only this path's entry
+        if _listed(record):
+            raise Kept("git still lists it after its removal was finished")
+        _finished(record, removing["by"])
+        return {**result, "state": "removed"}
+    head = _check_head(record, head_ok, resumed=None if removing is None else removing["head"])
+    started_by = by if removing is None else removing["by"]
+    if removing is None:
+        _write_marker(task["id"], "removing", {"by": by, "path": path, "head": head})
     toolchain.unlink_deps(record)
-    gitops.git(["worktree", "remove", record["path"]], record["common_dir"])
-    return {"task_id": task["id"], "removed": record["path"], "branch_kept": record["branch"]}
+    try:
+        gitops.git(["worktree", "remove", path], common_dir)
+    except FleetError as exc:
+        # git refuses before it removes anything: a worktree it left whole gets its links back and no marker.
+        try:
+            whole = _listed(record) and _present(record) and not gitops.dirty(record)
+        except (FleetError, OSError):
+            whole = False
+        if whole:
+            _relink(record)
+            _drop_marker(task["id"], "removing")
+            raise Kept(f"git would not remove it ({common.scrubbed_line(exc, 160)})") from None
+        raise Kept(f"its removal stopped part way ({common.scrubbed_line(exc, 160)}); finish it with git worktree"
+                   " remove --force once nothing in it is yours") from None
+    if _listed(record) or _present(record):
+        raise Kept("git said it removed the worktree, but it is still there")
+    _finished(record, started_by)
+    return {**result, "state": "removed"}
+
+
+def remove(conn, task_id: str) -> dict:
+    """fleet worktree-remove: remove a closed task's worktree, under its review lock. Git refuses if it has
+    uncommitted changes. The branch stays. A removal a kill cut short is finished."""
+    task_id = ids.check("task", task_id)
+    try:
+        with run_desk.task_lock(task_id):
+            done = remove_closed(conn, task_id, "hand")
+    except safefs.Busy:
+        raise FleetError("a run or review of this task holds its lock; run it again once it has ended") from None
+    if done["state"] == "already":
+        raise FleetError("this task's worktree was removed already")
+    return {"task_id": done["task_id"], "removed": done["removed"], "branch_kept": done["branch_kept"],
+            "state": done["state"]}
+
+
+def kept_summary(task_id: str, path: str, why: object) -> str:
+    return common.scrubbed_line(f"kept worktree {path} of closed task {task_id}: {why}. Its branch is untouched;"
+                                f" once nothing in it is needed, fleet worktree-remove {task_id} removes it", 480)
+
+
+def tell_kept(conn, task: dict, path: str, why: object, now: Optional[int] = None) -> None:
+    """One headmaster event per worktree, whatever kept it and however often."""
+    pensieve.add_event(conn, task["desk"], KEPT_KIND, "headmaster", kept_summary(task["id"], path, why),
+                       task_id=task["id"], dedupe_key=f"worktree:kept:{task['id']}", now=now)
+
+
+def _on_origin(fetched: dict):
+    """head_ok for the sweep: HEAD is on the base or the task's branch on origin, each fetched once per round."""
+    def check(record: dict, head: str) -> Optional[bool]:
+        branches = []
+        base_ref = record.get("base_ref")
+        if isinstance(base_ref, str) and base_ref.startswith("origin/"):
+            branches.append(base_ref[len("origin/"):])
+        if record.get("branch"):
+            branches.append(record["branch"])
+        unknown = not branches
+        for branch in branches:
+            key = (record["common_dir"], branch)
+            if key not in fetched:
+                try:
+                    fetched[key] = gitops.fetch_branch(record["common_dir"], branch)
+                except (FleetError, OSError):
+                    fetched[key] = None
+            if fetched[key] is None:
+                unknown = True
+                continue
+            held = gitops.is_ancestor(record["common_dir"], head, fetched[key])
+            if held:
+                return True
+            unknown = unknown or held is None
+        return None if unknown else False
+    return check
+
+
+def _stored_path(task: dict) -> str:
+    try:
+        return castle_path(task["worktree"]) or "-"
+    except FleetError:
+        return "-"
+
+
+def _sweep_one(conn, task: dict, by: str, fetched: dict, counts: dict, now: Optional[int]) -> None:
+    try:
+        with run_desk.task_lock(task["id"]):
+            done = remove_closed(conn, task["id"], by, _on_origin(fetched))
+    except safefs.Busy:
+        counts["busy"] += 1  # a run or review holds the task: a later round looks again
+        return
+    except (FleetError, OSError, StoreError) as exc:
+        counts["kept"] += 1
+        tell_kept(conn, task, _stored_path(task), exc if isinstance(exc, Kept) else
+                  f"it could not be read ({common.scrubbed_line(exc, 160)})", now)
+        return
+    if done["state"] == "removed":
+        counts["removed"] += 1
+
+
+def _switch_for(by: str) -> bool:
+    if by == "sweep":
+        return cleanup_on()
+    if by == "closer":
+        return common.opt_in_on(config.AUTO_CLOSE_FILE)
+    return False
+
+
+def _count(number: int, word: str) -> str:
+    return f"{number} {word}" + ("" if number == 1 else "s")
+
+
+def _report(conn, now: Optional[int]) -> int:
+    """One routine row per round for the sweep's removals: each unreported marker joins this round's batch, each
+    batch is one event keyed by its round, then the markers go. A kill before the event leaves the batch for the next
+    round, and a kill after it finds the event there already, so no removal is left out or told twice."""
+    batches: dict = {}
+    this_round = f"{common.now_stamp(now)}-{secrets.token_hex(4)}"
+    for task_id in markers("unreported"):
+        marker = read_marker(task_id, "unreported")
+        if marker is None:
+            continue
+        if marker.get("batch") is None:
+            marker = {**marker, "batch": this_round}
+            _write_marker(task_id, "unreported", {key: value for key, value in marker.items() if key != "task_id"})
+        batches.setdefault(marker["batch"], []).append(task_id)
+    for batch, task_ids in sorted(batches.items()):
+        shown = task_ids[:IDS_SHOWN]
+        more = f" and {len(task_ids) - len(shown)} more" if len(task_ids) > len(shown) else ""
+        pensieve.add_event(conn, config.PATROL_SENDER, REMOVED_KIND, "routine",
+                           f"removed {_count(len(task_ids), 'worktree')} of closed tasks: {', '.join(shown)}{more};"
+                           " their branches are kept", dedupe_key=f"worktree:removed:{batch}", now=now)
+        for task_id in task_ids:
+            _drop_marker(task_id, "unreported")
+    return sum(len(task_ids) for task_ids in batches.values())
+
+
+def sweep_closed(conn, now: Optional[int] = None) -> dict:
+    """The Map round's worktree cleanup. Never raises. First it finishes each removal a kill cut short while the switch
+    that started it is still on, and tells you once of each it cannot. Then, while the worktree-cleanup switch is on
+    (read again before each removal), it removes the worktree of each build task closed at least
+    WORKTREE_CLEANUP_AFTER_SECONDS ago, through remove_closed under the task's review lock, with HEAD on origin's base
+    or branch after a fetch. Last, the round's removals are one routine row. {state, removed, kept, busy, reported}."""
+    counts = {"state": "on" if cleanup_on() else "off", "removed": 0, "kept": 0, "busy": 0, "reported": 0}
+    try:
+        fetched: dict = {}
+        for task_id in markers("removing"):
+            try:
+                task = pensieve.get_task(conn, task_id)
+            except NotFoundError:
+                continue  # a marker no task of the store owns: nothing here removes anything for it
+            try:
+                marker = read_marker(task_id, "removing")
+            except (FleetError, OSError) as exc:
+                counts["kept"] += 1
+                tell_kept(conn, task, _stored_path(task), f"its removal marker could not be read ({exc})", now)
+                continue
+            if marker is None:
+                continue  # finished since it was listed
+            if not _switch_for(marker["by"]):
+                counts["kept"] += 1
+                why = (f"its removal was cut short; fleet worktree-remove {task_id} finishes it" if marker["by"] == "hand"
+                       else "its removal was cut short and the switch that started it is off now")
+                tell_kept(conn, task, _stored_path(task), why, now)
+                continue
+            _sweep_one(conn, task, marker["by"], fetched, counts, now)
+        if counts["state"] == "on":
+            cutoff = common.now_stamp(now) - config.WORKTREE_CLEANUP_AFTER_SECONDS
+            pending = set(markers("removing"))
+            done = set(markers("removed"))
+            for task in pensieve.list_tasks(conn, status="closed"):
+                if task["status"] != "closed" or task["desk"] not in config.WORKTREE_DESKS or not task["worktree"] \
+                        or not isinstance(task["closed_at"], int) or task["closed_at"] > cutoff \
+                        or task["id"] in done or task["id"] in pending:
+                    continue
+                if not cleanup_on():
+                    counts["state"] = "off"
+                    break
+                _sweep_one(conn, task, "sweep", fetched, counts, now)
+        counts["reported"] = _report(conn, now)
+        return counts
+    except Exception as exc:  # noqa: BLE001 - the Map's round must never fail on the cleanup
+        day = time.strftime("%Y-%m-%d", time.localtime(common.now_stamp(now)))
+        with contextlib.suppress(Exception):
+            pensieve.add_event(conn, config.PATROL_SENDER, "worktree.cleanup-failed", "headmaster",
+                               common.scrubbed_line(f"the worktree cleanup could not finish its round: {exc}", 480),
+                               dedupe_key=f"worktree:cleanup-failed:{day}", now=now)
+        return {**counts, "state": "failed"}

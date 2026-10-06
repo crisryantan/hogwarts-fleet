@@ -143,13 +143,14 @@ While the stop file `~/.hogwarts/state/ollivander-stop` exists, or an update is 
 
 ## Switch the automations on and off
 
-Four automations are off by default. Each has its own file in the office, and only you can write there:
+Five automations are off by default. Each has its own file in the office, and only you can write there:
 
 | File | While it holds `on` | It also needs |
 | --- | --- | --- |
 | `~/.hogwarts/auto-draft-pr` | After the review loop's own PASS, never one you ran by hand, the loop pushes exactly the reviewed commit and opens a draft PR with your `gh` login. Marking it ready, requesting reviews and merging stay yours | The review loop (onboarding stage 5.1) and `gh` signed in |
 | `~/.hogwarts/pr-followup` | Review comments from teammates with write access on a PR the loop opened go back to Harry. He fixes or answers each one, the other family reviews, and the loop pushes to the same branch and posts his replies. It never resolves a thread | Draft PRs on, the patrol out of shadow mode, Harry and Hermione enabled, `FOLLOWUP_IGNORED_LOGINS` filled and `gh` signed in as `GITHUB_ACCOUNT` |
-| `~/.hogwarts/auto-close` | Each Map round starts the closer. It closes a passed task once scripts prove exactly the reviewed commit merged, CI on the merge commit is green and every after-merge check passes, with one row for each close. It skips a task whose follow-up is still open | The Map's job loaded (stage 5.2), and the reviewer of the other family enabled to judge written after-merge checks |
+| `~/.hogwarts/auto-close` | Each Map round starts the closer. It closes a passed task once scripts prove exactly the reviewed commit merged, CI on the merge commit is green and every after-merge check passes, with one row for each close. It skips a task whose follow-up is still open. A build it closes loses its worktree in the same pass when nothing in it can be lost | The Map's job loaded (stage 5.2), and the reviewer of the other family enabled to judge written after-merge checks |
+| `~/.hogwarts/worktree-cleanup` | Each Map round removes the worktree of each build task closed at least three days ago, by any path, once it has no uncommitted changes and its HEAD is on the base or its branch on origin. It never deletes a branch, keeps anything it can't read and tells you once, and sends one row per round that removed anything | The Map's job loaded (stage 5.2) |
 | `~/.hogwarts/auto-portrait` | Dumbledore's weeknight job applies the fact and memory note additions in the patch his run wrote that night. Edits, retires and archive moves wait for you, and so does an addition the store refused | His nightly job loaded (stage 5.3) |
 
 Switch one on from your terminal, and off by removing the file:

@@ -133,9 +133,14 @@ PR_FOLLOWUP_FILE = "pr-followup"
 # round starts the closer, which closes a passed task once scripts prove its merge, CI on the merge commit and every
 # after-merge check. Written from the terminal: echo on > ~/.hogwarts/auto-close
 AUTO_CLOSE_FILE = "auto-close"
+# Worktree cleanup (worktree.sweep_closed), off by default. While this plain file in the office holds exactly "on",
+# each Map round removes the worktree of a build task closed for at least WORKTREE_CLEANUP_AFTER_SECONDS, by any path,
+# once git shows nothing in it would be lost. Written from the terminal: echo on > ~/.hogwarts/worktree-cleanup
+# Auto-close removes the worktree of a task it closes itself, under its own switch, whatever this one says.
+WORKTREE_CLEANUP_FILE = "worktree-cleanup"
 # Every office opt-in file. common.opt_in_on reads only these names, so a typo never reads another office file as a
 # switch, every switch is read through that one reader, and a name not listed here always reads off.
-OPT_IN_FILES = (AUTO_DRAFT_PR_FILE, AUTO_PORTRAIT_FILE, PR_FOLLOWUP_FILE, AUTO_CLOSE_FILE)
+OPT_IN_FILES = (AUTO_DRAFT_PR_FILE, AUTO_PORTRAIT_FILE, PR_FOLLOWUP_FILE, AUTO_CLOSE_FILE, WORKTREE_CLEANUP_FILE)
 # Review rounds of one follow-up, apart from the task's REVIEW_ROUND_CAP, and the follow-ups one task may take.
 FOLLOWUP_ROUND_CAP = 2
 FOLLOWUP_MAX_PER_TASK = 5
@@ -187,6 +192,8 @@ AUTO_CLOSE_WALK_MAX = 10_000
 AUTO_CLOSE_RECORD_MAX_BYTES = 8192
 # Try and clear markers per merge commit, hand runs included.
 AUTO_CLOSE_MARKER_MAX = 99
+# A build task's worktree is left this long after its task closed before the worktree cleanup looks at it.
+WORKTREE_CLEANUP_AFTER_SECONDS = 3 * 86400
 # A failed run whose error text matches one of these hit the vendor's own usage, rate, quota or credit
 # limit, not a fleet cap. Matched without case against Claude's result text when is_error is set, and
 # against the message that ended a failed Codex run (its last turn.failed, else its last error event).

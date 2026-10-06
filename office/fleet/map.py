@@ -40,6 +40,11 @@ its review lock (routing takes it without waiting and tries again next round), t
 open follow-up, the store refuses a proven close of one, and a follow-up opens only on a task still awaiting close.
 So whichever commits first wins, and the other leaves the task alone.
 
+Worktree cleanup. Right after the closer's sweep, the round calls worktree.sweep_closed, which finishes a worktree
+removal a kill cut short and, while you have the worktree-cleanup switch on, removes the worktree of each build task
+closed long enough ago, once git shows nothing in it would be lost. Its removals are one routine row per round, and
+each round row says what it did under "worktrees".
+
 In shadow mode that is all. Once Ryan removes the shadow file, each for-me row is also a headmaster event,
 with a summary the script builds from the repo, the PR number and the kind of change.
 
@@ -58,7 +63,7 @@ if __name__ == "__main__" and "/Users/crisryantan/.hogwarts" not in sys.path:
 
 from hogwarts.errors import StoreError  # noqa: E402
 
-from fleet import closer, common, config, followup, morning, patrol, run_desk  # noqa: E402
+from fleet import closer, common, config, followup, morning, patrol, run_desk, worktree  # noqa: E402
 from fleet.safefs import FleetError  # noqa: E402
 
 SNAPSHOT = "snapshot.json"
@@ -328,8 +333,9 @@ def run_round(conn, now: Optional[int] = None) -> dict:
     """One Map round. Returns its round row plus what it woke and sent again."""
     ts = patrol.stamp(now)
     shadow = patrol.shadow_on()
-    # Before any GitHub read, so it runs on every path, whatever shadow mode says. It never raises.
+    # Before any GitHub read, so they run on every path, whatever shadow mode says. Neither ever raises.
     closing = closer.sweep(conn, now)
+    cleaned = worktree.sweep_closed(conn, now)
     try:
         login = patrol.account()
         seen = patrol.fetch_prs()
@@ -337,19 +343,20 @@ def run_round(conn, now: Optional[int] = None) -> dict:
         error = common.scrubbed_line(exc, 200)
         fu = _store_only(conn, ts, now)
         patrol.append_row("map", ROUNDS, {"ts": ts, "ok": False, "shadow": shadow, "error": error, "model": False,
-                                          "followups": fu, "closer": closing})
+                                          "followups": fu, "closer": closing, "worktrees": cleaned})
         patrol.tell_ryan(conn, shadow, "map-failed", f"the Map could not read GitHub: {error}",
                          f"patrol:map-failed:{patrol.local_day(now)}", now)
-        return {"ok": False, "error": error, "followups": fu, "closer": closing}
+        return {"ok": False, "error": error, "followups": fu, "closer": closing, "worktrees": cleaned}
     if not seen["complete"]:
         error = "GitHub's list of open PRs could not be read to its end, so the snapshot was left as it was"
         fu = _store_only(conn, ts, now)
         patrol.append_row("map", ROUNDS, {"ts": ts, "ok": False, "incomplete": True, "shadow": shadow, "error": error,
                                           "prs": len(seen["prs"]), "asked": len(seen["asked"]), "model": False,
-                                          "followups": fu, "closer": closing})
+                                          "followups": fu, "closer": closing, "worktrees": cleaned})
         patrol.tell_ryan(conn, shadow, "map-incomplete", f"the Map read only part of your PRs: {error}",
                          f"patrol:map-incomplete:{patrol.local_day(now)}", now)
-        return {"ok": False, "incomplete": True, "error": error, "followups": fu, "closer": closing}
+        return {"ok": False, "incomplete": True, "error": error, "followups": fu, "closer": closing,
+                "worktrees": cleaned}
     before = patrol.read_state("map", SNAPSHOT, None)
     baseline = not isinstance(before, dict) or before.get("account") != login or not isinstance(before.get("prs"), dict)
     rows = [] if baseline else changes(before, seen)
@@ -390,7 +397,8 @@ def run_round(conn, now: Optional[int] = None) -> dict:
         or bool(lineup and lineup.get("model")) or fu["model"]
     row = {"ts": ts, "ok": True, "shadow": shadow, "baseline": baseline, "prs": len(seen["prs"]),
            "asked": len(seen["asked"]), "refused": refused, "changes": len(rows), "for_me": len(for_me), "model": model,
-           "followups": {"live": fu["live"], "routed": fu["routed"], "errors": fu["errors"]}, "closer": closing}
+           "followups": {"live": fu["live"], "routed": fu["routed"], "errors": fu["errors"]}, "closer": closing,
+           "worktrees": cleaned}
     if lineup is not None:
         row["lineup"] = "written" if lineup.get("ok") else "failed"
     patrol.append_row("map", ROUNDS, row)

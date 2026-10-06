@@ -295,14 +295,15 @@ class SwitchTests(FollowupCase):
         for value in (True, False):
             with self.subTest(value=value), mock.patch.object(common, "opt_in_on", return_value=value) as reader:
                 self.assertEqual((followup.switched_on(), push.auto_draft_pr_on(), portrait_auto.auto_portrait_on(),
-                                  closer.auto_close_on()), (value, value, value, value))
+                                  closer.auto_close_on(), worktree.cleanup_on()), (value,) * 5)
                 self.assertEqual([call.args[0] for call in reader.call_args_list],
                                  [config.PR_FOLLOWUP_FILE, config.AUTO_DRAFT_PR_FILE, config.AUTO_PORTRAIT_FILE,
-                                  config.AUTO_CLOSE_FILE])
+                                  config.AUTO_CLOSE_FILE, config.WORKTREE_CLEANUP_FILE])
         self.write_file(self.office / "other-switch", "on\n")
         self.assertFalse(common.opt_in_on("other-switch"))
         self.assertEqual(config.OPT_IN_FILES, (config.AUTO_DRAFT_PR_FILE, config.AUTO_PORTRAIT_FILE,
-                                               config.PR_FOLLOWUP_FILE, config.AUTO_CLOSE_FILE))
+                                               config.PR_FOLLOWUP_FILE, config.AUTO_CLOSE_FILE,
+                                               config.WORKTREE_CLEANUP_FILE))
 
     def test_opt_in_off_routes_nothing_and_writes_nothing(self):
         self.switch_off()

@@ -60,7 +60,10 @@ close_one, for one task, under the task's review lock (the judge's process inher
    An output that cannot be read whole keeps the run too, so neither is ever followed by another judge run.
    A changed pack voids it.
 5. The close, through pensieve.close_proven alone: the task, and McGonagall's go task when nothing else is open under
-   it, in one transaction with one headmaster event naming what proved each check.
+   it, in one transaction with one headmaster event naming what proved each check. Then, still under the task's review
+   lock, a build's own worktree goes through worktree.remove_closed, the path fleet worktree-remove takes, when it has
+   no uncommitted changes and its HEAD is the commit the close proved or one on the base this attempt fetched. One it
+   keeps is named in the close event ("Kept worktree <path>: uncommitted changes"), and the branch always stays.
 
 Wait means change nothing and try again next round; a wait that can last tells you once after
 AUTO_CLOSE_STALL_SECONDS. Unknown means a read failed or was partial: try again, and tell you once after
@@ -70,8 +73,8 @@ event is the stop's durable word: a pass that finds it, since the last fleet clo
 the record right and goes no further. A red check or a PR merged at an unreviewed head stops it at once, whatever
 else GitHub's answer left unread.
 
-The closer reads GitHub only through the patrol's guard, writes nothing to GitHub, starts no process itself, and takes
-back only worktrees it made, through git.
+The closer reads GitHub only through the patrol's guard, writes nothing to GitHub, starts no process itself, and removes
+only the worktrees it made and the worktree of a build it closed itself, through git.
 """
 from __future__ import annotations
 
@@ -1338,7 +1341,7 @@ def _close_evidence(a: Attempt, parent_note: str) -> str:
     return "\n".join(lines) + "\n"
 
 
-def _summary(a: Attempt, parent_note: str) -> str:
+def _summary(a: Attempt, parent_note: str, worktree_note: Optional[str] = None) -> str:
     landed = a.landed
     if landed["how"] == "pr":
         how = f"PR #{landed['pr']} merged {a.pass_sha[:12]} into {landed['base']} as {a.merge_sha[:12]}"
@@ -1350,9 +1353,11 @@ def _summary(a: Attempt, parent_note: str) -> str:
                 if a.commands else "no after-merge commands")
     written = (f"written checks {_ids_text([check['id'] for check in a.written])} passed by {a.judge}" if a.written
                else "no written checks")
+    # The worktree note and the evidence pointer are never cut: the rest is cut to fit beside them.
+    tail = (f" {worktree_note}." if worktree_note else "") + \
+        f" Evidence: close-evidence-{a.merge_sha[:12]} in the office reviews folder"
     return common.one_line(f"task {a.task_id} closed as complete by auto-close: {how}; {ci}; {commands}; {written};"
-                           f" {parent_note}. Evidence: close-evidence-{a.merge_sha[:12]} in the office reviews folder",
-                           SUMMARY_MAX)
+                           f" {parent_note}.", SUMMARY_MAX - len(tail)) + common.one_line(tail, SUMMARY_MAX)
 
 
 def _close(a: Attempt) -> dict:
@@ -1379,6 +1384,7 @@ def _close(a: Attempt) -> dict:
             parent, parent_note = a.found["parent"], f"its go task {a.found['parent']} closed with it"
     else:
         parent_note = "it has no go task"
+    plan = _worktree_plan(a)
     text = _close_evidence(a, parent_note)
     name = f"close-evidence-{a.merge_sha}.md"
     with _reviews(a.task_id, create=True) as fd:
@@ -1392,8 +1398,8 @@ def _close(a: Attempt) -> dict:
     if not auto_close_on():  # read once more, right before the store close
         raise Off()
     try:
-        closed = pensieve.close_proven(a.conn, a.task_id, proof, _summary(a, parent_note), f"close:proven:{a.task_id}",
-                                       parent_task_id=parent, now=a.now_arg)
+        closed = pensieve.close_proven(a.conn, a.task_id, proof, _summary(a, parent_note, plan and plan["note"]),
+                                       f"close:proven:{a.task_id}", parent_task_id=parent, now=a.now_arg)
     except StoreError as exc:
         try:
             closed_meanwhile = pensieve.get_task(a.conn, a.task_id)["status"] == "closed"
@@ -1411,8 +1417,45 @@ def _close(a: Attempt) -> dict:
     a.record.update(state="closed", unknown=None, waiting=None)
     a.save()
     cleaned = housekeep(a.conn, a.now_arg, only=a.task_id, locked=a.task_id)
-    return {"task_id": a.task_id, "outcome": "closed", "merge_sha": a.merge_sha,
-            "parent": None if closed["parent"] is None else closed["parent"]["id"], "housekeeping": cleaned}
+    result = {"task_id": a.task_id, "outcome": "closed", "merge_sha": a.merge_sha,
+              "parent": None if closed["parent"] is None else closed["parent"]["id"], "housekeeping": cleaned}
+    if plan is not None:
+        result["worktree"] = _remove_worktree(a, plan)
+    return result
+
+
+def _worktree_plan(a: Attempt) -> Optional[dict]:
+    """For a build, before its close: whether its own worktree goes after the close, and the close event's note. It
+    goes only with no uncommitted changes and a HEAD that is the commit the close proved, or one on the base this
+    attempt fetched (worktree.why_kept). Your own sessions' tasks keep theirs."""
+    if a.found["kind"] != "build":
+        return None
+    tip = a.landed["tip"]
+
+    def head_ok(record: dict, head: str) -> Optional[bool]:
+        return True if head == a.pass_sha else gitops.is_ancestor(record["common_dir"], head, tip)
+
+    why = worktree.why_kept(a.build_record, head_ok)
+    note = ("Its clean worktree is removed and its branch kept" if why is None
+            else f"Kept worktree {a.build_record['path']}: {why}")
+    return {"head_ok": head_ok, "why": why, "note": note}
+
+
+def _remove_worktree(a: Attempt, plan: dict) -> dict:
+    """After the close, under the task's review lock, which this attempt holds: the build's worktree goes through
+    worktree.remove_closed, which checks everything again. One the close event named as kept stays; one that fails
+    those checks now stays too, and you hear once."""
+    path = a.build_record["path"]
+    if plan["why"] is not None:
+        return {"kept": path, "why": plan["why"]}
+    try:
+        worktree.remove_closed(a.conn, a.task_id, "closer", plan["head_ok"])
+    except (FleetError, StoreError, OSError) as exc:
+        why = exc if isinstance(exc, worktree.Kept) else f"it could not be read ({common.scrubbed_line(exc, 160)})"
+        with contextlib.suppress(FleetError, StoreError):
+            worktree.tell_kept(a.conn, a.task, path, why, a.now_arg)
+        return {"kept": path, "why": common.scrubbed_line(why, 200)}
+    return {"removed": path}
 
 
 # How an attempt ends
