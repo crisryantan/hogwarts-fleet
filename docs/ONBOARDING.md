@@ -330,8 +330,8 @@ Prove the cheap jobs are right before they can interrupt you.
 **Follow-ups (optional).** Once draft PRs are on, a teammate's review comment on a PR the loop opened can go back to Harry by itself, and the loop pushes his reviewed fix to the same PR and posts his one-line replies in your name.
 
 - Fill `FOLLOWUP_IGNORED_LOGINS` in `~/.hogwarts/fleet/config.py` with your org's CI and service accounts that GitHub lists as people, and check `gh auth status` shows the account in `GITHUB_ACCOUNT`. Replies only ever go out as that account.
-- Switch follow-ups on while the patrol is still in shadow mode, with `echo on > ~/.hogwarts/pr-followup`, and read `~/.hogwarts/patrol/followup/` for a few days: each file lists what a round would have sent Harry, with no comment text.
-- Then take the patrol out of shadow mode. Switch follow-ups off any time with `rm ~/.hogwarts/pr-followup`: routing stops at once, and so does the next push or reply. An open follow-up is still tidied up by the next Map round.
+- Switch follow-ups on while the patrol is still in shadow mode, with `echo on > ~/.hogwarts/pr-followup`, and read `~/.hogwarts/patrol/followup/` for a few days: each file lists what a round would have sent Harry, with no comment text. It counts comments from the last seven days as if follow-ups had been live then (`FOLLOWUP_SHADOW_WINDOW_SECONDS`), so it works from your very first round.
+- Then take the patrol out of shadow mode. Only comments written from then on are routed; the ones the dry run counted are not. Switch follow-ups off any time with `rm ~/.hogwarts/pr-followup`: routing stops at once, and so does the next push or reply. An open follow-up is still tidied up by the next Map round, even one that cannot read GitHub.
 
 ### 5.3 Dumbledore's nightly review
 

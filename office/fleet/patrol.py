@@ -371,7 +371,8 @@ def run_gh(argv: list) -> bytes:
         raise FleetError(f"gh is not at {config.GH_BIN}; set GH_BIN in fleet/config.py") from None
     if done.returncode != 0:
         last = [line for line in done.stderr.decode("utf-8", "replace").splitlines() if line.strip()]
-        raise FleetError("gh failed: " + common.one_line(last[-1] if last else f"exit {done.returncode}", 200))
+        # Scrubbed whole before it is cut, so a cut never leaves part of a credential gh printed in a row or an event.
+        raise FleetError("gh failed: " + common.scrubbed_line(last[-1] if last else f"exit {done.returncode}", 200))
     if len(done.stdout) > config.GH_OUTPUT_MAX_BYTES:
         raise FleetError("gh returned more than the patrol reads")
     return done.stdout

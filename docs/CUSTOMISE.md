@@ -204,6 +204,7 @@ All in `~/.hogwarts/fleet/config.py`:
 | `FOLLOWUP_SETTLE_SECONDS` | How old a PR's newest teammate comment must be before its follow-up starts, 300, so one review's comments go as one follow-up |
 | `FOLLOWUP_WRITE_ASSOCIATIONS` | Whose comments a follow-up takes, by GitHub's authorAssociation: OWNER, MEMBER and COLLABORATOR |
 | `FOLLOWUP_IGNORED_LOGINS` | Service and CI accounts that GitHub lists as people; their comments are never routed. Empty in the kit: fill it before you switch follow-ups on. Compared without letter case |
+| `FOLLOWUP_SHADOW_WINDOW_SECONDS` | How far back the shadow-mode dry run in `patrol/followup/` counts comments as if follow-ups had been live, seven days. It never opens a live period, so nothing it counts is ever routed |
 | `RUN_SLOTS` | How many runs a desk may have going at once: Moody 2, Hermione 2 and every other desk 1, so two reviews of different tasks run at once. Each slot has its own lock, Codex work folder and temp folder, and the caps stay per desk across all of them. Raise it only for a desk whose runs never write the same file, at most 8 |
 | `RUN_TIMEOUT_SECONDS` | How long one run may take |
 | `TEMPUS_THRESHOLD` | Context size that triggers the Tempus warning |

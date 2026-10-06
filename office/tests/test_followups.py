@@ -23,10 +23,11 @@ class Killed(BaseException):
     """The process ends here: nothing after it runs, and no except Exception sees it."""
 
 
-def comment_item(label: str = "T1", comment_id: str = "11", kind: str = "comment", quote=None) -> dict:
+def comment_item(label: str = "T1", comment_id: str = "11", kind: str = "comment", quote=None,
+                 number: int = PR) -> dict:
     fragment = {"thread": "#discussion_r", "review": "#pullrequestreview-", "comment": "#issuecomment-"}[kind]
     return {"label": label, "kind": kind, "thread_id": "PRRT_a1" if kind == "thread" else None, "reply_to": comment_id,
-            "url": f"{URL}{fragment}{comment_id}", "quote": quote}
+            "url": f"https://github.com/{REPO}/pull/{number}{fragment}{comment_id}", "quote": quote}
 
 
 class FollowupStoreCase(StoreCase):
@@ -388,39 +389,83 @@ class ReplyLedgerTests(FollowupStoreCase):
             self.raw("INSERT INTO pr_replies(followup_id, label, mark, body, state) VALUES (?, 'T1', 'FIXED', 'x',"
                      " 'planned')", (row["id"],))
 
-    def test_a_reply_moves_planned_posting_then_posted_failed_or_unknown_and_never_back(self):
-        self.passed()
-        row = self.open_followup(item_rows=[comment_item(), comment_item("T2", "12"), comment_item("T3", "13")])
+    def posting(self, labels=("T1",), task_id: str = None, number: int = PR, sha: str = SHA) -> dict:
+        """A follow-up of a passed task whose replies are planned and which is posting them."""
+        task_id = self.passed(task_id, number=number, sha=sha)
+        items = [comment_item(label, str(100 * number + index), number=number) for index, label in enumerate(labels, 1)]
+        row = self.open_followup(task_id, item_rows=items, base_sha=sha)
         followups.advance(self.conn, row["id"], "starting", now=NOW)
         followups.advance(self.conn, row["id"], "building", now=NOW)
-        followups.plan_replies(self.conn, row["id"], SHA, self.replies(("T1", "T2", "T3")), False, now=NOW)
+        return followups.plan_replies(self.conn, row["id"], sha, self.replies(labels), False, now=NOW)
+
+    def reply_states(self, row: dict) -> dict:
+        return {reply["label"]: (reply["state"], reply["posted_id"])
+                for reply in followups.replies(self.conn, row["id"])}
+
+    def test_a_reply_moves_planned_posting_then_posted_failed_or_unknown_and_never_back(self):
+        row = self.posting(("T1", "T2"))
         with self.assertRaisesRegex(ConflictError, "being posted"):
             followups.end_reply(self.conn, row["id"], "T1", "posted", "501", now=NOW)
-        for label, ending, posted_id in (("T1", "posted", "501"), ("T2", "failed", None), ("T3", "unknown", None)):
-            followups.begin_reply(self.conn, row["id"], label, now=NOW)
-            followups.end_reply(self.conn, row["id"], label, ending, posted_id, now=NOW)
-        states = {reply["label"]: (reply["state"], reply["posted_id"]) for reply in followups.replies(self.conn, row["id"])}
-        self.assertEqual(states, {"T1": ("posted", "501"), "T2": ("failed", None), "T3": ("unknown", None)})
-        for label in ("T1", "T2", "T3"):
+        followups.begin_reply(self.conn, row["id"], "T1", now=NOW)
+        followups.end_reply(self.conn, row["id"], "T1", "posted", "501", now=NOW)
+        followups.begin_reply(self.conn, row["id"], "T2", now=NOW)
+        followups.stop(self.conn, row["id"], "refused", now=NOW, end_replies={"T2": ("failed", None)})
+        other = self.posting(task_id=self.build_task("another"), number=PR + 1, sha=SHA2)
+        followups.begin_reply(self.conn, other["id"], "T1", now=NOW)
+        followups.stop(self.conn, other["id"], "unclear", now=NOW, end_replies={"T1": ("unknown", None)})
+        self.assertEqual(self.reply_states(row), {"T1": ("posted", "501"), "T2": ("failed", None)})
+        self.assertEqual(self.reply_states(other), {"T1": ("unknown", None)})
+        for followup_id, label in ((row["id"], "T1"), (row["id"], "T2"), (other["id"], "T1")):
             for state in ("planned", "posting", "posted"):
                 with self.subTest(label=label, state=state), self.assertRaises(sqlite3.IntegrityError):
                     self.raw("UPDATE pr_replies SET state = ? WHERE followup_id = ? AND label = ?",
-                             (state, row["id"], label))
+                             (state, followup_id, label))
         with self.assertRaises(sqlite3.IntegrityError):
             self.raw("UPDATE pr_replies SET body = 'other' WHERE followup_id = ?", (row["id"],))
         self.assertEqual(followups.posted_ids(self.conn, self.task_id), {"501"})
 
-    def test_a_github_id_another_reply_holds_is_never_taken_again(self):
-        self.passed()
-        row = self.open_followup(item_rows=[comment_item(), comment_item("T2", "12")])
-        followups.advance(self.conn, row["id"], "starting", now=NOW)
-        followups.advance(self.conn, row["id"], "building", now=NOW)
-        followups.plan_replies(self.conn, row["id"], SHA, self.replies(("T1", "T2")), False, now=NOW)
-        for label in ("T1", "T2"):
-            followups.begin_reply(self.conn, row["id"], label, now=NOW)
+    def test_a_reply_ends_failed_or_unknown_only_in_the_transaction_that_stops_its_followup(self):
+        row = self.posting()
+        followups.begin_reply(self.conn, row["id"], "T1", now=NOW)
+        for ending in ("failed", "unknown"):
+            with self.subTest(ending=ending):
+                with self.assertRaisesRegex(ValidationError, "only as its follow-up stops"):
+                    followups.end_reply(self.conn, row["id"], "T1", ending, now=NOW)
+                with self.assertRaises(sqlite3.IntegrityError):
+                    self.raw("UPDATE pr_replies SET state = ?, ended_at = 1 WHERE followup_id = ?", (ending, row["id"]))
+        event = ("followup.stopped", "headmaster", "it stopped", f"followup:stopped:{row['id']}")
+        with mock.patch.object(pensieve, "add_event", side_effect=Killed("killed")), self.assertRaises(Killed):
+            followups.stop(self.conn, row["id"], "refused", now=NOW, event=event, end_replies={"T1": ("failed", None)})
+        self.assertEqual((followups.get(self.conn, row["id"])["state"], self.reply_states(row), self.count("events")),
+                         ("posting", {"T1": ("posting", None)}, 0))
+        followups.stop(self.conn, row["id"], "refused", now=NOW, event=event, end_replies={"T1": ("failed", None)})
+        self.assertEqual((followups.get(self.conn, row["id"])["state"], self.reply_states(row), self.count("events")),
+                         ("stopped", {"T1": ("failed", None)}, 1))
+
+    def test_no_reply_begins_while_one_begun_before_it_is_not_posted(self):
+        row = self.posting(("T1", "T2"))
+        followups.begin_reply(self.conn, row["id"], "T1", now=NOW)
+        with self.assertRaisesRegex(ConflictError, "every reply begun before it is posted"):
+            followups.begin_reply(self.conn, row["id"], "T2", now=NOW)
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.raw("UPDATE pr_replies SET state = 'posting', begun_at = 1 WHERE followup_id = ? AND label = 'T2'",
+                     (row["id"],))
         followups.end_reply(self.conn, row["id"], "T1", "posted", "501", now=NOW)
+        self.assertEqual(followups.begin_reply(self.conn, row["id"], "T2", now=NOW)["state"], "posting")
+
+    def test_a_github_id_another_reply_holds_is_never_taken_again(self):
+        row = self.posting(("T1", "T2", "T3"))
+        followups.begin_reply(self.conn, row["id"], "T1", now=NOW)
+        followups.end_reply(self.conn, row["id"], "T1", "posted", "501", now=NOW)
+        followups.begin_reply(self.conn, row["id"], "T2", now=NOW)
         with self.assertRaisesRegex(ConflictError, "another reply"):
             followups.end_reply(self.conn, row["id"], "T2", "posted", "501", now=NOW)
+        # Taken as the reason a follow-up stops, the same id is refused too, and the whole stop with it.
+        with self.assertRaisesRegex(ConflictError, "another reply"):
+            followups.stop(self.conn, row["id"], "another login", now=NOW, end_replies={"T2": ("posted", "501")},
+                           event=("followup.stopped", "headmaster", "x", f"followup:stopped:{row['id']}"))
+        self.assertEqual((followups.get(self.conn, row["id"])["state"], self.count("events")), ("posting", 0))
+        self.assertEqual(self.reply_states(row)["T2"], ("posting", None))
 
 
 class RoundGroupTests(FollowupStoreCase):
@@ -548,6 +593,9 @@ class FollowupSecurityTests(FollowupStoreCase):
             lambda bad: followups.advance(self.conn, bad, "pushing", now=NOW),
             lambda bad: followups.advance(self.conn, row["id"], bad, now=NOW),
             lambda bad: followups.stop(self.conn, bad, "x", now=NOW),
+            lambda bad: followups.stop(self.conn, row["id"], "x", now=NOW, end_replies={bad: ("failed", None)}),
+            lambda bad: followups.stop(self.conn, row["id"], "x", now=NOW, end_replies={"T1": ("posted", bad)}),
+            lambda bad: followups.stop(self.conn, row["id"], "x", now=NOW, end_replies={"T1": (bad, None)}),
             lambda bad: followups.begin_reply(self.conn, row["id"], bad, now=NOW),
             lambda bad: followups.end_reply(self.conn, row["id"], "T1", "posted", bad, now=NOW),
             lambda bad: followups.handled(self.conn, bad),

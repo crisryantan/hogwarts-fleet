@@ -72,9 +72,12 @@ class FollowupGitHub(FakeGitHub):
         self.pr_threads, self.pr_reviews, self.pr_comments = [], [], []
         self.more = {}
         self.fail = None
+        self.down = False
         self.followup_reads = 0
 
     def __call__(self, argv: list) -> bytes:
+        if self.down:  # offline, or gh no longer signed in: every read fails
+            raise FleetError("gh could not reach GitHub")
         query = argv[4][len("query="):]
         name = next(key for key, text in patrol.QUERIES.items() if text == query)
         if name != "followup":
@@ -154,9 +157,9 @@ class FollowupCase(AutoPushCase):
         self.land(kind, argv, self.next_id, json.loads(body.decode("ascii"))["body"])
         return 0, json.dumps(posted), ""
 
-    def land(self, kind: str, argv: list, comment_id: int, text: str, at: int = None) -> None:
+    def land(self, kind: str, argv: list, comment_id: int, text: str, at: int = None, login: str = ACCOUNT) -> None:
         """A comment that went out shows up on the fake PR, as GitHub would show it."""
-        node = gh_comment(comment_id, at or int(time.time()), login=ACCOUNT, association="OWNER", body=text,
+        node = gh_comment(comment_id, at or int(time.time()), login=login, association="OWNER", body=text,
                           kind="thread" if kind == "reply" else "comment")
         if kind == "reply":
             target = argv[4].split("/comments/")[1].split("/")[0]
@@ -334,6 +337,30 @@ class SwitchTests(FollowupCase):
         for secret in ("Rename it", TOKEN, EMAIL, "Please rename"):
             self.assertNotIn(secret, text)
         self.assertEqual(self.followup_owl_runs(), [])
+
+    def test_a_copy_kept_in_shadow_mode_from_the_start_still_writes_what_it_would_route(self):
+        self.shadow()
+        self.map_round(self.t0 + 50)  # the first round: a baseline
+        self.add_thread()
+        self.add_comment(701, at=self.t0 + 120)
+        self.add_comment(702, at=self.t0 - config.FOLLOWUP_SHADOW_WINDOW_SECONDS)  # before the PR opened: never
+        events = self.count_rows("events")
+        self.map_round(self.t0 + 120 + SETTLE + 10)
+        [name] = os.listdir(self.office / "patrol" / "followup")
+        text = (self.office / "patrol" / "followup" / name).read_text()
+        self.assertIn(f"| {PR_KEY} | {self.task['id']} | route | T1, T2 | 2 | - |", text)
+        self.assertIn("as if follow-ups had been live then", text)
+        # The window is simulated: no live period opened, nothing routed, recorded or told.
+        for table in ("followup_live", "pr_followups", "pr_comments"):
+            self.assertEqual(self.count_rows(table), 0, table)
+        self.assertEqual(self.count_rows("events"), events)
+        self.assertEqual(self.status(), "awaiting_close")
+        self.assertEqual(self.followup_owl_runs(), [])
+        # Going live routes only what is written while live: the comments the dry run counted stay unrouted.
+        os.unlink(self.office / "patrol" / "shadow")
+        self.map_round(self.t0 + 1000)
+        self.map_round(self.t0 + 1000 + SETTLE + 10)
+        self.assertIsNone(followups.open_for_task(self.conn, self.task["id"]))
 
     def test_a_switch_change_opens_and_closes_one_live_period(self):
         self.go_live_at(self.t0 + 10)
@@ -920,6 +947,67 @@ class HousekeepingTests(FollowupCase):
         self.assertEqual(len([event for event in self.followup_events() if event["kind"].startswith("followup.stop")]),
                          1)
 
+    def test_a_round_that_cannot_read_github_still_ends_a_closed_tasks_followup(self):
+        row = self.building()
+        pensieve.close_task(self.conn, self.task["id"], "abandoned")
+        self.github.down = True
+        result = self.map_round(self.clock + 10)
+        self.assertFalse(result["ok"])
+        self.assertEqual(followups.get(self.conn, row["id"])["state"], "stopped")
+        [event] = [event for event in self.followup_events() if event["kind"].startswith("followup.stop")]
+        self.assertEqual((event["kind"], event["verdict"]), ("followup.stopped-closed", "routine"))
+        self.assertEqual(patrol.read_rows("map", "rounds.jsonl")[-1]["followups"]["errors"], 0)
+        self.map_round(self.clock + 10)
+        self.assertEqual(len([event for event in self.followup_events() if event["kind"].startswith("followup.stop")]),
+                         1)
+
+    def test_a_round_with_a_partial_list_of_prs_still_settles_a_start_cut_off(self):
+        self.go_live_at()
+        self.add_comment(701)
+        real = followups.advance
+
+        def advance(conn, followup_id, state, *args, **kwargs):
+            if state == "building":
+                raise Killed("killed")
+            return real(conn, followup_id, state, *args, **kwargs)
+
+        with mock.patch.object(followups, "advance", side_effect=advance), self.assertRaises(Killed):
+            self.map_round(self.t0 + 100 + SETTLE + 10)
+        self.github.endless = True  # the list of open PRs never ends: the round reads only part of it
+        result = self.map_round(self.clock + 10)
+        self.assertEqual((result["ok"], result["incomplete"]), (False, True))
+        row = followups.open_for_task(self.conn, self.task["id"])
+        self.assertEqual(row["state"], "building")
+        self.assertEqual(len(self.followup_owl_runs()), 1)
+        [event] = self.followup_events()
+        self.assertEqual(event["kind"], "followup.start-unsure")
+
+    def test_a_round_that_cannot_read_github_routes_nothing_and_opens_no_live_period(self):
+        self.go_live_at()
+        self.add_comment(701)
+        with mock.patch.object(followup, "finish_routing", side_effect=Killed("killed")), self.assertRaises(Killed):
+            self.map_round(self.t0 + 100 + SETTLE + 10)
+        row = followups.open_for_task(self.conn, self.task["id"])
+        self.github.down = True
+        # Live, but GitHub could not be read: a cut-off routing waits for a round with a whole read.
+        self.map_round(self.clock + 10)
+        self.assertEqual((followups.get(self.conn, row["id"])["state"], self.status()), ("routing", "active"))
+        self.assertEqual(self.followup_owl_runs(), [])
+        # Switched off: undone from the store alone, with one event, and the live period closes.
+        self.switch_off()
+        self.map_round(self.clock + 10)
+        self.assertEqual((followups.get(self.conn, row["id"])["state"], self.status()), ("stopped", "awaiting_close"))
+        self.assertEqual([event["kind"] for event in self.followup_events()], ["followup.stopped"])
+        self.assertEqual([period["until"] for period in followups.live_periods(self.conn)], [self.clock])
+        # On again while GitHub still cannot be read: no live period opens from a round that read nothing.
+        self.switch_on()
+        self.map_round(self.clock + 10)
+        self.assertIsNone(followups.current_live(self.conn))
+        self.assertEqual(self.followup_owl_runs(), [])
+        self.github.down = False
+        self.map_round(self.clock + 10)
+        self.assertIsNotNone(followups.current_live(self.conn))
+
     def test_every_final_state_and_its_event_land_together(self):
         row = self.building()
         pensieve.close_task(self.conn, self.task["id"], "abandoned")
@@ -1040,6 +1128,32 @@ class UntrustedShapeTests(FollowupCase):
         row = self.routed()
         [item] = followups.items(self.conn, row["id"])
         self.assertIsNone(item["quote"])
+
+
+    def test_a_quote_is_taken_only_from_a_comment_scrubbed_whole_before_any_cut(self):
+        # A quoted password with spaces, longer than a quote: cut first, its closing quote would be lost and the
+        # credential's start would read as plain text.
+        secret = "correct horse battery staple " * 6
+        body = f'Please move it out: password = "{secret.strip()}" and rename the widget.'
+        self.assertGreater(len(body), config.FOLLOWUP_QUOTE_MAX)
+        self.assertIsNone(followup.make_quote(body, REPO_ID))
+        self.assertIsNone(followup.make_quote(f"-----BEGIN RSA PRIVATE KEY-----\nMIIB{TOKEN}\n", REPO_ID))
+        # Something scrub would change after the first line leaves the quote alone.
+        self.assertEqual(followup.make_quote(f"Please rename it.\nmail {EMAIL}", REPO_ID), "Please rename it.")
+        self.go_live_at()
+        self.add_review(601, state="CHANGES_REQUESTED", body=body)
+        row = self.routed()
+        [item] = followups.items(self.conn, row["id"])
+        self.assertIsNone(item["quote"])
+        self.assertNotIn("correct horse", self.threads_file())
+
+    def test_a_quote_with_any_link_or_inline_markup_becomes_a_link_line(self):
+        for body in (f"See https://github.com/{REPO_ID}/pull/{NUMBER} for why.", f"Same as github.com/{REPO_ID} at"
+                     f" https://github.com/{REPO_ID}/", "Use `run_desk` here", "This is *wrong*", "This is _wrong_",
+                     "This is __wrong__", "This was ~~wrong~~", "This was ~wrong~"):
+            with self.subTest(body=body):
+                self.assertIsNone(followup.make_quote(body, REPO_ID))
+        self.assertEqual(followup.make_quote("Rename max_rounds please.", REPO_ID), "Rename max_rounds please.")
 
 
 class PatrolTests(FollowupCase):

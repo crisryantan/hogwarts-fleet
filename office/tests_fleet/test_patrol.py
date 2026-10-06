@@ -25,6 +25,8 @@ from tests_fleet.support import IN_KIT, ONLY_IN_KIT, OFFICE, fake_children
 from tests_fleet.test_caps import CLAUDE_USAGE_LIMIT
 from tests_fleet.test_run_desk import RunDeskCase
 
+REAL_RUN_GH = patrol.run_gh  # captured before any test replaces it
+
 REPO = "acme/web-app"
 SHA2 = "1123456789abcdef0123456789abcdef01234567"
 RON_WORDS = ("Ron - Release Engineer, map round.\n\nOne red on web-app.\n\nOUTCOMES\n"
@@ -445,6 +447,17 @@ class MapRoundTests(PatrolCase):
         self.assertTrue(later["resent"]["resent"][0]["collected"])
         self.assertEqual(self.pending(), {})
         self.assertIn("One red on web-app.", self.round_text())
+
+    def test_what_gh_printed_is_scrubbed_whole_before_it_is_cut(self):
+        token = "ghp_" + "a" * 36
+        printed = subprocess.CompletedProcess([], 1, b"", ("x" * 180 + " " + token + " more\n").encode())
+        with mock.patch.object(patrol, "run_gh", side_effect=REAL_RUN_GH), \
+                mock.patch.object(patrol.subprocess, "run", return_value=printed):
+            result = self.round(NOW)
+        self.assertFalse(result["ok"])
+        error = self.rows("rounds.jsonl")[-1]["error"]
+        self.assertTrue(error.startswith("gh failed: xxx"), error)
+        self.assertNotIn("ghp_", error)
 
     def test_a_github_failure_is_a_round_row_and_no_model(self):
         with mock.patch.object(patrol, "run_gh", side_effect=FleetError("gh failed: HTTP 401")):

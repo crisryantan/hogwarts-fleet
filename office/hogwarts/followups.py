@@ -10,8 +10,10 @@ final. Each reply is planned at the PASS and moves planned, posting, then posted
 off mid-post is read back, never posted again.
 
 Every write here is one transaction. A final state and its one event are written in the same transaction
-(advance, stop, abandon_routing, end_closed), so a kill leaves both or neither. Every read raises on a store error:
-a caller that cannot read treats that as unknown, never as nothing.
+(advance, stop, abandon_routing, end_closed), so a kill leaves both or neither. A reply that failed or may or may not
+be on the PR ends only in the transaction that stops its follow-up (stop with end_replies), and a reply begins only
+while every reply begun before it is posted; the store's triggers hold both, whatever code asks. Every read raises on
+a store error: a caller that cannot read treats that as unknown, never as nothing.
 """
 from __future__ import annotations
 
@@ -364,11 +366,16 @@ def advance(conn: Conn, followup_id: str, state: str, now: Optional[int] = None,
         return get(conn, followup_id)
 
 
-def stop(conn: Conn, followup_id: str, reason: str, now: Optional[int] = None, event: Optional[tuple] = None) -> dict:
-    """Stop a follow-up that has not ended, with its one event in the same transaction. A follow-up that already
-    ended is returned as it is, and no event is written."""
+def stop(conn: Conn, followup_id: str, reason: str, now: Optional[int] = None, event: Optional[tuple] = None,
+         end_replies: Optional[dict] = None) -> dict:
+    """Stop a follow-up that has not ended, with its one event in the same transaction. end_replies, {label: (state,
+    posted id or None)}, ends replies that were being posted in that same transaction, after the follow-up stops:
+    failed, unknown, or posted when the answer itself is why it stops (it came back from another login), so a reply's
+    outcome and the stop it implies land together or not at all. A posted id another reply of the task holds is a
+    ConflictError and nothing changes. A follow-up that already ended is returned as it is, and nothing is written."""
     followup_id = ids.check("followup", followup_id)
     reason = _printable_line(reason, "stop reason", _REASON)
+    endings = _check_endings(end_replies)
     ts = ids.stamp(now)
     with db.transaction(conn):
         row = get(conn, followup_id)
@@ -376,8 +383,38 @@ def stop(conn: Conn, followup_id: str, reason: str, now: Optional[int] = None, e
             return row
         conn.execute("UPDATE pr_followups SET state = 'stopped', stop_reason = ?, updated_at = ? WHERE id = ?"
                      " AND state = ?", (reason, ts, followup_id, row["state"]))
+        for label, (state, posted_id) in endings:
+            _end(conn, row, label, state, posted_id, ts)
         _event(conn, pensieve.get_task(conn, row["task_id"]), event, ts)
         return get(conn, followup_id)
+
+
+def _check_endings(end_replies: Optional[dict]) -> list:
+    """end_replies checked: [(label, (state, posted id or None))] in label order."""
+    if end_replies is None:
+        return []
+    if not isinstance(end_replies, dict):
+        raise ValidationError("reply endings are a map of label to (state, posted id)")
+    checked = []
+    for label, ending in end_replies.items():
+        if not isinstance(ending, tuple) or len(ending) != 2:
+            raise ValidationError("a reply ending is (state, posted id)")
+        state = ids.check_enum(ending[0], db.REPLY_FINAL_STATES, "reply ending")
+        posted_id = ids.optional("github_id", ending[1])
+        if (state == "posted") != (posted_id is not None):
+            raise ValidationError("a posted reply, and only a posted one, has its GitHub id")
+        checked.append((ids.check("item_label", label), (state, posted_id)))
+    return sorted(checked, key=lambda pair: int(pair[0][1:]))
+
+
+def _end(conn: Conn, row: dict, label: str, state: str, posted_id: Optional[str], ts: int) -> None:
+    """End one reply that was being posted, in the caller's transaction."""
+    if _reply(conn, row["id"], label)["state"] != "posting":
+        raise ConflictError("only a reply being posted ends")
+    if posted_id is not None and posted_id in posted_ids(conn, row["task_id"]):
+        raise ConflictError("that comment is already another reply of this task")
+    conn.execute("UPDATE pr_replies SET state = ?, posted_id = ?, ended_at = ? WHERE followup_id = ? AND label = ?"
+                 " AND state = 'posting'", (state, posted_id, ts, row["id"], label))
 
 
 def abandon_routing(conn: Conn, followup_id: str, reason: str, now: Optional[int] = None,
@@ -413,10 +450,10 @@ def end_closed(conn: Conn, followup_id: str, reason: str, now: Optional[int] = N
         row = get(conn, followup_id)
         if row["state"] in FINAL_STATES:
             return row
-        conn.execute("UPDATE pr_replies SET state = 'unknown', ended_at = ? WHERE followup_id = ? AND state = 'posting'",
-                     (ts, followup_id))
         conn.execute("UPDATE pr_followups SET state = 'stopped', stop_reason = ?, updated_at = ? WHERE id = ?"
                      " AND state = ?", (reason, ts, followup_id, row["state"]))
+        conn.execute("UPDATE pr_replies SET state = 'unknown', ended_at = ? WHERE followup_id = ? AND state = 'posting'",
+                     (ts, followup_id))
         _event(conn, pensieve.get_task(conn, row["task_id"]), event, ts)
         return get(conn, followup_id)
 
@@ -466,13 +503,16 @@ def _reply(conn: Conn, followup_id: str, label: str) -> dict:
 
 
 def begin_reply(conn: Conn, followup_id: str, label: str, now: Optional[int] = None) -> dict:
-    """Mark a planned reply as being posted, before it is posted. Only while its follow-up is posting."""
+    """Mark a planned reply as being posted, before it is posted. Only while its follow-up is posting and every reply
+    begun before it is posted: one still posting, failed or unknown holds back every reply after it."""
     followup_id = ids.check("followup", followup_id)
     label = ids.check("item_label", label)
     ts = ids.stamp(now)
     with db.transaction(conn):
         if get(conn, followup_id)["state"] != "posting" or _reply(conn, followup_id, label)["state"] != "planned":
             raise ConflictError("only a planned reply of a follow-up that is posting begins")
+        if any(reply["state"] in ("posting", "failed", "unknown") for reply in replies(conn, followup_id)):
+            raise ConflictError("a reply begins only while every reply begun before it is posted")
         conn.execute("UPDATE pr_replies SET state = 'posting', begun_at = ? WHERE followup_id = ? AND label = ?"
                      " AND state = 'planned'", (ts, followup_id, label))
         return _reply(conn, followup_id, label)
@@ -480,21 +520,18 @@ def begin_reply(conn: Conn, followup_id: str, label: str, now: Optional[int] = N
 
 def end_reply(conn: Conn, followup_id: str, label: str, state: str, posted_id: Optional[str] = None,
               now: Optional[int] = None) -> dict:
-    """End a reply that was being posted: posted with its GitHub id, failed (GitHub refused it, so it is surely not on
-    the PR) or unknown (it may or may not be). A GitHub id another reply of the same task already holds is refused."""
+    """End a reply that was being posted with a clean post: posted, with its GitHub id. A reply that failed or may or
+    may not be on the PR ends only through stop (end_replies), with the stop it implies. A GitHub id another reply of
+    the same task already holds is refused."""
     followup_id = ids.check("followup", followup_id)
     label = ids.check("item_label", label)
     state = ids.check_enum(state, db.REPLY_FINAL_STATES, "reply ending")
     posted_id = ids.optional("github_id", posted_id)
     if (state == "posted") != (posted_id is not None):
         raise ValidationError("a posted reply, and only a posted one, has its GitHub id")
+    if state != "posted":
+        raise ValidationError("a reply that failed or may or may not be posted ends only as its follow-up stops")
     ts = ids.stamp(now)
     with db.transaction(conn):
-        row = get(conn, followup_id)
-        if _reply(conn, followup_id, label)["state"] != "posting":
-            raise ConflictError("only a reply being posted ends")
-        if posted_id is not None and posted_id in posted_ids(conn, row["task_id"]):
-            raise ConflictError("that comment is already another reply of this task")
-        conn.execute("UPDATE pr_replies SET state = ?, posted_id = ?, ended_at = ? WHERE followup_id = ? AND label = ?"
-                     " AND state = 'posting'", (state, posted_id, ts, followup_id, label))
+        _end(conn, get(conn, followup_id), label, state, posted_id, ts)
         return _reply(conn, followup_id, label)

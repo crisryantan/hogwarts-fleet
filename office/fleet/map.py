@@ -25,9 +25,10 @@ until then they wait on her pending owl and are not sent again. Nothing is ever 
 
 PR follow-ups (fleet/followup.py): before the round writes its snapshot, so a round killed mid-routing is computed
 again and loses no row, the follow-up tidies what only the store can finish and, while the Headmaster has it on and
-live, sends teammates' comments on PRs the review loop opened back to the build desk. A person's thread it takes becomes a
-routine row, since the follow-up raises its own events, and the bot pass leaves those threads alone. The round file
-lists the follow-ups from the store.
+live, sends teammates' comments on PRs the review loop opened back to the build desk. A round that cannot read GitHub
+whole (offline, gh not signed in, a list cut short) still does that tidying, and routes nothing. A person's thread
+the follow-up takes becomes a routine row, since the follow-up raises its own events, and the bot pass leaves those
+threads alone. The round file lists the follow-ups from the store.
 
 Last, the round sends again each patrol owl whose file the patrol has not taken yet (patrol.resend_pending).
 
@@ -291,6 +292,16 @@ def catch_up_lineup(conn, ts: int, now: Optional[int]) -> Optional[dict]:
         return {"ok": False, "error": common.one_line(exc, 200)}
 
 
+def _store_only(conn, ts: int, now: Optional[int]) -> dict:
+    """A round that could not read GitHub whole still finishes what only the store can for open PR follow-ups
+    (followup.store_round), and routes nothing from the partial read. Its rows go to the outcomes; the counts go to the
+    round row."""
+    fu = followup.store_round(conn, ts, now)
+    for row in fu["rows"]:
+        patrol.append_row("map", OUTCOMES, {"ts": ts, **row})
+    return {"live": fu["live"], "routed": 0, "errors": fu["errors"], "rows": len(fu["rows"])}
+
+
 def run_round(conn, now: Optional[int] = None) -> dict:
     """One Map round. Returns its round row plus what it woke and sent again."""
     ts = patrol.stamp(now)
@@ -299,18 +310,22 @@ def run_round(conn, now: Optional[int] = None) -> dict:
         login = patrol.account()
         seen = patrol.fetch_prs()
     except FleetError as exc:
-        error = common.one_line(exc, 200)
-        patrol.append_row("map", ROUNDS, {"ts": ts, "ok": False, "shadow": shadow, "error": error, "model": False})
+        error = common.scrubbed_line(exc, 200)
+        fu = _store_only(conn, ts, now)
+        patrol.append_row("map", ROUNDS, {"ts": ts, "ok": False, "shadow": shadow, "error": error, "model": False,
+                                          "followups": fu})
         patrol.tell_ryan(conn, shadow, "map-failed", f"the Map could not read GitHub: {error}",
                          f"patrol:map-failed:{patrol.local_day(now)}", now)
-        return {"ok": False, "error": error}
+        return {"ok": False, "error": error, "followups": fu}
     if not seen["complete"]:
         error = "GitHub's list of open PRs could not be read to its end, so the snapshot was left as it was"
+        fu = _store_only(conn, ts, now)
         patrol.append_row("map", ROUNDS, {"ts": ts, "ok": False, "incomplete": True, "shadow": shadow, "error": error,
-                                          "prs": len(seen["prs"]), "asked": len(seen["asked"]), "model": False})
+                                          "prs": len(seen["prs"]), "asked": len(seen["asked"]), "model": False,
+                                          "followups": fu})
         patrol.tell_ryan(conn, shadow, "map-incomplete", f"the Map read only part of your PRs: {error}",
                          f"patrol:map-incomplete:{patrol.local_day(now)}", now)
-        return {"ok": False, "incomplete": True, "error": error}
+        return {"ok": False, "incomplete": True, "error": error, "followups": fu}
     before = patrol.read_state("map", SNAPSHOT, None)
     baseline = not isinstance(before, dict) or before.get("account") != login or not isinstance(before.get("prs"), dict)
     rows = [] if baseline else changes(before, seen)

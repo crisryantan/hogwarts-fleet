@@ -1034,6 +1034,23 @@ V_PR_FOLLOWUPS = (
         " OR (OLD.state = 'posting' AND NEW.state IN ('posted', 'failed', 'unknown')))",
         "a reply moves planned, then posting while its follow-up posts, then posted, failed or unknown",
     ),
+    # A reply begins only once every reply begun before it is posted: one whose outcome is not a clean post (still
+    # posting, failed or unknown) holds back every reply after it, whatever code asks.
+    _guard(
+        "pr_replies_one_at_a_time",
+        "BEFORE UPDATE OF state ON pr_replies WHEN OLD.state = 'planned' AND NEW.state = 'posting'"
+        " AND EXISTS (SELECT 1 FROM pr_replies AS other WHERE other.followup_id = NEW.followup_id"
+        " AND other.label IS NOT NEW.label AND other.state IN ('posting', 'failed', 'unknown'))",
+        "a reply begins only while every reply begun before it is posted",
+    ),
+    # A reply that failed or may or may not be on the PR ends only as its follow-up stops, in the same transaction, so
+    # a kill can never leave that outcome without the stop it implies.
+    _guard(
+        "pr_replies_fail_only_with_stop",
+        "BEFORE UPDATE OF state ON pr_replies WHEN NEW.state IN ('failed', 'unknown') AND NEW.state IS NOT OLD.state"
+        " AND NOT EXISTS (SELECT 1 FROM pr_followups WHERE id = NEW.followup_id AND state = 'stopped')",
+        "a reply ends failed or unknown only as its follow-up stops",
+    ),
     _guard(
         "pr_replies_begun_once",
         "BEFORE UPDATE OF begun_at ON pr_replies WHEN OLD.begun_at IS NOT NULL AND NEW.begun_at IS NOT OLD.begun_at",

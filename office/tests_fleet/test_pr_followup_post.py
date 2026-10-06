@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 from unittest import mock
 
-from hogwarts import capacity, followups, owlery, pensieve
+from hogwarts import capacity, db, followups, owlery, pensieve
 from hogwarts.errors import StoreError
 
 from fleet import config, followup, gitops, owl_post, push, review, run_desk
@@ -473,6 +473,19 @@ class ReplyRuleTests(PostCase):
         ("Addressed in abc1234 now.", "opens with a Fixed in formula"),
         ("Renamed {sha} and {sha}.", "has a stray brace or a second {sha}"),
         ("Renamed {it}.", "has a stray brace or a second {sha}"),
+        (f"See https://github.com/{REPO_ID}/../../other/repo/issues/1 for why.", "links outside this repo"),
+        (f"See https://github.com/{REPO_ID}/%2e%2e/%2E%2E/other/repo/issues/1 for why.", "links outside this repo"),
+        (f"See https://github.com/{REPO_ID}/pull/7/%2f..%2fx for why.", "links outside this repo"),
+        (f"See https://github.com/{REPO_ID}/./pull/7 for why.", "links outside this repo"),
+        (f"See https://github.com/{REPO_ID}-evil/pull/7 for why.", "links outside this repo"),
+        (f"See https://github.com:8443/{REPO_ID}/pull/7 for why.", "links outside this repo"),
+        (f"See https://github.com.evil.example/{REPO_ID}/pull/7 for why.", "links outside this repo"),
+        (f"See //github.com/{REPO_ID}/pull/7 for why.", "links outside this repo"),
+        ("Use `run_desk` there.", "holds markup"),
+        ("It is *one* step.", "holds markup"),
+        ("It is _one_ step.", "holds markup"),
+        ("It is __one__ step.", "holds markup"),
+        ("It was ~~two~~ steps.", "holds markup"),
     )
 
     def test_each_reply_rule_refuses_before_anything_is_pushed(self):
@@ -482,6 +495,9 @@ class ReplyRuleTests(PostCase):
         self.assertIsNone(followup.reply_problem(f"See https://github.com/{REPO_ID}/pull/7 for it, {{sha}}.", "FIXED",
                                                  REPO_ID, pushed=True))
         self.assertIsNone(followup.reply_problem(f"Like {REPO_ID}#3 did.", "PUSHBACK", REPO_ID, pushed=False))
+        self.assertIsNone(followup.reply_problem(f"See https://github.com/{REPO_ID} and https://github.com/"
+                                                 f"{REPO_ID.upper()}/pull/7#discussion_r5 on max_rounds.", "PUSHBACK",
+                                                 REPO_ID, pushed=False))
         row = self.ready()
         self.hand_off(row, f"T1 | FIXED | Moved it, ask {EMAIL}, see {{sha}}.")
         event = self.assert_one_stop("T1 holds what looks like a credential or personal data")
@@ -845,6 +861,194 @@ class KillTests(PostCase):
         self.assertEqual(len(self.endings()), 1)
         self.assertEqual(len(self.writes), 1)
         self.assertEqual(owl_post.unfinished_afters(self.task["id"]), [])
+
+
+class ReplyCheckTests(PostCase):
+    """Before every reply, the first one and one resumed after a kill included, the PR is read again."""
+
+    ROWS = FIXED_ROW + "\nT2 | FIXED | Added one for the rename."
+
+    def again(self) -> dict:
+        """The next follow-up of the task, with a thread item and a comment item, once the last one stopped."""
+        count = followups.count_for_task(self.conn, self.task["id"])
+        self.add_comment(710 + count, at=self.clock + 1)
+        self.github.pr_threads[0]["comments"]["nodes"].append(gh_comment(520 + count, self.clock + 1, kind="thread"))
+        self.sync_prs()
+        return self.routed(self.clock + SETTLE + 20)
+
+    def test_a_pr_that_changed_after_the_first_reply_gets_no_more(self):
+        cases = [
+            ("closed", "the PR is no longer open", "state", "CLOSED"),
+            ("signed in elsewhere", "gh is signed in as another account", "viewer", "someone-else"),
+            ("head moved", "a commit the fleet did not build", "head", lambda: "e" * 40),
+            ("another branch", "another repo or branch than the loop pushed", "head_ref", "other/branch"),
+        ]
+        for round_no, (name, phrase, field, value) in enumerate(cases, 2):
+            with self.subTest(case=name):
+                row = self.ready(comment_body="Please add a test.") if round_no == 2 else self.again()
+                saved = getattr(self.github, field)
+
+                def answer(argv, body, field=field, value=value):
+                    setattr(self.github, field, value)
+                    return None
+
+                self.write_answer = answer
+                self.writes.clear()
+                self.hand_off(row, self.ROWS, change=f"widget renamed {round_no}", round_no=round_no)
+                self.write_answer = None
+                setattr(self.github, field, saved)
+                self.assertEqual(len(self.writes), 1)
+                self.assertEqual([state for _, _, state in self.replies(row)], ["posted", "planned"])
+                self.assertEqual(self.row(row)["state"], "stopped")
+                stop = [event for event in self.endings() if event["kind"] == "followup.stopped"][-1]
+                self.assertIn("between replies", stop["summary"])
+                self.assertIn(phrase, stop["summary"])
+                self.assertEqual(stop["verdict"], "headmaster")
+
+    def test_a_reply_resumed_after_a_kill_reads_the_pr_again(self):
+        row = self.ready(comment_body="Please add a test.")
+        real = followups.begin_reply
+
+        def begin(conn, followup_id, label, *args, **kwargs):
+            if label == "T2":
+                raise Killed("killed")
+            return real(conn, followup_id, label, *args, **kwargs)
+
+        with mock.patch.object(followups, "begin_reply", side_effect=begin), self.assertRaises(Killed):
+            self.hand_off(row, self.ROWS)
+        self.assertEqual([state for _, _, state in self.replies(row)], ["posted", "planned"])
+        self.github.viewer = "someone-else"
+        self.next_pass()
+        self.next_pass()
+        self.assertEqual(len(self.writes), 1)
+        self.assert_one_stop("gh is signed in as another account")
+
+    def test_a_pr_head_that_lags_the_push_counts_only_when_the_branch_holds_it(self):
+        row = self.ready(comment_body="Please add a test.")
+        self.github.head = lambda: self.base_sha  # GitHub has not caught up with the push yet
+        self.hand_off(row, self.ROWS)
+        self.assertEqual(len(self.writes), 2)
+        self.assertEqual(self.row(row)["state"], "done")
+
+
+class OutcomeTests(PostCase):
+    """Every reply outcome but a clean post lands in the one transaction that stops the follow-up: a kill at that stop
+    leaves the reply posting, which the read-back settles, and nothing after it is ever posted."""
+
+    ROWS = FIXED_ROW + "\nT2 | FIXED | Added one for the rename."
+
+    def killed_at_the_stop(self, row: dict, answer, rows: str = None) -> None:
+        self.write_answer = answer
+        with mock.patch.object(followups, "stop", side_effect=Killed("killed")), self.assertRaises(Killed):
+            self.hand_off(row, rows or self.ROWS)
+        self.write_answer = None
+
+    def assert_stopped_after_one(self, *phrases) -> None:
+        self.next_pass()
+        self.next_pass()
+        self.assertEqual(len(self.writes), 1)
+        self.assertEqual(self.row(self.current)["state"], "stopped")
+        self.assertEqual(self.replies(self.current)[-1][2], "planned")
+        self.assert_one_stop(*phrases)
+
+    def test_a_refused_reply_killed_before_its_stop_never_lets_the_next_one_out(self):
+        self.current = row = self.ready(comment_body="Please add a test.")
+        self.killed_at_the_stop(row, lambda argv, body: (1, "", "gh: Validation Failed (HTTP 422)\n")
+                                if len(self.writes) == 1 else None)
+        self.assertEqual(self.replies(row)[0][2], "posting")
+        self.assert_stopped_after_one("at reply T1", "nothing was posted again")
+        self.assertEqual(self.replies(row)[0][2], "unknown")
+
+    def test_an_answer_from_another_login_killed_before_its_stop_never_lets_the_next_one_out(self):
+        self.current = row = self.ready(comment_body="Please add a test.")
+
+        def answer(argv, body):
+            if len(self.writes) != 1:
+                return None
+            self.next_id += 1
+            self.land("reply", argv, self.next_id, json.loads(body.decode("ascii"))["body"], login="someone-else")
+            return 0, json.dumps({"id": self.next_id, "html_url": f"{PR_LINK}#discussion_r{self.next_id}",
+                                  "user": {"login": "someone-else"}}), ""
+
+        self.killed_at_the_stop(row, answer)
+        self.assert_stopped_after_one("at reply T1", "under another GitHub login")
+
+    def test_a_comment_id_another_reply_holds_killed_before_its_stop_never_lets_the_next_one_out(self):
+        self.current = row = self.ready(review_body="Split this please.", comment_body="Please add a test.")
+
+        def answer(argv, body):
+            if len(self.writes) != 2:
+                return None
+            held = followups.replies(self.conn, row["id"])[0]["posted_id"]
+            return 0, json.dumps({"id": int(held), "html_url": f"{PR_LINK}#issuecomment-{held}",
+                                  "user": {"login": ACCOUNT}}), ""
+
+        self.killed_at_the_stop(row, answer, self.ROWS.replace("T2 | FIXED", "T2 | PUSHBACK") + "\nT3 | FIXED | Added.")
+        self.assertEqual([state for _, _, state in self.replies(row)], ["posted", "posting", "planned"])
+        self.next_pass()
+        self.next_pass()
+        self.assertEqual(len(self.writes), 2)
+        self.assertEqual([state for _, _, state in self.replies(row)], ["posted", "unknown", "planned"])
+        self.assert_one_stop("at reply T2")
+
+    def test_a_reply_not_found_by_the_read_back_killed_before_its_stop_never_lets_the_next_one_out(self):
+        self.current = row = self.ready(comment_body="Please add a test.")
+        with mock.patch.object(gitops, "post_reply", side_effect=Killed("killed")), self.assertRaises(Killed):
+            self.hand_off(row, self.ROWS)
+        with mock.patch.object(followups, "stop", side_effect=Killed("killed")), self.assertRaises(Killed):
+            self.next_pass()
+        self.assertEqual([state for _, _, state in self.replies(row)], ["posting", "planned"])
+        self.next_pass()
+        self.next_pass()
+        self.assertEqual(self.writes, [])
+        self.assertEqual([state for _, _, state in self.replies(row)], ["unknown", "planned"])
+        self.assert_one_stop("at reply T1", "is not on the PR")
+
+    def test_a_read_back_past_its_limit_killed_before_its_stop_never_lets_the_next_one_out(self):
+        self.current = row = self.ready(comment_body="Please add a test.")
+        with mock.patch.object(gitops, "post_reply", side_effect=Killed("killed")), self.assertRaises(Killed):
+            self.hand_off(row, self.ROWS)
+        self.github.fail = "gh"
+        late = self.row(row)["updated_at"] + config.FOLLOWUP_RECONCILE_LIMIT_SECONDS + 1
+        with mock.patch.object(followups, "stop", side_effect=Killed("killed")), self.assertRaises(Killed):
+            review.auto_review(self.conn, self.task["id"], now=late)
+        self.assertEqual([state for _, _, state in self.replies(row)], ["posting", "planned"])
+        self.github.fail = None
+        review.auto_review(self.conn, self.task["id"], now=late + 10)
+        review.auto_review(self.conn, self.task["id"], now=late + 20)
+        self.assertEqual(self.writes, [])
+        self.assertEqual([state for _, _, state in self.replies(row)], ["unknown", "planned"])
+        self.assert_one_stop("at reply T1")
+
+    def test_recovery_never_posts_past_a_reply_that_did_not_end_posted(self):
+        for ending in ("failed", "unknown"):
+            with self.subTest(ending=ending):
+                row = self.ready(comment_body="Please add a test.") if ending == "failed" else self.again()
+                self.writes.clear()
+                with mock.patch.object(followups, "begin_reply", side_effect=Killed("killed")), \
+                        self.assertRaises(Killed):
+                    self.hand_off(row, self.ROWS, change=f"widget {ending}", round_no=2 if ending == "failed" else 3)
+                # A store written before the stop and the outcome shared one transaction: T1 ended, nothing stopped.
+                self.conn.execute("DROP TRIGGER IF EXISTS pr_replies_fail_only_with_stop")
+                self.conn.execute("UPDATE pr_replies SET state = 'posting', begun_at = 1 WHERE followup_id = ?"
+                                  " AND label = 'T1'", (row["id"],))
+                self.conn.execute("UPDATE pr_replies SET state = ?, ended_at = 1 WHERE followup_id = ?"
+                                  " AND label = 'T1'", (ending, row["id"]))
+                for statement in db.V_PR_FOLLOWUPS:
+                    if isinstance(statement, str) and "pr_replies_fail_only_with_stop" in statement:
+                        self.conn.execute(statement)
+                self.next_pass()
+                self.next_pass()
+                self.assertEqual(self.writes, [])
+                self.assertEqual(self.row(row)["state"], "stopped")
+                stop = [event for event in self.endings() if event["kind"] == "followup.stopped"][-1]
+                self.assertIn(f"it ended {ending}, not posted, so no more were posted", stop["summary"])
+
+    def again(self) -> dict:
+        self.add_comment(703, at=self.clock + 1)
+        self.github.pr_threads[0]["comments"]["nodes"].append(gh_comment(530, self.clock + 1, kind="thread"))
+        self.sync_prs()
+        return self.routed(self.clock + SETTLE + 20)
 
 
 class EventTests(PostCase):

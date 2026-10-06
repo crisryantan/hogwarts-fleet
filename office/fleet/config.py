@@ -151,6 +151,10 @@ FOLLOWUP_STALL_SECONDS = 4 * 3600
 FOLLOWUP_RECONCILE_LIMIT_SECONDS = 4 * 3600
 # A reply read back counts only from this long before it was begun, for clocks a little apart.
 FOLLOWUP_READBACK_SKEW_SECONDS = 300
+# In shadow mode with the switch on, the dry run in patrol/followup/ counts comments from this far back as if follow-ups
+# had been live then, so a copy kept in shadow mode from the start still shows what it would route. It never opens a
+# live period: a live round routes only comments written while follow-ups are live.
+FOLLOWUP_SHADOW_WINDOW_SECONDS = 7 * 86400
 # A failed run whose error text matches one of these hit the vendor's own usage, rate, quota or credit
 # limit, not a fleet cap. Matched without case against Claude's result text when is_error is set, and
 # against the message that ended a failed Codex run (its last turn.failed, else its last error event).

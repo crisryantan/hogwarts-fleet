@@ -385,7 +385,7 @@ class InputSecurityTests(StoreCase):
                        "url": f"https://github.com/{REPO}/pull/7#issuecomment-11", "quote": None}],
         "comment_rows": [{"kind": "comment", "comment_id": "11", "label": "T1"}], "max_per_task": 5,
         "state": "starting", "event": None, "reply_rows": [{"label": "T1", "mark": "PUSHBACK", "body": "No."}],
-        "push_needed": False, "label": "T1", "posted_id": None,
+        "push_needed": False, "label": "T1", "posted_id": None, "end_replies": None,
     }
     OVERRIDES = {
         ("record_review", "verdict"): "CHANGES", ("record_round_verdict", "verdict"): "CHANGES",
@@ -395,7 +395,8 @@ class InputSecurityTests(StoreCase):
         ("add_bump", "kind"): "runs", ("add_bump", "expires_at"): NOW + DAY,
         ("apply_model", "reason"): "initial",
         ("stop", "reason"): "stopped by a test", ("abandon_routing", "reason"): "stopped by a test",
-        ("end_closed", "reason"): "stopped by a test", ("end_reply", "state"): "unknown",
+        ("end_closed", "reason"): "stopped by a test", ("end_reply", "state"): "posted",
+        ("end_reply", "posted_id"): "501",
         ("open_review_round", "followup_id"): None,
     }
 

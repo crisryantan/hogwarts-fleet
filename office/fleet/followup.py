@@ -14,16 +14,21 @@ one follow-up: the comments are recorded as handled, the fix request owl from th
 the task goes back to active, in one store transaction. The GitHub text goes to a threads file next to TASK.md,
 scrubbed whole and quoted line by line as data; the owl holds only script text. The build desk starts on that owl
 through worktree.build, the path a fix round uses. In shadow mode with the switch on, a round only writes what it would
-route to patrol/followup/.
+route to patrol/followup/, judging comments inside a simulated window (shadow_window) that never opens a live period.
+A round that cannot read GitHub whole still does the housekeeping (store_round), and routes nothing.
 
 The build desk's handoff carries a THREADS (<follow-up id>) section marking every item FIXED or PUSHBACK with its exact
 reply. The usual automatic review follows; its rounds count against the follow-up's own cap. On its PASS (after_pass),
 the review loop checks every reply against fixed rules, reads the PR again, pushes exactly the reviewed commit to the
 same branch (never forced, never a new PR) when it is new, then posts each reply once through gitops, in a review
-thread or as a PR comment quoting the review or comment it answers. Each step is marked begun in the store first, so a
-kill is finished from the store (resume_after_pass): a push is read back from the remote branch, a reply from the PR,
-and nothing is pushed or posted twice. A follow-up that pushed and posted ends with one headmaster event naming the PR,
-the commit and how many replies went out in the Headmaster's name; every stop ends with one headmaster event too.
+thread or as a PR comment quoting the review or comment it answers. Before every reply, a resumed one included, it
+reads live() and the PR again: still open, opened and read as GITHUB_ACCOUNT, on the bound repo and branch, at the
+commit that passed. Each step is marked begun in the store first, so a kill is finished from the store
+(resume_after_pass): a push is read back from the remote branch, a reply from the PR, and nothing is pushed or posted
+twice. Every reply outcome but a clean post (refused, unclear when read back, another login, an id another reply holds)
+is written in the one transaction that stops the follow-up with its event, and no reply goes out after one that did
+not end posted. A follow-up that pushed and posted ends with one headmaster event naming the PR, the commit and how
+many replies went out in the Headmaster's name; every stop ends with one headmaster event too.
 Nothing here resolves a thread, requests a review, marks a PR ready or merges.
 
 No text from GitHub, a PR or a desk is ever taken as an instruction: the script reads only ids, enums, times and URLs of
@@ -34,6 +39,7 @@ from __future__ import annotations
 import contextlib
 import re
 import secrets
+import urllib.parse
 from typing import Optional
 
 from hogwarts import capacity, db, followups, ids, owlery, pensieve
@@ -69,9 +75,15 @@ EM_DASHES = ("\u2014", "\u2015", "\u2e3a", "\u2e3b")
 TYPED_DASH = re.compile(r"(?:^|\s)--(?:\s|$)")
 MENTION = re.compile(r"(?<![A-Za-z0-9_.+-])@[A-Za-z0-9]")
 LINK = re.compile(r"(?i)(?:\b[a-z][a-z0-9+.-]*:)?//\S*|\bwww\.\S*|\b(?:mailto|javascript|data|vbscript|file):\S*")
+# What a link to this repo may hold: no percent-encoding, no markup and no quoting, so what is checked is what GitHub
+# opens (see _repo_link).
+LINK_CHARS = re.compile(r"[A-Za-z0-9._/#?=&,()+:-]+")
 CROSS_REFERENCE = re.compile(r"([A-Za-z0-9._-]+/[A-Za-z0-9._-]+)(?:#[0-9]+|@[0-9A-Fa-f]{7,40})\b")
 FORMULA = re.compile(r"(?i)^(fixed|addressed|done|resolved|updated)\s+in\s+(\{sha\}|[0-9a-f]{7,40})\b")
-MARKUP = ("<", "](", "![", "```")
+# Markup: HTML, links and images, code (any backtick), emphasis and strikethrough. An underscore inside a word, as in
+# snake_case, is not emphasis on GitHub; one that opens or closes a word is.
+MARKUP = ("<", "](", "![", "`", "*", "~")
+EMPHASIS_UNDERSCORE = re.compile(r"(?<![A-Za-z0-9])_|_(?![A-Za-z0-9])")
 
 
 class Starting(FleetError):
@@ -340,19 +352,31 @@ def qualify(binding: dict, pr: dict, handled: set, periods: list, own_ids: set, 
     return sorted(found, key=lambda item: (item["oldest"], KIND_ORDER[item["kind"]], int(item["reply_to"])))
 
 
+def _first_line(text: str) -> str:
+    """The first line of text that holds anything once its leading > marks and spaces are dropped, or empty."""
+    for line in text.splitlines():
+        line = line.strip()
+        while line.startswith(">"):
+            line = line[1:].strip()
+        if line:
+            return line
+    return ""
+
+
 def make_quote(body: str, repo: str) -> Optional[str]:
     """The quote a reply to a review or comment opens with: its first line with text (leading > and spaces dropped),
-    cut at a word to FOLLOWUP_QUOTE_MAX characters. Kept only when it is printable ASCII and passes every reply rule
-    but the length and the opening formula, so it never republishes a mention, a link, markup, another repository's
-    reference or anything scrub would change in the Headmaster's name; None means the reply links to the comment instead."""
-    text = ""
-    for line in body.splitlines():
-        text = line.strip()
-        while text.startswith(">"):
-            text = text[1:].strip()
-        if text:
-            break
-    if not text:
+    cut at a word to FOLLOWUP_QUOTE_MAX characters. The whole comment is scrubbed before anything is taken from it or
+    cut, and the line is checked whole before the cut, so a cut can never turn something it would refuse into
+    something it keeps. Kept only when that line is just what scrub leaves, holds no link at all, and passes every
+    reply rule but the length and the opening formula, so it never republishes a mention, a link, markup, another
+    repository's reference or anything scrub would change in the Headmaster's name; None means the reply carries the
+    comment's own link instead."""
+    if not isinstance(body, str):
+        return None
+    text = _first_line(body)
+    if not text or _first_line(pensieve.scrub(body)) != text:
+        return None
+    if LINK.search(text) or "://" in text or _rule_broken(text, repo, single_line=True) is not None:
         return None
     limit = config.FOLLOWUP_QUOTE_MAX
     if len(text) > limit:
@@ -520,15 +544,36 @@ def _rule_broken(text: str, repo: str, single_line: bool = True) -> Optional[str
         return "holds what looks like a credential or personal data"
     if MENTION.search(text):
         return "mentions someone"
-    prefix = f"https://github.com/{repo}/".lower()
-    if any(not match.group(0).lower().startswith(prefix) for match in LINK.finditer(text)):
+    if any(not _repo_link(match.group(0), repo) for match in LINK.finditer(text)):
         return "links outside this repo"
-    if any(mark in text for mark in MARKUP) or text.startswith((">", "#")):
+    plain = LINK.sub(" ", text)  # a link that passed holds none of the marks below
+    if any(mark in plain for mark in MARKUP) or EMPHASIS_UNDERSCORE.search(plain) or text.startswith((">", "#")):
         return "holds markup"
     for match in CROSS_REFERENCE.finditer(text):
         if match.group(1).lower() != repo.lower():
             return "names another repository's issue, PR or commit"
     return None
+
+
+def _repo_link(url: str, repo: str) -> bool:
+    """Whether a link opens this repo on GitHub and nothing else: https://github.com/<owner>/<name>, then any path.
+    It is parsed, not matched by prefix: no percent-encoding at all, no "." or ".." segment and no empty one, no user,
+    port or other host, and the owner and name equal to the repo's (letter case aside), so a link that climbs out of
+    the repo, or spells the climb encoded, never passes."""
+    if not isinstance(url, str) or LINK_CHARS.fullmatch(url) is None:
+        return False
+    try:
+        parts = urllib.parse.urlsplit(url)
+    except ValueError:
+        return False
+    if parts.scheme != "https" or parts.netloc.lower() != "github.com":
+        return False
+    segments = parts.path.split("/")
+    if len(segments) < 3 or segments[0] != "" or any(segment in (".", "..") for segment in segments) \
+            or "" in segments[1:-1]:
+        return False
+    owner, _, name = repo.partition("/")
+    return segments[1].lower() == owner.lower() and segments[2].lower() == name.lower()
 
 
 def reply_problem(reply: str, mark: str, repo: str, pushed: bool) -> Optional[str]:
@@ -678,10 +723,12 @@ def _stopped_event(task: dict, row: dict, binding: dict, step: str, reason: str,
 
 
 def _stop(conn, task: dict, row: dict, binding: dict, step: str, reason: str, after: str,
-          now: Optional[int]) -> str:
-    """Stop a follow-up with its one headmaster event, in one transaction. The reason is a fixed text."""
+          now: Optional[int], end_replies: Optional[dict] = None) -> str:
+    """Stop a follow-up with its one headmaster event, in one transaction. The reason is a fixed text. end_replies,
+    {label: (state, posted id)}, ends the replies being posted in that same transaction, so a reply's outcome never
+    lands without the stop it implies."""
     followups.stop(conn, row["id"], common.one_line(f"{step}: {reason}", db.FOLLOWUP_REASON_MAX), now=now,
-                   event=_stopped_event(task, row, binding, step, reason, after))
+                   event=_stopped_event(task, row, binding, step, reason, after), end_replies=end_replies)
     return f"stopped {step}: {reason}"
 
 
@@ -750,9 +797,10 @@ def _local_block(conn, task: dict, now: Optional[int]) -> tuple:
     return record, head, None
 
 
-def _plan(conn, binding: dict, task: dict, pr: dict) -> list:
-    """The items a follow-up of this PR would take now."""
-    periods = followups.live_periods(conn)
+def _plan(conn, binding: dict, task: dict, pr: dict, periods: Optional[list] = None) -> list:
+    """The items a follow-up of this PR would take now, with comments counted when written inside one of the store's
+    live periods, or inside periods when given (the shadow dry run's simulated window)."""
+    periods = followups.live_periods(conn) if periods is None else periods
     return qualify(binding, pr, followups.handled(conn, binding["repo"]), periods,
                    followups.posted_ids(conn, task["id"]), followups.reply_bodies(conn, task["id"]))
 
@@ -792,6 +840,28 @@ def _covered_routed(conn, seen: dict, covered: dict) -> None:
             covered[key] = None
 
 
+def store_round(conn, ts: int, now: Optional[int]) -> dict:
+    """The follow-up's part of a Map round that could not read GitHub whole (offline, gh not signed in, or a list of
+    open PRs cut short): only what the store can finish (housekeeping), whatever the switch says. It never routes and
+    never carries a cut-off routing on, since nothing here may act on a partial read; such a routing waits for a round
+    with a complete list, or is undone when follow-ups are not live. It closes the open live period when follow-ups
+    are not live and never opens one. Never raises; returns what patrol_round does."""
+    result = {"rows": [], "covered": {}, "live": False, "routed": 0, "errors": 0, "model": False}
+    try:
+        is_live = live()
+        result["live"] = is_live
+        result["rows"] += housekeeping(conn, is_live, now, result, carry_on=False)
+        if not is_live:
+            followups.see_live(conn, False, ts)
+    except (FleetError, StoreError) as exc:
+        result["errors"] += 1
+        result["rows"].append(_row("-", "follow-up error", common.scrubbed_line(exc, 200)))
+    except Exception as exc:  # noqa: BLE001 - the Map round must still record itself
+        result["errors"] += 1
+        result["rows"].append(_row("-", "follow-up error", type(exc).__name__))
+    return result
+
+
 def patrol_round(conn, seen: dict, ts: int, now: Optional[int], shadow: bool, baseline: bool) -> dict:
     """The follow-up's part of one Map round, before the round writes its snapshot. Never raises for a fleet, store or
     file error: each is an error row. Returns {rows, covered, live, routed, errors, model}: covered maps a PR key to
@@ -820,7 +890,8 @@ def _patrol_round(conn, seen: dict, ts: int, now: Optional[int], baseline: bool,
         followups.see_live(conn, is_live, ts)
     except StoreError as exc:
         result["errors"] += 1
-        result["rows"].append(_row("-", "follow-up error", f"the live period was not recorded: {exc}"))
+        result["rows"].append(_row("-", "follow-up error",
+                                   f"the live period was not recorded: {common.scrubbed_line(exc, 150)}"))
         return
     if not on:
         return
@@ -835,7 +906,8 @@ def _patrol_round(conn, seen: dict, ts: int, now: Optional[int], baseline: bool,
         candidates = _candidates(conn, seen)
     except StoreError as exc:
         result["errors"] += 1
-        result["rows"].append(_row("-", "follow-up error", f"the bound PRs could not be read: {exc}"))
+        result["rows"].append(_row("-", "follow-up error",
+                                   f"the bound PRs could not be read: {common.scrubbed_line(exc, 150)}"))
         return
     for binding, key in candidates:
         try:
@@ -974,12 +1046,26 @@ def abandon(conn, task: dict, row: dict, why: str, now: Optional[int]) -> None:
                               event=("followup.stopped", HEADMASTER, summary, f"followup:stopped:{row['id']}"))
 
 
+def shadow_window(conn, ts: int) -> list:
+    """The eligibility a shadow dry run judges comments by: the store's real live periods, plus one simulated period
+    covering the last FOLLOWUP_SHADOW_WINDOW_SECONDS, as if follow-ups had been live then. It is only ever passed to
+    qualify; no live period is opened or kept for it, so nothing it counts can ever be routed by a live round."""
+    simulated = {"id": None, "since": ts - config.FOLLOWUP_SHADOW_WINDOW_SECONDS, "until": None}
+    return followups.live_periods(conn) + [simulated]
+
+
 def dry_run(conn, seen: dict, ts: int, now: Optional[int]) -> Optional[str]:
     """Shadow mode with the switch on: what a live round would route, written to patrol/followup/<stamp>.md and
-    nowhere else. PR keys, counts, labels and reasons only; no event, no cap report, no store write."""
+    nowhere else. Comments are judged inside shadow_window, so a copy kept in shadow mode from the start, which has
+    no live period at all, still shows what it would route. PR keys, counts, labels and reasons only; no event, no cap
+    report, no store write."""
+    days = config.FOLLOWUP_SHADOW_WINDOW_SECONDS // DAY
+    window = f"{days} days" if days > 1 else f"{config.FOLLOWUP_SHADOW_WINDOW_SECONDS // 3600} hours"
     lines = [f"# PR follow-ups, dry run {patrol.file_stamp(now)}\n",
              "The patrol is in shadow mode, so nothing was routed, no event was raised and nothing changed but the"
-             " live period. This is what a live round would do.\n"]
+             f" live period. This is what a live round would do, counting comments from the last {window} as if"
+             " follow-ups had been live then. A live round routes only comments written while follow-ups are live.\n"]
+    periods = shadow_window(conn, ts)
     rows = []
     for binding, key in _candidates(conn, seen):
         task = pensieve.get_task(conn, binding["task_id"])
@@ -989,7 +1075,7 @@ def dry_run(conn, seen: dict, ts: int, now: Optional[int]) -> Optional[str]:
             continue
         try:
             pr = read_pr(binding)
-            candidates = _plan(conn, binding, task, pr)
+            candidates = _plan(conn, binding, task, pr, periods)
         except ReadIncomplete:
             rows.append((key, task["id"], "blocked", "-", "-", "read-incomplete"))
             continue
@@ -1017,18 +1103,20 @@ def dry_run(conn, seen: dict, ts: int, now: Optional[int]) -> Optional[str]:
 # Housekeeping
 
 
-def housekeeping(conn, is_live: bool, now: Optional[int], result: Optional[dict] = None) -> list:
-    """What only the store can finish, every round while any follow-up is open, whatever the switch says. Nothing here
-    reaches GitHub. A routing cut off by a kill is carried on in a live round and undone in any other; a start cut off
-    is never started again; a closed task's follow-up ends; a follow-up whose round a review run by hand passed
-    stops; and one with nothing going for hours raises one event."""
+def housekeeping(conn, is_live: bool, now: Optional[int], result: Optional[dict] = None,
+                 carry_on: bool = True) -> list:
+    """What only the store can finish, every round while any follow-up is open, whatever the switch says, the rounds
+    that could not read GitHub whole included (store_round). Nothing here reaches GitHub. A routing cut off by a kill
+    is carried on in a live round with a complete read (carry_on), left for one in a live round without, and undone in
+    any other; a start cut off is never started again; a closed task's follow-up ends; a follow-up whose round a review
+    run by hand passed stops; and one with nothing going for hours raises one event."""
     rows = []
     try:
         open_rows = followups.list_followups(conn, open_only=True)
     except StoreError as exc:
         if result is not None:
             result["errors"] += 1
-        return [_row("-", "follow-up error", f"open follow-ups could not be read: {common.one_line(exc, 150)}")]
+        return [_row("-", "follow-up error", f"open follow-ups could not be read: {common.scrubbed_line(exc, 150)}")]
     for row in open_rows:
         key = f"{row['repo']}#{row['pr_number']}"
         try:
@@ -1044,7 +1132,7 @@ def housekeeping(conn, is_live: bool, now: Optional[int], result: Optional[dict]
                     stop_closed(conn, task, followups.get(conn, row["id"]), now)
                 rows.append(_row(key, "follow-up done", f"follow-up {row['number']} ended: its task was closed"))
             elif row["state"] in ("routing", "starting"):
-                outcome = resume_routing(conn, task, row, is_live, now)
+                outcome = resume_routing(conn, task, row, is_live, now, carry_on)
                 if outcome is not None:
                     if result is not None and outcome.get("started"):
                         result["model"] = True
@@ -1062,10 +1150,12 @@ def housekeeping(conn, is_live: bool, now: Optional[int], result: Optional[dict]
     return rows
 
 
-def resume_routing(conn, task: dict, row: dict, is_live: bool, now: Optional[int]) -> Optional[dict]:
+def resume_routing(conn, task: dict, row: dict, is_live: bool, now: Optional[int],
+                   carry_on: bool = True) -> Optional[dict]:
     """A follow-up a kill left routing or starting, under the task's review lock taken without waiting (busy: None).
     Starting: the build desk may or may not be running, so it is never started again; building with one headmaster
-    event. Routing, live: carry on from the castle threads file. Routing, otherwise: undo it."""
+    event. Routing, live: carry on from the castle threads file, only when carry_on (a round that read GitHub whole);
+    otherwise it waits for such a round. Routing, not live: undo it."""
     with contextlib.ExitStack() as held:
         try:
             lock_fd = held.enter_context(run_desk.task_lock(task["id"]))
@@ -1085,6 +1175,8 @@ def resume_routing(conn, task: dict, row: dict, is_live: bool, now: Optional[int
         if not is_live:
             abandon(conn, task, row, _off_reason() or "the follow-up is not live", now)
             return {"started": False, "detail": f"follow-up {row['number']} undone: not live"}
+        if not carry_on:
+            return None
         return finish_routing(conn, task, row, lock_fd, now)
 
 
@@ -1277,54 +1369,102 @@ def _carry_on(conn, task: dict, row: dict, binding: dict, now: Optional[int]) ->
     return _post_planned(conn, task, row, binding, now)
 
 
+def _reply_ready(conn, task: dict, row: dict, binding: dict) -> Optional[str]:
+    """Why the next reply may not go out, or None, read again before every reply, the first one and one resumed after a
+    kill included: live, the task still awaiting close, the store's binding unchanged, and the PR read again, open,
+    opened by GITHUB_ACCOUNT, gh signed in as that account, its repo and branch the loop pushed to, and its head the
+    commit that passed. GitHub's PR head can lag a push by seconds, so a head still at the follow-up's base counts only
+    when the remote branch itself already holds the pushed commit."""
+    off = _off_reason()
+    if off is not None:
+        return off
+    status = pensieve.get_task(conn, task["id"])["status"]
+    if status == "closed":
+        return "the task was closed"
+    if status != "awaiting_close":
+        return "the task is no longer awaiting close"
+    bound = followups.pr_for_task(conn, task["id"])
+    if bound is None or (bound["repo"], bound["number"], bound["branch"]) != \
+            (binding["repo"], binding["number"], binding["branch"]):
+        return "the PR bound to the task is not the one the follow-up began on"
+    try:
+        pr = read_pr(bound)
+    except FleetError:
+        return "the PR could not be read again, and nothing is retried"
+    problem = github_problem(bound, pr, row["pass_sha"])
+    if problem is not None and problem[0] == "head-moved" and pr["head_oid"] == row["base_sha"] \
+            and row["pass_sha"] != row["base_sha"]:
+        record = gitops.find_record(worktree.castle_path(task["worktree"]))
+        if record is not None and gitops.remote_tip(record, bound["branch"]) == row["pass_sha"]:
+            problem = None
+    return None if problem is None else problem[1]
+
+
 def _post_planned(conn, task: dict, row: dict, binding: dict, now: Optional[int]) -> str:
-    """Post each planned reply once, in label order, then end the follow-up. live() and the task's status are read
-    again before every reply. A refusal ends that reply failed and stops; an unclear answer leaves it posting for the
+    """Post each planned reply once, in label order, then end the follow-up. Before every reply: no reply before it
+    may have ended any way but posted, and _reply_ready reads live(), the task and the PR again. Every outcome but a
+    clean post (GitHub refused it, an answer from another login, a comment id another reply holds) is written in the
+    one transaction that stops the follow-up with its event; an unclear answer leaves the reply posting for the
     read-back and ends this pass."""
     item_rows = {item["label"]: item for item in followups.items(conn, row["id"])}
+    account = config.GITHUB_ACCOUNT.lower()
     for reply in followups.replies(conn, row["id"]):
-        if reply["state"] != "planned":
+        if reply["state"] == "posted":
             continue
         went = sum(1 for other in followups.replies(conn, row["id"]) if other["state"] == "posted")
         rest = f"{went} replies went out; castle followup show {task['id']} lists the rest"
-        off = _off_reason()
-        if off is not None:
-            return _stop(conn, task, row, binding, "between replies", off, rest, now)
-        if pensieve.get_task(conn, task["id"])["status"] == "closed":
-            return _stop(conn, task, row, binding, "between replies", "the task was closed", rest, now)
-        followups.begin_reply(conn, row["id"], reply["label"], now=now)
-        item = item_rows[reply["label"]]
+        label = reply["label"]
+        if reply["state"] != "planned":
+            # Failed, unknown or still posting: it may not be on the PR, so nothing after it goes out.
+            return _stop(conn, task, row, binding, f"at reply {label}", f"it ended {reply['state']}, not posted, so"
+                         " no more were posted", rest, now)
+        problem = _reply_ready(conn, task, row, binding)
+        if problem is not None:
+            return _stop(conn, task, row, binding, "between replies" if went else "before the replies", problem, rest,
+                         now)
+        followups.begin_reply(conn, row["id"], label, now=now)
+        item = item_rows[label]
         try:
             if item["kind"] == "thread":
                 answer = gitops.post_reply(binding["repo"], binding["number"], item["reply_to"], reply["body"])
             else:
                 answer = gitops.post_pr_comment(binding["repo"], binding["number"], reply["body"])
         except gitops.Uncertain:
-            return f"reply {reply['label']} may or may not be posted; the next pass reads it back"
+            return f"reply {label} may or may not be posted; the next pass reads it back"
         except FleetError:
-            followups.end_reply(conn, row["id"], reply["label"], "failed", now=now)
-            return _stop(conn, task, row, binding, f"at reply {reply['label']}", "GitHub refused it, so it is not on"
-                         " the PR", rest, now)
+            return _stop(conn, task, row, binding, f"at reply {label}", "GitHub refused it, so it is not on the PR",
+                         rest, now, end_replies={label: ("failed", None)})
+        if answer["login"].lower() != account:
+            return _stop_on(conn, task, row, binding, f"after reply {label}", "it went out under another GitHub login,"
+                            " so no more were posted", rest, now, label, answer["id"])
         try:
-            followups.end_reply(conn, row["id"], reply["label"], "posted", answer["id"], now=now)
+            followups.end_reply(conn, row["id"], label, "posted", answer["id"], now=now)
         except ConflictError:
-            followups.end_reply(conn, row["id"], reply["label"], "unknown", now=now)
-            return _stop(conn, task, row, binding, f"at reply {reply['label']}", "GitHub named a comment another"
-                         " reply already holds", rest, now)
-        if answer["login"].lower() != config.GITHUB_ACCOUNT.lower():
-            return _stop(conn, task, row, binding, f"after reply {reply['label']}",
-                         "it went out under another GitHub login, so no more were posted", rest, now)
+            return _stop(conn, task, row, binding, f"at reply {label}", "GitHub named a comment another reply already"
+                         " holds", rest, now, end_replies={label: ("unknown", None)})
     row = followups.get(conn, row["id"])
     posted = sum(1 for reply in followups.replies(conn, row["id"]) if reply["state"] == "posted")
     followups.advance(conn, row["id"], "done", now=now, event=_done_event(task, row, binding, posted))
     return f"done: {posted} replies posted"
 
 
+def _stop_on(conn, task: dict, row: dict, binding: dict, step: str, reason: str, after: str, now: Optional[int],
+             label: str, posted_id: str) -> str:
+    """Stop with a reply that is on the PR (posted, its id) as the reason it stops, in one transaction; when another
+    reply already holds that id, the reply ends unknown instead, in the same one stop."""
+    try:
+        return _stop(conn, task, row, binding, step, reason, after, now, end_replies={label: ("posted", posted_id)})
+    except ConflictError:
+        return _stop(conn, task, row, binding, step, reason, after, now, end_replies={label: ("unknown", None)})
+
+
 def _read_back(conn, task: dict, row: dict, binding: dict, now: Optional[int]) -> Optional[str]:
     """Settle each reply a kill left posting, from GitHub: found (by the PR's author, in its thread or the PR's
     conversation, the same text, written no earlier than it began, its id no other reply's), it is posted; a complete
-    read that finds none, it is unknown and the follow-up stops; a failed read waits, up to the reconcile limit. The
-    outcome when the pass ends here, or None to carry on with the planned replies."""
+    read that finds none, it is unknown and the follow-up stops, in one transaction, saying so when a comment with its
+    text is there under another login; a failed read waits, up to the reconcile limit, then every reply still posting
+    is unknown and the follow-up stops, in one transaction. The outcome when the pass ends here, or None to carry on
+    with the planned replies."""
     posting = [reply for reply in followups.replies(conn, row["id"]) if reply["state"] == "posting"]
     if not posting:
         return None
@@ -1335,29 +1475,29 @@ def _read_back(conn, task: dict, row: dict, binding: dict, now: Optional[int]) -
     except FleetError:
         if not limit_passed:
             return "the read-back of a cut-off reply could not read the PR; the next pass tries again"
-        for reply in posting:
-            followups.end_reply(conn, row["id"], reply["label"], "unknown", now=now)
         return _stop(conn, task, row, binding, f"at reply {posting[0]['label']}", "it was cut off and GitHub could not"
-                     " be read to say whether it is on the PR; nothing was posted again", rest, now)
+                     " be read to say whether it is on the PR; nothing was posted again", rest, now,
+                     end_replies={reply["label"]: ("unknown", None) for reply in posting})
     items_by_label = {item["label"]: item for item in followups.items(conn, row["id"])}
     taken = followups.posted_ids(conn, task["id"])
     author = (pr["author"] or "").lower()
-    for reply in posting:
+    for index, reply in enumerate(posting):
         item = items_by_label[reply["label"]]
         if item["kind"] == "thread":
             pool = next((thread["comments"] for thread in pr["threads"] if thread["id"] == item["thread_id"]), [])
         else:
             pool = pr["comments"]
         earliest = reply["begun_at"] - config.FOLLOWUP_READBACK_SKEW_SECONDS
-        found = next((comment for comment in pool
-                      if comment["id"] is not None and comment["id"] not in taken
-                      and (comment["login"] or "").lower() == author and author
-                      and comment["created"] is not None and comment["created"] >= earliest
-                      and comment["body"].replace("\r\n", "\n") == reply["body"]), None)
+        same = [comment for comment in pool
+                if comment["id"] is not None and comment["id"] not in taken and comment["created"] is not None
+                and comment["created"] >= earliest and comment["body"].replace("\r\n", "\n") == reply["body"]]
+        found = next((comment for comment in same if author and (comment["login"] or "").lower() == author), None)
         if found is None:
-            followups.end_reply(conn, row["id"], reply["label"], "unknown", now=now)
-            return _stop(conn, task, row, binding, f"at reply {reply['label']}", "it was cut off and is not on the PR;"
-                         " nothing was posted again", rest, now)
+            unknown = {other["label"]: ("unknown", None) for other in posting[index:]}
+            elsewhere = any((comment["login"] or "").lower() != author for comment in same)
+            why = ("it was cut off, and a comment with its text is on the PR under another GitHub login; nothing was"
+                   " posted again") if elsewhere else "it was cut off and is not on the PR; nothing was posted again"
+            return _stop(conn, task, row, binding, f"at reply {reply['label']}", why, rest, now, end_replies=unknown)
         followups.end_reply(conn, row["id"], reply["label"], "posted", found["id"], now=now)
         taken.add(found["id"])
     return None
@@ -1439,7 +1579,7 @@ def lineup_text(conn, now: Optional[int] = None) -> str:
                          f"{sum(1 for reply in replies if reply['state'] == 'posted')} of {len(replies)}",
                          row["stop_reason"] or "-"))
     except StoreError as exc:
-        return f"Follow-ups: not read ({common.one_line(exc, 150)})\n"
+        return f"Follow-ups: not read ({common.scrubbed_line(exc, 150)})\n"
     if not rows:
         return "No follow-ups open or ended today.\n"
     return patrol.table(("PR", "task", "follow-up", "state", "rounds", "items", "replies posted", "stopped"), rows)
