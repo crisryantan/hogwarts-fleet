@@ -7,7 +7,8 @@ would send Ryan is written to the job's file instead, while the caps and the spe
 Ryan removes the file to go live. If the file can't be checked, or the patrol folder is missing, shadow mode
 stays on. Nothing here ever writes to GitHub or posts to a chat.
 
-GitHub. Every read is gh api graphql with one of the fixed queries below and plain variables. GitHub only
+GitHub. Every read is gh api graphql with one of the fixed queries below and plain variables, the follow-up's read of
+one PR the review loop opened (fleet/followup.py) included. GitHub only
 says whether a review thread is resolved over GraphQL, which is always an HTTP POST, so the guard checks
 what is sent instead: one of these constant queries, each a query and never a mutation, with variables
 that match their own patterns. gh runs by absolute path with a small fixed environment. The open PR lists
@@ -45,7 +46,7 @@ from hogwarts.errors import StoreError
 from fleet import common, config, owl_post, run_desk, safefs
 from fleet.safefs import FleetError
 
-JOBS = ("map", "lineup", "keeper", "scoreboard", "bot-pass")
+JOBS = ("map", "lineup", "keeper", "scoreboard", "bot-pass", "followup")
 PENDING_FILE = "pending.json"
 REPORT_SUFFIX = {"ron": "report", "hermione": "drafts"}
 ROLES = {"ron": "Ron - Release Engineer", "hermione": "Hermione - Staff Engineer"}
@@ -127,8 +128,29 @@ THREADS_QUERY = """query($owner: String!, $name: String!, $number: Int!) {
     }
   }
 }"""
+# One PR the review loop opened, read whole for its teammate follow-up (fleet/followup.py): its state, author and
+# branch, the account gh is signed in as, and every review thread, review and conversation comment with who wrote it,
+# their access (authorAssociation) and its id. Any list with a next page makes the read incomplete.
+FOLLOWUP_QUERY = """query($owner: String!, $name: String!, $number: Int!) {
+  viewer { login }
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      number state url headRefName headRefOid baseRefName
+      author { login }
+      headRepository { nameWithOwner }
+      reviewThreads(first: 100) { pageInfo { hasNextPage } nodes {
+        id isResolved isOutdated path line
+        comments(first: 100) { pageInfo { hasNextPage } nodes {
+          fullDatabaseId author { __typename login } authorAssociation body createdAt url diffHunk } } } }
+      reviews(first: 100) { pageInfo { hasNextPage } nodes {
+        fullDatabaseId author { __typename login } authorAssociation state body submittedAt url } }
+      comments(first: 100) { pageInfo { hasNextPage } nodes {
+        fullDatabaseId author { __typename login } authorAssociation body createdAt url } }
+    }
+  }
+}"""
 QUERIES = {"prs": PRS_QUERY, "asked": ASKED_QUERY, "main": MAIN_QUERY, "merged": MERGED_QUERY,
-           "threads": THREADS_QUERY}
+           "threads": THREADS_QUERY, "followup": FOLLOWUP_QUERY}
 # Every variable a query may take, and the shape its value must have.
 VARIABLES = {
     "mine": re.compile(r"[A-Za-z0-9:._ -]{1,200}"),

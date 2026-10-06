@@ -687,7 +687,8 @@ class RunSlotCapacityTests(RoundCase):
     def test_request_round_names_the_round_a_request_opened(self):
         opened = self.round(SHAS[0], slot=1)
         self.assertEqual(capacity.request_round(self.conn, opened["request"]["id"]),
-                         {"request_id": opened["request"]["id"], "task_id": self.author, "reviewer": "beta", "slot": 1})
+                         {"request_id": opened["request"]["id"], "task_id": self.author, "reviewer": "beta", "slot": 1,
+                          "followup_id": None})
         other = owlery.open_request(self.conn, "alpha", "beta", "something else", body="not a review")
         self.assertIsNone(capacity.request_round(self.conn, other["request"]["id"]))
         with self.assertRaises(ValidationError):

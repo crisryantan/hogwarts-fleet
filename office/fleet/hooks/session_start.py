@@ -44,7 +44,7 @@ def _tasks(conn, desk: str, status: str) -> list:
 def _flight(conn, desk: str, now: Optional[int]) -> dict:
     fleet_wide = desk in config.FLEET_VIEW_DESKS
     return capacity.in_flight(conn, now, config.RUNNING_WINDOW_SECONDS, None if fleet_wide else desk,
-                              config.REVIEW_ROUND_CAP)
+                              config.REVIEW_ROUND_CAP, config.FOLLOWUP_ROUND_CAP)
 
 
 def _action(conn, task: dict) -> str:
@@ -73,6 +73,10 @@ def _action(conn, task: dict) -> str:
 
 
 def _state_text(task: dict) -> str:
+    followup = task.get("followup")
+    if followup is not None:
+        return (f"{task['state']}, follow-up {followup['number']}, round {followup['rounds_used']} of"
+                f" {followup['max_rounds']}, {common.one_line(followup['pr'], 120)}")
     if task["round"] is None:
         return task["state"]
     if task["state"] == "round cap":

@@ -116,6 +116,41 @@ AUTO_REVIEW_LOCK_WAIT_SECONDS = 10
 #   echo on > ~/.hogwarts/auto-draft-pr
 # A file anywhere else, a link, a file someone else owns or can write, or any other text leaves it off.
 AUTO_DRAFT_PR_FILE = "auto-draft-pr"
+# Teammates' review comments on a PR the review loop opened (fleet/followup.py), off by default. On only while this
+# plain file in the office holds exactly "on" and the patrol is out of shadow mode:
+#   echo on > ~/.hogwarts/pr-followup
+# Comments from people with write access go back to the build desk, the other family reviews the fix and the replies,
+# and the loop pushes the reviewed commit to the same PR and posts each reply once.
+PR_FOLLOWUP_FILE = "pr-followup"
+# Every opt-in file, read only through common.opt_in_on. A name not listed here always reads off.
+OPT_IN_FILES = (AUTO_DRAFT_PR_FILE, PR_FOLLOWUP_FILE)
+# Review rounds of one follow-up, apart from the task's REVIEW_ROUND_CAP, and the follow-ups one task may take.
+FOLLOWUP_ROUND_CAP = 2
+FOLLOWUP_MAX_PER_TASK = 5
+# At most this many follow-ups start in one Map round; the rest wait for the next.
+FOLLOWUP_ROUTES_PER_ROUND = 2
+# A PR's newest qualifying comment must be this old before its follow-up starts, so one review goes as one follow-up.
+FOLLOWUP_SETTLE_SECONDS = 300
+# Items one follow-up carries, and the size of its threads file; the rest wait, whole, for the next follow-up.
+FOLLOWUP_MAX_ITEMS = 20
+FOLLOWUP_TEXT_MAX = 200_000
+# One comment body in the threads file, scrubbed whole before it is cut to this.
+FOLLOWUP_COMMENT_MAX = 6000
+# Whose comments are followed: GitHub's authorAssociation for people with write access to the repo.
+FOLLOWUP_WRITE_ASSOCIATIONS = ("OWNER", "MEMBER", "COLLABORATOR")
+# Service and CI accounts GitHub lists as people (User, often with MEMBER access). Their comments are never routed.
+# Compared without letter case. Fill it before you switch follow-ups on.
+FOLLOWUP_IGNORED_LOGINS: tuple = ()
+# A reply as the build desk writes it, and the whole comment posted (the quote of a review or comment included).
+FOLLOWUP_REPLY_MAX = 400
+FOLLOWUP_BODY_MAX = 600
+FOLLOWUP_QUOTE_MAX = 120
+# A follow-up with no handoff and nothing else going for this long raises one headmaster event.
+FOLLOWUP_STALL_SECONDS = 4 * 3600
+# A push or reply cut off by a kill is read back from GitHub; a read that keeps failing gives up after this long.
+FOLLOWUP_RECONCILE_LIMIT_SECONDS = 4 * 3600
+# A reply read back counts only from this long before it was begun, for clocks a little apart.
+FOLLOWUP_READBACK_SKEW_SECONDS = 300
 # A failed run whose error text matches one of these hit the vendor's own usage, rate, quota or credit
 # limit, not a fleet cap. Matched without case against Claude's result text when is_error is set, and
 # against the message that ended a failed Codex run (its last turn.failed, else its last error event).

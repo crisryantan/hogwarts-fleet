@@ -6,7 +6,7 @@ Seven single-purpose agents, named after the Harry Potter characters who fit eac
 
 - **One desk, one job.** Seven agents, each with one role: McGonagall - Chief of Staff, Harry - Senior Engineer, Hermione - Staff Engineer, Moody - Security Reviewer, Ron - Release Engineer, Snape - Data Analyst and Dumbledore - Knowledge Manager.
 - **Short runs, many tasks.** A desk runs one model process at a time, except the two reviewers, Moody and Hermione, which can run two reviews of different tasks at once. Each run is short and single-threaded. Harry, Hermione, Moody, Ron and your own sessions can each keep many tasks in flight between runs, so a task waiting for fixes never blocks another. McGonagall, Snape and Dumbledore keep one task at a time.
-- **No agent pushes without a review from the other model family.** When Codex writes code, Claude reviews it. When Claude writes code, including in your own sessions, Codex reviews it. The pass is tied to the exact commit, and a push gate checks for it.
+- **No agent pushes without a review from the other model family.** When Codex writes code, Claude reviews it. When Claude writes code, including in your own sessions, Codex reviews it. The pass is tied to the exact commit, and a push gate checks for it. A teammate's later review comments go through the same loop.
 - **The controls sit where no agent can change them.** The store, review passes, close tokens, hooks and desk settings live in a folder no desk can write and Claude desks can't read. A desk can only post to its own outbox, so it can't pretend to be another desk.
 - **Scripts patrol and models only judge.** Plain scripts check PRs and CI and move messages at zero tokens. A fast model wakes only when a change may need you. A frontier model is kept for review and the nightly memory pass.
 - **Desks ask for a tier, not a model.** Each desk's role card says what the job needs, and Ollivander - Model Keeper, a script, picks the model. A desk never changes model family, so the review rule holds.
@@ -38,7 +38,7 @@ These are the ways a fleet of agents running side by side goes wrong. Each fix i
 | Ron - Release Engineer | No | Write | No | No | `api.github.com` only | No |
 | Snape - Data Analyst | No | Write | No | No | No shell tool. He reaches only his read-only MCP servers | No |
 | Dumbledore - Knowledge Manager | No | Write | No | No | Off | No |
-| The Owl Post and the Map (scripts) | Read and write | Read outboxes, deliver inboxes | No | No | GitHub API | Only under a standing order |
+| The Owl Post and the Map (scripts) | Read and write | Read outboxes, deliver inboxes | No | No | GitHub API | Only under a standing order, or the follow-up replies you switch on |
 | Ollivander - Model Keeper (script) | Read and write his model rows, and read each role card | None | No | No | The CLIs he asks, and updates only if you switch them on | No. He files notes for you |
 | You | Everything | Everything | Everything | Everything | Yes | Yes, and only you merge, deploy or close a task |
 
@@ -68,7 +68,7 @@ Four scripts use no model. The **Owl Post - Message Router** moves owls between 
 4. **Evidence.** A verify script runs every acceptance check and records the command, exit code and output for that commit.
 5. **Cross-model review.** Codex-written work goes to Hermione and Claude-written work goes to Moody. A reviewer who finds one instance of a problem checks its siblings and lists them all, so one fix round covers the whole kind. The review script records the verdict from the reviewer's own output. The store counts a pass only when the families differ, and any new commit voids it. For Harry's work this is a loop that runs by itself: his handoff starts the review, CHANGES starts his fix round, and it stops at the round cap, on PASS or on HEADMASTER, each time telling you.
 6. **Push and PR.** A hook asks the store for a pass on HEAD and blocks any agent's `git push` without one. You push with `fleet push`, unless you opt in with one file in the office: then the review loop pushes the reviewed commit after its PASS and opens a draft PR from Harry's commit message and PR body draft. Opening a ready PR waits for your yes, because it notifies people.
-7. **Patrol.** Ron watches CI and files bot comments. Hermione reproduces or rebuts each one.
+7. **Patrol.** Ron watches CI and files bot comments. Hermione reproduces or rebuts each one. With `~/.hogwarts/pr-followup` on and the patrol out of shadow mode, comments from people with write access on a PR the loop opened go back to Harry as a follow-up. His fixes and his one-line replies get the usual cross-family review. On PASS the loop pushes the reviewed commit to the same branch and posts each reply once. Threads are never resolved, and the PR is never marked ready or merged.
 8. **Merge.** You merge and deploy, then type "Mischief managed <task-id>".
 
 ## The timetable
@@ -77,7 +77,7 @@ Four scripts use no model. The **Owl Post - Message Router** moves owls between 
 | --- | --- | --- | --- |
 | Owl Post | Script | Whenever an outbox changes, plus a sweep every 5 minutes | None |
 | Ollivander | Script | Daily 06:00 | None |
-| Marauder's Map rounds | Script, then Ron | Every 15 minutes, weekdays 08:00 to 19:00 | None, fast tier on change |
+| Marauder's Map rounds | Script, then Ron | Every 15 minutes, weekdays 08:00 to 19:00; while follow-ups are on, each round also sends teammates' new comments back to Harry | None, fast tier on change |
 | Morning lineup | Ron | Weekdays 08:30; a missed one is written by the next Map round | Fast tier |
 | Keeper's watch | Ron | 09:00, 13:00 and 17:00 on weekdays | None when green, fast tier on red |
 | Weekly scoreboard | Script, then Ron | Mondays 09:00 | None for the numbers, fast tier for the words |
@@ -116,6 +116,7 @@ Every headless desk has a daily cap on runs, and the headless Claude desks a cap
 - A review whose reviewer is busy (other runs hold every one of its run slots) or at its cap is queued. The next review of that same task replaces it, so only a task's newest commit gets reviewed. Reviews of other tasks never replace it.
 - The review the Owl Post starts on Harry's handoff holds no place in any line either. While it can't start (Harry's run still going, the reviewer busy, another review of the task running) it ends at once, and the Owl Post starts it again on each pass, for up to four hours, then tells you. What follows its verdict is written down before it starts, so a review killed after its verdict is finished on the next pass without another round. Its review is published first if the kill came before that, an ending you already heard about is left as it is, and a fix round, push or PR it had begun is never started twice: you hear once that it may or may not have happened.
 - A task gets three review rounds, and only a round where the reviewer recorded a verdict counts. A fourth waits for `castle task allow-round`.
+- A follow-up gets two review rounds of its own, apart from the task's three, and a task takes at most five follow-ups. `castle task allow-round` lifts the cap of whatever is open when you run it: the open follow-up's, or the build's when none is.
 - Every stop says which limit it was. The fleet's cap is yours to lift. The Claude or Codex plan's own usage limit isn't, and no bump pretends to lift it.
 
 ## Watching without typing
@@ -154,6 +155,7 @@ Standard-library Python that runs on the Mac's built-in Python 3.9, with a CLI c
 | Requests | Phases only move forward. A desk can defer or decline with a reason. |
 | Review passes | A pass counts only for that exact commit, only when it is registered on the author's task, and only when the reviewer's family differs from the author's. |
 | Facts | One current fact per subject. Volatile facts need a live lookup or a short expiry. Nightly changes arrive as typed operations applied all or nothing. |
+| PR follow-ups | The PR the loop opened for a task, each follow-up and its state, every teammate comment it handled, and every reply with whether it was posted. A passed task goes back to active only in the transaction that opens a follow-up, and stays active until a round of that follow-up passes. A comment is handled once, a reply is posted once, and no row is ever deleted. |
 
 The full contract is in `office/README.md`. Both the store and fleet test suites run on the system Python. They include checks that no code reads environment variables and that hostile ids and paths are refused at every entry point.
 
@@ -175,7 +177,7 @@ Three things usually dominate token use: what loads before you type, how long a 
 - Credentials and logins. No desk ever enters, reads or prints one.
 - Security and config: permissions, hooks, settings, MCP, plugins and sandbox. Desks propose a diff and you apply it.
 - Installs. Homebrew only, after you've read `brew info`.
-- Anything sent to a person: chat, email, tickets, PR threads, review requests and opening a ready PR.
+- Anything sent to a person: chat, email, tickets, PR threads, review requests and opening a ready PR. The one exception after the draft PR is the follow-up replies you switch on (`~/.hogwarts/pr-followup`): one-line replies to teammates' review comments on PRs the loop opened, posted only after the other family passed them and only while `gh` is signed in as your `GITHUB_ACCOUNT`.
 - Public repo text: branch names, commits and PR text before the first push. The one exception is the draft PR you opt in to (`~/.hogwarts/auto-draft-pr`), which pushes a reviewed commit and opens a draft from Harry's text after a fleet-word and credential check. Character names never leave the fleet.
 - Scope: editing Intent, adding criteria, splitting a PR.
 - Force pushes and deletions, including branches, PRs and memory.
@@ -210,7 +212,7 @@ What the fleet doesn't do, or only partly does.
 - **The review loop is tested on temporary repos.** The fleet suite runs it on throwaway git repos, so try it on a small real task first. `office/pending/README.md` (g) walks through one.
 - **The nightly review is tested on temporary stores.** Its tests cover the export, the run and the patch checks. It reviews the local day its job runs in, so when the Mac sleeps through 22:30 and launchd only runs the job on waking after midnight, the new day is reviewed and the missed one never is. The export stops at 512KB of extracts and 300 fact candidates and says how many it left out. Archive moves are notes you carry out by hand, and the export carries no copy of a memory index, so he proposes them only from what the day shows him. His chat is off until you give him a read-only MCP job ([CUSTOMISE.md](CUSTOMISE.md#change-budgets-and-limits)).
 - **The patrol is tested against a faked GitHub and faked desks.** Know these before you take it out of shadow mode:
-  - The patrol's scripts read GitHub with `gh api graphql`, which is always an HTTP POST, because only GraphQL says whether a review thread is resolved. A guard lets through only the patrol's five fixed queries, none of them a mutation, with checked variables. The one read outside that guard is Ron's own `gh run view` of a failing log, which his brief allows and which only reads.
+  - The patrol's scripts read GitHub with `gh api graphql`, which is always an HTTP POST, because only GraphQL says whether a review thread is resolved. A guard lets through only the patrol's six fixed queries, none of them a mutation, with checked variables; the sixth reads one PR the review loop opened, whole, for its follow-up. The one read outside that guard is Ron's own `gh run view` of a failing log, which his brief allows and which only reads.
   - Open PRs come 50 to a page, up to 10 pages per list. A list that can't be read to its end leaves the Map's snapshot as it was, and the round's row says it was incomplete. Within a PR, the patrol sees 100 review threads and 100 checks per commit, and past that those lists are cut.
   - Shadow mode covers Ron's and Hermione's patrol runs too. A cap, near-cap or vendor-limit note from one of those runs lands in the job's file instead of the digest, while the cap itself and the spend still count. Notes about a desk's model still reach the digest in shadow mode (a blocked model, a model change, a failed model trial), since they are about the desk's setup, not the patrol's findings.
   - Ron reads a failing log with `gh run view`, but his sandbox allows only `api.github.com`, so a log GitHub serves from another host may not load, and then his call is UNSURE.
@@ -231,6 +233,16 @@ What the fleet doesn't do, or only partly does.
   - A review round's owl runs only from its own review, so starting it by hand is refused. Two runs of any other owl can overlap on a two-slot desk. That only happens when one is started again by hand, or by a patrol retry after its job was killed, while the first still goes.
   - Update the office while no review is running. A review started on the old code still takes the desk lock as its only lock, and on its way in could close a reviewer task that a new review holds in another slot.
 - **Two open build tasks never share one TASK.md.** The evidence, the handoff and the reviews are written next to TASK.md, so `fleet worktree` and `castle task start` both refuse a second open Harry task under the same McGonagall task. Two commands under one TASK.md never both get through: each takes that TASK.md's lock without waiting and holds it until its task is active, and the last check and the start share one store transaction. A command that store transaction refuses takes back its worktree, its new branch and its record, so its task stays queued and the same command can run again. One branch in one repo is made by one command at a time, whichever TASK.md asks for it: `fleet worktree` and a go each take that branch's lock without waiting before they check it's new, and hold it until the task has the worktree or it's taken back. A take-back removes a branch only when git made it for that command, so a branch you or another command made is never removed. The rest rests on the briefs: Hermione's outbox body files start with the task id, and Ron's with the id of the owl that started his run.
+- **PR follow-ups are tested against a faked GitHub.** Know these before you switch them on:
+  - Only PRs the loop opened since this version was installed are followed. A PR you opened by hand, or one opened while draft PRs were off, never is.
+  - `MEMBER` is GitHub's org membership, which doesn't always mean write access to the repo. CI and service accounts that GitHub lists as people go in `FOLLOWUP_IGNORED_LOGINS`.
+  - A teammate with write access can ask for a change that passes review and gets pushed to your PR before you read it. That is the point of the feature; the Intent check, the other family's review and the reply rules are what bound it.
+  - An edited comment isn't routed again, and a deleted one that was already routed is still answered. A reply to a comment deleted meanwhile fails and stops the replies after it.
+  - More than 100 threads, 100 comments in a thread, 100 reviews or 100 conversation comments make the PR unreadable for follow-ups. You hear once a day and answer them by hand.
+  - Routing runs only in Map rounds, but the push and replies happen when the review finishes, so a reply can go out in the evening.
+  - Times compare GitHub's clock with your Mac's, so a comment written a minute or two before a live period begins may or may not count. Comments written between switching follow-ups on and the next Map round fall outside every live period and are never routed.
+  - A follow-up round where Harry changed no code and Hermione said CHANGES makes that review the newest one of the PR's commit, so `fleet push` refuses that commit until a later round passes it.
+  - A reply that names a teammate whose name is also a fleet word is refused, so replies leave names out.
 - **Partial clones never fetch behind your back.** The git the fleet runs, and the git its desks and verify checks run, has `GIT_NO_LAZY_FETCH=1`. A clone made with `--filter` then reports a missing object instead of quietly fetching it with your credentials, so a review or check that needs one fails until you fetch it yourself. Git older than 2.44 ignores the setting.
 
 ## Credits

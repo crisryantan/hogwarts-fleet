@@ -17,7 +17,7 @@ from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest import mock
 
-from hogwarts import capacity, cli, db, facts, ids, owlery, pensieve, wands
+from hogwarts import capacity, cli, db, facts, followups, ids, owlery, pensieve, wands
 from hogwarts.errors import IntegrityError, ValidationError
 from tests.support import DAY, NOW, REPO, SHA, TEST_TMP_ROOT, StoreCase, temp_dir
 
@@ -353,7 +353,7 @@ class InputSecurityTests(StoreCase):
     IDENTIFIERS = {
         "name", "desk", "task_id", "request_id", "owl_id", "sender", "recipient", "requester", "repo", "sha",
         "session_id", "scope", "reviewer_desk", "parent_task_id", "in_reply_to", "closed_by", "run_id",
-        "idempotency_key", "dedupe_key", "subject_key",
+        "idempotency_key", "dedupe_key", "subject_key", "followup_id", "label", "posted_id", "base_sha", "pass_sha",
     }
     DEFAULTS = {
         "name": "gamma", "family": "claude", "role": None, "model": "model-x", "desk": "alpha", "title": "title",
@@ -378,6 +378,14 @@ class InputSecurityTests(StoreCase):
         "claude_ids_only": False, "blocked": (), "default_model": None, "retiring_within": DAY,
         "running_window": 3600, "branch": "fix/site", "slot": None,
         "repo_dir": "/private/tmp/checkout", "base": "origin/main", "intent_sha256": "a" * 64,
+        # PR follow-ups (hogwarts.followups and the follow-up groups of capacity)
+        "followup_id": "fu_0000000000000000", "followup_max_rounds": 2, "number": 7,
+        "url": f"https://github.com/{REPO}/pull/7", "live": True, "base_sha": SHA, "pass_sha": SHA,
+        "item_rows": [{"label": "T1", "kind": "comment", "thread_id": None, "reply_to": "11",
+                       "url": f"https://github.com/{REPO}/pull/7#issuecomment-11", "quote": None}],
+        "comment_rows": [{"kind": "comment", "comment_id": "11", "label": "T1"}], "max_per_task": 5,
+        "state": "starting", "event": None, "reply_rows": [{"label": "T1", "mark": "PUSHBACK", "body": "No."}],
+        "push_needed": False, "label": "T1", "posted_id": None,
     }
     OVERRIDES = {
         ("record_review", "verdict"): "CHANGES", ("record_round_verdict", "verdict"): "CHANGES",
@@ -386,10 +394,13 @@ class InputSecurityTests(StoreCase):
         ("set_worktree", "worktree"): f"{ids.WORKTREES_ROOT}/wt",
         ("add_bump", "kind"): "runs", ("add_bump", "expires_at"): NOW + DAY,
         ("apply_model", "reason"): "initial",
+        ("stop", "reason"): "stopped by a test", ("abandon_routing", "reason"): "stopped by a test",
+        ("end_closed", "reason"): "stopped by a test", ("end_reply", "state"): "unknown",
+        ("open_review_round", "followup_id"): None,
     }
 
     def targets(self) -> list:
-        found = [function for module in (pensieve, owlery, facts, capacity, wands)
+        found = [function for module in (pensieve, owlery, facts, capacity, wands, followups)
                  for _, function in public_functions(module)]
         found.append(owlery._cascade_task_closed)
         return [function for function in found if self.IDENTIFIERS & set(inspect.signature(function).parameters)]

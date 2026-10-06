@@ -228,6 +228,18 @@ class GuardTests(unittest.TestCase):
                 with self.assertRaises(FleetError):
                     patrol.guard(argv)
 
+    def test_the_followup_query_takes_only_checked_variables(self):
+        good = patrol.gh_argv("followup", {"owner": "acme", "name": "web-app", "number": 7})
+        self.assertEqual(good[4], "query=" + patrol.FOLLOWUP_QUERY)
+        self.assertEqual(good[5:], ["-f", "name=web-app", "-F", "number=7", "-f", "owner=acme"])
+        for variables in ({"owner": "acme", "name": "web-app", "number": "7; x"}, {"owner": "a b", "name": "web-app",
+                                                                                  "number": 7},
+                          {"owner": "acme", "name": "web-app", "number": 7, "after": "x y"},
+                          {"owner": "acme", "name": "web-app", "number": 7, "body": "hello"}):
+            with self.subTest(variables=variables), self.assertRaises(FleetError):
+                patrol.gh_argv("followup", variables)
+        self.assertNotIn("mutation", patrol.FOLLOWUP_QUERY.lower())
+
     def test_a_next_page_cursor_is_checked(self):
         for name in ("prs", "asked"):
             argv = patrol.gh_argv(name, {"mine" if name == "prs" else "asked": "is:pr is:open", "after": cursor(50)})

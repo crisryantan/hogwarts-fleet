@@ -61,6 +61,8 @@ KNOWN_FLAGS = {
     "--drill",
     # the review loop's draft PR, gh pr create --draft with its body on stdin (gitops.draft_pr_argv)
     "--draft", "--repo", "--head", "--body-file",
+    # a PR follow-up's replies, gh api --method POST with their JSON on stdin (gitops.reply_argv, pr_comment_argv)
+    "--method", "--input",
     # Dumbledore's nightly job: the export alone, with no owl and no run
     "--export-only",
 }
@@ -151,6 +153,20 @@ class ProcessTests(unittest.TestCase):
                     self.assertEqual((modules, calls), (PROCESS_MODULES_ALLOWED[path.name], []))
                 else:
                     self.assertEqual((sorted(modules), calls), ([], []))
+
+    def test_only_gitops_writes_to_github_in_three_shapes(self):
+        # A gh command that writes is built only in gitops, from its fixed shapes: no other fleet module names a gh
+        # write method or the draft PR command, and followup.py, which posts the replies, starts no process at all.
+        writes = {"--method", "--input", "--draft", "--body-file", "POST", "PATCH", "PUT", "DELETE"}
+        for path in SOURCES:
+            if path.name == "gitops.py":
+                continue
+            constants = {node.value for node in ast.walk(ast.parse(path.read_text()))
+                         if isinstance(node, ast.Constant) and isinstance(node.value, str)}
+            with self.subTest(path=path.name):
+                self.assertEqual(constants & writes, set())
+        self.assertNotIn("followup.py", PROCESS_MODULES_ALLOWED)
+        self.assertEqual(imported_modules(ast.parse((FLEET / "followup.py").read_text())) & PROCESS_MODULES, set())
 
     def test_no_process_module_uses_a_shell_keyword(self):
         for path in [FLEET / name for name in PROCESS_MODULES_ALLOWED] + [RUNNER]:

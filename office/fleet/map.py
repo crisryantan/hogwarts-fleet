@@ -23,6 +23,12 @@ review threads she has not seen fetches that PR's threads and wakes her. She wri
 drafts, which land in patrol/bot-pass. The threads count as seen only once the patrol has taken her drafts;
 until then they wait on her pending owl and are not sent again. Nothing is ever posted anywhere.
 
+PR follow-ups (fleet/followup.py): before the round writes its snapshot, so a round killed mid-routing is computed
+again and loses no row, the follow-up tidies what only the store can finish and, while the Headmaster has it on and
+live, sends teammates' comments on PRs the review loop opened back to the build desk. A person's thread it takes becomes a
+routine row, since the follow-up raises its own events, and the bot pass leaves those threads alone. The round file
+lists the follow-ups from the store.
+
 Last, the round sends again each patrol owl whose file the patrol has not taken yet (patrol.resend_pending).
 
 In shadow mode that is all. Once Ryan removes the shadow file, each for-me row is also a headmaster event,
@@ -43,7 +49,7 @@ if __name__ == "__main__" and "/Users/crisryantan/.hogwarts" not in sys.path:
 
 from hogwarts.errors import StoreError  # noqa: E402
 
-from fleet import common, config, morning, patrol, run_desk  # noqa: E402
+from fleet import common, config, followup, morning, patrol, run_desk  # noqa: E402
 from fleet.safefs import FleetError  # noqa: E402
 
 SNAPSHOT = "snapshot.json"
@@ -138,12 +144,15 @@ def changes(before: dict, after: dict) -> list:
     return rows
 
 
-def render_round(rows: list, seen: dict, ts: int) -> str:
+def render_round(rows: list, seen: dict, ts: int, followups_text: Optional[str] = None) -> str:
     changed = [(row["mark"], row["pr"], row["change"], row["detail"]) for row in rows]
-    return (f"# Map round {patrol.file_stamp(ts)}\n\n"
+    text = (f"# Map round {patrol.file_stamp(ts)}\n\n"
             "## Changes since the last round\n\n" + patrol.table(("mark", "PR", "change", "detail"), changed)
             + "\n## Ryan's open PRs now\n\n" + patrol.prs_table(seen["prs"], ts)
             + "\n## Reviews waiting on Ryan\n\n" + patrol.asked_table(seen["asked"], ts))
+    if followups_text is not None:
+        text += "\n## Follow-ups\n\n" + followups_text
+    return text
 
 
 # Hermione's bot pass
@@ -214,10 +223,13 @@ def seed_bot_passes(seen: dict, ts: int) -> None:
                                                for key, record in seen["prs"].items()})
 
 
-def bot_passes(conn, seen: dict, ts: int, now: Optional[int] = None, shadow: bool = True) -> list:
+def bot_passes(conn, seen: dict, ts: int, now: Optional[int] = None, shadow: bool = True,
+               skip: Optional[dict] = None) -> list:
     """Wake Hermione for each PR old enough to have its bot reviews with threads she has not seen yet. A
     thread counts as seen once the patrol has taken her drafts for it (patrol.finish); until then it waits
-    on her pending owl and no second pass sends it."""
+    on her pending owl and no second pass sends it. skip maps a PR to the threads a PR follow-up takes, which she
+    leaves alone; a PR whose follow-up threads the store could not read (None) gets no bot pass this round."""
+    skip = skip or {}
     state = patrol.read_state("map", BOT_PASS_STATE, {})
     state = {key: value for key, value in (state.items() if isinstance(state, dict) else ())
              if key in seen["prs"] and isinstance(value, dict) and isinstance(value.get("threads"), list)}
@@ -227,7 +239,9 @@ def bot_passes(conn, seen: dict, ts: int, now: Optional[int] = None, shadow: boo
     for key, record in sorted(seen["prs"].items()):
         if not record["created_at"] or ts - record["created_at"] < config.BOT_PASS_DELAY_SECONDS:
             continue
-        done = set(state.get(key, {}).get("threads", [])) | sent.get(key, set())
+        if key in skip and skip[key] is None:
+            continue
+        done = set(state.get(key, {}).get("threads", [])) | sent.get(key, set()) | set(skip.get(key) or ())
         fresh = [thread for thread in record["open_threads"] if thread not in done]
         if fresh:
             due.append((key, record, fresh))
@@ -239,10 +253,12 @@ def bot_passes(conn, seen: dict, ts: int, now: Optional[int] = None, shadow: boo
         out = f"{tag}-{patrol.file_stamp(now)}.md"
         try:
             threads = fetch_threads(record)
-            text, carried = render_threads(key, record, threads, fresh)
             # Seen once taken: the threads this pass carries, and open ones the fetch no longer returns (resolved
-            # since, or unreadable), which no pass could carry. Threads left out for size wait for a later pass.
+            # since, or unreadable), which no pass could carry. Threads left out for size wait for a later pass, and
+            # threads a PR follow-up took are not hers to draft at all.
             fetched = {thread["id"] for thread in threads}
+            threads = [thread for thread in threads if thread["id"] not in set(skip.get(key) or ())]
+            text, carried = render_threads(key, record, threads, fresh)
             marks = carried + [thread for thread in record["open_threads"] if thread not in fetched]
             patrol.write_text("bot-pass", out, text)
             woke = patrol.wake(conn, "hermione", "bot-pass", "bot pass", text, out, now, tag=tag, shadow=shadow,
@@ -298,6 +314,11 @@ def run_round(conn, now: Optional[int] = None) -> dict:
     before = patrol.read_state("map", SNAPSHOT, None)
     baseline = not isinstance(before, dict) or before.get("account") != login or not isinstance(before.get("prs"), dict)
     rows = [] if baseline else changes(before, seen)
+    # Before the snapshot is written: a round killed while it routes is computed again, and the store covers what it
+    # routed, so no row is lost and nothing routes twice.
+    fu = followup.patrol_round(conn, seen, ts, now, shadow, baseline)
+    rows = followup.mark_covered(rows, before if not baseline else {}, seen, fu)
+    rows += fu["rows"]
     patrol.write_state("map", SNAPSHOT, {"account": login, "taken_at": ts, "prs": seen["prs"], "asked": seen["asked"]})
     for row in rows:
         patrol.append_row("map", OUTCOMES, {"ts": ts, **row})
@@ -305,7 +326,7 @@ def run_round(conn, now: Optional[int] = None) -> dict:
     woke = None
     if for_me:
         out = f"round-{patrol.file_stamp(now)}.md"
-        text = render_round(rows, seen, ts)
+        text = render_round(rows, seen, ts, followup.lineup_text(conn, now))
         patrol.write_text("map", out, text)
         for row in for_me:
             patrol.tell_ryan(conn, shadow, "for-me", f"{row['pr']}: {row['change']} ({row['detail']})",
@@ -318,13 +339,14 @@ def run_round(conn, now: Optional[int] = None) -> dict:
         seed_bot_passes(seen, ts)
         passes = []
     else:
-        passes = bot_passes(conn, seen, ts, now, shadow)
+        passes = bot_passes(conn, seen, ts, now, shadow, skip=fu["covered"])
     resent = patrol.resend_pending(conn, shadow, now)
     lineup = catch_up_lineup(conn, ts, now)
     model = bool(woke and woke.get("launched")) or any(item.get("launched") for item in passes) or resent["launched"] \
-        or bool(lineup and lineup.get("model"))
+        or bool(lineup and lineup.get("model")) or fu["model"]
     row = {"ts": ts, "ok": True, "shadow": shadow, "baseline": baseline, "prs": len(seen["prs"]),
-           "asked": len(seen["asked"]), "changes": len(rows), "for_me": len(for_me), "model": model}
+           "asked": len(seen["asked"]), "changes": len(rows), "for_me": len(for_me), "model": model,
+           "followups": {"live": fu["live"], "routed": fu["routed"], "errors": fu["errors"]}}
     if lineup is not None:
         row["lineup"] = "written" if lineup.get("ok") else "failed"
     patrol.append_row("map", ROUNDS, row)

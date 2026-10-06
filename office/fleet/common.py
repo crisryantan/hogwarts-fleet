@@ -13,10 +13,11 @@ from typing import Callable, Iterator, Optional, Sequence
 from hogwarts import db, ids, pensieve
 from hogwarts.errors import StoreError
 
-from . import config
+from . import config, safefs
 from .safefs import FleetError
 
 _PRINTABLE = re.compile(r"[^\x20-\x7e]")
+OPT_IN_MAX_BYTES = 64
 
 
 def connect():
@@ -171,3 +172,18 @@ def run_hook(name: str, body: Callable, argv: Optional[Sequence[str]], stdin, st
         stderr.write(f"Hogwarts {name} hook skipped: {type(exc).__name__}\n")
         return 1
     return 0
+
+
+def opt_in_on(name: str) -> bool:
+    """Whether the Headmaster opted in to one thing: the plain file config.OPT_IN_FILES names in the office, his own
+    and writable by no one else, reached with no link on the way, holds exactly "on". It is read from nowhere else, so
+    nothing a desk can write turns it on, and a name that is not in OPT_IN_FILES always reads off. Missing, unreadable
+    or anything else is off."""
+    if not isinstance(name, str) or name not in config.OPT_IN_FILES:
+        return False
+    try:
+        with safefs.opened_dir(config.OFFICE_ROOT) as fd:
+            raw = safefs.read_regular(fd, name, OPT_IN_MAX_BYTES, "an opt-in")
+    except (FleetError, OSError):
+        return False
+    return raw.strip() == b"on"

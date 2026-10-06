@@ -30,7 +30,7 @@ starts the desk's run if Ryan has enabled the desk.
 
   fleet build <task-id>     starts the desk again on the same task, for a fix round after a review. The review
                             loop starts a fix round through build() itself after a CHANGES verdict, so this is the
-                            fallback. Both run under the task's review lock, so neither starts the desk mid-review,
+                            fallback. During a PR follow-up it starts the desk on that follow-up's own owl. Both run under the task's review lock, so neither starts the desk mid-review,
                             and hand that lock to the run they start, which holds it until its process ends, so no
                             review starts while the desk may still be writing (see run_desk.task_lock). fleet
                             worktree starts the first run the same way.
@@ -335,13 +335,19 @@ def settle(conn, claim: dict, exc: BaseException) -> None:
 def start_desk(conn, task: dict, lock_fd: int) -> str:
     """Start the desk's run on its request owl, when Ryan has enabled the desk. Returns what happened. Called under
     the task's review lock (lock_fd), which the run is handed, so no review of the task starts before the run holds
-    it (see run_desk.task_lock)."""
-    owl_id = _request_owl(conn, task)
+    it (see run_desk.task_lock). While the task's PR follow-up is starting or building, the run starts on that
+    follow-up's own owl instead, with its threads file written again from the office copy first; while it is still
+    being routed, nothing starts (fleet/followup.py, run_owl)."""
+    from fleet import followup  # here, not at the top: the follow-up module builds on this one
+
+    owl_id, open_followup = followup.run_owl(conn, task)
     if not run_desk.is_enabled(task["desk"]):
         return f"{task['desk']} is not enabled, so nothing was started"
     if run_desk.over_daily_cap(conn, task["desk"]) is not None:
         run_desk.report_cap(conn, task["desk"])
         return f"{task['desk']} reached its daily cap, so nothing was started"
+    if open_followup is not None:
+        followup.publish_threads(conn, task, open_followup)
     run_desk.spawn(task["desk"], owl_id, hold_fd=lock_fd)
     return f"started {task['desk']} on owl {owl_id}"
 

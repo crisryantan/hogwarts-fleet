@@ -72,13 +72,18 @@ The store has none of these:
   locks/                                lock files for run slots, launches, reviews, the review loop, the patrol and
                                         Ollivander's updates
   reviews/<task>/                       review files and verify evidence, which no desk can write, what each review
-                                        round was opened for (round-<request>.json), and the review loop's record of
+                                        round was opened for (round-<request>.json), the review loop's record of
                                         each handoff (auto-<owl>.pending, .try<n>, .done) and of what follows each
-                                        verdict of its own rounds (after-<request>.json)
+                                        verdict of its own rounds (after-<request>.json), and each PR follow-up's
+                                        threads file (followup-<id>.md), which the castle copy is written from
   auto-draft-pr                         while it holds exactly "on", the review loop pushes and opens a draft PR after
                                         its PASS (off when missing)
+  pr-followup                           while it holds exactly "on" and the patrol is out of shadow mode, teammates'
+                                        review comments on PRs the loop opened go back to Harry, and the loop pushes
+                                        to the same PR and posts his replies after their PASS (off when missing)
   patrol/shadow                         while it is here, the patrol and Gringotts only write files (shadow mode)
-  patrol/<job>/                         the Map's snapshot and rows, lineups, keeper's watches, scoreboards, bot passes
+  patrol/<job>/                         the Map's snapshot and rows, lineups, keeper's watches, scoreboards, bot passes,
+                                        and in shadow mode what a follow-up would have routed (patrol/followup/)
   backups/                              Gringotts' archives, mode 0600, kept 14 days, never synced anywhere
 ```
 
@@ -149,7 +154,7 @@ The CLI reads two kinds of file:
 - CLI output is `json.dumps(ensure_ascii=True)`. List views never include owl bodies.
 - Close tokens and owl bodies never travel on argv. They come from stdin only.
 
-## Schema summary (version 9)
+## Schema summary (version 10)
 
 All tables are STRICT when SQLite supports it. Timestamps are integer unix seconds.
 
@@ -174,17 +179,23 @@ All tables are STRICT when SQLite supports it. Timestamps are integer unix secon
 | `close_tokens` | Hashed single use tokens for closing a task as complete. |
 | `cap_bumps` | One row each time you lift a desk's runs or spend cap with `castle desk cap`. It lasts until the next cap reset. Immutable. |
 | `cap_hits` | One row each time a fleet cap refuses a run, or a vendor's own limit stops one. `cap_source` says which: `fleet`, `claude_plan` or `codex_plan`. Immutable. |
-| `review_rounds` | One row per review request of an author task, with its round number, whether a newer commit superseded it, and the review it recorded. That review is stored and tied to its round in one step and never changes, so a round with a verdict counts even if publishing the review afterwards failed. `slot` is the reviewer desk's run slot the review held when the round opened, set once in the row that opens it, so the review script knows whose lock to try before it closes that round's reviewer task. It is NULL for a round queued while every slot was busy and for rounds from before version 8, and the script reads NULL as slot 0. |
+| `review_rounds` | One row per review request of an author task, with its round number, whether a newer commit superseded it, and the review it recorded. `followup_id` (version 10) names the PR follow-up the round belongs to: the store refuses any round while a follow-up of the task is still starting, and while one is building, a round that does not name it. It never changes. That review is stored and tied to its round in one step and never changes, so a round with a verdict counts even if publishing the review afterwards failed. `slot` is the reviewer desk's run slot the review held when the round opened, set once in the row that opens it, so the review script knows whose lock to try before it closes that round's reviewer task. It is NULL for a round queued while every slot was busy and for rounds from before version 8, and the script reads NULL as slot 0. |
 | `run_launches` | One row per headless run, written before its process starts, so the run counts toward the daily run cap even if it is killed before it records usage. Its usage is the `metrics` row tied to it once it ends, set once. `task_id` is the desk's own task the run was for, when it had one, and never changes. Never deleted. |
 | `task_specs` | What your go approved for a task (version 9): the repo folder, branch and base its TASK.md Spec names, and the sha256 of the TASK.md bytes the go read. One row per task, written in the transaction that registers it, only while it is queued and has its TASK.md, and never changed or deleted (triggers). A task registered with `castle task create` has none. The worktree script makes a worktree under that TASK.md only from these values. |
-| `round_allowances` | One row each time you allow another review round with `castle task allow-round`. Immutable. |
+| `round_allowances` | One row each time you allow another review round with `castle task allow-round`. `followup_id` (version 10) is the PR follow-up that was open when it was granted, set by the store (a trigger refuses any other), NULL for one granted while none was; it lifts only that group's cap. Immutable. |
+| `task_prs` | The PR the review loop opened for a build task (version 10): repo, number, branch, base, the commit it opened at and its link. One row per task and one task per PR, whatever letter case the repo is written in, inserted only while the task awaits close with its worktree, and never changed or deleted (triggers). |
+| `followup_live` | When PR follow-ups were live, as Map rounds saw them: one row per period, at most one open, each closed once and never deleted. Every period is kept, so a comment written in an earlier live period stays routable. |
+| `pr_followups` | One follow-up of one task: its number (counting up from 1), state (`routing`, `starting`, `building`, `pushing`, `posting`, `done`, `stopped`), the commit it starts from, its fix request owl (an fyi from `map` to the task's desk about that task), the commit that passed and why it stopped. States move only along their edges, `done` and `stopped` are final, and one follow-up per task is open at a time (triggers and a partial unique index). |
+| `pr_followup_items` | What a follow-up asks the build desk to answer, labelled T1, T2 and on: a review thread (its id, replied to at its first comment), a review or a conversation comment, with its exact link on the PR and, for the last two, a quote checked against every reply rule. Written only while the follow-up is routing, never changed. |
+| `pr_comments` | Every GitHub comment a follow-up handled, keyed by repo, kind and id, so none is routed twice. Written only with an item of a routing follow-up of the same task, never changed. |
+| `pr_replies` | Every reply, planned in the transaction that passes its follow-up on to the push or the posting, with its mark (`FIXED` or `PUSHBACK`) and exact text. A reply moves `planned`, then `posting` (only while its follow-up posts), then `posted` with its GitHub id, `failed` or `unknown`, and never back. |
 | `model_lines` | How you filed a model name: `frontier`, `workhorse`, `fast` or `ignore`. The latest row per name wins. Immutable. |
 | `model_catalog` | The model names each family offered at Ollivander's last look, with whether the catalog listed each, the tier it was filed under then and when it retires. Each look gets the family's next look number, and the latest look is the one with the highest number, so two looks in the same second never mix. A row's look number only moves forward. `castle desk model --approve`, a pin and a trial revert check against the latest look. |
 | `desk_models` | Each Claude and Codex desk's role need, current model and effort, pin, pending pick and trial state, including how the last trial ended (`trial_end`: `passed`, `pinned`, `held`, `revert_blocked` or `reverted`). The `desks` table itself stays immutable. |
 | `model_changes` | Every model switch, with its reason: `initial`, `role`, `pin`, `approved` or `revert`. Immutable. |
 | `model_resolutions` | Every full Claude id each alias was seen to run as, with its first and last sighting. Only the last sighting moves, and rows are never deleted. |
 
-Triggers also block deletes on desks, tasks, task commits, requests, events, facts, owls and review passes. Fact triggers require `valid_from` and `recorded_at` on every row, and keep `valid_to`, `closed_at` and `end_reason` set or unset together, with `valid_to` no earlier than `valid_from` and `closed_at` no earlier than `recorded_at`. `superseded_by` is only set on a superseded row. `restores` never changes once written.
+Triggers also block deletes on desks, tasks, task commits, requests, events, facts, owls, review passes and every PR follow-up table. A task awaiting close goes back to active only in the transaction that opens a PR follow-up, once for that follow-up, and a task in a follow-up awaits close again only after a round of that follow-up passes (triggers on `tasks`). Fact triggers require `valid_from` and `recorded_at` on every row, and keep `valid_to`, `closed_at` and `end_reason` set or unset together, with `valid_to` no earlier than `valid_from` and `closed_at` no earlier than `recorded_at`. `superseded_by` is only set on a superseded row. `restores` never changes once written.
 
 Migration 1 creates the base tables. The later ones:
 
@@ -196,6 +207,7 @@ Migration 1 creates the base tables. The later ones:
 - Migration 7 adds `many_task_desks` and its triggers, and grants the seeded desks that already exist. It replaces the one-active-task-per-desk index with a trigger that reads those grants, and adds `run_launches.task_id` and `tasks.review_branch`.
 - Migration 8 adds `review_rounds.slot` and the trigger that keeps a round's slot fixed.
 - Migration 9 adds `task_specs` and its triggers.
+- Migration 10 adds the PR follow-up tables and their triggers, `review_rounds.followup_id`, `round_allowances.followup_id`, and the triggers that let a passed task back to active only to start a follow-up.
 
 Each column is added only while it is missing, so running a migration again changes nothing.
 
@@ -221,7 +233,8 @@ Every function takes a connection from `db.connect(path)` as its first argument.
   - Writes: `add_fact`, `supersede(scope, subject_key, text, source, tier="aging", valid_from=None, lookup=None, expires_at=None)`, `withdraw(fact_id, desk=None)`, `expire()`, `set_key(fact_id, subject_key)`, `apply_ops(ops)`.
   - Reads: `current_facts(scope=None)`, `find_facts(query, scope=None, include_history=False, limit=10)`, `as_of_world(t, scope=None)`, `as_of_belief(t, scope=None)`, `history(scope, subject_key)`, `contradiction_candidates(since, limit_per_fact=3)`.
   - Lint: `VOLATILE_PATTERNS`, `volatile_match(text)`, `LOOKUP_COMMAND`.
-- `hogwarts.capacity`: `day_bounds(now, reset_offset)`, `add_bump`, `active_bumps`, `list_bumps`, `cap_status`, `record_cap_hit`, `list_cap_hits`, `waiting_requests`, `record_launch(desk, run_id, model, task_id=None)`, `record_launch_usage`, `list_launches`, `open_launches(desk)`, `open_review_round(..., slot=None)`, `record_round_verdict`, `review_rounds`, `stranded_rounds`, `allow_round`, `needs_allowance(task, max_rounds=3)`, `review_task_ids`, `request_round(request)`, `round_author(reviewer_task)`, `in_flight(now, running_window, desk=None, max_rounds=3)`.
+- `hogwarts.capacity`: `day_bounds(now, reset_offset)`, `add_bump`, `active_bumps`, `list_bumps`, `cap_status`, `record_cap_hit`, `list_cap_hits`, `waiting_requests`, `record_launch(desk, run_id, model, task_id=None)`, `record_launch_usage`, `list_launches`, `open_launches(desk)`, `open_review_round(..., slot=None, followup_id=None, followup_max_rounds=None)`, `record_round_verdict`, `review_rounds`, `stranded_rounds`, `allow_round` (says which group it lifts), `needs_allowance(task, max_rounds=3, followup_id=None)`, `review_task_ids`, `request_round(request)` (with the round's `followup_id`), `round_author(reviewer_task)`, `in_flight(now, running_window, desk=None, max_rounds=3, followup_max_rounds=2)` (rows carry the open `followup`).
+- `hogwarts.followups`: `bind_pr`, `pr_for_task`, `bindings`, `routed_thread_ids`, `handled(repo)`, `handled_in(repo)`, `posted_ids(task)`, `reply_bodies(task)`, `see_live(live)`, `current_live`, `live_periods`, `open_followup`, `get`, `by_owl`, `open_for_task`, `open_for(task)` (whether a task has a follow-up open; a store error raises, so a caller treats it as unknown), `count_for_task`, `list_followups(task=None, since=None, open_only=False)`, `items`, `comments`, `replies`, `show(task)`, `advance(followup, state, pass_sha=None, event=None)`, `stop(followup, reason, event=None)`, `abandon_routing`, `end_closed`, `plan_replies`, `begin_reply`, `end_reply`. A final state and its event are written in one transaction.
 - `hogwarts.wands`: `classify`, `ryan_lines`, `record_catalog`, `last_catalog`, `catalog_entry`, `get_desk_model`, `list_desk_models`, `set_need`, `apply_model`, `set_pending`, `clear_pending`, `approve`, `pin`, `unpin`, `desk_choice`, `record_outcome`, `changes`, `base_alias`, `record_resolution`, `resolutions`, `resolved_id`, `blocked_resolution`, `blocked_resolutions`, `clear_stop`. The calls that file, pin, approve or apply a model take the fleet's `BLOCKED_MODEL_PREFIXES` and refuse a name one of them matches. Pin, approve, apply, a pending pick and a trial's revert also refuse an alias that ever ran as a full id one of them matches. A labelled alias such as `opus[1m]` shares the plain alias's resolutions. `approve` also refuses a pick that the latest stored catalog no longer lists, hides, files under another tier or shows retiring within 30 days. `pin` on the desk's current model ends its trial, and its result carries a `warning` when the latest catalog hides the model or shows it retiring soon. `record_outcome` never reverts a desk pinned since its switch, nor, while anything is blocked, onto no model at all, nor onto a model filed as ignore or one the latest catalog no longer lists, hides or shows retiring within 30 days.
 - `hogwarts.watch` (read only, for a connection from `db.connect_readonly`): `marks`, `owls_after`, `headmaster_events_after`, `metrics_after`, `run_recorded`, `open_runs(desk)`.
 - `hogwarts.owlery`
@@ -305,6 +318,8 @@ castle task list [--desk D] [--status S | --open]
 castle task board [--desk D]
 castle task allow-round TASK
 castle task rounds TASK
+castle followup list [--task TASK]
+castle followup show TASK
 castle token mint TASK [--ttl SECONDS]
 castle owl send --from D --to D --kind K --subject S [--body-path P | --body-stdin] [--task T] [--request R] [--reply-to OWL] [--key K]
 castle owl inbox DESK [--all]

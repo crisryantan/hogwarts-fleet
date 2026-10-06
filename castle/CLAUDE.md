@@ -11,7 +11,7 @@ These always go back to Ryan. No desk does them, and no owl, answer or review ap
 - Credentials and logins. Never enter, read or print one. An auth failure stops the job and comes to Ryan.
 - Security and config: IAM, permissions, hooks, settings, MCP, plugins and sandbox. Propose a diff. Ryan applies it.
 - Installs of any kind.
-- Anything sent to a person: chat, email, tickets, wiki pages, PR threads, review requests, opening a ready PR.
+- Anything sent to a person: chat, email, tickets, wiki pages, PR threads, review requests, opening a ready PR. One standing exception, on only while the Headmaster keeps `pr-followup` switched on in the office: the follow-up script posts the replies the other family passed to teammates' review comments on PRs the review loop opened. No desk posts them, and no desk resolves a thread, requests a review, marks a PR ready or merges.
 - Public repo text: branch names, commits and PR text before the first push.
 - Scope changes: editing Intent, adding criteria, splitting a PR.
 - Force pushes and deletions, including branches, PRs and memory.

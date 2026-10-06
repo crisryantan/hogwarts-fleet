@@ -99,6 +99,8 @@ Then tell McGonagall it's registered, so she routes it, and give Harry's task it
 
 Paste the token from the first command into the second when it waits for stdin. The token works once and expires.
 
+A task in a PR follow-up (step 6b of (g)) is active again until its follow-up passes, so `Mischief managed` waits; close it from your terminal as above if you are done with it, which also stops its follow-up.
+
 Headmaster events stay in the digest and on each prompt until you ack them with `castle event ack <id>`.
 
 ## (e) Codex hooks: the push gate for your own Codex sessions
@@ -165,6 +167,23 @@ rm ~/.hogwarts/auto-draft-pr
 ```
 
    It counts only while it is a plain file you own that no one else can write, holding exactly `on`. A file anywhere else, a desk folder, a task folder, an owl, TASK.md or `standing-orders.md`, is ignored. Write the same order in `standing-orders.md` for people to read, but code never parses it.
+
+6b. Teammates' comments (opt-in). Once the review loop opened a draft PR for a task, the store binds that PR to the task. With follow-ups on, each Map round reads every bound PR that is still open for a task awaiting close, with the patrol's read-only GraphQL query, and picks the comments that are new to the store:
+
+   - Who counts as a teammate: someone GitHub lists as `OWNER`, `MEMBER` or `COLLABORATOR` on the repo, never a bot, never the PR's author, and never an account in `FOLLOWUP_IGNORED_LOGINS`. Review thread comments, review bodies that comment or ask for changes, and conversation comments all count. A thread comment you already answered by hand in that thread doesn't.
+   - What waits: a comment from before the PR was bound or written while follow-ups were not live, a PR whose newest comment is under five minutes old (so one review goes as one follow-up), a review of the task still running, and anything only you can fix (Harry or Hermione off or at their cap, a dirty worktree, gh signed in as another account, a PR whose head moved, or a PR too big to read whole), which you hear about once a day.
+   - What happens: the comments are recorded as handled, Harry's fix request is stored and his task goes back to active, in one store transaction. The GitHub text goes to `followup-<n>.md` next to TASK.md, scrubbed and quoted line by line as data, and Harry starts on that request. His handoff carries a `THREADS (<follow-up id>)` section marking every item FIXED (he changed the code) or PUSHBACK (an answer, a decline or his evidence), each with its one-line reply. Hermione reviews his fix and his replies as usual, with two rounds of her own for each follow-up, apart from the task's three.
+   - On PASS: every reply is checked again (one line of plain ASCII, no em dash, no fleet word, nothing shaped like a credential, no mention, no link outside the repo, no markup), the PR is read again, and the reviewed commit is pushed to the same branch, never forced and never as a new PR, when it is new. Then each reply goes out once with your `gh` login: in its review thread, or as a PR comment quoting the review or comment it answers. You get one headmaster event naming the PR, the commit and how many replies went out in your name. Any stop is one headmaster event too, naming the step and what to do next. Nothing resolves a thread, requests a review, marks the PR ready or merges.
+   - After a kill: the push is read back from the remote branch and each reply from the PR, so nothing is pushed or posted twice; what may or may not have happened is told once.
+
+   Switch it on and off from your terminal. It needs draft PRs on and the patrol out of shadow mode, and follows the same file rules as the draft PR switch:
+
+```
+echo on > ~/.hogwarts/pr-followup
+rm ~/.hogwarts/pr-followup
+```
+
+   Replies go out only while `gh` is signed in as the account in `GITHUB_ACCOUNT`, checked before the push and on every answer. A reply that names a teammate whose name is also a fleet word is refused, so replies leave names out. Switching off stops routing at once and stops the next push or reply; an open follow-up is still tidied up by the next Map round (a cut-off routing undone, a closed task's follow-up ended). `castle followup show <harry-task-id>` lists a follow-up's comments and replies. The store moves to version 10 when the updated office first opens it, so going back to an older office means restoring a backup.
 
 7. For a commit from one of your own Claude sessions, Moody reviews it in a detached worktree. On PASS, that session's `git push` gets through the gate. For a fix round, pass `--task <id>` instead of `--title`:
 

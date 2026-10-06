@@ -22,20 +22,24 @@ its PR BODY DRAFT, through gitops.open_draft_pr. Before anything is pushed, the 
 messages are refused when they hold a fleet word or anything shaped like a credential, key or email. It
 never opens a ready PR, merges, forces or retries. Any failure stops it where it is and raises a
 FleetError naming what was and was not done.
+
+A task whose PR the review loop opened is bound to it in the store (hogwarts.followups.bind_pr). fleet push on such a
+task pushes to that PR's branch as always and names the open PR instead of printing a command for a new one.
+push_followup is the PR follow-up's push after its own PASS (fleet/followup.py): exactly the reviewed commit, to the
+same branch, never forced, so a remote branch that moved makes git refuse.
 """
 from __future__ import annotations
 
 import sys
 from typing import Callable, Optional
 
-from hogwarts import ids, owlery, pensieve
+from hogwarts import followups, ids, owlery, pensieve
 
-from fleet import common, config, gitops, safefs, worktree
+from fleet import common, config, gitops, worktree
 from fleet.safefs import FleetError
 
 ADDED_LINE_PREFIX = "+"
 MAX_LISTED = 20
-OPT_IN_MAX_BYTES = 64
 # What pensieve.scrub puts in place of a credential, key or email. Text any of its patterns matches this way never
 # goes out by itself. Its hex and IP address marks are left out, since commit shas and version numbers look like them.
 SENSITIVE_MARKS = ("[private_key]", "[credentials]", "[jwt]", "[token]", "[secret]", "[aws_key]", "[email]")
@@ -100,12 +104,16 @@ def push(conn, task_id: str, confirm: Optional[Callable[[str], str]] = None) -> 
         answer = confirm(summary + "Type the branch name to push it, or anything else to stop: ")
         if answer.strip() != branch:
             raise FleetError("not pushed: the branch name was not typed")
+    bound = followups.pr_for_task(conn, plan["task"]["id"])
     _push_exact(record, sha, branch)
+    pushed = {"task_id": plan["task"]["id"], "repo": record["repo"], "branch": branch, "sha": sha}
+    if bound is not None:
+        # The review loop opened this task's PR, so the push lands on it and no second PR is suggested.
+        return {**pushed, "pr": bound["url"]}
     subject = gitops.git(["log", "-1", "--format=%s", sha], record["git_dir"], record["path"]).strip()
     title = subject.replace("\\", "").replace('"', "'")
     draft = f'gh pr create --draft --repo {record["repo"]} --head {branch} --title "{title}" --body-file <file>'
-    return {"task_id": plan["task"]["id"], "repo": record["repo"], "branch": branch, "sha": sha,
-            "draft_pr_command": draft}
+    return {**pushed, "draft_pr_command": draft}
 
 
 def _push_exact(record: dict, sha: str, branch: str) -> str:
@@ -120,15 +128,18 @@ def _push_exact(record: dict, sha: str, branch: str) -> str:
 
 
 def auto_draft_pr_on() -> bool:
-    """Whether Ryan opted in to the automatic draft PR: the plain file config.AUTO_DRAFT_PR_FILE in the office, his
-    own and writable by no one else, reached with no link on the way, holds exactly "on". It is read from nowhere
-    else, so nothing a desk can write turns it on. Missing, unreadable or anything else is off."""
-    try:
-        with safefs.opened_dir(config.OFFICE_ROOT) as fd:
-            raw = safefs.read_regular(fd, config.AUTO_DRAFT_PR_FILE, OPT_IN_MAX_BYTES, "the draft PR opt-in")
-    except (FleetError, OSError):
-        return False
-    return raw.strip() == b"on"
+    """Whether the Headmaster opted in to the automatic draft PR: the plain file config.AUTO_DRAFT_PR_FILE in the office
+    holds exactly "on", read through the one opt-in reader (common.opt_in_on). Missing, unreadable or anything else is
+    off."""
+    return common.opt_in_on(config.AUTO_DRAFT_PR_FILE)
+
+
+def push_followup(record: dict, sha: str, branch: str) -> str:
+    """A PR follow-up's push after its PASS: exactly the reviewed commit to the PR's branch, never forced, so a remote
+    branch that moved makes git refuse. The caller has run every check first (fleet/followup.py)."""
+    if not isinstance(sha, str) or gitops.SHA.fullmatch(sha) is None:
+        raise FleetError("a follow-up pushes one full commit sha")
+    return _push_exact(record, sha, gitops.check_branch(branch))
 
 
 def sensitive_mark(text: str) -> Optional[str]:
