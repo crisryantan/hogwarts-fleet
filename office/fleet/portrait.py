@@ -20,9 +20,9 @@ picks up. Neither name ends in .json, so the Owl Post leaves both alone. After a
 patch, Ryan gets one headmaster event saying it is ready, or saying the file was refused and why.
 
 While Ryan has switched auto-portrait on (fleet/portrait_auto.py, the office file config.AUTO_PORTRAIT_FILE),
-the run goes through portrait_auto.night instead: the job holds Dumbledore's run slot from before the run until
-it has stored the patch tonight's run wrote, then applies its additions from the store, and the night ends in
-that lane's one event. Every job but --export-only first finishes the nights an earlier job left part way
+the run goes through portrait_auto.night instead: the job holds every run slot Dumbledore could have from before
+the run until it has stored the patch tonight's run wrote, then applies its additions from the store, and the night
+ends in that lane's one event. Every job but --export-only first finishes the nights an earlier job left part way
 (portrait_auto.resume), without reading the castle. SIGTERM and SIGHUP end the job through its finally blocks
 and handlers (common.ended_by_signals); a signal after the owl exists and before the lane armed the night is
 reported like a failed run, as run_desk.main reports a run the Owl Post started.

@@ -315,6 +315,54 @@ class NightlyRunTests(PortraitCase):
         with self.assertRaises(NotFoundError):
             portrait_patch.show(self.conn, "2027-01-13", now=NOW)
 
+    def test_lane_show_keeps_the_stored_outcome_when_the_file_is_refused_or_malformed(self):
+        sha = self.lane_night()
+        [event] = self.events_of("portrait.auto")
+        os.link(self.patch_path(), self.tmp / "second-link")  # the same bytes, now refused for their two links
+        shown = portrait_patch.show(self.conn, DATE, now=NOW)
+        self.assertEqual((shown["file"], shown["sha256"], shown["ops"], shown["apply_command"]),
+                         (f"patch-{DATE}.ops", None, [], None))
+        self.assertIn("more than one hard link", shown["problem"])
+        self.assertEqual((shown["auto"]["outcome"], shown["auto"]["sha256"], shown["auto"]["applied"]),
+                         (event["summary"], sha, ["f1", "n1"]))
+        self.assertIsNone(shown["auto"]["file_changed"])  # unknown, never taken for unchanged
+        os.unlink(self.tmp / "second-link")
+        self.write_raw(b"not a patch")
+        shown = portrait_patch.show(self.conn, DATE, now=NOW)
+        self.assertEqual(shown["sha256"], hashlib.sha256(b"not a patch").hexdigest())
+        self.assertIn("strict UTF-8 JSON", shown["problem"])
+        self.assertEqual((shown["auto"]["outcome"], shown["auto"]["file_changed"]), (event["summary"], True))
+        with mock.patch.object(portrait_patch, "read_patch", side_effect=OSError(5, "Input/output error")):
+            shown = portrait_patch.show(self.conn, DATE, now=NOW)
+        self.assertIn("Input/output error", shown["problem"])
+        self.assertEqual((shown["auto"]["outcome"], shown["auto"]["file_changed"]), (event["summary"], None))
+        # A date auto-portrait never took on still raises, as before.
+        self.write_raw(b"not a patch", date="2027-01-14")
+        with self.assertRaises(ValidationError):
+            portrait_patch.show(self.conn, "2027-01-14", now=NOW)
+
+    def test_lane_patches_keeps_the_stored_nights_when_the_outbox_cannot_be_read(self):
+        outbox, aside = self.outbox("portrait"), self.tmp / "outbox-aside"
+        os.rename(outbox, aside)
+        with self.assertRaises(NotFoundError):
+            portrait_patch.patches(self.conn)  # no night of auto-portrait to keep: as before
+        os.rename(aside, outbox)
+        self.lane_night()
+        [event] = self.events_of("portrait.auto")
+        with mock.patch.object(portrait_patch, "read_patch", side_effect=OSError(5, "Input/output error")):
+            [listed] = portrait_patch.patches(self.conn)
+        self.assertEqual((listed["file"], listed["auto"]["outcome"]), (f"patch-{DATE}.ops", event["summary"]))
+        self.assertIn("Input/output error", listed["problem"])
+        os.rename(outbox, aside)
+        [listed] = portrait_patch.patches(self.conn)
+        self.assertEqual((listed["file"], listed["date"], listed["applied"]), (f"patch-{DATE}.ops", DATE, ["f1", "n1"]))
+        self.assertEqual(listed["auto"], {"state": "done", "outcome": event["summary"], "applied": ["f1", "n1"]})
+        self.assertIn("does not exist", listed["problem"])
+        os.symlink(aside, outbox)  # an outbox reached through a link is refused
+        [listed] = portrait_patch.patches(self.conn)
+        self.assertEqual(listed["auto"]["outcome"], event["summary"])
+        self.assertIn("was refused", listed["problem"])
+
 
 # The patch: schema, show, apply and the list
 

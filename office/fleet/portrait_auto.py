@@ -3,31 +3,38 @@ on.
 
 It is off by default. It is on only while the plain office file config.AUTO_PORTRAIT_FILE holds exactly "on", read
 through common.opt_in_on, the one reader of every office switch, so no flag, store row, desk file or owl turns it
-on. The nightly job (fleet/portrait.py) reads it before it takes Dumbledore's run slot, and apply reads it again
+on. The nightly job (fleet/portrait.py) reads it before it takes Dumbledore's run slots, and apply reads it again
 just before anything is applied, on the first night and on resume alike: off at either read and nothing applies.
 
 A night with the switch on (night), after the export:
 
-1. Take Dumbledore's only run slot (run_desk.desk_lock) and, under it, read his patch for the night's date once
-   (portrait_patch.read_state). Arm the night in the store (pensieve.arm_auto_patch) with what was there: absent,
-   present (and its sha256) or unreadable.
-2. Run him through run_desk.run with that slot (lock_held). A run that is refused, capped, stopped, blocked or
-   fails ends the night stopped with no event of its own: the run's own event tells Ryan.
-3. Still under the slot, read the patch once more (validate). Only a patch that was absent before the run goes
-   on: the job held the only slot from before the first read until this one, and a killed launcher's process keeps
-   that slot (run_desk.desk_lock), so no other run of his wrote it in between. A patch that was there before, even
+1. Take every run slot Dumbledore could ever have (run_desk.all_slots_lock: up to hogwarts.db.RUN_SLOT_LIMIT,
+   whatever RUN_SLOTS says, so no config, this one or another process's, leaves one for another run of his) and,
+   under them, read his patch for the night's date once (portrait_patch.read_state). Arm the night in the store
+   (pensieve.arm_auto_patch) with what was there: absent, present (and its sha256) or unreadable.
+2. Run him through run_desk.run with one slot (lock_held) and the others in keep_fds, so his process holds them
+   all. A run that is refused, capped, stopped, blocked or fails ends the night stopped with no event of its own:
+   the run's own event tells Ryan. A cap, vendor limit or blocked model ends the night in the very transaction that
+   writes its event (run_desk.run's on_told), and any other refusal is reported before the night is closed, so a
+   kill never leaves a night armed that Ryan was told of without its owl-keyed event, nor one closed untold. A
+   clean run that called a model blocked here (its result's blocked_model, which after_run told Ryan of) stops the
+   night with one event, so what that model wrote is left to Ryan, as with the switch off.
+3. Still under the slots, read the patch once more (validate). Only a patch that was absent before the run goes
+   on: the job held every slot from before the first read until this one, and a killed launcher's process keeps
+   them all (see run_desk.desk_lock), so no other run of his wrote it in between. A patch that was there before, even
    one tonight's run rewrote, could carry another run's ops, so it stops the night. The patch is parsed and checked
    (portrait_patch.parse_patch), and the store keeps one snapshot (pensieve.snapshot_auto_patch): its sha256, the
    checked fact_add and memory_note_add ops as canonical ASCII JSON, and the op ids in patch order, held for Ryan
    and out of schema. No raw patch bytes are ever stored, so a secret in an op out of schema never reaches the store.
-4. Let the slot go and apply (apply) from the snapshot, never from the file again. One transaction re-reads the
+4. Let the slots go and apply (apply) from the snapshot, never from the file again. One transaction re-reads the
    night, checks the stored plan, stops for a patch Ryan has started applying by hand, then runs each addition in
    its own savepoint with a check of its effect (portrait_patch.memory_marks before and after: exactly one current
    fact or key point added, nothing taken away), and writes its ledger row under the manual path's key, the night's
    event and its ending. An op the store refuses, or one that would change memory already there, waits.
 
-Every op that retires, edits or moves memory waits for Ryan, and so does every addition that did not apply. Ollivander's
-stop file holds the apply too: with it in place, or the switch off, the night ends off with today's patch-ready event.
+Every op that retires, edits or moves memory waits for Ryan, and so does every addition that did not apply.
+Ollivander's stop file holds the apply too: with it in place, or the switch off, the night ends off with today's
+patch-ready event.
 
 Events. A night with a patch ends in exactly one headmaster event for Ryan, built by this script from the date, op ids
 (pattern and scrub checked when parsed), counts, the sha256 and fixed words, never from op text or refusal reasons:
@@ -35,15 +42,18 @@ portrait.auto when the night applied what it could (what applied, what waits, an
 command for the rest, or castle portrait show <date> when that does not fit); portrait.auto-stopped, keyed by date and
 attempt, when the night stopped after it was armed (its text goes through common.scrubbed_line and never carries the
 sha256); portrait.patch-ready when the switch was off or the stop file in place at the apply. A clean run that wrote no
-patch ends done with no event. A run that failed or was refused raises only its own event. The same line is the
-night's outcome in the store, which castle portrait patches and show print.
+patch ends done with no event. A run that failed or was refused raises only its own event, and a clean run that
+called a blocked model raises one portrait.auto-stopped event beside the run's own note naming the model, as the
+switch-off night has patch-ready beside it. The same line is the night's outcome in the store, which castle portrait
+patches and show print.
 
 Kills and signals. A SIGKILL leaves the store as it was; resume, at the start of the next nightly job, finishes every
 night still armed or validated without reading the castle file again: an armed night whose run is over is told once
-and closed (unless its run's own owl-keyed event told Ryan already), and a validated one is applied from its snapshot.
-The ledger keys make an op apply at most once whatever was cut. SIGTERM, SIGHUP or Ctrl+C from arming until the
-snapshot commits ends the night stopped with one event; after the snapshot it leaves the night validated for resume,
-exactly as a SIGKILL there would, since the apply transaction rolls back whole.
+and closed (unless its run's own owl-keyed event told Ryan already; a cap, vendor limit or blocked model closed it
+when it told him), and a validated one is applied from its snapshot. The ledger keys make an op apply at most once
+whatever was cut. SIGTERM, SIGHUP or Ctrl+C from arming until the snapshot commits ends the night stopped with one
+event; after the snapshot it leaves the night validated for resume, exactly as a SIGKILL there would, since the apply
+transaction rolls back whole.
 
 It starts no process of its own.
 """
@@ -57,7 +67,7 @@ from typing import Optional
 from hogwarts import db, ids, pensieve
 from hogwarts.errors import StoreError, ValidationError
 
-from fleet import common, config, portrait_patch, run_desk
+from fleet import common, config, portrait_patch, run_desk, safefs
 from fleet.safefs import FleetError
 
 DESK = portrait_patch.DESK
@@ -80,6 +90,8 @@ WHY_BEFORE_UNREADABLE = ("the patch file could not be read before tonight's revi
 WHY_BEFORE_PRESENT = ("a patch for this date was already there before tonight's review, so auto-portrait cannot tell"
                       " which run wrote which op")
 WHY_MALFORMED = "the patch is not a valid patch ({reason})"
+WHY_BLOCKED_MODEL = ("tonight's run called a model that is blocked here, so nothing it wrote applies by itself; the"
+                     " run's own row names the model")
 WHY_NOT_STORED = "the patch could not be stored ({reason})"
 WHY_PLAN = "the plan it stored no longer checks out"
 WHY_BY_HAND = "you already applied some of it by hand, so the rest is yours too"
@@ -227,6 +239,32 @@ def _end_quietly(conn, date: str, attempt: int, state: str, outcome: str, now: O
     return {"state": state}
 
 
+def _close_told(conn, date: str, attempt: int, now: Optional[int]):
+    """What run_desk.run calls inside the transaction that writes the event a refused or vendor-limited run ends with
+    (a cap, a vendor limit, a blocked model): attempt's armed night ends stopped there with no event of its own, so
+    the event and the ending commit together and no kill can leave the night armed once Ryan was told. An error here
+    undoes the event too, and the run raises it instead, which the night then reports as a failed run."""
+    def told(kind: str) -> None:
+        row = pensieve.auto_patch(conn, date)
+        if row is not None and row["state"] == "armed" and row["attempt"] == attempt:
+            outcome = RUN_FAILED if kind == "rundesk.plan-limit" else RUN_REFUSED
+            pensieve.end_auto_patch(conn, date, "stopped", outcome, now=_ts(now))
+    return told
+
+
+def _tell_refusal(conn, exc: Exception, owl_id: str, now: Optional[int]) -> None:
+    """Tell Ryan of a run that raised before it ended, as the nightly job's own report would, before the night is
+    closed quietly: a kill between the two then leaves the night armed with its owl-keyed event, which resume reads
+    (RUN_TOLD_KEYS), never closed with no event at all. A cap or blocked model told Ryan, and closed the night, in
+    one commit (_close_told); a stop is Ollivander's to tell. Never raises but for a signal."""
+    if isinstance(exc, (run_desk.Capped, run_desk.Stopped, run_desk.Blocked)):
+        return
+    if isinstance(exc, safefs.Busy):
+        run_desk.report_lock_wait(conn, DESK, owl_id, now)
+    else:
+        run_desk.report_failure(conn, DESK, owl_id, now)
+
+
 def close_unarmed(conn, date: str, now: Optional[int] = None) -> Optional[dict]:
     """With the switch off tonight, end a same-date night an earlier killed attempt left armed as off, with no event:
     tonight's own patch-ready or failure event tells Ryan. Best effort."""
@@ -246,16 +284,21 @@ def night(conn, date: str, owl_id: str, now: Optional[int] = None, progress: Opt
     """Run the night with the switch on: (the run's result, what the lane did, ids and counts only). progress gets
     "attempt" once this attempt's night is armed, in one step, so the caller tells Ryan of a signal itself only
     before that and a night never gets both. A FleetError or StoreError raised here comes from before the run
-    returned, and the caller reports it as today; once the run has returned clean nothing the lane does raises one."""
+    returned, and the caller reports it as today (a second report of an owl-keyed event changes nothing); once the
+    run has returned clean nothing the lane does raises one. Every slot Dumbledore could have is held from before
+    the first read of his outbox until the patch is stored, and his process inherits them all."""
     progress = {} if progress is None else progress
-    with run_desk.desk_lock(DESK) as slot:
+    with run_desk.all_slots_lock(DESK) as slots:
         try:
             before, value = portrait_patch.read_state(date)
             before_sha = hashlib.sha256(value).hexdigest() if before == "present" else None
             progress["attempt"] = pensieve.arm_auto_patch(conn, date, owl_id, before, before_sha, now=now)["attempt"]
-            result = run_desk.run(conn, DESK, owl_id, config.PORTRAIT_MCP_JOB, now=now, lock_held=slot)
-        except (FleetError, StoreError):
+            result = run_desk.run(conn, DESK, owl_id, config.PORTRAIT_MCP_JOB, now=now, lock_held=slots[0],
+                                  keep_fds=tuple(slot.fd for slot in slots[1:]),
+                                  on_told=_close_told(conn, date, progress["attempt"], now))
+        except (FleetError, StoreError) as exc:
             if "attempt" in progress:
+                _tell_refusal(conn, exc, owl_id, now)
                 _end_quietly(conn, date, progress["attempt"], "stopped", RUN_REFUSED, now)
             raise
         except BaseException:
@@ -268,6 +311,9 @@ def night(conn, date: str, owl_id: str, now: Optional[int] = None, progress: Opt
                 run_desk.report_failure(conn, DESK, owl_id, now)
             ended = _end_quietly(conn, date, attempt, "stopped", RUN_FAILED, now)
             return result, {"state": ended["state"]}
+        if result.get("blocked_model") is not None:
+            # A clean run that called a model blocked here: what it wrote is left to Ryan, as with the switch off.
+            return result, _stop(conn, date, attempt, WHY_BLOCKED_MODEL, now)
         try:
             checked = validate(conn, date, {"attempt": attempt, "before": before}, now)
         except BaseException:

@@ -27,7 +27,8 @@ from a desk:
   memory_note_add ops (AUTO_TYPES) of the patch his nightly run wrote, from the checked copy it stored, never
   from the file again. It records each one as a routine portrait.auto-applied event under the same dedupe key,
   so the two paths share one ledger and an op applies at most once whichever gets there first. Every other op
-  waits for Ryan's apply. Show and patches print what the lane did on each night.
+  waits for Ryan's apply. Show and patches print what the lane did on each night, from the store, even when the
+  file is gone or it or the outbox cannot be read, with that problem beside it.
 
 Nothing in a patch is executed, evaluated or used as a path. Show checks the ops that are in schema by
 running them in a store transaction that is always rolled back, so it reports what the store would refuse
@@ -438,10 +439,11 @@ def split_ids(text: Optional[str]) -> list:
     return [] if not text else text.split(",")
 
 
-def _lane(row: dict, sha: Optional[str]) -> dict:
+def _lane(row: dict, sha: Optional[str], known: bool = True) -> dict:
     """What auto-portrait did on one night, for show: its state, the sha256 it read, its outcome line, the ops it
-    applied, and whether the file now on disk (sha, None when gone) is another one."""
-    changed = row["sha256"] is not None and sha != row["sha256"]
+    applied, and whether the file now on disk (sha, None when gone) is another one. With known false the file is there
+    but could not be read, so whether it changed is unknown (None), never taken for unchanged or gone."""
+    changed = (row["sha256"] is not None and sha != row["sha256"]) if known else None
     lane = {"state": row["state"], "attempt": row["attempt"], "before": row["before"], "sha256": row["sha256"],
             "outcome": row["outcome"], "applied": split_ids(row["applied_ids"]), "file_changed": changed}
     if changed:
@@ -452,18 +454,27 @@ def _lane(row: dict, sha: Optional[str]) -> dict:
 def show(conn, date: str, now: Optional[int] = None) -> dict:
     """Every op in date's patch with its status (ready, applied, out of schema, or what the store would
     refuse), its fields, and the exact command that applies the ready ones, with what auto-portrait did on that
-    night when it took it on, even once the file is gone. Changes nothing."""
+    night when it took it on, even once the file is gone. A night auto-portrait took on whose file is now refused or
+    not a patch still shows what the lane did, with the file's problem beside it: a failed read never hides it.
+    Changes nothing."""
     date = check_date(date)
     row = pensieve.auto_patch(conn, date)
+    sha = None
     try:
         raw = read_patch(date)
+        sha = hashlib.sha256(raw).hexdigest()
+        patch = parse_patch(raw, date)
     except NotFoundError:
         if row is None:
             raise
         return {"date": date, "file": None, "sha256": None, "ops": [], "ready": [], "apply_command": None,
                 "auto": _lane(row, None)}
-    sha = hashlib.sha256(raw).hexdigest()
-    patch = parse_patch(raw, date)
+    except (StoreError, OSError) as exc:
+        if row is None:
+            raise
+        return {"date": date, "file": PATCH_NAME.format(date=date), "sha256": sha, "ops": [], "ready": [],
+                "apply_command": None, "problem": common.one_line(exc, 300),
+                "auto": _lane(row, sha, known=sha is not None)}
     applied = applied_ops(conn, date)
     pending = [entry for entry in patch["ops"] if entry["problem"] is None and entry["id"] not in applied]
     checks = _trial(conn, pending, date, sha, ids.stamp(now))
@@ -570,10 +581,18 @@ def _lane_line(row: dict) -> dict:
 def patches(conn) -> list:
     """The newest patches in Dumbledore's outbox, newest first: each one's sha256, its op ids, the ones out
     of schema and the ones applied, and what auto-portrait did on its night. A patch that cannot be read or
-    parsed says why instead. A night auto-portrait took on whose file is gone is listed too, with file null."""
+    parsed says why instead. A night auto-portrait took on whose file is gone is listed too, with file null. When the
+    outbox itself cannot be read, the nights auto-portrait took on are still listed, each naming its file with the
+    outbox's problem, since whether that file is there is unknown; with no such night, the outbox's error is raised."""
     lane = {row["date"]: row for row in pensieve.recent_auto_patches(conn, LIST_LIMIT)}
+    try:
+        names, outbox_problem = list(_patch_names()), None
+    except (StoreError, OSError) as exc:
+        if not lane:
+            raise
+        names, outbox_problem = [], common.one_line(exc, 200)
     found = []
-    for name in _patch_names():
+    for name in names:
         named = PATCH_FILE.fullmatch(name).group(1)
         item = {"file": name}
         try:
@@ -585,11 +604,13 @@ def patches(conn) -> list:
             patch = parse_patch(raw, date)
             item.update(sha256=hashlib.sha256(raw).hexdigest(), ops=[entry["id"] for entry in patch["ops"]],
                         out_of_schema=[entry["id"] for entry in patch["ops"] if entry["problem"] is not None])
-        except StoreError as exc:
+        except (StoreError, OSError) as exc:
             item["problem"] = common.one_line(exc, 200)
         found.append((named, item))
     for date, row in lane.items():
-        found.append((date, {"file": None, "date": date, "applied": sorted(applied_ops(conn, date)),
-                             "auto": _lane_line(row)}))
+        item = {"file": None, "date": date, "applied": sorted(applied_ops(conn, date)), "auto": _lane_line(row)}
+        if outbox_problem is not None:
+            item.update(file=PATCH_NAME.format(date=date), problem=outbox_problem)
+        found.append((date, item))
     found.sort(key=lambda pair: pair[0], reverse=True)
     return [item for _, item in found[:LIST_LIMIT]]

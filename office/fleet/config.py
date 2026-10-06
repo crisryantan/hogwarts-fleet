@@ -118,8 +118,10 @@ AUTO_REVIEW_LOCK_WAIT_SECONDS = 10
 AUTO_DRAFT_PR_FILE = "auto-draft-pr"
 # Auto-portrait (fleet/portrait_auto.py), off by default: after Dumbledore's clean nightly run, the job applies the
 # fact and key point additions in the patch tonight's run wrote, and every other op waits for Ryan. It is on only
-# while this plain file in the office holds exactly "on", by the same rules as the draft PR file:
+# while this plain file in the office holds exactly "on", by the same rules as the draft PR file, and removing it
+# switches it off:
 #   echo on > ~/.hogwarts/auto-portrait
+#   rm ~/.hogwarts/auto-portrait
 AUTO_PORTRAIT_FILE = "auto-portrait"
 # Every office opt-in file. common.opt_in_on reads only these names, so a typo never reads another office file as a
 # switch, and every switch is read through that one reader.
@@ -148,7 +150,9 @@ STDERR_PLAN_LIMIT_PATTERNS = (
 # How many model processes each headless desk may run at once. Each run holds one run slot, and every slot of a
 # desk has its own lock, Codex work folder and private temp folder (slot 0 keeps the names a desk had before
 # slots). The reviewers take two, so two reviews of different tasks run at once; a desk left out has one. Caps,
-# the launch gate and a desk's spend are shared by all its slots. At most hogwarts.db.RUN_SLOT_LIMIT.
+# the launch gate and a desk's spend are shared by all its slots. At most hogwarts.db.RUN_SLOT_LIMIT. With
+# auto-portrait on, the nightly portrait job holds every slot Dumbledore could have, up to that limit, while it reads
+# and stores his patch (run_desk.all_slots_lock), so giving him more slots never lets another run of his write it.
 RUN_SLOTS = {"hermione": 2, "ron": 1, "portrait": 1, "harry": 1, "moody": 2}
 # A run the Owl Post starts waits this long for a free run slot of its desk. A review never waits.
 DESK_LOCK_WAIT_SECONDS = 1860

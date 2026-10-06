@@ -55,7 +55,9 @@ launch (the Owl Post's, a review's, a new worktree's) takes the lock without wai
 launch while a launch holds it. Every read of the caps looks at the run lock files before the store, and a run's
 lock file goes only once its usage is in (or its process never started), so a run settled meanwhile, by whoever
 settles it, is held at its budget or counted at its cost, never missed. A desk with one slot has no run lock and
-holds nothing, as before slots.
+holds nothing, as before slots. The nightly portrait job alone takes every slot Dumbledore could ever have
+(all_slots_lock, up to hogwarts.db.RUN_SLOT_LIMIT whatever RUN_SLOTS says) and his process inherits them all, so no
+other run of his starts, under any config, while the job reads his outbox, runs him and stores his patch.
 
 From that last stop check until the desk's process has exited, the run holds Ollivander's update lock
 shared (config.UPDATE_LOCK), and the process inherits it, like its slot, so it stays held if this
@@ -799,10 +801,23 @@ def _limit_key(status: dict, cap: str) -> str:
     return repr(float(status["spend_limit_usd"]))
 
 
-def report_cap(conn, desk: str, now: Optional[int] = None, held: Optional[list] = None) -> None:
+def _tell_ending(conn, kind: str, on_told: Optional[Callable[[str], None]], tell: Callable[[], object]) -> None:
+    """Write the owner event a run ends with (tell) and, with on_told, the caller's own record that Ryan was told of
+    it, in one transaction: both commit or neither does, and an error on_told raises undoes the event and goes on up
+    in place of the run's own error. on_told gets the event's kind, and is called even when the event's dedupe key
+    had told Ryan already today."""
+    with db.transaction(conn):
+        tell()
+        if on_told is not None:
+            on_told(kind)
+
+
+def report_cap(conn, desk: str, now: Optional[int] = None, held: Optional[list] = None,
+               on_told: Optional[Callable[[str], None]] = None) -> None:
     """Record a refusal by a fleet cap. Ryan hears once per desk, cap, effective limit and day: which cap,
     what waits, when it resets. After a bump, reaching the raised limit is news again. With held (the
-    patrol's shadow mode), the note goes on that list instead of reaching Ryan."""
+    patrol's shadow mode), the note goes on that list instead of reaching Ryan. on_told commits with the event
+    (see _tell_ending)."""
     status = cap_status(conn, desk, now)
     cap = status["reached"] or "runs"
     capacity.record_cap_hit(conn, desk, cap, "fleet", now=now)
@@ -813,9 +828,9 @@ def report_cap(conn, desk: str, now: Optional[int] = None, held: Optional[list] 
     if held is not None:
         held.append(summary)
         return
-    pensieve.add_event(conn, desk, "rundesk.cap", "headmaster", summary,
-                       dedupe_key=f"rundesk:cap:{desk}:{cap}:{_limit_key(status, cap)}:{status['day_start']}",
-                       now=now)
+    _tell_ending(conn, "rundesk.cap", on_told, lambda: pensieve.add_event(
+        conn, desk, "rundesk.cap", "headmaster", summary,
+        dedupe_key=f"rundesk:cap:{desk}:{cap}:{_limit_key(status, cap)}:{status['day_start']}", now=now))
 
 
 def warn_near_cap(conn, desk: str, now: Optional[int] = None, held: Optional[list] = None) -> list:
@@ -844,9 +859,10 @@ def warn_near_cap(conn, desk: str, now: Optional[int] = None, held: Optional[lis
 
 
 def report_plan_limit(conn, desk: str, cap_source: str, run_id: str, now: Optional[int] = None,
-                      held: Optional[list] = None) -> None:
+                      held: Optional[list] = None, on_told: Optional[Callable[[str], None]] = None) -> None:
     """A run the vendor's own usage or rate limit stopped. No fleet bump lifts that, and the event says so.
-    With held (the patrol's shadow mode), the note goes on that list instead of reaching Ryan."""
+    With held (the patrol's shadow mode), the note goes on that list instead of reaching Ryan. on_told commits with
+    the event (see _tell_ending)."""
     capacity.record_cap_hit(conn, desk, "plan", cap_source, run_id=run_id, now=now)
     day_start, _ = capacity.day_bounds(common.now_stamp(now), config.CAP_RESET_UTC_SECONDS)
     summary = (f"{desk} stopped at the {PLAN_NAMES[cap_source]}'s own usage or rate limit, cap_source"
@@ -855,8 +871,9 @@ def report_plan_limit(conn, desk: str, cap_source: str, run_id: str, now: Option
     if held is not None:
         held.append(summary)
         return
-    pensieve.add_event(conn, desk, "rundesk.plan-limit", "headmaster", summary,
-                       dedupe_key=f"rundesk:plan-limit:{desk}:{cap_source}:{day_start}", now=now)
+    _tell_ending(conn, "rundesk.plan-limit", on_told, lambda: pensieve.add_event(
+        conn, desk, "rundesk.plan-limit", "headmaster", summary,
+        dedupe_key=f"rundesk:plan-limit:{desk}:{cap_source}:{day_start}", now=now))
 
 
 def report_lock_wait(conn, desk: str, owl_id: Optional[str], now: Optional[int] = None) -> None:
@@ -1243,6 +1260,16 @@ def after_run(conn, plan: dict, previous: Optional[str], real: Optional[str], ex
         pass
 
 
+def _blocked_used(used: list) -> Optional[str]:
+    """The first model a run called that is blocked here, or "unchecked" when the blocklist could not check them
+    (never taken for none), else None."""
+    try:
+        return next((name for name in used if wands.blocked_by(name, config.BLOCKED_MODEL_PREFIXES) is not None),
+                    None)
+    except (StoreError, FleetError):
+        return "unchecked"
+
+
 def _report_blocked_run(conn, plan: dict, display: str, used: list, now: Optional[int]) -> None:
     """Tell Ryan, once a day, that a run called a blocked model, whether or not it did most of the work.
     The next run of the desk is refused."""
@@ -1330,6 +1357,29 @@ def desk_lock(desk: str, wait: bool = True) -> Iterator[Slot]:
                     raise safefs.Busy(f"every run slot of {desk} is held")
                 time.sleep(0.5)
         yield held
+
+
+@contextlib.contextmanager
+def all_slots_lock(desk: str, wait: bool = True) -> Iterator[tuple]:
+    """Every run slot the desk could ever have, 0 to below db.RUN_SLOT_LIMIT whatever RUN_SLOTS gives it now,
+    yielding their Slots in order. While they are held no run of the desk starts, whatever slot count the config of
+    the process starting it gives, since run_slots never passes db.RUN_SLOT_LIMIT. They are taken together without
+    waiting: while any one is held elsewhere, every one taken is let go before the next try, every half second for at
+    most DESK_LOCK_WAIT_SECONDS (wait=False: no retry), then safefs.Busy. It never holds a slot while it waits."""
+    desk = ids.check("desk", desk)
+    deadline = time.monotonic() + config.DESK_LOCK_WAIT_SECONDS
+    while True:
+        with contextlib.ExitStack() as stack:
+            try:
+                slots = tuple(stack.enter_context(slot_lock(desk, index)) for index in range(db.RUN_SLOT_LIMIT))
+            except safefs.Busy:
+                slots = None
+            if slots is not None:
+                yield slots
+                return
+        if not wait or time.monotonic() >= deadline:
+            raise safefs.Busy(f"a run of {desk} holds one of its run slots")
+        time.sleep(0.5)
 
 
 def task_lock_name(task_id: str) -> str:
@@ -1457,7 +1507,9 @@ def blocked_model(plan: dict, conn=None) -> Optional[str]:
     return wands.blocked_resolution(conn, model, blocked)
 
 
-def _refuse_blocked(conn, plan: dict, now: Optional[int]) -> None:
+def _refuse_blocked(conn, plan: dict, now: Optional[int], on_told: Optional[Callable[[str], None]] = None) -> None:
+    """Blocked, with its event to Ryan, when the plan would launch a blocked model. on_told commits with the event
+    (see _tell_ending)."""
     model = blocked_model(plan, conn)
     if model is None:
         return
@@ -1475,14 +1527,16 @@ def _refuse_blocked(conn, plan: dict, now: Optional[int]) -> None:
         else:
             fix = (f"Run fleet ollivander to give it its role's pick, or castle desk model {desk} <model> pins an"
                    " allowed one")
-        pensieve.add_event(conn, desk, "rundesk.blocked", "headmaster", f"{why}. {fix}",
-                           dedupe_key=f"rundesk:blocked:{desk}:{CODEX_DEFAULT}:{day_start}", now=now)
+        _tell_ending(conn, "rundesk.blocked", on_told, lambda: pensieve.add_event(
+            conn, desk, "rundesk.blocked", "headmaster", f"{why}. {fix}",
+            dedupe_key=f"rundesk:blocked:{desk}:{CODEX_DEFAULT}:{day_start}", now=now))
         raise Blocked(why)
     named = model if model == plan["model"] else f"{plan['model']}, which once resolved to {model},"
-    pensieve.add_event(conn, desk, "rundesk.blocked", "headmaster",
-                       f"{desk} was not started: its model {named} is blocked here. castle desk model {desk}"
-                       f" <model> pins an allowed one, or --role hands it back to Ollivander",
-                       dedupe_key=f"rundesk:blocked:{desk}:{model}:{day_start}", now=now)
+    _tell_ending(conn, "rundesk.blocked", on_told, lambda: pensieve.add_event(
+        conn, desk, "rundesk.blocked", "headmaster",
+        f"{desk} was not started: its model {named} is blocked here. castle desk model {desk}"
+        f" <model> pins an allowed one, or --role hands it back to Ollivander",
+        dedupe_key=f"rundesk:blocked:{desk}:{model}:{day_start}", now=now))
     raise Blocked(f"{desk} was not started: its model {named} is blocked here")
 
 
@@ -1526,20 +1580,25 @@ def launch_gate() -> Iterator[int]:
 
 def run(conn, desk: str, owl_id: str, mcp_job: Optional[str] = None, now: Optional[int] = None,
         on_start: Optional[Callable[[], None]] = None, lock_held: Optional[Slot] = None, keep_fds: tuple = (),
-        shadow: bool = False, task_lock_fd: Optional[int] = None) -> dict:
+        shadow: bool = False, task_lock_fd: Optional[int] = None,
+        on_told: Optional[Callable[[str], None]] = None) -> dict:
     """Run one desk on one owl. on_start is called under the run's slot and the desk's launch lock once the
     caps allow the run, just before its launch is recorded, so a caller's own bookkeeping never runs for a
     refused run. lock_held is the Slot of this desk the caller already holds (the review script holds one, from
-    before its round opens until its reviewer task closes, and the nightly portrait job holds Dumbledore's only one,
-    from before it reads his outbox until it has stored the patch his run wrote, see fleet/portrait_auto.py); without
-    it the run takes a free slot itself. Only those two pass it, and an owl of a review round runs only with the slot
-    its round recorded, so every other launch of a round's owl is refused (ReviewOwl) before it waits for a slot. The desk's process inherits
-    every fd in keep_fds, its slot's and, on a desk that holds spend, its own run lock's, so the locks they hold
-    outlive this process if it is killed mid-run. shadow is the patrol's shadow mode: the cap, near-cap and
-    vendor-limit notes go in the result's held list, not to Ryan (a cap refusal's own reason is the Capped error),
-    and the caps and accounting are unchanged. A build desk's run on its own task holds the task's review lock from
-    before it waits for a slot until it ends, and its process inherits it: task_lock_fd is that lock when the run was
-    handed it (spawn hold_fd), and otherwise the run takes it itself (see _hold_task_lock)."""
+    before its round opens until its reviewer task closes, and the nightly portrait job holds every slot Dumbledore
+    could have, all_slots_lock, from before it reads his outbox until it has stored the patch his run wrote, and
+    passes the others in keep_fds, see fleet/portrait_auto.py); without it the run takes a free slot itself. Only those
+    two pass it, and an owl of a review round runs only with the slot its round recorded, so every other launch of a
+    round's owl is refused (ReviewOwl) before it waits for a slot. on_told, which only the nightly portrait job passes,
+    is called with the event's kind inside the transaction that writes the event a refused or vendor-limited run
+    ends with (rundesk.cap, rundesk.blocked, rundesk.plan-limit), so the caller's record that Ryan was told commits
+    with it or not at all (_tell_ending). The desk's process inherits every fd in keep_fds, its slot's and, on a desk
+    that holds spend, its own run lock's, so the locks they hold outlive this process if it is killed mid-run. shadow
+    is the patrol's shadow mode: the cap, near-cap and vendor-limit notes go in the result's held list, not to Ryan (a
+    cap refusal's own reason is the Capped error), and the caps and accounting are unchanged. A build desk's run on
+    its own task holds the task's review lock from before it waits for a slot until it ends, and its process inherits
+    it: task_lock_fd is that lock when the run was handed it (spawn hold_fd), and otherwise the run takes it itself
+    (see _hold_task_lock)."""
     notes = [] if shadow else None
     desk = ids.check("desk", desk)
     if lock_held is not None and (not isinstance(lock_held, Slot) or lock_held.desk != desk):
@@ -1552,7 +1611,7 @@ def run(conn, desk: str, owl_id: str, mcp_job: Optional[str] = None, now: Option
     early = build_plan(conn, desk, owl_id, mcp_job)
     _refuse_review_round(early, lock_held)
     _refuse_closed(early)
-    _refuse_blocked(conn, early, now)
+    _refuse_blocked(conn, early, now, on_told)
     with contextlib.ExitStack() as held:
         # First in the lock order: no review of a build desk's task runs from here until this run's process ends.
         task_fd = _hold_task_lock(held, early, task_lock_fd)
@@ -1566,11 +1625,11 @@ def run(conn, desk: str, owl_id: str, mcp_job: Optional[str] = None, now: Option
             _check_stop()
             cap = over_daily_cap(conn, desk, now, launch_held=True)
             if cap is not None:
-                report_cap(conn, desk, now, notes)
+                report_cap(conn, desk, now, notes, on_told)
                 raise Capped(cap)
             plan = build_plan(conn, desk, owl_id, mcp_job, slot.index)
             _refuse_closed(plan)
-            _refuse_blocked(conn, plan, now)
+            _refuse_blocked(conn, plan, now, on_told)
             if plan["cwd"] == work_dir(plan["desk"], slot.index):
                 with safefs.opened_dir(config.CASTLE_ROOT, "desks", plan["desk"],
                                        slot_name(config.CODEX_WORK_DIR, slot.index), create=True):
@@ -1591,7 +1650,8 @@ def run(conn, desk: str, owl_id: str, mcp_job: Optional[str] = None, now: Option
         result = _launch(conn, plan, now, keep_fds, own)
     warn_near_cap(conn, plan["desk"], now, notes)
     if result["cap_source"] is not None:
-        report_plan_limit(conn, plan["desk"], result["cap_source"], run_id=result["run_id"], now=now, held=notes)
+        report_plan_limit(conn, plan["desk"], result["cap_source"], run_id=result["run_id"], now=now, held=notes,
+                          on_told=on_told)
     elif result["exit_code"] == 0:
         _ack_owl(conn, plan["desk"], plan["owl_id"], now)
     if notes is not None:
@@ -1796,8 +1856,12 @@ def _launch(conn, plan: dict, now: Optional[int], keep_fds: tuple = (), own: Opt
             _record_resolution(conn, plan["model"], full_id, now)
     cap_source = plan_limit(plan["family"], output, exit_code != 0, errors, timed_out=exit_code == -1)
     after_run(conn, plan, previous, real, exit_code, now, cap_source, used)
-    return {"desk": desk, "run_id": run_id, "exit_code": exit_code, "timed_out": exit_code == -1,
-            "cap_source": cap_source, **usage}
+    found = {"desk": desk, "run_id": run_id, "exit_code": exit_code, "timed_out": exit_code == -1,
+             "cap_source": cap_source, **usage}
+    blocked = _blocked_used(used)
+    if blocked is not None:
+        found["blocked_model"] = blocked  # after_run told Ryan; a caller that acts on the output can refuse it
+    return found
 
 
 def main(argv: Optional[list] = None) -> int:

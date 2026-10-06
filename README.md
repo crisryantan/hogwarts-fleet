@@ -143,7 +143,7 @@ Two test suites cover the kit: `tests` for the store and `tests_fleet` for the f
 
 - The review loop is tested against temporary git repos.
 - The patrol is tested against a faked GitHub and faked desks. It starts in shadow mode: while `~/.hogwarts/patrol/shadow` exists, the patrol and Gringotts only write files under the office, and none of their findings reach you.
-- The weeknight memory review by Dumbledore - Knowledge Manager is tested against temporary stores. He only proposes changes, and nothing applies until you run `castle portrait apply`, unless you switch on auto-portrait, which applies only his additions and never removes anything.
+- The weeknight memory review by Dumbledore - Knowledge Manager is tested against temporary stores. He only proposes changes, and nothing applies until you run `castle portrait apply`, unless you switch on auto-portrait with `echo on > ~/.hogwarts/auto-portrait` (`rm ~/.hogwarts/auto-portrait` switches it off). It applies only his additions and never removes anything: every retire, edit and archive move waits for you, and so does an addition the store refused. Each night with a patch ends in one row for you that says what applied and what waits, with the command for the rest. If the job is killed, the next weeknight job finishes that night from the copy it stored, or tells you once that it was cut off, and nothing applies twice. The [handbook](docs/HANDBOOK.md#daily-rhythm) has the details.
 - The Codex desks' read boundary rests on Codex permission profiles, which Codex marks as beta. Rerun `scripts/codex-boundary-test.sh` after every Codex upgrade.
 - The fleet runs on macOS only, for one person on one Mac.
 

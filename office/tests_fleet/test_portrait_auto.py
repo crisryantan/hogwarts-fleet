@@ -135,6 +135,21 @@ class AutoCase(PortraitCase):
             with mock.patch.object(target, attribute, step):
                 yield
 
+    def refusals(self):
+        """Each run_desk ending that tells Ryan itself: (name, its event kind, the setup that makes the run end so, the
+        run_desk function whose return or raise is the moment its event has committed)."""
+        def capped():
+            return mock.patch.object(run_desk, "over_daily_cap", return_value="daily run cap reached")
+
+        def plan_limit():
+            return mock.patch.object(run_desk, "plan_limit", return_value="claude_plan")
+
+        def blocked():
+            return mock.patch.object(run_desk, "blocked_model", side_effect=lambda plan, conn=None: plan["model"])
+        return (("capped", "rundesk.cap", capped, "report_cap"),
+                ("vendor limit", "rundesk.plan-limit", plan_limit, "report_plan_limit"),
+                ("blocked model", "rundesk.blocked", blocked, "_refuse_blocked"))
+
     # the store
 
     def row(self, date: str = DATE):
@@ -648,6 +663,89 @@ class ProvenanceTests(AutoCase):
             pass
         self.assertEqual(self.row()["state"], "done")
 
+    def test_a_second_run_slot_never_lets_another_run_write_the_patch(self):
+        f9 = op("f9", "fact_add", scope="fleet", text="another run in another slot wrote this", tier="aging")
+        tried, seen = [], {}
+
+        def another_run():
+            # Another run of his, in whatever slot its own config gives it, writing tonight's patch while he runs.
+            for slots in (2, db.RUN_SLOT_LIMIT):
+                with mock.patch.dict(config.RUN_SLOTS, {"portrait": slots}):
+                    try:
+                        with run_desk.desk_lock("portrait", wait=False):
+                            self.write_patch([f9])
+                            tried.append("ran")
+                    except safefs.Busy:
+                        tried.append("busy")
+
+        def run(argv, cwd, env, stdin, stdout, stderr, timeout, check, pass_fds=()):
+            seen["inherited"] = {(os.fstat(fd).st_dev, os.fstat(fd).st_ino) for fd in pass_fds}
+            another_run()
+            os.write(stdout, (json.dumps(CLAUDE_OK) + "\n").encode("utf-8"))
+            return subprocess.CompletedProcess(args=argv, returncode=0)
+        real = pensieve.snapshot_auto_patch
+
+        def snapshot(*args, **kwargs):
+            another_run()
+            return real(*args, **kwargs)
+        with mock.patch.dict(config.RUN_SLOTS, {"portrait": 2}), fake_children(run), \
+                mock.patch.object(pensieve, "snapshot_auto_patch", snapshot):
+            portrait.nightly(self.conn, now=NOW)
+        self.assertEqual(tried, ["busy", "busy"])
+        self.assertEqual((self.row()["before"], self.row()["state"]), ("absent", "done"))
+        self.assertIn("wrote no patch", self.row()["outcome"])
+        self.assertEqual(self.ledger(), {})
+        # His process inherits every slot he could have, so a killed job leaves none for another run of his.
+        locks = self.office / "locks"
+        every = set()
+        for index in range(db.RUN_SLOT_LIMIT):
+            st = os.stat(locks / run_desk.slot_lock_name("portrait", index))
+            every.add((st.st_dev, st.st_ino))
+        self.assertLessEqual(every, seen["inherited"])
+        # The same night with a patch of his own: only his ops apply.
+        with mock.patch.dict(config.RUN_SLOTS, {"portrait": 2}):
+            self.night(self.ops, now=NEXT, during=another_run)
+        self.assertEqual(tried[2:], ["busy", "busy"])
+        self.assertEqual(sorted(self.ledger(NEXT_DATE)), ["f1", "n1"])
+        with mock.patch.dict(config.RUN_SLOTS, {"portrait": db.RUN_SLOT_LIMIT}):
+            with run_desk.desk_lock("portrait", wait=False):
+                pass
+
+    def test_every_slot_is_taken_together_or_none_is_held(self):
+        with run_desk.slot_lock("portrait", db.RUN_SLOT_LIMIT - 1):  # a run of his under a config with every slot
+            with self.assertRaises(safefs.Busy):
+                with run_desk.all_slots_lock("portrait", wait=False):
+                    pass
+            with run_desk.desk_lock("portrait", wait=False) as slot:  # nothing was kept while it gave up
+                self.assertEqual(slot.index, 0)
+        with run_desk.all_slots_lock("portrait", wait=False) as slots:
+            self.assertEqual([slot.index for slot in slots], list(range(db.RUN_SLOT_LIMIT)))
+            for index in range(db.RUN_SLOT_LIMIT):
+                with self.assertRaises(safefs.Busy):
+                    with run_desk.slot_lock("portrait", index):
+                        pass
+
+    def test_a_patch_from_a_run_that_called_a_blocked_model_is_never_applied(self):
+        called = {**CLAUDE_OK, "modelUsage": {"claude-quill-9-9": {"inputTokens": 10, "outputTokens": 5}}}
+
+        def run(argv, cwd, env, stdin, stdout, stderr, timeout, check, pass_fds=()):
+            self.write_patch(self.ops)
+            os.write(stdout, (json.dumps(called) + "\n").encode("utf-8"))
+            return subprocess.CompletedProcess(args=argv, returncode=0)
+        with mock.patch.object(config, "BLOCKED_MODEL_PREFIXES", ("claude-quill-",)), fake_children(run):
+            result = portrait.nightly(self.conn, now=NOW)
+        self.assertEqual((self.ledger(), self.keypoints()), ({}, []))
+        self.assertEqual((self.row()["state"], self.row()["sha256"]), ("stopped", None))
+        self.assertEqual((result["ok"], result["blocked_model"]), (True, "claude-quill-9-9"))
+        self.assertNotIn("store.python", {row["subject_key"] for row in facts.current_facts(self.conn, now=NOW)})
+        self.assertEqual(sorted(event["kind"] for event in self.owner_events()),
+                         ["portrait.auto-stopped", "rundesk.blocked"])
+        [stop] = self.events_of("portrait.auto-stopped")
+        self.assertIn("blocked here", stop["summary"])
+        self.assertIn(f"castle portrait show {DATE}", stop["summary"])
+        self.assertNotIn("claude-quill", stop["summary"])
+        self.assertEqual(portrait_auto.resume(self.conn, NEXT_DATE, NEXT), [])
+
     def test_a_patch_from_a_requested_run_waits_for_you(self):
         for index, rewrite in enumerate((False, True)):
             with self.subTest(rewrite=rewrite):
@@ -872,6 +970,70 @@ class ResumeTests(AutoCase):
         self.assertEqual(self.row()["state"], "stopped")
         self.assertEqual([event["kind"] for event in self.owner_events()], ["rundesk.failed"])
 
+    def test_a_night_its_refused_run_told_is_closed_with_that_event_when_killed(self):
+        for index, (name, kind, setup, step) in enumerate(self.refusals()):
+            with self.subTest(ending=name):
+                now = NOW + 3 * index * DAY
+                date = date_of(now)
+                mark = self.last_event_id()
+                real = getattr(run_desk, step)
+                with self.killed() as kill:
+                    def then_killed(*args, **kwargs):
+                        try:
+                            return real(*args, **kwargs)
+                        finally:
+                            kill()  # SIGKILL the moment the run's own event has committed
+                    with setup(), mock.patch.object(run_desk, step, then_killed):
+                        self.night(self.ops, now=now, returncode=1 if name == "vendor limit" else 0)
+                self.assertEqual([event["kind"] for event in self.owner_events(mark)], [kind])
+                self.assertEqual(self.row(date)["state"], "stopped")
+                self.quiet_night(now + DAY)
+                self.quiet_night(now + 2 * DAY)
+                self.assertEqual([event["kind"] for event in self.owner_events(mark)], [kind])
+                self.assertEqual(self.ledger(date), {})
+
+    def test_a_night_its_refused_run_told_whose_ending_cannot_be_written_is_told_once(self):
+        for index, (name, kind, setup, _) in enumerate(self.refusals()):
+            with self.subTest(ending=name):
+                now = NOW + 3 * index * DAY
+                date = date_of(now)
+                mark = self.last_event_id()
+                with setup(), mock.patch.object(pensieve, "end_auto_patch", side_effect=StoreError("busy")), \
+                        contextlib.suppress(FleetError, StoreError):
+                    self.night(self.ops, now=now, returncode=1 if name == "vendor limit" else 0)
+                told = [event["kind"] for event in self.owner_events(mark)]
+                self.assertEqual(len(told), 1, told)
+                self.quiet_night(now + DAY)
+                self.assertEqual(self.row(date)["state"], "stopped")
+                self.quiet_night(now + 2 * DAY)
+                self.assertEqual([event["kind"] for event in self.owner_events(mark)], told)
+                self.assertEqual(self.ledger(date), {})
+
+    def test_a_refused_run_is_told_before_its_night_is_closed(self):
+        def disabled():
+            os.unlink(self.office / "desks" / "portrait" / config.ENABLED_MARKER)
+        for index, (target, attribute) in enumerate(((portrait_auto, "_end_quietly"), (run_desk, "report_failure"))):
+            with self.subTest(killed_after=attribute):
+                now = NOW + 3 * index * DAY
+                date = date_of(now)
+                self.enable("portrait")
+                mark = self.last_event_id()
+                real = getattr(target, attribute)
+                with self.killed() as kill:
+                    def then_killed(*args, **kwargs):
+                        try:
+                            return real(*args, **kwargs)
+                        finally:
+                            kill()
+                    with mock.patch.object(target, attribute, then_killed):
+                        disabled()
+                        self.night(self.ops, now=now)
+                self.enable("portrait")
+                self.quiet_night(now + DAY)
+                self.quiet_night(now + 2 * DAY)
+                self.assertEqual([event["kind"] for event in self.owner_events(mark)], ["rundesk.failed"])
+                self.assertEqual(self.row(date)["state"], "stopped")
+
     def test_killed_after_the_apply_does_nothing_more(self):
         self.night(self.ops)
         self.assertEqual(self.row()["state"], "done")
@@ -993,6 +1155,12 @@ class EventTests(AutoCase):
         def signal():
             raise SystemExit(143)
 
+        def refused(setup, returncode):
+            def night(now):
+                with setup(), contextlib.suppress(FleetError):
+                    self.night(self.ops, now=now, returncode=returncode)
+            return night
+
         def endings():
             yield "applied", lambda now: self.night(self.ops, now=now), 1
             yield "every op held", lambda now: self.night(self.ops[1:3], now=now), 1
@@ -1004,6 +1172,8 @@ class EventTests(AutoCase):
                                                        self.night(now=now)), 1
             yield "a malformed patch", lambda now: self.night(raw=b"nope", now=now), 1
             yield "a failed run", lambda now: self.night(self.ops, now=now, returncode=1), 1
+            for name, _, setup, _ in self.refusals():
+                yield name, refused(setup, 1 if name == "vendor limit" else 0), 1
             yield "off at the apply", lambda now: self.night(self.ops, now=now, during=self.opt_out), 1
             yield "a signal mid run", lambda now: self.night(self.ops, now=now, during=signal), 1
             yield "a signal with the lane off", lambda now: (self.opt_out(), self.night(self.ops, now=now,
