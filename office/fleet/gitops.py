@@ -572,6 +572,22 @@ def ignored(record: dict) -> list:
     return [name for name in out.split("\0") if name]
 
 
+def flagged(record: dict) -> list:
+    """Every tracked path in the worktree that git is told not to check: assume-unchanged (a lowercase tag in git
+    ls-files -v) or skip-worktree (S). git status shows no change to such a file, and git worktree remove deletes it.
+    A read git fails refuses, and so does more than git can list whole."""
+    out = git(["ls-files", "-v", "-z", "--", "."], record["git_dir"], record["path"], whole=True)
+    found = []
+    for entry in out.split("\0"):
+        if not entry:
+            continue
+        if len(entry) < 3 or entry[1] != " ":
+            raise FleetError("git ls-files -v printed an entry it could not read")
+        if entry[0] == "S" or entry[0].islower():
+            found.append(entry[2:])
+    return found
+
+
 def _clean(record: dict, mode: str) -> list:
     out = git(["clean", mode, "-d", "-X", "--", ".", *link_excludes(record)], record["git_dir"], record["path"])
     if len(out) >= OUTPUT_MAX_CHARS:

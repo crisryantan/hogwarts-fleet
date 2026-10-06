@@ -41,14 +41,17 @@ Closed tasks' worktrees also go by themselves, through remove_closed, the same p
 closer removes the worktree of a build it closes on proof, in the same pass, under auto-close's switch. With the
 worktree-cleanup switch on, each Map round (sweep_closed) removes the worktree of every build task closed by any path at
 least config.WORKTREE_CLEANUP_AFTER_SECONDS ago. Either one removes a worktree only while git lists it, its folder is a
-plain folder of yours in the castle worktrees folder, it has no uncommitted changes and no git-ignored files (the
-toolchain's own dependency links aside, each checked against the office record), and its HEAD is somewhere a removal
-cannot lose: the commit the close proved, or a commit on the base or the branch on origin after a fetch. Anything it
-cannot read keeps the worktree, and you hear once. Only git worktree remove runs, without --force: no branch is
+plain folder of yours in the castle worktrees folder, it has no uncommitted changes, no git-ignored files (the
+toolchain's own dependency links aside, each checked against the office record) and no tracked file marked
+assume-unchanged or skip-worktree, whose changes git status hides, and its HEAD is somewhere a removal cannot lose:
+the commit the close proved, or a commit on the base or the branch on origin after a fetch. Anything it cannot read
+keeps the worktree, and you hear once. Only git worktree remove runs, without --force: no branch is
 deleted, and git worktree prune never runs. Marker files next to the office records make a removal a kill cut short
 finish on a later round, or tell you once when it cannot: the closer's intent (<task>.closing), written before its
 close commits, then <task>.removing, <task>.removed and the sweep's <task>.unreported, which share the removal's own
-identity so no removal is told twice. Your own fleet worktree-remove keeps git's own rule, which deletes ignored files.
+identity so no removal is told twice. The switch that started a removal is read again right before git worktree
+remove: off, nothing is removed and its intent or marker stays. Your own fleet worktree-remove keeps git's own rule,
+which deletes ignored files.
 
 castle task start goes through start_task for a build desk's task, which makes the same TASK.md check, so it is
 no way round it. Every other desk's task starts as the store allows.
@@ -489,12 +492,23 @@ REMOVAL = re.compile(r"[0-9a-f]{16}")
 BATCH = re.compile(r"[0-9]{1,12}-[0-9a-f]{8}")
 KEPT_KIND, REMOVED_KIND = "worktree.kept", "worktree.removed"
 IGNORED_KEPT = "ignored files that exist only here"
+FLAGGED_KEPT = "tracked files git is told not to check (assume-unchanged or skip-worktree)"
 SWITCH_OFF_KEPT = "its removal was cut short and the switch that started it is off now"
 IDS_SHOWN = 6
 
 
 class Kept(FleetError):
     """A closed task's worktree left where it is, and why: whoever removes it automatically tells you once."""
+
+
+class SwitchedOff(FleetError):
+    """The switch that started an automatic removal was off at the last check before git worktree remove: nothing was
+    removed, the worktree is whole, and a removal a kill cut short keeps its marker (resumed)."""
+
+    def __init__(self, resumed: bool) -> None:
+        super().__init__(SWITCH_OFF_KEPT if resumed else "the switch that started its removal was off by the time git"
+                         " would have removed it")
+        self.resumed = resumed
 
 
 def cleanup_on() -> bool:
@@ -595,14 +609,16 @@ def _ignored_here(record: dict) -> bool:
 
 def _check_head(record: dict, head_ok, resumed: Optional[str] = None, automatic: bool = True) -> str:
     """The worktree's HEAD once nothing in it would be lost: no uncommitted changes, for an automatic removal no
-    ignored files either, and HEAD passes head_ok (None skips it, for your own command), or is the HEAD a removal a kill
-    cut short had checked already. Kept otherwise."""
+    ignored files and no tracked file marked assume-unchanged or skip-worktree either, and HEAD passes head_ok (None
+    skips it, for your own command), or is the HEAD a removal a kill cut short had checked already. Kept otherwise."""
     cut = " (a removal was cut short part way: finish it with git worktree remove --force once nothing in it is" \
           " yours)" if resumed is not None else ""
     if gitops.dirty(record):
         raise Kept("uncommitted changes" + cut)
     if automatic and _ignored_here(record):
         raise Kept(IGNORED_KEPT + cut)
+    if automatic and gitops.flagged(record):
+        raise Kept(FLAGGED_KEPT + cut)
     head = gitops.rev(record)
     if head_ok is None or head == resumed:
         return head
@@ -661,9 +677,12 @@ def remove_closed(conn, task_id: str, by: str, head_ok=None) -> dict:
     The task must be closed, its record its own, its stored worktree in the castle worktrees folder. A worktree git
     lists, whose folder is there, goes only with no uncommitted changes and a HEAD that passes head_ok(record, head):
     True to remove, False or None (unknown) to keep. The closer and the sweep also keep one with git-ignored files,
-    the toolchain's own dependency links aside, since git worktree remove would delete them; head_ok None is your own
-    command, which keeps git's own rule. A removing marker, with the removal's own identity, is written before
-    anything changes, and git worktree remove runs without --force, so git checks once more. A marker left by a kill
+    the toolchain's own dependency links aside, or with a tracked file marked assume-unchanged or skip-worktree, whose
+    changes git status hides, since git worktree remove would delete them; head_ok None is your own command, which
+    keeps git's own rule. Right before git worktree remove, the switch that started an automatic removal is read
+    again: off, nothing is removed, a removal a kill cut short keeps its marker, and SwitchedOff says so. A removing
+    marker, with the removal's own identity, is written before anything changes, and git worktree remove runs without
+    --force, so git checks once more. A marker left by a kill
     finishes the removal on a later call: a folder git no longer lists is done, and an entry git lists whose folder is
     gone is removed by git worktree remove for that path alone. Without such a marker, either is left for you, and
     nothing is ever deleted by path. Kept, or a FleetError for a failed read, says what stays. {task_id, removed,
@@ -696,6 +715,7 @@ def remove_closed(conn, task_id: str, by: str, head_ok=None) -> dict:
     if not present:
         if removing is None:
             raise Kept("git lists it but its folder is gone; nothing removes that entry but you")
+        _still_on(by, resumed=True)
         gitops.git(["worktree", "remove", path], common_dir)  # the folder is gone: git drops only this path's entry
         if _listed(record):
             raise Kept("git still lists it after its removal was finished")
@@ -707,6 +727,13 @@ def remove_closed(conn, task_id: str, by: str, head_ok=None) -> dict:
     if removing is None:
         _write_marker(task["id"], "removing", {"by": by, "path": path, "head": head, "removal": removal})
     toolchain.unlink_deps(record)
+    try:
+        _still_on(by, resumed=removing is not None)
+    except SwitchedOff:
+        _relink(record)
+        if removing is None:
+            _drop_marker(task["id"], "removing")  # nothing started: the next round with the switch on starts again
+        raise
     try:
         gitops.git(["worktree", "remove", path], common_dir)
     except FleetError as exc:
@@ -725,6 +752,13 @@ def remove_closed(conn, task_id: str, by: str, head_ok=None) -> dict:
         raise Kept("git said it removed the worktree, but it is still there")
     _finished(record, started_by, removal)
     return {**result, "state": "removed"}
+
+
+def _still_on(by: str, resumed: bool) -> None:
+    """The last check before git worktree remove, under the task's review lock: the closer's and the sweep's removals
+    need their own switch on still. Your own command needs none."""
+    if by != "hand" and not _switch_for(by):
+        raise SwitchedOff(resumed)
 
 
 def remove(conn, task_id: str) -> dict:
@@ -821,6 +855,11 @@ def _sweep_one(conn, task: dict, by: str, fetched: dict, counts: dict, now: Opti
     except safefs.Busy:
         counts["busy"] += 1  # a run or review holds the task: a later round looks again
         return
+    except SwitchedOff as exc:
+        if exc.resumed:  # its marker stays, and finishes once the switch is on again
+            counts["kept"] += 1
+            tell_kept(conn, task, _stored_path(task), exc, now)
+        return  # a removal that never started starts again on a round with the switch on
     except (FleetError, OSError, StoreError) as exc:
         counts["kept"] += 1
         tell_kept(conn, task, _stored_path(task), exc if isinstance(exc, Kept) else
@@ -946,6 +985,10 @@ def _reconcile_intent(conn, task_id: str, counts: dict, now: Optional[int]) -> N
                 counts["kept"] += 1
                 tell_kept(conn, task, _stored_path(task), exc, now)
                 drop_intent(task_id)
+                return
+            except SwitchedOff:
+                counts["kept"] += 1  # auto-close went off at the last check: the intent stays for when it is on
+                tell_kept(conn, task, _stored_path(task), SWITCH_OFF_KEPT, now)
                 return
             drop_intent(task_id)
     except safefs.Busy:

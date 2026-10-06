@@ -1449,12 +1449,19 @@ def _remove_worktree(a: Attempt, plan: dict) -> dict:
     """After the close, under the task's review lock, which this attempt holds: the build's worktree goes through
     worktree.remove_closed, which checks everything again. One the close event named as kept stays; one that fails
     those checks now stays too, and you hear once. The intent written before the close goes once the removal ended
-    either way; after a failed read it stays, so the next Map round tries again."""
+    either way; after a failed read, or with auto-close off at the last check before git, it stays, so the next Map
+    round tries again."""
     path = a.build_record["path"]
     if plan["why"] is not None:
         return {"kept": path, "why": plan["why"]}
     try:
         worktree.remove_closed(a.conn, a.task_id, "closer", plan["head_ok"])
+    except worktree.SwitchedOff as exc:
+        # Auto-close went off between the close and the removal: nothing was removed, and the intent stays, so the
+        # next Map round finishes it once auto-close is on again, or tells you.
+        with contextlib.suppress(FleetError, StoreError):
+            worktree.tell_kept(a.conn, a.task, path, exc, a.now_arg)
+        return {"kept": path, "why": str(exc)}
     except (FleetError, StoreError, OSError) as exc:
         kept = isinstance(exc, worktree.Kept)
         why = exc if kept else f"it could not be read ({common.scrubbed_line(exc, 160)})"

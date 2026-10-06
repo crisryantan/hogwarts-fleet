@@ -129,6 +129,18 @@ class CleanupCase(CloseCase):
         os.symlink(target or f"{record['repo_dir']}/node_modules", link)
         return link
 
+    FLAGS = ("--assume-unchanged", "--skip-worktree")
+    FLAGGED = "tracked files git is told not to check (assume-unchanged or skip-worktree)"
+
+    def hide_change(self, ctx: dict, flag: str) -> None:
+        """A change to a tracked file that git status no longer shows, through flag."""
+        self.write_file(ctx["wt"] / "README.md", "changed here, hidden from git status\n")
+        self.git("update-index", flag, "README.md", cwd=ctx["wt"])
+        self.assertFalse(gitops.dirty(gitops.find_record(str(ctx["wt"]))))
+
+    def kept_for(self, task_id: str) -> list:
+        return [event for event in self.cleanup_events("worktree.kept") if task_id in event["summary"]]
+
     def intent(self, task_id: str) -> Path:
         return self.marker(task_id, "closing")
 
@@ -361,6 +373,7 @@ class SweepTests(CleanupCase):
              "its commits could not be confirmed on origin"),
             (gitops, "is_ancestor", {"return_value": None}, "its commits could not be confirmed on origin"),
             (gitops, "dirty", {"side_effect": FleetError("git status failed")}, "it could not be read"),
+            (gitops, "flagged", {"side_effect": FleetError("git ls-files failed")}, "it could not be read"),
             (gitops, "rev", {"side_effect": FleetError("git rev-parse failed")}, "it could not be read"),
             (worktree, "read_marker", {"side_effect": FleetError("a worktree removal marker is malformed")},
              "it could not be read"),
@@ -786,6 +799,161 @@ class MarkerTests(CleanupCase):
         self.assertEqual(self.sweep(ctx, after=3 * DAYS + 900)["reported"], 0)
         self.assert_removed(ctx)
         self.assertEqual(len(self.removed_rows(ctx["task"])), 1)
+
+
+class HiddenChangeTests(CleanupCase):
+    """A tracked file marked assume-unchanged or skip-worktree hides its changes from git status, and git worktree
+    remove deletes them, so no automatic removal takes such a worktree, on any path."""
+
+    def test_proven_close_keeps_a_worktree_with_hidden_changes_to_tracked_files(self):
+        for flag in self.FLAGS:
+            with self.subTest(flag=flag):
+                ctx = self.passed_build(branch=f"fix/close{flag}")
+                self.land_pr(ctx)
+                self.hide_change(ctx, flag)
+                result = self.close(ctx)
+                self.assertEqual(result["outcome"], "closed")
+                self.assertEqual(result["worktree"]["kept"], str(ctx["wt"]))
+                self.assertEqual((ctx["wt"] / "README.md").read_text(), "changed here, hidden from git status\n")
+                [event] = [event for event in self.close_events() if ctx["task"] in event["summary"]]
+                self.assertIn(f"Kept worktree {ctx['wt']}: {self.FLAGGED}.", event["summary"])
+                self.assertFalse(self.intent(ctx["task"]).exists())
+
+    def test_proven_close_rechecks_hidden_changes_after_the_close(self):
+        for flag in self.FLAGS:
+            with self.subTest(flag=flag):
+                ctx = self.passed_build(branch=f"fix/recheck{flag}")
+                self.land_pr(ctx)
+                self.hide_change(ctx, flag)
+                with mock.patch.object(worktree, "why_kept", return_value=None):
+                    self.assertEqual(self.close(ctx)["worktree"]["kept"], str(ctx["wt"]))
+                self.assertTrue(ctx["wt"].is_dir() and self.listed(ctx["wt"]))
+                [event] = self.kept_for(ctx["task"])
+                self.assertIn(self.FLAGGED, event["summary"])
+
+    def test_sweep_keeps_a_worktree_with_hidden_changes_tells_once_and_looks_again(self):
+        self.switch_on()
+        for flag in self.FLAGS:
+            with self.subTest(flag=flag):
+                ctx = self.closed_build(branch=f"fix/sweep{flag}")
+                self.hide_change(ctx, flag)
+                for offset in (0, 900):
+                    self.sweep(ctx, after=3 * DAYS + offset)
+                self.assertTrue(ctx["wt"].is_dir() and self.listed(ctx["wt"]))
+                self.assertEqual((ctx["wt"] / "README.md").read_text(), "changed here, hidden from git status\n")
+                [event] = self.kept_for(ctx["task"])
+                self.assertIn(self.FLAGGED, event["summary"])
+                self.assertFalse(self.marker(ctx["task"], "removing").exists())
+                self.git("update-index", flag.replace("--", "--no-"), "README.md", cwd=ctx["wt"])
+                self.git("checkout", "--", "README.md", cwd=ctx["wt"])
+                self.sweep(ctx, after=3 * DAYS + 1800)
+                self.assert_removed(ctx, f"fix/sweep{flag}")
+
+    def test_recovery_of_an_intent_or_a_marker_keeps_hidden_changes(self):
+        for flag in self.FLAGS:
+            for left in ("intent", "marker"):
+                with self.subTest(flag=flag, left=left):
+                    branch = f"fix/{left}{flag}"
+                    if left == "intent":
+                        ctx = self.passed_build(branch=branch)
+                        self.land_pr(ctx)
+                        with CloseGapTests.kill_in_the_gap(self, "after the close commits"), self.assertRaises(Killed):
+                            self.close(ctx)
+                    else:
+                        self.switch_on()
+                        ctx = self.closed_build(branch=branch)
+                        with self.kill_at_remove(), self.assertRaises(Killed):
+                            self.sweep(ctx)
+                    self.hide_change(ctx, flag)
+                    self.assertEqual(self.sweep(at=self.t0 + 3 * DAYS + 9000)["removed"], 0)
+                    self.assertEqual((ctx["wt"] / "README.md").read_text(), "changed here, hidden from git status\n")
+                    self.assertTrue(self.listed(ctx["wt"]))
+                    [event] = self.kept_for(ctx["task"])
+                    self.assertIn(self.FLAGGED, event["summary"])
+                    self.switch_off()
+
+
+class LastCheckTests(CleanupCase):
+    """The switch that started a removal is read again right before git worktree remove."""
+
+    def test_the_sweep_removes_nothing_once_its_switch_went_off_during_its_checks(self):
+        self.switch_on()
+        ctx = self.closed_build()
+        link = self.link_deps(ctx)
+        real = gitops.fetch_branch
+
+        def fetch_then_off(*args, **kwargs):
+            self.switch_off()
+            return real(*args, **kwargs)
+        with mock.patch.object(gitops, "fetch_branch", side_effect=fetch_then_off):
+            result = self.sweep(ctx)
+        self.assertEqual((result["removed"], result["kept"]), (0, 0))
+        self.assertTrue(ctx["wt"].is_dir() and self.listed(ctx["wt"]))
+        self.assertTrue(gitops.borrowed_link(gitops.find_record(str(ctx["wt"])), "node_modules"))  # linked again
+        self.assertTrue(os.path.islink(link))
+        self.assertFalse(self.marker(ctx["task"], "removing").exists())
+        self.assertEqual(self.cleanup_events(), [])
+        self.switch_on()
+        self.assertEqual(self.sweep(ctx, after=3 * DAYS + 900)["removed"], 1)
+        self.assert_removed(ctx)
+
+    def test_the_closer_keeps_its_intent_when_auto_close_went_off_before_the_removal(self):
+        ctx = self.passed_build()
+        self.land_pr(ctx)
+        real = closer.housekeep
+
+        def housekeep_then_off(*args, **kwargs):
+            self.opt_out()
+            return real(*args, **kwargs)
+        with mock.patch.object(closer, "housekeep", side_effect=housekeep_then_off):
+            result = self.close(ctx)
+        self.assertEqual((result["outcome"], result["worktree"]["kept"]), ("closed", str(ctx["wt"])))
+        self.assertTrue(ctx["wt"].is_dir() and self.listed(ctx["wt"]))
+        self.assertTrue(self.intent(ctx["task"]).exists())
+        self.assertFalse(self.marker(ctx["task"], "removing").exists())
+        self.assertEqual(self.sweep(at=self.t0 + 9000)["removed"], 0)
+        self.assertEqual(len(self.kept_for(ctx["task"])), 1)
+        self.opt_in()
+        self.assertEqual(self.sweep(at=self.t0 + 9900)["removed"], 1)
+        self.assert_removed(ctx)
+        self.assertFalse(self.intent(ctx["task"]).exists())
+
+    def test_intent_recovery_keeps_its_intent_when_auto_close_went_off_during_its_checks(self):
+        ctx = self.passed_build()
+        self.land_pr(ctx)
+        with CloseGapTests.kill_in_the_gap(self, "after the close commits"), self.assertRaises(Killed):
+            self.close(ctx)
+        real = gitops.rev
+
+        def rev_then_off(*args, **kwargs):
+            self.opt_out()
+            return real(*args, **kwargs)
+        with mock.patch.object(gitops, "rev", side_effect=rev_then_off):
+            self.assertEqual(self.sweep(at=self.t0 + 9000)["removed"], 0)
+        self.assertTrue(ctx["wt"].is_dir() and self.listed(ctx["wt"]))
+        self.assertTrue(self.intent(ctx["task"]).exists())
+        self.opt_in()
+        self.assertEqual(self.sweep(at=self.t0 + 9900)["removed"], 1)
+        self.assert_removed(ctx)
+
+    def test_marker_recovery_keeps_its_marker_when_the_switch_went_off_during_its_checks(self):
+        self.switch_on()
+        ctx = self.closed_build()
+        with self.kill_at_remove(), self.assertRaises(Killed):
+            self.sweep(ctx)
+        real = gitops.dirty
+
+        def dirty_then_off(*args, **kwargs):
+            self.switch_off()
+            return real(*args, **kwargs)
+        with mock.patch.object(gitops, "dirty", side_effect=dirty_then_off):
+            self.assertEqual(self.sweep(ctx, after=3 * DAYS + 900)["removed"], 0)
+        self.assertTrue(ctx["wt"].is_dir() and self.listed(ctx["wt"]))
+        self.assertTrue(self.marker(ctx["task"], "removing").exists())
+        self.assert_kept(ctx, "its removal was cut short and the switch that started it is off now")
+        self.switch_on()
+        self.assertEqual(self.sweep(ctx, after=3 * DAYS + 1800)["removed"], 1)
+        self.assert_removed(ctx)
 
 
 class HandTests(CleanupCase):
