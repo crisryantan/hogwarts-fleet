@@ -321,10 +321,10 @@ class VerifyTests(LoopCase):
         seen = []
         real_check = verify.run_check
 
-        def check(record, scratch, command, sandboxed=True):
+        def check(record, scratch, command, sandboxed=True, **kwargs):
             seen.append(scratch)
             self.assertTrue(os.path.isdir(f"{scratch}/home") and os.path.isdir(f"{scratch}/tmp"))
-            return real_check(record, scratch, command, sandboxed)
+            return real_check(record, scratch, command, sandboxed, **kwargs)
 
         with mock.patch.object(verify, "run_check", side_effect=check):
             verify.verify(self.conn, task["id"])
@@ -335,16 +335,13 @@ class VerifyTests(LoopCase):
     def test_build_desk_checks_always_run_under_codex_sandbox(self):
         parent, task, _, _, _ = self.build()
         launched = []
-        real_run = subprocess.run
 
-        def fake_run(argv, **kwargs):
-            if argv[0] == config.GIT_BIN:
-                return real_run(argv, **kwargs)
+        def fake_run(argv, cwd, env, out_fd, keep_fds=()):
             launched.append(argv)
-            return subprocess.CompletedProcess(argv, 0)
+            return 0
 
         with mock.patch.object(verify, "sandbox_argv", REAL_SANDBOX_ARGV), \
-                mock.patch.object(verify.subprocess, "run", side_effect=fake_run):
+                mock.patch.object(verify, "run_command", side_effect=fake_run):
             result = verify.verify(self.conn, task["id"])
         self.assertEqual(result["checks"], 3)
         self.assertEqual(len(launched), 2)

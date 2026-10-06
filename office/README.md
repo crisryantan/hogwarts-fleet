@@ -80,10 +80,12 @@ The store has none of these:
                                         verdict of its own rounds (after-<request>.json). Every TASK.md a verify
                                         read (task-md-<sha256>.md), and for your own sessions' tasks the digest
                                         fleet review own approved (task-md-approved). The closer's record
-                                        (close.json), its O_EXCL try and clear markers (close-<sha>.cmd-try<n>,
-                                        close-<sha>.judge-try<n>, close-clear<n>), and per merge commit the
-                                        after-merge evidence, the judge's pack and verdict, and the close evidence
-                                        (after-merge-evidence-<sha>.md, after-merge-pack-<sha>.md,
+                                        (close.json), its O_EXCL try and clear markers (one per after-merge command,
+                                        close-<sha>.AC-<n>.cmd-try<k>, then close-<sha>.judge-try<k> and
+                                        close-clear<k>), and per merge commit each after-merge command's result as
+                                        it ends, the after-merge evidence, the judge's pack and verdict, and the
+                                        close evidence (after-merge-results-<sha>.json,
+                                        after-merge-evidence-<sha>.md, after-merge-pack-<sha>.md,
                                         after-merge-review-<sha>-<desk>-<run>.md, close-evidence-<sha>.md)
   auto-draft-pr                         while it holds exactly "on", the review loop pushes and opens a draft PR after
                                         its PASS (off when missing)

@@ -38,22 +38,32 @@ close_one, for one task, under the task's review lock (the judge's process inher
    "no checks" counts until AUTO_CLOSE_CI_SETTLE_SECONDS after the merge was first seen. Anything partial or unknown is
    unknown. CI is read again on every attempt.
 3. After-merge commands run through verify.run_after_merge in a fresh detached worktree at the merge commit, under
-   verify's sandbox rule, with scrubbed evidence. Each run first takes an O_EXCL try marker. A sandboxed task gets
+   verify's sandbox rule, with evidence normalized and scrubbed before any cut. Right before each command starts,
+   the closer holds Ollivander's launch gate and reads auto-close, his stop and the update marker once more, then
+   takes that command's O_EXCL try marker. The command runs in its own process group and inherits the task's review
+   lock and the gate for as long as it or anything it started runs, so a killed closer never lets a later pass take
+   back or reuse its worktree, and no CLI update replaces a binary under it. Each command's result is kept as it
+   ends, so a stop or a kill between commands loses none and runs none again. A sandboxed task's command gets
    AUTO_CLOSE_MAX_TRIES automatic tries; your own sessions' commands, which run without the sandbox, are started at
-   most once per merge commit by an automatic pass, and a run cut short is never started again by one: only fleet
-   close runs them again. No command runs while Ollivander's stop or a CLI update is in place, and no try is used.
-   Evidence written whole before a kill is read back, never run again.
+   most once per merge commit by an automatic pass, and one cut short is never started again by one: only fleet
+   close runs it again. Evidence written whole before a kill is read back, never run again.
 4. Written after-merge checks go to the reviewer of the other family as an fyi owl from map with no task, pointing at
    a pack in the judge's own inbox, built once per merge commit: script values, the approved TASK.md, CI, the command
-   evidence and the merged diff, scrubbed whole before any cut and marked as data. The verdict comes only from the
-   run's own output, bound to the task and the merge commit, and the script decides it. A changed pack voids it.
+   evidence and the merged diff, normalized and scrubbed whole before any cut and marked as data. auto-close and
+   Ollivander's stop are read again at the judge's launch, after any wait for its slot. The verdict comes only from
+   the output of a run whose end the record kept as clean (exit 0, no cap, no vendor limit), bound to the task and
+   the merge commit, and the script decides it; an output that cannot be read keeps the run and starts no other.
+   A changed pack voids it.
 5. The close, through pensieve.close_proven alone: the task, and McGonagall's go task when nothing else is open under
    it, in one transaction with one headmaster event naming what proved each check.
 
 Wait means change nothing and try again next round; a wait that can last tells you once after
 AUTO_CLOSE_STALL_SECONDS. Unknown means a read failed or was partial: try again, and tell you once after
 AUTO_CLOSE_UNKNOWN_GRACE_SECONDS of one unknown spell. Stop means one headmaster event, then the record says stopped and
-no pass acts on that task again by itself: Mischief managed closes it, or fleet close <task-id> tries once more.
+no pass acts on that task again by itself: Mischief managed closes it, or fleet close <task-id> tries once more. The
+event is the stop's durable word: a pass that finds it, since the last fleet close, before the record says so puts
+the record right and goes no further. A red check or a PR merged at an unreviewed head stops it at once, whatever
+else GitHub's answer left unread.
 
 The closer reads GitHub only through the patrol's guard, writes nothing to GitHub, starts no process itself, and takes
 back only worktrees it made, through git.
@@ -222,12 +232,13 @@ def _check_record(data: object, task_id: str) -> dict:
         raise ValueError("commands")
     judge = data["judge"]
     if judge is not None and not (
-            isinstance(judge, dict) and set(judge) == {"merge_sha", "try", "owls", "run_id", "pack_sha256"}
+            isinstance(judge, dict) and set(judge) == {"merge_sha", "try", "owls", "run_id", "outcome", "pack_sha256"}
             and _is_sha(judge["merge_sha"]) and type(judge["try"]) is int
             and 1 <= judge["try"] <= config.AUTO_CLOSE_MARKER_MAX and isinstance(judge["owls"], list)
             and len(judge["owls"]) <= config.AUTO_CLOSE_MARKER_MAX
             and all(isinstance(owl, str) and ids.PATTERNS["owl"].fullmatch(owl) for owl in judge["owls"])
             and (judge["run_id"] is None or (isinstance(judge["run_id"], str) and RUN_ID.fullmatch(judge["run_id"])))
+            and judge["outcome"] in (None, "ok", "failed") and (judge["run_id"] is not None or judge["outcome"] is None)
             and _is_digest(judge["pack_sha256"])):
         raise ValueError("judge")
     return data
@@ -248,20 +259,20 @@ def read_record(task_id: str) -> tuple:
         return "bad", None
 
 
-def write_record(record: dict) -> None:
-    """The close record, whole, through a temp file and a rename."""
+def write_record(record: dict, aside: bool = False) -> None:
+    """The close record, whole, through a temp file and a rename. With aside, the record there now, which could not be
+    read, is kept first as close.json.unreadable-<random> by a second link to it, never read and never removed, so
+    close.json is never missing in between: the rename replaces it in one step."""
     data = (json.dumps(_check_record(record, record["task_id"]), ensure_ascii=True, sort_keys=True) + "\n")
     raw = data.encode("ascii")
     if len(raw) > config.AUTO_CLOSE_RECORD_MAX_BYTES:
         raise FleetError("the close record grew past its size limit")
     with _reviews(record["task_id"], create=True) as fd:
+        if aside:
+            with contextlib.suppress(FileNotFoundError):
+                os.link(RECORD, f"{RECORD}.unreadable-{secrets.token_hex(4)}", src_dir_fd=fd, dst_dir_fd=fd,
+                        follow_symlinks=False)
         safefs.write_new(fd, RECORD, raw)
-
-
-def _move_aside(task_id: str) -> None:
-    """Move an unreadable close record out of the way, never reading it, so no later pass reads it as empty."""
-    with contextlib.suppress(FileNotFoundError, safefs.Missing), _reviews(task_id) as fd:
-        safefs.move(fd, RECORD, fd, f"{RECORD}.unreadable-{secrets.token_hex(4)}")
 
 
 def _markers(task_id: str, prefix: str) -> list:
@@ -296,6 +307,23 @@ def _give_back_marker(task_id: str, prefix: str, number: int) -> None:
 def clears(task_id: str) -> int:
     """How many times fleet close has cleared a stop of this task: every later event key carries it."""
     return len(_markers(task_id, "close-clear"))
+
+
+def stop_event(conn, task_id: str) -> Optional[dict]:
+    """The stop event of the task since fleet close last cleared it (the current clear count in its key), or None. It
+    is the stop's durable word: it commits before the record says stopped, so a kill or a failed write between the
+    two never leaves the task to be worked again, and every pass and fleet close reads it before anything else."""
+    found = pensieve.events_with_key_prefix(conn, f"close:stopped:{task_id}:c{clears(task_id)}:")
+    return found[-1] if found else None
+
+
+def stopped_record(record: Optional[dict], task_id: str, key: str) -> dict:
+    """The record a stop event says the task should have: stopped at the step and merge commit its key names."""
+    record = record or fresh_record(task_id)
+    _, _, _, _, short, step = key.split(":", 5)
+    merge_sha = record["merge_sha"] if record["merge_sha"] and record["merge_sha"][:12] == short else None
+    return {**record, "state": "stopped", "stopped": {"step": step if step in STEPS else "record",
+                                                      "merge_sha": merge_sha}, "unknown": None, "waiting": None}
 
 
 def _read_office(task_id: str, name: str, max_bytes: int, label: str) -> bytes:
@@ -453,15 +481,24 @@ def _attempt(a: Attempt) -> dict:
     except NotFoundError:
         raise NotMine("no such task") from None
     state, a.record = read_record(a.task_id)
+    if state == "ok" and a.record["state"] in ("closed", "done") or (a.task["status"] == "closed"
+                                                                     and state == "missing"):
+        raise NotMine("it is closed")
+    if a.task["status"] == "closed":
+        a.record = a.record or fresh_record(a.task_id)
+        raise ClosedByHand()
+    # Before anything decides whether the task is worked: a stop whose record a kill or a failed write lost.
+    event = stop_event(a.conn, a.task_id)
+    if event is not None and not (state == "ok" and a.record["state"] == "stopped"):
+        a.record = stopped_record(a.record, a.task_id, event["dedupe_key"])
+        with contextlib.suppress(FleetError, OSError):
+            write_record(a.record, aside=state == "bad")
+        raise NotMine("it is stopped: fleet close tries it once more")
     if state == "missing":
         a.record = fresh_record(a.task_id)
     elif state == "bad":
         a.record = fresh_record(a.task_id)
-        raise Stop("record", "its close record could not be read whole, so it was moved aside", move_aside=True)
-    if a.record["state"] in ("closed", "done") or (a.task["status"] == "closed" and state == "missing"):
-        raise NotMine("it is closed")
-    if a.task["status"] == "closed":
-        raise ClosedByHand()
+        raise Stop("record", "its close record could not be read whole, so it was set aside", move_aside=True)
     if a.record["state"] == "legacy":
         raise NotMine("it passed review before auto-close kept its TASK.md: close it by hand")
     if a.record["state"] == "stopped":
@@ -575,40 +612,53 @@ def _base_branch(record: dict) -> str:
         raise Stop("base", "its worktree's base is not a plain branch name") from None
 
 
-def landed_prs(data: dict, repo: str) -> list:
-    """The same-repo PRs from one head branch, each checked against its shape. Any query answer that is partial or
-    fails a shape is Unknown, never fewer PRs: an unreadable list never falls through to the ancestry path."""
+PR_FIELDS = ("number", "state", "merged", "mergedAt", "createdAt", "closedAt", "headRefOid", "baseRefName",
+             "isCrossRepository", "headRepository", "mergeCommit")
+
+
+def landed_prs(data: dict, repo: str) -> tuple:
+    """(prs, unread): the same-repo PRs from one head branch that GitHub's answer shows whole, each checked against
+    its shape, and why the answer is not all of them, or None when it is. A partial list or a node with a field
+    missing or of the wrong shape is unread, never fewer PRs: an unreadable list never falls through to the ancestry
+    path. What the whole PRs show still counts, so a PR merged at an unreviewed head stops the task even beside one
+    that could not be read."""
     found = patrol.get(data, "repository", "pullRequests")
     total, nodes = patrol.get(found, "totalCount"), patrol.get(found, "nodes")
+    unread = None
     if type(total) is not int or total < 0 or total > 20 or not isinstance(nodes, list) or len(nodes) != total:
-        raise Unknown("landed", "GitHub's list of PRs from the branch was not whole")
+        unread = "GitHub's list of PRs from the branch was not whole"
     prs = []
-    for node in nodes:
-        if not isinstance(node, dict) or not isinstance(node.get("isCrossRepository"), bool):
-            raise Unknown("landed", "a PR from the branch has a field of the wrong shape")
+    for node in nodes if isinstance(nodes, list) else []:
+        if not isinstance(node, dict) or any(key not in node for key in PR_FIELDS) \
+                or not isinstance(node["isCrossRepository"], bool):
+            unread = unread or "a PR from the branch has a field missing or of the wrong shape"
+            continue
         head_repo = patrol.get(node, "headRepository", "nameWithOwner")
         named = isinstance(head_repo, str) and ids.PATTERNS["repo"].fullmatch(head_repo) is not None
         if node["isCrossRepository"] or (named and not review._same_repo(head_repo, repo)):
             continue  # a fork's PR, dropped before anything looks at it
-        if not named:
-            raise Unknown("landed", "a PR from the branch names no head repository")
-        prs.append(_pr_shape(node))
-    return prs
+        shaped = _pr_shape(node) if named else None
+        if shaped is None:
+            unread = unread or "a PR from the branch has a field missing or of the wrong shape"
+            continue
+        prs.append(shaped)
+    return prs, unread
 
 
-def _pr_shape(node: dict) -> dict:
-    number, state, merged = node.get("number"), node.get("state"), node.get("merged")
-    created, merged_at, closed_at = (patrol.parse_ts(node.get(key)) for key in ("createdAt", "mergedAt", "closedAt"))
-    head, base = node.get("headRefOid"), node.get("baseRefName")
+def _pr_shape(node: dict) -> Optional[dict]:
+    """One PR node checked against its shape, or None when a field fails it."""
+    number, state, merged = node["number"], node["state"], node["merged"]
+    created, merged_at, closed_at = (patrol.parse_ts(node[key]) for key in ("createdAt", "mergedAt", "closedAt"))
+    head, base = node["headRefOid"], node["baseRefName"]
     merge = patrol.get(node, "mergeCommit", "oid")
     good = (type(number) is int and number > 0 and state in PR_STATES and isinstance(merged, bool)
             and merged == (state == "MERGED") and created is not None and _is_sha(head)
             and isinstance(base, str) and gitops.REF.fullmatch(base) is not None
-            and (node.get("mergedAt") is None) == (not merged) and (not merged or merged_at is not None)
-            and (node.get("closedAt") is None or closed_at is not None) and (state == "OPEN" or closed_at is not None)
+            and (node["mergedAt"] is None) == (not merged) and (not merged or merged_at is not None)
+            and (node["closedAt"] is None or closed_at is not None) and (state == "OPEN" or closed_at is not None)
             and (not merged or _is_sha(merge)))
     if not good:
-        raise Unknown("landed", "a PR from the branch has a field of the wrong shape")
+        return None
     return {"number": number, "state": state, "merged": merged, "merged_at": merged_at, "closed_at": closed_at,
             "head": head, "base": base, "merge": merge if merged else None}
 
@@ -635,8 +685,9 @@ def _landed(a: Attempt) -> None:
         data = patrol.gh_query("landed", {"owner": owner, "name": name, "head": head})
     except FleetError as exc:
         raise Unknown("landed", exc) from None
-    prs = landed_prs(data, a.repo)
+    prs, unread = landed_prs(data, a.repo)
     since = a.task["created_at"]
+    # What GitHub showed whole stops the task first, whatever else the answer left unread.
     for pr in prs:
         if pr["merged"] and pr["merged_at"] >= since and pr["head"] != a.pass_sha:
             raise Stop("landed", f"PR #{pr['number']} merged a head the review never passed")
@@ -644,6 +695,8 @@ def _landed(a: Attempt) -> None:
     merged = [pr for pr in into if pr["merged"] and pr["merged_at"] >= since]
     if len(merged) > 1:
         raise Stop("landed", f"{len(merged)} PRs from its branch merged into {base}, so which one landed is unclear")
+    if unread is not None:
+        raise Unknown("landed", unread)
     common_dir = a.build_record["common_dir"]
     if merged:
         tip = _fetched_tip(a, base)
@@ -700,12 +753,14 @@ def _check_result(node: object) -> tuple:
                   else "red" if state in STATUS_RED else "unknown")
     else:
         return "check", "unknown"
-    shown = common.scrubbed_line(patrol.clean(name), CHECK_NAME_MAX) if isinstance(name, str) and name else "check"
+    shown = common.scrubbed_line(name, CHECK_NAME_MAX) if isinstance(name, str) and name else "check"
     return shown or "check", result
 
 
 def merge_checks(a: Attempt) -> dict:
-    """Step 2: {ci: green or none, checks: [(name, result)]} once settled, else Wait, Unknown or Stop."""
+    """Step 2: {ci: green or none, checks: [(name, result)]} once settled, else Wait, Unknown or Stop. Any red GitHub
+    shows stops the task at once, before a check it could not read, a list it did not give whole or a pending one is
+    looked at. Only an explicit null rollup means no checks; a commit whose answer leaves the rollup out is unknown."""
     owner, name = a.repo.split("/", 1)
     try:
         data = patrol.gh_query("merge_checks", {"owner": owner, "name": name, "oid": a.merge_sha})
@@ -714,20 +769,24 @@ def merge_checks(a: Attempt) -> dict:
     commit = patrol.get(data, "repository", "object")
     if not isinstance(commit, dict) or commit.get("__typename") != "Commit" or commit.get("oid") != a.merge_sha:
         raise Unknown("ci", "GitHub did not answer with the merge commit")
-    rollup = commit.get("statusCheckRollup")
-    checks = []
+    if "statusCheckRollup" not in commit:
+        raise Unknown("ci", "GitHub's answer left out the checks on the merge commit")
+    rollup = commit["statusCheckRollup"]
+    checks, whole = [], True
     if rollup is not None:
         contexts = patrol.get(rollup, "contexts")
         total, nodes = patrol.get(contexts, "totalCount"), patrol.get(contexts, "nodes")
-        if not isinstance(contexts, dict) or patrol.get(contexts, "pageInfo", "hasNextPage") is not False \
-                or type(total) is not int or not isinstance(nodes, list) or len(nodes) != total:
-            raise Unknown("ci", "the checks on the merge commit were not read whole")
-        checks = [_check_result(node) for node in nodes]
+        if isinstance(nodes, list):
+            checks = [_check_result(node) for node in nodes]
+        whole = (isinstance(contexts, dict) and patrol.get(contexts, "pageInfo", "hasNextPage") is False
+                 and type(total) is int and isinstance(nodes, list) and len(nodes) == total)
     results = [result for _, result in checks]
+    if "red" in results:
+        raise Stop("ci", f"CI on the merge commit is red ({results.count('red')} of {len(results)} checks read)")
+    if not whole:
+        raise Unknown("ci", "the checks on the merge commit were not read whole")
     if "unknown" in results:
         raise Unknown("ci", "a check on the merge commit has a state the closer does not know")
-    if "red" in results:
-        raise Stop("ci", f"CI on the merge commit is red ({results.count('red')} of {len(results)} checks)")
     if "pending" in results:
         raise Wait("ci")
     if a.now - a.record["landed_seen_at"] < config.AUTO_CLOSE_CI_SETTLE_SECONDS:
@@ -753,7 +812,9 @@ def _evidence_result(a: Attempt) -> Optional[dict]:
     except safefs.Missing:
         return None
     except (FleetError, OSError) as exc:
-        raise Unknown("commands", exc) from None
+        if review.failed_read(exc) == "unreadable":
+            raise Unknown("commands", exc) from None
+        raise Stop("record", "its after-merge evidence for the merge commit is not a plain file") from None
     digest = hashlib.sha256(raw).hexdigest()
     if kept is not None and kept["merge_sha"] == a.merge_sha and kept["evidence_sha256"] == digest:
         return {"exits": None, "evidence_sha256": digest, "failed": []}
@@ -769,6 +830,62 @@ def _evidence_result(a: Attempt) -> Optional[dict]:
     return {"exits": exits, "evidence_sha256": digest, "failed": [key for key, code in exits.items() if code != 0]}
 
 
+def _command_prefix(merge_sha: str, check_id: str) -> str:
+    """The try markers of one after-merge command at one merge commit: close-<merge commit>.AC-<n>.cmd-try<k>."""
+    return f"close-{merge_sha}.{check_id}.cmd-try"
+
+
+def _command_results(a: Attempt) -> dict:
+    """The result of each after-merge command that ended at this merge commit, from the office record a stop or a
+    kill between commands left. A record that cannot be read is unknown, never "no results", so nothing that ran is
+    run again on a failed read; one that does not read whole for this task, merge commit, reviewed commit and TASK.md
+    stops the task."""
+    try:
+        raw = _read_office(a.task_id, verify.after_results_name(a.merge_sha), OFFICE_READ_MAX, "after-merge results")
+    except safefs.Missing:
+        return {}
+    except (FleetError, OSError) as exc:
+        if review.failed_read(exc) == "unreadable":
+            raise Unknown("commands", exc) from None
+        raise Stop("record", "the results of its after-merge commands are not a plain file") from None
+    found = verify.parse_after_results(raw, a.task_id, a.merge_sha, a.pass_sha, a.approved,
+                                       [check["id"] for check in a.commands])
+    if found is None:
+        raise Stop("record", "the results of its after-merge commands do not read whole")
+    return found
+
+
+def _keep_results(a: Attempt, results: dict) -> None:
+    raw = verify.dump_after_results(a.task_id, a.merge_sha, a.pass_sha, a.approved, results)
+    with _reviews(a.task_id, create=True) as fd:
+        safefs.write_new(fd, verify.after_results_name(a.merge_sha), raw)
+
+
+@contextlib.contextmanager
+def _command_launch(a: Attempt, check: dict, limit: int) -> Iterator[tuple]:
+    """Entered right before one after-merge command starts. It holds Ollivander's launch gate (his update lock,
+    shared, as every desk run does), then reads auto-close and Ollivander's stop and update marker once more under
+    it, then takes the command's O_EXCL try marker, and yields the fds the command's process inherits for as long as
+    it or anything it started runs: the task's review lock, so no later pass takes back or reuses its worktree, and
+    the gate, so no CLI update replaces a binary under it. Both are handed over (safefs.hand_over), so neither is let
+    go of while the process lives, even when this process ends. Off, a stop or a refused gate starts nothing and
+    takes no try; every result before it is kept."""
+    with contextlib.ExitStack() as gate:
+        try:
+            gate_fd = gate.enter_context(run_desk.launch_gate())
+        except run_desk.Stopped:
+            raise Wait("ollivander") from None
+        if not auto_close_on():
+            raise Off()
+        if run_desk.stop_requested():
+            raise Wait("ollivander")
+        if take_marker(a.task_id, _command_prefix(a.merge_sha, check["id"]), limit) is None:
+            raise Stop("commands", f"every try of after-merge command {check['id']} for this merge commit is used")
+        for fd in (a.lock_fd, gate_fd):
+            safefs.hand_over(fd)
+        yield a.lock_fd, gate_fd
+
+
 def _commands(a: Attempt) -> None:
     """Step 3 (see the module notes)."""
     if not a.commands:
@@ -781,28 +898,32 @@ def _commands(a: Attempt) -> None:
         return
     if found is not None and not a.manual:
         raise Stop("commands", f"after-merge commands {_ids_text(found['failed'])} failed at the merge commit")
-    if not auto_close_on():
-        raise Off()
-    if run_desk.stop_requested():
-        raise Wait("ollivander")
-    prefix = f"close-{a.merge_sha}.cmd-try"
-    taken = _markers(a.task_id, prefix)
+    results = _command_results(a)
+    if a.manual:  # fleet close runs a command that failed again; one that passed stays proven
+        results = {key: value for key, value in results.items() if value["exit_code"] == 0}
     sandboxed = verify.sandboxed_for(a.task)
-    if not a.manual and taken and not found:
-        if not sandboxed:
+    todo = [check for check in a.commands if check["id"] not in results]
+    for check in todo if not a.manual else []:
+        taken = _markers(a.task_id, _command_prefix(a.merge_sha, check["id"]))
+        if taken and not sandboxed:
             raise Stop("commands", "an after-merge command was stopped part way and may or may not have run;"
                                    " nothing was run again: fleet close runs them by hand")
         if len(taken) >= config.AUTO_CLOSE_MAX_TRIES:
-            raise Stop("commands", f"the after-merge commands started {len(taken)} times and never finished")
-    merged = _fresh_worktree(a)
-    limit = config.AUTO_CLOSE_MARKER_MAX if a.manual else (config.AUTO_CLOSE_MAX_TRIES if sandboxed else 1)
-    if not auto_close_on():
-        raise Off()
-    if run_desk.stop_requested():
-        raise Wait("ollivander")
-    if take_marker(a.task_id, prefix, limit) is None:
-        raise Stop("commands", "every try of the after-merge commands for this merge commit is used")
-    result = verify.run_after_merge(a.conn, a.task, merged, a.merge_sha, a.pass_sha, a.approved, a.checks, a.now_arg)
+            raise Stop("commands", f"after-merge command {check['id']} started {len(taken)} times and never finished")
+    if todo:
+        if not auto_close_on():
+            raise Off()
+        if run_desk.stop_requested():
+            raise Wait("ollivander")
+        merged = _fresh_worktree(a)
+        limit = config.AUTO_CLOSE_MARKER_MAX if a.manual else (config.AUTO_CLOSE_MAX_TRIES if sandboxed else 1)
+        result = verify.run_after_merge(a.conn, a.task, merged, a.merge_sha, a.pass_sha, a.approved, a.checks,
+                                        a.now_arg, done=results, launch=lambda check: _command_launch(a, check, limit),
+                                        keep=lambda kept: _keep_results(a, kept))
+    else:
+        # Every command ended before a stop or a kill: the evidence is written from their results, and none runs.
+        result = verify.write_after_merge(a.conn, a.task, a.merge_sha, a.pass_sha, a.approved, a.checks, results,
+                                          config.worktree_dir(_merged_name(a)))
     if result["failed"]:
         raise Stop("commands", f"after-merge commands {_ids_text(result['failed'])} failed at the merge commit")
     a.record["commands"] = {"merge_sha": a.merge_sha, "evidence_sha256": result["evidence_sha256"]}
@@ -868,6 +989,8 @@ def after_merge_block(text: str, task_id: str, merge_sha: str, written_ids: list
 
 
 def _fenced(text: str) -> str:
+    """A pack section in a fence. Its text is normalized already, so no invisible character left in it can join a
+    fence of its own once the fence inside is replaced."""
     return "```\n" + text.replace("```", "'''").rstrip("\n") + "\n```\n"
 
 
@@ -875,9 +998,17 @@ def _diff_text(common_dir: str, args: list) -> str:
     return gitops.git(["diff", "--no-ext-diff", "--no-textconv", *args], common_dir, whole=True)
 
 
+def _cut(text: str, limit: int) -> str:
+    if len(text) <= limit:
+        return text
+    return text[:limit] + f"\n(cut: {len(text) - limit} characters left out)\n"
+
+
 def build_pack(a: Attempt) -> str:
-    """The judge's pack for one merge commit (see the module notes): script values first, written after any scrub,
-    then each section from GitHub, the repository or a command scrubbed whole before any cut and fenced."""
+    """The judge's pack for one merge commit (see the module notes): script values first, then each section from
+    GitHub, the repository, TASK.md or a command, normalized and scrubbed whole (common.untrusted_text) before any
+    cut, then fenced. Normalizing comes first, so no invisible or compatibility character can hide a credential from
+    the scrub or a fence from its replacement."""
     common_dir, base_sha, merge_sha = a.build_record["common_dir"], a.build_record["base"], a.merge_sha
     landed = a.landed
     if landed["how"] == "pr":
@@ -888,28 +1019,24 @@ def build_pack(a: Attempt) -> str:
               f"LANDED {how}", f"TASK.md sha256 {a.approved}", "", DATA_NOTE, ""]
     criteria = "\n".join(f"{check['id']} {check['what']} | after merge: {check['check']}" for check in a.written)
     ci = "\n".join(f"{name}: {result}" for name, result in a.ci["checks"]) or "no checks reported"
-    raw_md = _frozen_task_md(a).decode("utf-8", "replace")
     evidence = "no after-merge commands"
     if a.commands:
         evidence = _read_office(a.task_id, verify.after_evidence_name(merge_sha), OFFICE_READ_MAX,
                                 "after-merge evidence").decode("utf-8", "replace")
-    diff = pensieve.scrub(_diff_text(common_dir, [f"{base_sha}..{merge_sha}"]))
-    if len(diff) > config.AUTO_CLOSE_PACK_DIFF_MAX_CHARS:
-        left = len(diff) - config.AUTO_CLOSE_PACK_DIFF_MAX_CHARS
-        diff = diff[:config.AUTO_CLOSE_PACK_DIFF_MAX_CHARS] + f"\n(cut: {left} characters left out)\n"
+    stat = _diff_text(common_dir, ["--stat", f"{base_sha}..{merge_sha}"])
+    beyond = _diff_text(common_dir, ["--stat", a.pass_sha, merge_sha])
     sections = [
-        ("Written after-merge checks to judge", pensieve.scrub(criteria)),
-        ("TASK.md, the one you approved", pensieve.scrub(raw_md)),
-        ("CI on the merge commit", ci),
-        ("After-merge command results", pensieve.scrub(evidence)),
-        ("Merged diff from the build's base, stat", pensieve.scrub(_diff_text(common_dir, ["--stat",
-                                                                                            f"{base_sha}..{merge_sha}"]))),
-        ("Merged diff from the build's base", diff),
-        ("What the merge commit holds beyond the reviewed commit",
-         pensieve.scrub(_diff_text(common_dir, ["--stat", a.pass_sha, merge_sha])) or "nothing"),
+        ("Written after-merge checks to judge", common.untrusted_text(criteria)),
+        ("TASK.md, the one you approved", common.untrusted_text(_frozen_task_md(a).decode("utf-8", "replace"))),
+        ("CI on the merge commit", common.untrusted_text(ci)),
+        ("After-merge command results", common.untrusted_text(evidence)),
+        ("Merged diff from the build's base, stat", common.untrusted_text(stat)),
+        ("Merged diff from the build's base",
+         _cut(common.untrusted_text(_diff_text(common_dir, [f"{base_sha}..{merge_sha}"])),
+              config.AUTO_CLOSE_PACK_DIFF_MAX_CHARS)),
+        ("What the merge commit holds beyond the reviewed commit", common.untrusted_text(beyond) or "nothing"),
     ]
-    body = "".join(f"\n## {title}\n\n{_fenced(text)}" for title, text in sections)
-    return "\n".join(header) + patrol.clean(body)
+    return "\n".join(header) + "".join(f"\n## {title}\n\n{_fenced(text)}" for title, text in sections)
 
 
 def _pack(a: Attempt) -> tuple:
@@ -997,7 +1124,8 @@ def _keep_verdict(a: Attempt, run_id: str, decided: tuple, pack_sha: str) -> str
         raise Unknown("pack", exc) from None
     if office != pack_sha or inbox != pack_sha:
         if a.record["judge"] is not None:
-            a.record["judge"]["run_id"] = None  # void: no later pass, fleet close included, reads that run again
+            # void: no later pass, fleet close included, reads that run again
+            a.record["judge"].update(run_id=None, outcome=None)
         raise Stop("pack", "the pack the judge read changed while it was judged, so its verdict is void")
     verdict, block = decided
     name = f"after-merge-review-{a.merge_sha}-{a.judge}-{run_id}.md"
@@ -1008,11 +1136,22 @@ def _keep_verdict(a: Attempt, run_id: str, decided: tuple, pack_sha: str) -> str
     return verdict
 
 
-def _verdict_of_run(a: Attempt, run_id: str) -> Optional[tuple]:
+def _run_verdict(a: Attempt, judged: dict) -> Optional[tuple]:
+    """The verdict of the judge run the record names, or None when that try is over with no verdict. The same rule
+    holds whether the run just ended or a later pass recovers it: only a run whose end the record kept as "ok" (exit
+    0, no cap, no vendor limit) is read, so a failed, capped or limited run, or one whose end no process saw (a kill
+    before its outcome was kept), never gives a verdict. A read of its output that fails is unknown, or a stop when no
+    retry mends it, and keeps the run id, so no other judge run starts while that run's word cannot be read; only an
+    output read whole that holds no after-merge block ends the try."""
+    if judged["outcome"] != "ok":
+        return None
     family = pensieve.get_desk(a.conn, a.judge)["family"]
-    try:
-        text = review.reviewer_output(a.judge, family, run_id)
-    except FleetError:
+    state, text = review.run_output(a.judge, family, judged["run_id"])
+    if state == "unreadable":
+        raise Unknown("judge", "the judge's run output could not be read")
+    if state == "malformed":
+        raise Stop("judge", "the judge's run output is not a plain file the closer can read whole")
+    if state == "none":
         return None
     return after_merge_block(text, a.task_id, a.merge_sha, [check["id"] for check in a.written])
 
@@ -1040,10 +1179,10 @@ def _judge(a: Attempt) -> None:
     record = a.record["judge"] if a.record["judge"] and a.record["judge"]["merge_sha"] == a.merge_sha else None
     if record is not None and record["run_id"] is not None:
         # That run has ended: its process held this task lock, which this attempt holds now.
-        decided = _verdict_of_run(a, record["run_id"])
+        decided = _run_verdict(a, record)
         if decided is not None:
             return _judged(a, _keep_verdict(a, record["run_id"], decided, record["pack_sha256"]))
-        record["run_id"] = None  # that try is over with no verdict
+        record.update(run_id=None, outcome=None)  # that try is over with no verdict
         a.save()
     if not run_desk.is_enabled(a.judge):
         raise Stop("judge", f"{a.judge} is not enabled, so no one can judge its written after-merge checks")
@@ -1068,11 +1207,17 @@ def _judge(a: Attempt) -> None:
         owl_post.deliver_script_owl(a.conn, fd, owl, body, a.now_arg)
     owls = (record or {}).get("owls") or []
     a.record["judge"] = {"merge_sha": a.merge_sha, "try": number, "owls": [*owls, owl["id"]][-10:], "run_id": None,
-                         "pack_sha256": pack_sha}
+                         "outcome": None, "pack_sha256": pack_sha}
     a.save()
     launched = []
 
     def keep(run_id: str) -> None:
+        # Called by run_desk.run at the last moment before the launch, under the judge's slot, its launch lock and
+        # Ollivander's launch gate, after any wait for them: switched off or stopped meanwhile, nothing starts.
+        if not auto_close_on():
+            raise Off()
+        if run_desk.stop_requested():
+            raise run_desk.Stopped("Ollivander's stop file or a CLI update is in place")
         a.record["judge"]["run_id"] = run_id
         a.save()
         launched.append(run_id)
@@ -1080,6 +1225,9 @@ def _judge(a: Attempt) -> None:
     try:
         result = run_desk.run(a.conn, a.judge, owl["id"], now=a.now_arg, lock_held=slot,
                               keep_fds=(a.lock_fd, slot.fd), on_run_id=keep)
+    except Off:
+        _give_back_marker(a.task_id, prefix, number)  # nothing started, so the try was never used
+        raise
     except (run_desk.Capped, run_desk.Stopped, run_desk.Blocked):
         _give_back_marker(a.task_id, prefix, number)
         raise Wait("judge-slot") from None
@@ -1087,12 +1235,13 @@ def _judge(a: Attempt) -> None:
         if not launched:
             _give_back_marker(a.task_id, prefix, number)
         raise Unknown("judge", exc) from None
-    decided = None
-    if result["exit_code"] == 0 and result.get("cap_source") is None:
-        decided = _verdict_of_run(a, result["run_id"])
+    # Kept before the output is read, so a later pass judges this run by the same rule (_run_verdict).
+    a.record["judge"]["outcome"] = "ok" if result["exit_code"] == 0 and result.get("cap_source") is None else "failed"
+    a.save()
+    decided = _run_verdict(a, a.record["judge"])
     if decided is None:
         # This try is over with no verdict: no later pass reads that run's output.
-        a.record["judge"]["run_id"] = None
+        a.record["judge"].update(run_id=None, outcome=None)
         a.save()
         raise Wait("judge-retry")
     return _judged(a, _keep_verdict(a, result["run_id"], decided, pack_sha))
@@ -1160,8 +1309,6 @@ def _summary(a: Attempt, parent_note: str) -> str:
 
 def _close(a: Attempt) -> dict:
     """Step 5: the task, and its go parent when nothing else is open under it, in one transaction."""
-    if not auto_close_on():
-        raise Off()
     found = candidacy(a.conn, pensieve.get_task(a.conn, a.task_id))
     if found is None or found["round"]["request_id"] != a.found["round"]["request_id"] \
             or found["pass_sha"] != a.pass_sha:
@@ -1194,6 +1341,8 @@ def _close(a: Attempt) -> dict:
              "judge_desk": a.judge if a.written else None,
              "evidence_path": f"{ids.REVIEWS_ROOT}/{a.task_id}/{name}",
              "evidence_sha256": hashlib.sha256(text.encode("ascii")).hexdigest()}
+    if not auto_close_on():  # read once more, right before the store close
+        raise Off()
     try:
         closed = pensieve.close_proven(a.conn, a.task_id, proof, _summary(a, parent_note), f"close:proven:{a.task_id}",
                                        parent_task_id=parent, now=a.now_arg)
@@ -1207,7 +1356,7 @@ def _close(a: Attempt) -> dict:
         raise Unknown("close", exc) from None
     a.record.update(state="closed", unknown=None, waiting=None)
     a.save()
-    cleaned = housekeep(a.conn, a.now_arg, only=a.task_id)
+    cleaned = housekeep(a.conn, a.now_arg, only=a.task_id, locked=a.task_id)
     return {"task_id": a.task_id, "outcome": "closed", "merge_sha": a.merge_sha,
             "parent": None if closed["parent"] is None else closed["parent"]["id"], "housekeeping": cleaned}
 
@@ -1276,9 +1425,7 @@ def _stopped(a: Attempt, exc: Stop) -> dict:
     record = a.record or fresh_record(a.task_id)
     record.update(state="stopped", stopped={"step": exc.step, "merge_sha": merge_sha}, unknown=None, waiting=None)
     a.record = record
-    if exc.move_aside:
-        _move_aside(a.task_id)
-    a.save()
+    write_record(record, aside=exc.move_aside)
     return {"task_id": a.task_id, "outcome": "stopped", "step": exc.step}
 
 
@@ -1297,8 +1444,9 @@ def _closed_by_hand(a: Attempt) -> dict:
     if a.record is not None:
         a.record.update(state="closed", unknown=None, waiting=None)
         a.save()
-    return {"task_id": a.task_id, "outcome": "closed by hand", "housekeeping": housekeep(a.conn, a.now_arg,
-                                                                                          only=a.task_id)}
+    locked = a.task_id if a.lock_fd is not None else None
+    return {"task_id": a.task_id, "outcome": "closed by hand",
+            "housekeeping": housekeep(a.conn, a.now_arg, only=a.task_id, locked=locked)}
 
 
 # Housekeeping
@@ -1315,10 +1463,13 @@ def _merged_records() -> list:
                   for match in map(MERGED_RECORD.fullmatch, names) if match is not None)
 
 
-def housekeep(conn, now: Optional[int] = None, only: Optional[str] = None) -> list:
+def housekeep(conn, now: Optional[int] = None, only: Optional[str] = None, locked: Optional[str] = None) -> list:
     """Take back the merged worktree of every closed task through git (worktree.remove_merged), and mark its close
-    record done. A worktree that cannot be removed is left alone and raises one headmaster event for it. A stopped
-    task's merged worktree stays for you to look at."""
+    record done. Each is taken back under its task's review lock, which every after-merge command's process keeps
+    while it or anything it started runs: while the lock is held, a command still runs there, so the worktree is
+    left for a later pass (locked names the task whose lock this caller holds already). A worktree that cannot be
+    removed is left alone and raises one headmaster event for it. A stopped task's merged worktree stays for you to
+    look at."""
     done = []
     try:
         merged = _merged_records()
@@ -1339,11 +1490,14 @@ def housekeep(conn, now: Optional[int] = None, only: Optional[str] = None) -> li
         if task["status"] != "closed":
             continue
         try:
-            build_record = gitops.find_record(worktree.castle_path(task["worktree"]))
-            if build_record is None:
-                raise FleetError("the task's own worktree record is missing")
-            worktree.remove_merged(build_record, name)
+            with contextlib.nullcontext() if task_id == locked else run_desk.task_lock(task_id):
+                build_record = gitops.find_record(worktree.castle_path(task["worktree"]))
+                if build_record is None:
+                    raise FleetError("the task's own worktree record is missing")
+                worktree.remove_merged(build_record, name)
             done.append(name)
+        except safefs.Busy:
+            continue  # an after-merge command still runs there: taken back once it has ended
         except (FleetError, OSError) as exc:
             with contextlib.suppress(StoreError):
                 pensieve.add_event(conn, task["desk"], "close.cleanup", "headmaster",
@@ -1446,14 +1600,15 @@ def close_by_hand(conn, task_id: str, now: Optional[int] = None) -> dict:
             if state == "ok" and record["state"] == "legacy":
                 raise FleetError("this task passed review before auto-close kept its TASK.md; Mischief managed closes"
                                  " it by hand")
-            if state == "bad" or (state == "ok" and record["state"] == "stopped"):
+            # A stop event since the last clear stops it as surely as the record does: a kill may have kept the
+            # record from saying so.
+            if state == "bad" or (state == "ok" and record["state"] == "stopped") \
+                    or stop_event(conn, task_id) is not None:
                 if take_marker(task_id, "close-clear", config.AUTO_CLOSE_MARKER_MAX) is None:
                     raise FleetError("this task was retried by hand as often as fleet close allows")
-                if state == "bad":
-                    _move_aside(task_id)
-                    record = fresh_record(task_id)
+                record = record if state == "ok" else fresh_record(task_id)
                 record.update(state="watching", stopped=None, unknown=None, waiting=None)
-                write_record(record)
+                write_record(record, aside=state == "bad")
             return close_one(conn, task_id, manual=True, now=now)
     except safefs.Busy:
         raise FleetError("an auto-close pass is running; run fleet close again when it ends") from None

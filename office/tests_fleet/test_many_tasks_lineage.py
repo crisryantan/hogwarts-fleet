@@ -264,14 +264,14 @@ class OwnLineageAncestryTests(ManyCase):
         first = self.commit("a work")
         real_verify, refused = verify.verify, []
 
-        def stacked_meanwhile(conn, task_id):
+        def stacked_meanwhile(conn, task_id, **kwargs):
             if not refused:
                 self.stacked("fix/a-more")
                 self.commit("more on a")
                 with self.assertRaises(FleetError) as caught:
                     review.review_own(self.conn, str(self.repo), title="stacked", fetch=False)
                 refused.append(str(caught.exception))
-            return real_verify(conn, task_id)
+            return real_verify(conn, task_id, **kwargs)
 
         with mock.patch.object(verify, "verify", side_effect=stacked_meanwhile):
             task_id = self.own_review()["task_id"]

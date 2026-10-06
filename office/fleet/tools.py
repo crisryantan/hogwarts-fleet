@@ -107,8 +107,9 @@ def run(conn, args: argparse.Namespace) -> object:
     if args.command == "worktree-remove":
         return worktree.remove(conn, args.task)
     if args.command == "verify":
-        with review.task_review_lock(args.task):  # never under a running review, whose evidence it would replace
-            return verify.verify(conn, args.task)
+        # Never under a running review, whose evidence it would replace; each check's process keeps the lock while it runs.
+        with review.task_review_lock(args.task) as lock_fd:
+            return verify.verify(conn, args.task, keep_fds=(lock_fd,))
     if args.command == "review":
         if args.target != "own":
             if any(value is not None for value in (args.repo_dir, args.title, args.intent_file, args.task)):

@@ -180,6 +180,26 @@ class AfterMergeCheckTests(VerifyChecksCase):
                 [check] = verify.parse_checks(line + "\n")
                 self.assertEqual((check["command"], check["malformed"] is not None), (None, True))
 
+    def test_malformed_when_anything_label_shaped_follows_a_valid_label(self):
+        # Any pipe, a few words and a colon outside the backticks is a second label, known or not, whichever label came
+        # first, and an invisible or fullwidth character never hides one.
+        for line in ("AC-1 x | check: looks right | later: confirm",
+                     "AC-1 x | after merge: looks right | note : confirm",
+                     "AC-1 x | check: `make test` | then: done",
+                     "AC-1 x | after merge: `make` |later:`rm -rf ~`",
+                     "AC-1 x | check: fine | 2nd pass: again",
+                     "AC-1 x | check: fine |​later: confirm",
+                     "AC-1 x | after merge: fine ｜ later: confirm",
+                     "AC-1 x | check: fine | après merge: confirm"):
+            with self.subTest(line=line):
+                [check] = verify.parse_checks(line + "\n")
+                self.assertEqual((check["command"], check["malformed"]), (None, verify.TWO_LABELS))
+        # A pipe with no label after it, and one inside the backticks, stay part of the check.
+        for line, command in (("AC-1 x | check: one | two", None), ("AC-1 x | check: `a | b: c`", "a | b: c")):
+            with self.subTest(line=line):
+                [check] = verify.parse_checks(line + "\n")
+                self.assertEqual((check["command"], check["malformed"]), (command, None))
+
     def test_after_merge_pipe_inside_a_backtick_command_is_still_a_command(self):
         [check] = verify.parse_checks("AC-1 x | after merge: `make test | tee out | grep check: | wc -l`\n")
         self.assertEqual((check["command"], check["malformed"], check["when"]),

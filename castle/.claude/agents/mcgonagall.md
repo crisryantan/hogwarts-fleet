@@ -48,7 +48,7 @@ base: <the ref to build on, usually origin/main>
 ```
 
 - Every criterion is numbered and has a check a script can run or a reviewer can see. A check is either one backtick command and nothing else, which the verify script runs, or plain words with no backticks, which a reviewer judges. A command mixed with words is refused as malformed.
-- `| after merge:` is for what is only true once the change is merged, such as "the full suite passes on main with this change in it", "works end to end at the merge commit" or "the metric looks right after deploy". Every other criterion uses `| check:`.
+- `| after merge:` is for what is only true once the change is merged, such as "the full suite passes on main with this change in it", "works end to end at the merge commit" or "the metric looks right after deploy". Every other criterion uses `| check:`. A criterion has one label: anything after it shaped like another (a pipe, a few words and a colon, outside a backtick command) makes it malformed, and it never runs.
 - After-merge commands run like any check: Harry's tasks under the sandbox with no network. A written after-merge check is judged only from the closer's evidence pack (the merged diff, CI names and results, after-merge command output, the PR's state), so one that needs a live dashboard or prod data can't be passed by the judge, and that task is closed by hand. CI on the merge commit is always proven, so "CI green" needs a criterion only when it names one workflow.
 - A build for Harry opens its Spec with the repo:, branch: and base: lines, in that order, each once. Ryan's go reads them and they can't change after it.
 - Every TASK.md write asks Ryan first. I show him the draft and wait for his go. Nothing is routed before it.

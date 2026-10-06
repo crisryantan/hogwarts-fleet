@@ -216,6 +216,38 @@ def reviewer_output(desk: str, family: str, run_id: str) -> str:
     return result
 
 
+def run_output(desk: str, family: str, run_id: str) -> tuple:
+    """(state, text) of a reviewer run's final text, for a reader that must never take a failed read as a run that
+    said nothing: "ok" with the text; "none" when the run's output was read and holds no final text (Codex wrote no
+    last message, or Claude's stream has no result event); "unreadable" when the read failed and is worth a retry;
+    "malformed" when the file is not a plain file of ours or is too large, or Claude's output file, which every
+    launch makes before its process starts, is gone, which no retry mends."""
+    run_id = safefs.check_component(run_id)
+    name = f"{run_id}-last-message.md" if family == "codex" else f"{run_id}.out"
+    try:
+        with safefs.opened_dir(config.OFFICE_ROOT, "runs", desk) as fd:
+            if family == "codex":
+                raw = safefs.read_regular(fd, name, REVIEW_MAX_BYTES, "review output")
+            else:
+                raw, _ = safefs.read_range(fd, name, None, run_desk.RUN_OUTPUT_MAX_BYTES, "review output")
+    except safefs.Missing:
+        return ("none" if family == "codex" and _runs_folder_there(desk) else "malformed"), None
+    except (FleetError, OSError) as exc:
+        return failed_read(exc), None
+    if family == "codex":
+        return "ok", raw.decode("utf-8", "replace")
+    result = run_desk.claude_result(raw).get("result")
+    return ("ok", result) if isinstance(result, str) else ("none", None)
+
+
+def _runs_folder_there(desk: str) -> bool:
+    try:
+        with safefs.opened_dir(config.OFFICE_ROOT, "runs", desk):
+            return True
+    except (FleetError, OSError):
+        return False
+
+
 def commit_message(handoff: str, check_words: bool = True) -> tuple:
     """(subject, body) from the COMMIT MESSAGE section of a build desk's handoff."""
     lines = handoff.splitlines()
@@ -638,7 +670,9 @@ def run_review(conn, task: dict, record: dict, sha: str, holder_id: str, handoff
         raise FleetError("this author's family has no reviewer")
     if not run_desk.is_enabled(reviewer):
         raise FleetError(f"{reviewer} is not enabled, so no review can run")
-    evidence = verify.verify(conn, task["id"])
+    # Each check's process inherits the review lock, so a check still running after this process is killed keeps
+    # every other review and verify of the task off the worktree until it ends.
+    evidence = verify.verify(conn, task["id"], keep_fds=(task_lock_fd,))
     if evidence["sha"] != sha:
         raise FleetError("HEAD moved before the review started; run the review again")
     pensieve.record_commit(conn, task["id"], record["repo"], sha)

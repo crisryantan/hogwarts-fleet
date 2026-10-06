@@ -8,6 +8,7 @@ import signal
 import sys
 import threading
 import time
+import unicodedata
 from typing import Callable, Iterator, Optional, Sequence
 
 from hogwarts import db, ids, pensieve
@@ -17,6 +18,12 @@ from . import config, safefs
 from .safefs import FleetError
 
 _PRINTABLE = re.compile(r"[^\x20-\x7e]")
+_CONTROLS = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
+# Unicode's default ignorable code points that are not control or format characters already, such as the Hangul
+# fillers and the variation selectors: no reader sees them, so they could split a credential the scrub would miss.
+_IGNORABLE = re.compile("[\u00ad\u034f\u061c\u115f\u1160\u17b4\u17b5\u180b-\u180f\u200b-\u200f\u202a-\u202e"
+                        "\u2060-\u206f\u3164\ufe00-\ufe0f\ufeff\uffa0\ufff0-\ufff8\U0001bca0-\U0001bca3"
+                        "\U0001d173-\U0001d17a\U000e0000-\U000e0fff]")
 # An opt-in file holds "on" and a newline, so anything longer is not one.
 OPT_IN_MAX_BYTES = 64
 
@@ -139,11 +146,32 @@ def opt_in_on(name: str) -> bool:
     return raw.strip() == b"on"
 
 
+def normalized(text: object) -> str:
+    """Untrusted text (repository text, TASK.md, command output, GitHub fields) made plain before anything scrubs or
+    cuts it: compatibility forms folded (NFKC, so a fullwidth letter is the letter it shows), line and paragraph
+    separators made newlines, and every other control, format, surrogate, private-use or unassigned character and
+    every invisible one, such as a zero-width space, removed. Newline and tab stay. So no character a reader cannot
+    see splits a credential for the scrub to miss, and none is removed after the scrub to join one again."""
+    value = str(text)
+    if not value.isascii():
+        value = unicodedata.normalize("NFKC", _IGNORABLE.sub("", value))
+        value = value.replace("\u2028", "\n").replace("\u2029", "\n")
+        value = "".join(char for char in value if char.isascii()
+                        or (unicodedata.category(char)[0] != "C" and _IGNORABLE.fullmatch(char) is None))
+    return _CONTROLS.sub("", value)
+
+
+def untrusted_text(text: object) -> str:
+    """Untrusted text made fit to hand on whole: normalized first, then scrubbed of anything shaped like a credential
+    (pensieve.scrub). Whoever cuts it cuts only after this, so a cut never leaves part of a credential in the clear."""
+    return pensieve.scrub(normalized(text))
+
+
 def scrubbed_line(text: object, limit: int) -> str:
-    """one_line for text that can quote git, gh or a desk: all of it is scrubbed of anything shaped like a credential
-    (pensieve.scrub) before it is cut, so a cut never leaves part of one unscrubbed, and again once it is on one line,
-    since joining its lines can shape one."""
-    return one_line(pensieve.scrub(one_line(pensieve.scrub(str(text)), sys.maxsize)), limit)
+    """one_line for text that can quote git, gh or a desk: all of it is normalized and scrubbed of anything shaped like
+    a credential (untrusted_text) before it is cut, so neither an invisible character nor a cut leaves part of one
+    unscrubbed, and scrubbed again once it is on one line, since joining its lines can shape one."""
+    return one_line(pensieve.scrub(one_line(untrusted_text(text), sys.maxsize)), limit)
 
 
 def hook_desk(argv: Sequence[str]) -> str:

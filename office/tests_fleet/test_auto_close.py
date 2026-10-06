@@ -52,6 +52,31 @@ COMMAND_AC = "AC-2 the widget is on main | after merge: `test -f widget.txt`\n"
 WRITTEN_AC = "AC-3 the merged widget reads well | after merge: the widget file says widget\n"
 TOKEN = "gh" + "p_" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8"  # shaped like a GitHub token, built so no scanner trips
 JUDGE_HEADER = re.compile(r"AFTER-MERGE (tk_[0-9a-f]{16}) @ ([0-9a-f]{40})")
+SPLIT_TOKEN = TOKEN[:2] + "\u200b" + TOKEN[2:]  # a zero-width space inside it, so it shows whole
+WIDE_TOKEN = "".join(chr(ord(char) + 0xFEE0) for char in TOKEN)  # fullwidth letters, read as the token
+TWO_COMMANDS = COMMAND_AC + "AC-4 the readme is on main | after merge: `test -f README.md`\n"
+
+
+def gone(pid: int, seconds: float = 5.0) -> bool:
+    """Whether the process has ended (and been reaped by whoever its parent is now) within seconds."""
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        time.sleep(0.05)
+    return False
+
+
+def lock_busy(name: str, shared: bool = False) -> bool:
+    """Whether some process holds the office lock name so that this one cannot take it now."""
+    with safefs.opened_dir(config.OFFICE_ROOT, "locks", create=True) as fd:
+        try:
+            with safefs.held_lock(fd, name, blocking=False, shared=shared):
+                return False
+        except safefs.Busy:
+            return True
 
 
 def iso(ts: int) -> str:
@@ -153,7 +178,9 @@ class CloseCase(LoopCase):
                         mock.patch.object(run_desk, "user_temp_dir", return_value=str(self.user_temp))):
             patcher.start()
             self.addCleanup(patcher.stop)
-        self.git("config", f"url.{self.bare}.insteadOf", ORIGIN)
+        # What git config url.<bare>.insteadOf would write to the checkout's own config, without a git run per test.
+        with open(self.repo / ".git" / "config", "a") as config_file:
+            config_file.write(f'[url "{self.bare}"]\n\tinsteadOf = {ORIGIN}\n')
         self.github = FakeGitHub()
         for patcher in (mock.patch.object(patrol, "run_gh", side_effect=self.github),
                         mock.patch.object(config, "AUTO_CLOSE_CI_SETTLE_SECONDS", 0)):
@@ -705,11 +732,46 @@ class LandedTests(CloseCase):
         [event] = self.close_events()
         self.assertIn("PR #9 merged a head the review never passed", event["summary"])
 
+    def test_landed_merged_at_an_unreviewed_head_stops_beside_a_pr_it_could_not_read(self):
+        ctx = self.passed_build()
+        merge = self.merge_commit(ctx["sha"])
+        self.push_main(merge)
+        unreadable = self.pr(ctx, number=8, state="OPEN")
+        del unreadable["headRefOid"]
+        self.github.prs = [unreadable, self.pr(ctx, head="e" * 40, merge=merge)]
+        result = self.close(ctx)
+        self.assertEqual((result["outcome"], result["step"]), ("stopped", "landed"))
+        [event] = self.close_events()
+        self.assertIn("PR #7 merged a head the review never passed", event["summary"])
+
+    def test_landed_a_pr_field_left_out_is_unknown_never_a_default(self):
+        ctx = self.passed_build()
+        for key in ("mergedAt", "closedAt", "mergeCommit", "headRepository"):
+            with self.subTest(key=key):
+                left_out = self.pr(ctx, state="OPEN")
+                del left_out[key]
+                self.github.prs = [left_out]
+                result = self.close(ctx)
+                self.assertEqual((result["outcome"], result["step"]), ("unknown", "landed"))
+        self.assertNotIn("not-landed", json.dumps(self.record(ctx["task"])))
+
 
 class MergeChecksTests(CloseCase):
     def landed(self, after: str = "") -> tuple:
         ctx = self.passed_build(after=after)
         return ctx, self.land_pr(ctx)
+
+    def checks_of(self, ctx: dict, merge: str, landed_seen_at: int = None) -> dict:
+        """merge_checks alone, as an attempt that has proven the merge commit reads CI on it."""
+        attempt = closer.Attempt(self.conn, ctx["task"], False, self.t0 + 7200, {})
+        attempt.found, attempt.merge_sha = {"repo": REPO_ID}, merge
+        attempt.record = {"landed_seen_at": self.t0 if landed_seen_at is None else landed_seen_at}
+        return closer.merge_checks(attempt)
+
+    def commit_answer(self, merge: str, nodes: list, total: int = None, more: bool = False) -> dict:
+        return {"repository": {"object": {"__typename": "Commit", "oid": merge, "statusCheckRollup": {"contexts": {
+            "totalCount": len(nodes) if total is None else total, "pageInfo": {"hasNextPage": more},
+            "nodes": nodes}}}}}
 
     def test_merge_checks_success_neutral_skipped_pass_and_pending_waits(self):
         ctx, merge = self.landed()
@@ -753,13 +815,47 @@ class MergeChecksTests(CloseCase):
         ctx, merge = self.landed()
         reds = [check_run(conclusion=conclusion) for conclusion in
                 ("FAILURE", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STARTUP_FAILURE", "STALE")]
-        for node in reds + [status_context(state="ERROR"), status_context(state="FAILURE")]:
+        self.github.checks[merge] = [check_run(), reds[0]]
+        self.assertEqual(self.close(ctx)["step"], "ci")
+        for node in reds[1:] + [status_context(state="ERROR"), status_context(state="FAILURE")]:
             with self.subTest(node=node):
-                with contextlib.suppress(FileNotFoundError):  # each red read as if for the first time
-                    os.unlink(self.reviews(ctx["task"]) / "close.json")
                 self.github.checks[merge] = [check_run(), node]
-                self.assertEqual(self.close(ctx)["step"], "ci")
-        self.assertEqual(self.kinds(), ["close.stopped"])  # one stop of one merge commit is told once
+                with self.assertRaises(closer.Stop) as stopped:
+                    self.checks_of(ctx, merge)
+                self.assertEqual(stopped.exception.step, "ci")
+        # A record a kill lost still finds the stop told before it, so the task stays stopped and is told once.
+        os.unlink(self.reviews(ctx["task"]) / "close.json")
+        self.assertEqual(self.close(ctx)["outcome"], "not the closer's")
+        self.assertEqual((self.kinds(), self.record(ctx["task"])["state"]), (["close.stopped"], "stopped"))
+
+    def test_merge_checks_any_red_stops_before_unknown_or_pending_siblings(self):
+        ctx, merge = self.landed()
+        red = check_run("build", "FAILURE")
+        for answer in (self.commit_answer(merge, [check_run(conclusion="WEIRD"), red]),
+                       self.commit_answer(merge, [check_run(status="IN_PROGRESS"), red]),
+                       self.commit_answer(merge, [{"__typename": "Mystery"}, status_context(state="ERROR")]),
+                       self.commit_answer(merge, [red], total=150, more=True),
+                       self.commit_answer(merge, [check_run(), red], total=3)):
+            with self.subTest(answer=json.dumps(answer)[-120:]):
+                self.github.checks_answer = answer
+                with self.assertRaises(closer.Stop) as stopped:
+                    self.checks_of(ctx, merge, landed_seen_at=self.t0 + 7200)  # inside the settle time too
+                self.assertEqual(stopped.exception.step, "ci")
+        self.github.checks_answer = self.commit_answer(merge, [check_run(conclusion="WEIRD"), red])
+        result = self.close(ctx)
+        self.assertEqual((result["outcome"], result["step"]), ("stopped", "ci"))
+        self.assertEqual(self.kinds(), ["close.stopped"])
+
+    def test_merge_checks_rollup_left_out_is_unknown_and_only_null_is_none(self):
+        ctx, merge = self.landed()
+        self.github.checks_answer = {"repository": {"object": {"__typename": "Commit", "oid": merge}}}
+        result = self.close(ctx)
+        self.assertEqual((result["outcome"], result["step"]), ("unknown", "ci"))
+        self.assertIsNone(pensieve.task_closure(self.conn, ctx["task"]))
+        self.github.checks_answer = {"repository": {"object": {"__typename": "Commit", "oid": merge,
+                                                               "statusCheckRollup": None}}}
+        self.assertEqual(self.close(ctx)["outcome"], "closed")
+        self.assertEqual(pensieve.task_closure(self.conn, ctx["task"])["ci"], "none")
 
     def test_merge_checks_truncated_or_unknown_values_are_unknown(self):
         ctx, merge = self.landed()
@@ -807,17 +903,23 @@ class MergeChecksTests(CloseCase):
 
 
 class Counting:
-    """verify.run_check wrapped, counting each command run, or ending the process at the given runs."""
+    """verify.run_check wrapped, counting each command run, or ending the process at the given runs. then maps a run's
+    number to what happens while it runs (called once it has ended, before the closer sees its result)."""
 
-    def __init__(self, kill_at: tuple = ()) -> None:
-        self.calls, self.kill_at = [], kill_at
+    def __init__(self, kill_at: tuple = (), then: dict = None) -> None:
+        self.calls, self.kill_at, self.then = [], kill_at, then or {}
         self.real = verify.run_check
 
-    def __call__(self, record, scratch, command, sandboxed=True, scrub=False):
-        self.calls.append({"path": record["path"], "command": command, "sandboxed": sandboxed, "scrub": scrub})
-        if len(self.calls) in self.kill_at:
+    def __call__(self, record, scratch, command, sandboxed=True, scrub=False, keep_fds=()):
+        self.calls.append({"path": record["path"], "command": command, "sandboxed": sandboxed, "scrub": scrub,
+                           "keep_fds": keep_fds})
+        number = len(self.calls)
+        if number in self.kill_at:
             raise Killed()
-        return self.real(record, scratch, command, sandboxed, scrub)
+        result = self.real(record, scratch, command, sandboxed, scrub, keep_fds)
+        if number in self.then:
+            self.then[number]()
+        return result
 
 
 class AfterMergeCommandTests(CloseCase):
@@ -893,6 +995,104 @@ class AfterMergeCommandTests(CloseCase):
         self.assertIn("    [base64]\n", output)
         self.assertLessEqual(len(output.splitlines()), config.EVIDENCE_EXCERPT_LINES)
 
+    def test_after_merge_command_evidence_is_normalized_before_its_scrub(self):
+        # The command prints the token with a zero-width space inside it and once more in fullwidth letters.
+        command = (f"AC-2 the hidden token stays hidden | after merge: `printf '%s\\342\\200\\213%s\\n' {TOKEN[:2]}"
+                   f" {TOKEN[2:]}; printf '%s\\n' {WIDE_TOKEN}`\n")
+        ctx = self.passed_build(after=command, branch="fix/hidden-output")
+        merge = self.land_pr(ctx)
+        self.assertEqual(self.close(ctx)["outcome"], "closed")
+        evidence = (self.reviews(ctx["task"]) / f"after-merge-evidence-{merge}.md").read_text()
+        output = evidence.split("output, last 40 lines:\n", 1)[1]
+        self.assertNotIn(TOKEN, common.normalized(output))
+        self.assertNotIn("\u200b", evidence)
+        self.assertEqual(output.count("[token]"), 2)
+
+    def test_after_merge_command_process_group_ends_with_it_and_keeps_its_locks(self):
+        work, scratch = self.tmp / "work", self.tmp / "scratch"
+        for folder in (work, scratch / "home", scratch / "tmp"):
+            folder.mkdir(parents=True)
+        record = {"path": str(work), "links": []}
+        left = []
+
+        def end_left() -> None:
+            for pid in left:
+                with contextlib.suppress(ProcessLookupError):
+                    os.kill(pid, 9)
+
+        self.addCleanup(end_left)
+        result = verify.run_check(record, str(scratch), "sleep 60 & echo $!", sandboxed=False, scrub=True)
+        left.append(int(result["lines"][-1]))
+        self.assertEqual(result["exit_code"], 0)
+        self.assertTrue(gone(left[-1]))  # what it left behind ended with it
+        with mock.patch.object(config, "VERIFY_TIMEOUT_SECONDS", 1):
+            result = verify.run_check(record, str(scratch), "sleep 60 & echo $!; sleep 60", sandboxed=False)
+        left.append(int(result["lines"][-1]))
+        self.assertEqual(result["exit_code"], -1)
+        self.assertTrue(gone(left[-1]))
+        # The fds its caller holds for it are its own while it runs.
+        with open(self.tmp / "held", "w") as handle:
+            result = verify.run_check(record, str(scratch), f"test -e /dev/fd/{handle.fileno()}", sandboxed=False,
+                                      keep_fds=(handle.fileno(),))
+            self.assertEqual(result["exit_code"], 0)
+            result = verify.run_check(record, str(scratch), f"test -e /dev/fd/{handle.fileno()}", sandboxed=False)
+            self.assertEqual(result["exit_code"], 1)
+
+    def test_ollivander_stop_gate_is_held_by_each_command_for_its_life(self):
+        ctx = self.passed_build(after=TWO_COMMANDS)
+        merge = self.land_pr(ctx)
+        real, seen = verify.run_check, []
+
+        def probe(record, scratch, command, sandboxed=True, scrub=False, keep_fds=()):
+            with safefs.opened_dir(config.OFFICE_ROOT, "locks") as locks:
+                wanted = {safefs.lstat(locks, name).st_ino
+                          for name in (config.UPDATE_LOCK, run_desk.task_lock_name(ctx["task"]))}
+            seen.append({os.fstat(fd).st_ino for fd in keep_fds} == wanted)
+            seen.append(lock_busy(config.UPDATE_LOCK))  # no CLI update can start while it runs
+            # The command's process holds both itself.
+            opened = " && ".join(f"test -e /dev/fd/{fd}" for fd in keep_fds)
+            return real(record, scratch, f"{opened} && {command}", sandboxed, scrub, keep_fds)
+
+        with mock.patch.object(verify, "run_check", side_effect=probe):
+            self.assertEqual(self.close(ctx)["outcome"], "closed")
+        self.assertEqual(seen, [True, True, True, True])
+        self.assertFalse(lock_busy(config.UPDATE_LOCK))
+        evidence = (self.reviews(ctx["task"]) / f"after-merge-evidence-{merge}.md").read_text()
+        self.assertIn("AC-2 exit 0\nAC-4 exit 0\n", evidence)
+
+    def test_ollivander_stop_update_running_at_a_command_launch_runs_nothing_and_takes_no_try(self):
+        ctx = self.passed_build(after=COMMAND_AC)
+        merge = self.land_pr(ctx)
+        self.runs = self.counting()
+        # A CLI update holds Ollivander's lock, with no stop file or marker in place yet.
+        with safefs.opened_dir(config.OFFICE_ROOT, "locks", create=True) as locks, \
+                safefs.held_lock(locks, config.UPDATE_LOCK, blocking=False):
+            result = self.close(ctx)
+        self.assertEqual((result["outcome"], result["on"]), ("waiting", "ollivander"))
+        self.assertEqual((self.after_merges(ctx), self.kinds()), ([], []))
+        self.assertEqual([name for name in os.listdir(self.reviews(ctx["task"])) if ".cmd-try" in name], [])
+        self.assertEqual(self.close(ctx)["outcome"], "closed")
+        self.assertIn(f"close-{merge}.AC-2.cmd-try1", os.listdir(self.reviews(ctx["task"])))
+
+    def test_ollivander_stop_placed_during_a_command_starts_no_later_one_and_keeps_its_result(self):
+        ctx = self.passed_build(after=TWO_COMMANDS)
+        merge = self.land_pr(ctx)
+        stop = self.office / config.STATE_DIR / config.STOP_FILE
+        self.runs = self.counting()
+        self.runs.then = {1: lambda: self.write_file(stop, "stopped for a new Codex\n")}
+        result = self.close(ctx)
+        self.assertEqual((result["outcome"], result["on"]), ("waiting", "ollivander"))
+        self.assertEqual([call["command"] for call in self.after_merges(ctx)], ["test -f widget.txt"])
+        names = os.listdir(self.reviews(ctx["task"]))
+        self.assertIn(f"close-{merge}.AC-2.cmd-try1", names)
+        self.assertNotIn(f"close-{merge}.AC-4.cmd-try1", names)
+        kept = json.loads((self.reviews(ctx["task"]) / f"after-merge-results-{merge}.json").read_text())
+        self.assertEqual((sorted(kept["results"]), kept["results"]["AC-2"]["exit_code"]), (["AC-2"], 0))
+        os.unlink(stop)
+        self.assertEqual(self.close(ctx)["outcome"], "closed")
+        self.assertEqual([call["command"] for call in self.after_merges(ctx)],
+                         ["test -f widget.txt", "test -f README.md"])
+
     def test_after_merge_command_tries_stop_at_three(self):
         ctx = self.passed_build(after=COMMAND_AC)
         merge = self.land_pr(ctx)
@@ -901,11 +1101,11 @@ class AfterMergeCommandTests(CloseCase):
             with self.assertRaises(Killed):
                 self.close(ctx)
         self.assertEqual(sorted(name for name in os.listdir(self.reviews(ctx["task"])) if ".cmd-try" in name),
-                         [f"close-{merge}.cmd-try{n}" for n in (1, 2, 3)])
+                         [f"close-{merge}.AC-2.cmd-try{n}" for n in (1, 2, 3)])
         result = self.close(ctx)
         self.assertEqual((result["outcome"], result["step"]), ("stopped", "commands"))
         [event] = self.close_events()
-        self.assertIn("started 3 times and never finished", event["summary"])
+        self.assertIn("AC-2 started 3 times and never finished", event["summary"])
         self.assertEqual(len(self.runs.calls), 3)
 
     def test_after_merge_command_unsandboxed_runs_once_and_a_cut_short_run_stops(self):
@@ -952,7 +1152,7 @@ class AfterMergeCommandTests(CloseCase):
         os.unlink(self.office / config.STATE_DIR / config.UPDATING_FILE)
         self.assertEqual(self.after_merges(ctx), [])
         self.assertEqual(self.close(ctx)["outcome"], "closed")
-        self.assertEqual(os.listdir(self.reviews(ctx["task"])).count(f"close-{merge}.cmd-try1"), 1)
+        self.assertEqual(os.listdir(self.reviews(ctx["task"])).count(f"close-{merge}.AC-2.cmd-try1"), 1)
 
     def test_sibling_switched_off_before_an_after_merge_command_runs_nothing(self):
         ctx = self.passed_build(after=COMMAND_AC)
@@ -1125,6 +1325,79 @@ class JudgeTests(CloseCase):
         self.assertEqual(len(names), 1)
         self.assertLessEqual(len(names[0]), closer.CHECK_NAME_MAX + len(": ok"))
 
+    def test_judge_pack_normalizes_before_its_scrub_its_cut_and_its_fences(self):
+        hidden = f"split {SPLIT_TOKEN}\nwide {WIDE_TOKEN}\nfence `\u200b`` out\n"
+        ctx = self.passed_build(after=WRITTEN_AC + f"Notes: {SPLIT_TOKEN} and `\u200b`` and {WIDE_TOKEN}\n",
+                                branch="fix/hidden", files={"notes.txt": hidden})
+        merge = self.land_pr(ctx)
+        self.github.checks[merge] = [check_run(f"leak {SPLIT_TOKEN}")]
+        with self.judge_says("PASS"):
+            self.assertEqual(self.close(ctx)["outcome"], "closed")
+        pack = (self.reviews(ctx["task"]) / f"after-merge-pack-{merge}.md").read_text()
+        self.assertNotIn(TOKEN[4:], common.normalized(pack))
+        self.assertNotIn(WIDE_TOKEN[4:], pack)
+        self.assertNotIn("\u200b", pack)
+        self.assertEqual(pack.count("```"), 2 * 7)  # one fence around each section and no other
+
+    def test_judge_switched_off_while_it_waits_to_launch_starts_nothing_and_gives_its_try_back(self):
+        ctx, merge = self.judged_build()
+        real = run_desk.launch_lock
+
+        @contextlib.contextmanager
+        def switched_off_meanwhile(desk):
+            with real(desk):
+                self.opt_out()  # while the judge waited for its desk's launch lock
+                yield
+
+        with self.judge_says("PASS") as started, \
+                mock.patch.object(run_desk, "launch_lock", side_effect=switched_off_meanwhile):
+            self.assertEqual(self.close(ctx)["outcome"], "off")
+        self.assertEqual((started.call_count, self.kinds()), (0, []))
+        self.assertEqual([name for name in os.listdir(self.reviews(ctx["task"])) if ".judge-try" in name], [])
+        self.assertIsNone(self.record(ctx["task"])["judge"]["run_id"])
+        self.assertEqual(capacity.list_launches(self.conn, "hermione"), [])
+        self.opt_in()
+        with self.judge_says("PASS") as started:
+            self.assertEqual(self.close(ctx)["outcome"], "closed")
+        self.assertEqual(started.call_count, 1)
+        self.assertIn(f"close-{merge}.judge-try1", os.listdir(self.reviews(ctx["task"])))
+
+    def test_judge_unreadable_output_is_unknown_keeps_its_run_and_starts_no_other(self):
+        ctx, merge = self.judged_build()
+        outputs = self.office / "runs" / "hermione"
+
+        def then_unreadable(argv, **kwargs):
+            child = judge(argv, **kwargs)
+            ended = child.wait
+
+            def wait(timeout=None):
+                code = ended(timeout)
+                for path in outputs.glob("run-*.out"):
+                    os.chmod(path, 0)
+                return code
+
+            child.wait = wait
+            return child
+
+        with self.judge_says("CHANGES", lines={"AC-3": "CHANGES"}) as started:
+            judge = run_desk.start_child
+            with mock.patch.object(run_desk, "start_child", side_effect=then_unreadable):
+                result = self.close(ctx)
+        self.assertEqual((result["outcome"], result["step"]), ("unknown", "judge"))
+        kept = self.record(ctx["task"])["judge"]
+        self.assertEqual(kept["outcome"], "ok")
+        self.assertIsNotNone(kept["run_id"])
+        with self.judge_says("PASS") as started:
+            self.assertEqual(self.close(ctx)["step"], "judge")  # still unreadable: unknown again, no other run
+            self.assertEqual(self.record(ctx["task"])["judge"]["run_id"], kept["run_id"])
+            for path in outputs.glob("run-*.out"):
+                os.chmod(path, 0o600)
+            result = self.close(ctx)
+        # The run it kept said CHANGES, and that is the verdict: no other run ever replaced it.
+        self.assertEqual((result["outcome"], result["step"], started.call_count), ("stopped", "judge", 0))
+        self.assertEqual(len(self.judged), 1)
+        self.assertIn("the after-merge judge said CHANGES", self.close_events()[-1]["summary"])
+
     def test_judge_pack_changed_while_judged_voids_the_verdict(self):
         ctx, merge = self.judged_build()
 
@@ -1227,9 +1500,11 @@ class ClosesTests(CloseCase):
 
 
 class KillTests(CloseCase):
-    def test_kill_during_the_judge_reads_its_output_by_the_kept_run_id(self):
+    def test_kill_during_the_judge_never_takes_a_run_whose_end_was_not_kept(self):
+        # A run whose exit code and vendor limit no process saw is never a verdict, even one that wrote a PASS: that
+        # try is over, and the next judges the same pack again.
         ctx = self.passed_build(after=WRITTEN_AC)
-        self.land_pr(ctx)
+        merge = self.land_pr(ctx)
 
         def killed_meanwhile(argv, **kwargs):
             judge(argv, **kwargs).wait()
@@ -1240,13 +1515,37 @@ class KillTests(CloseCase):
             with mock.patch.object(run_desk, "start_child", side_effect=killed_meanwhile):
                 with self.assertRaises(Killed):
                     self.close(ctx)
-        run_id = self.record(ctx["task"])["judge"]["run_id"]
-        self.assertIsNotNone(run_id)
+        first = self.record(ctx["task"])["judge"]
+        self.assertEqual((first["outcome"], first["try"]), (None, 1))
+        self.assertIsNotNone(first["run_id"])
         with self.judge_says("PASS") as started:
             self.assertEqual(self.close(ctx)["outcome"], "closed")
-        self.assertEqual(started.call_count, 0)
-        self.assertEqual(len(self.judged), 1)
-        self.assertIn(f"-hermione-{run_id}.md", "".join(os.listdir(self.reviews(ctx["task"]))))
+        self.assertEqual((started.call_count, len(self.judged)), (1, 2))
+        kept = [name for name in os.listdir(self.reviews(ctx["task"])) if name.startswith("after-merge-review-")]
+        self.assertEqual(len(kept), 1)
+        self.assertNotIn(first["run_id"], kept[0])
+        self.assertIn(f"close-{merge}.judge-try2", os.listdir(self.reviews(ctx["task"])))
+
+    def test_kill_after_a_failed_or_capped_judge_run_never_takes_its_verdict(self):
+        for index, (exit_code, limit) in enumerate(((1, None), (0, "claude_plan"))):
+            with self.subTest(exit_code=exit_code, limit=limit):
+                ctx = self.passed_build(after=WRITTEN_AC, branch=f"fix/ended-{index}")
+                self.land_pr(ctx)
+                real, ended = run_desk.run, []
+
+                def ended_then_killed(*args, **kwargs):
+                    ended.append(real(*args, **kwargs))
+                    raise Killed()  # the closer dies before it keeps how the run ended
+
+                with self.judge_says("PASS", exit_code=exit_code), self.assertRaises(Killed), \
+                        mock.patch.object(run_desk, "plan_limit", return_value=limit), \
+                        mock.patch.object(run_desk, "run", side_effect=ended_then_killed):
+                    self.close(ctx)
+                self.assertEqual((ended[0]["exit_code"], ended[0]["cap_source"]), (exit_code, limit))
+                with self.judge_says("CHANGES", lines={"AC-3": "CHANGES"}) as started:
+                    result = self.close(ctx)
+                self.assertEqual((result["outcome"], result["step"], started.call_count), ("stopped", "judge", 1))
+                self.assertEqual(self.status(ctx["task"]), "awaiting_close")
 
     def test_kill_before_the_close_proves_again_without_rerunning_commands_or_the_judge(self):
         ctx = self.passed_build(after=COMMAND_AC + WRITTEN_AC)
@@ -1274,24 +1573,55 @@ class KillTests(CloseCase):
         self.assertFalse((self.castle / "worktrees" / name).exists())
         self.assertEqual((self.kinds(), self.record(ctx["task"])["state"]), (["close.proven"], "done"))
 
-    def test_kill_between_a_stop_event_and_its_record_tells_you_once(self):
+    def test_kill_between_a_stop_event_and_its_record_tells_you_once_and_never_closes(self):
         ctx = self.passed_build()
         merge = self.land_pr(ctx)
         self.github.checks[merge] = [check_run("build", "FAILURE")]
         real = closer.write_record
 
-        def killed_at_stop(record):
+        def killed_at_stop(record, **kwargs):
             if record["state"] == "stopped":
                 raise Killed()
-            return real(record)
+            return real(record, **kwargs)
 
         with mock.patch.object(closer, "write_record", side_effect=killed_at_stop):
             with self.assertRaises(Killed):
                 self.close(ctx)
         self.assertEqual(self.record(ctx["task"])["state"], "watching")
-        self.assertEqual(self.close(ctx)["outcome"], "stopped")
+        # CI turns green before the next pass, which still finds the stop told and closes nothing.
+        self.github.checks[merge] = [check_run("build (re-run)")]
+        calls = len(self.github.calls)
+        self.assertEqual(self.close(ctx)["outcome"], "not the closer's")
+        self.assertEqual(self.record(ctx["task"])["stopped"], {"step": "ci", "merge_sha": merge})
+        self.assertEqual([task["id"] for task in closer.candidates(self.conn)], [])
+        closer.run_pass(self.conn, now=self.t0 + 9000)
+        self.assertEqual((self.kinds(), self.status(ctx["task"]), len(self.github.calls)),
+                         (["close.stopped"], "awaiting_close", calls))
+        # fleet close clears it as it clears any stop, and the green CI closes it then.
+        self.assertEqual(closer.close_by_hand(self.conn, ctx["task"], now=self.t0 + 9300)["outcome"], "closed")
+
+    def test_kill_while_an_unreadable_record_is_set_aside_never_leaves_it_unstopped(self):
+        ctx = self.passed_build()
+        merge = self.land_pr(ctx)
+        path = self.reviews(ctx["task"]) / "close.json"
+        self.write_file(path, '{"task_id": "x", "judge": {"run_id": ')
+        real = safefs.write_new
+
+        def killed(fd, name, data, *args, **kwargs):
+            if name == "close.json":
+                raise Killed()
+            return real(fd, name, data, *args, **kwargs)
+
+        with mock.patch.object(safefs, "write_new", side_effect=killed), self.assertRaises(Killed):
+            self.close(ctx)
+        # The kill came after the stop event and before the stopped record: close.json was never missing.
+        self.assertEqual(path.read_text(), '{"task_id": "x", "judge": {"run_id": ')
         self.assertEqual(self.kinds(), ["close.stopped"])
-        self.assertEqual(self.record(ctx["task"])["state"], "stopped")
+        self.assertEqual(self.close(ctx)["outcome"], "not the closer's")
+        self.assertEqual((self.record(ctx["task"])["state"], self.kinds(), self.status(ctx["task"])),
+                         ("stopped", ["close.stopped"], "awaiting_close"))
+        aside = [name for name in os.listdir(self.reviews(ctx["task"])) if name.startswith("close.json.unreadable-")]
+        self.assertEqual(len(aside), 2)  # each pass that met it kept its own link to the unreadable record
 
     def test_kill_during_the_worktree_add_before_its_record_is_taken_back(self):
         ctx = self.passed_build(after=COMMAND_AC)
@@ -1324,7 +1654,7 @@ class KillTests(CloseCase):
             self.assertEqual(self.close(ctx)["outcome"], "closed")
         self.assertEqual(len(runs.calls), 2)
         tries = sorted(name for name in os.listdir(self.reviews(ctx["task"])) if ".cmd-try" in name)
-        self.assertEqual(tries, [f"close-{merge}.cmd-try1", f"close-{merge}.cmd-try2"])
+        self.assertEqual(tries, [f"close-{merge}.AC-2.cmd-try1", f"close-{merge}.AC-2.cmd-try2"])
 
     def test_kill_during_unsandboxed_commands_stops_and_never_runs_them_again(self):
         runs = Counting(kill_at=(2,))
@@ -1339,6 +1669,74 @@ class KillTests(CloseCase):
         self.assertEqual(len(runs.calls), 2)
         self.assertEqual(self.kinds(), ["close.stopped"])
 
+    def test_kill_after_every_result_before_the_evidence_runs_no_command_again(self):
+        for own in (False, True):
+            with self.subTest(own=own):
+                ctx = (self.passed_own(after=TWO_COMMANDS, branch="feat/results") if own
+                       else self.passed_build(after=TWO_COMMANDS, branch="fix/results"))
+                merge = self.merge_commit(ctx["sha"])
+                self.push_main(merge)
+                self.github.prs = []
+                runs = Counting()
+                with mock.patch.object(verify, "run_check", side_effect=runs):
+                    with mock.patch.object(verify, "write_after_merge", side_effect=Killed()), \
+                            self.assertRaises(Killed):
+                        self.close(ctx)
+                    self.assertEqual(self.close(ctx)["outcome"], "closed")
+                self.assertEqual(len(runs.calls), 2)
+                evidence = (self.reviews(ctx["task"]) / f"after-merge-evidence-{merge}.md").read_text()
+                self.assertIn("AC-2 exit 0\nAC-4 exit 0\n", evidence)
+
+    def test_kill_leaves_results_a_failed_read_never_takes_as_none(self):
+        ctx = self.passed_own(after=TWO_COMMANDS)
+        merge = self.merge_commit(ctx["sha"])
+        self.push_main(merge)
+        runs = Counting(then={1: self.opt_out})
+        with mock.patch.object(verify, "run_check", side_effect=runs):
+            self.assertEqual(self.close(ctx)["outcome"], "off")
+            self.opt_in()
+            results = self.reviews(ctx["task"]) / f"after-merge-results-{merge}.json"
+            os.chmod(results, 0)
+            result = self.close(ctx)
+            self.assertEqual((result["outcome"], result["step"]), ("unknown", "commands"))
+            os.chmod(results, 0o600)
+            text = results.read_text()
+            self.write_file(results, text.replace(ctx["sha"], "e" * 40))
+            result = self.close(ctx)
+            self.assertEqual((result["outcome"], result["step"]), ("stopped", "record"))
+        self.assertEqual(len(runs.calls), 1)  # neither read ran your own session's first command again
+
+    def test_kill_leaves_a_running_command_its_locks_so_no_pass_takes_back_or_reuses_its_worktree(self):
+        ctx = self.passed_build(after=COMMAND_AC)
+        merge = self.land_pr(ctx)
+        name = f"{ctx['task']}.merged-{merge[:12]}"
+        left = []
+
+        def still_running(record, scratch, command, sandboxed=True, scrub=False, keep_fds=()):
+            # The closer is killed while its command runs on, with what its process inherited.
+            left.append(subprocess.Popen(["/bin/sleep", "60"], cwd=record["path"], stdin=subprocess.DEVNULL,
+                                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, pass_fds=keep_fds,
+                                         start_new_session=True))
+            raise Killed()
+
+        with mock.patch.object(verify, "run_check", side_effect=still_running), self.assertRaises(Killed):
+            self.close(ctx)
+        self.addCleanup(lambda: [child.kill() or child.wait() for child in left])
+        self.assertTrue(lock_busy(run_desk.task_lock_name(ctx["task"])))
+        self.assertTrue(lock_busy(config.UPDATE_LOCK))  # and no CLI update replaces a binary under it
+        result = self.close(ctx)
+        self.assertEqual((result["outcome"], result["on"]), ("waiting", "review-loop"))
+        self.assertTrue((self.castle / "worktrees" / name).exists())
+        # Closed by hand meanwhile: housekeeping leaves the worktree to the command still running in it.
+        pensieve.close_task(self.conn, ctx["task"], "complete", owlery.mint(self.conn, ctx["task"], "cli")["token"])
+        closer.run_pass(self.conn, now=self.t0 + 9000)
+        self.assertTrue((self.castle / "worktrees" / name).exists())
+        left[0].kill()
+        left[0].wait()
+        closer.run_pass(self.conn, now=self.t0 + 9900)
+        self.assertFalse((self.castle / "worktrees" / name).exists())
+        self.assertEqual((self.kinds(), self.record(ctx["task"])["state"]), ([], "done"))
+
     def test_kill_after_the_evidence_before_the_record_never_reruns_a_command(self):
         for own in (False, True):
             with self.subTest(own=own):
@@ -1348,10 +1746,10 @@ class KillTests(CloseCase):
                 self.github.prs = []
                 real = closer.write_record
 
-                def killed(record):
+                def killed(record, **kwargs):
                     if record["commands"] is not None:
                         raise Killed()
-                    return real(record)
+                    return real(record, **kwargs)
 
                 runs = Counting()
                 with mock.patch.object(verify, "run_check", side_effect=runs):
@@ -1369,10 +1767,10 @@ class KillTests(CloseCase):
         merge = self.land_pr(ctx)
         real = closer.write_record
 
-        def killed(record):
+        def killed(record, **kwargs):
             if record["judge"] is not None and record["judge"]["run_id"] is None:
                 raise Killed()
-            return real(record)
+            return real(record, **kwargs)
 
         with mock.patch.object(closer, "write_record", side_effect=killed):
             with self.assertRaises(Killed):
@@ -1418,10 +1816,10 @@ class KillTests(CloseCase):
         self.assertEqual(self.close(ctx)["outcome"], "stopped")
         real = closer.write_record
 
-        def killed(record):
+        def killed(record, **kwargs):
             if record["state"] == "watching":
                 raise Killed()
-            return real(record)
+            return real(record, **kwargs)
 
         with mock.patch.object(closer, "write_record", side_effect=killed):
             with self.assertRaises(Killed):
@@ -1725,6 +2123,46 @@ class SiblingTests(CloseCase):
                 mock.patch.object(pensieve, "close_proven", side_effect=AssertionError("closed")):
             self.assertEqual(self.close(other)["outcome"], "off")
         self.assertEqual(self.kinds(), [])
+
+    def test_sibling_switched_off_during_a_command_starts_no_later_one_and_keeps_its_result(self):
+        for own in (False, True):
+            with self.subTest(own=own):
+                ctx = (self.passed_own(after=TWO_COMMANDS, branch="feat/off") if own
+                       else self.passed_build(after=TWO_COMMANDS, branch="fix/off"))
+                merge = self.merge_commit(ctx["sha"])
+                self.push_main(merge)
+                self.github.prs = []
+                runs = Counting(then={1: self.opt_out})
+                with mock.patch.object(verify, "run_check", side_effect=runs):
+                    self.assertEqual(self.close(ctx)["outcome"], "off")
+                    self.assertEqual([call["command"] for call in runs.calls], ["test -f widget.txt"])
+                    names = os.listdir(self.reviews(ctx["task"]))
+                    self.assertNotIn(f"close-{merge}.AC-4.cmd-try1", names)
+                    kept = json.loads((self.reviews(ctx["task"]) / f"after-merge-results-{merge}.json").read_text())
+                    self.assertEqual(sorted(kept["results"]), ["AC-2"])
+                    self.opt_in()
+                    # Switched on again, only the command that never started runs, your own sessions' included.
+                    self.assertEqual(self.close(ctx)["outcome"], "closed")
+                self.assertEqual([call["command"] for call in runs.calls], ["test -f widget.txt", "test -f README.md"])
+                self.assertEqual(self.kinds()[-1], "close.proven")
+
+    def test_sibling_events_and_logs_normalize_before_they_scrub(self):
+        for text in (SPLIT_TOKEN, f"gh said {SPLIT_TOKEN} and quit", WIDE_TOKEN, f"x\u2028{SPLIT_TOKEN}"):
+            with self.subTest(text=text):
+                line = common.scrubbed_line(text, 300)
+                self.assertNotIn(TOKEN[3:], line)
+                self.assertNotIn(TOKEN[3:], line.replace(" ", ""))
+                self.assertIn("[token]", line)
+        ctx = self.passed_build()
+        self.land_pr(ctx)
+        with mock.patch.object(patrol, "gh_query", side_effect=FleetError(f"gh: HTTP 401 for {SPLIT_TOKEN}")):
+            result = self.close(ctx)
+            self.close(ctx, now=self.t0 + 7200 + config.AUTO_CLOSE_UNKNOWN_GRACE_SECONDS)
+        self.assertEqual((result["outcome"], result["step"]), ("unknown", "landed"))
+        self.assertNotIn(TOKEN[3:], result["why"].replace(" ", ""))
+        self.assertIn("[token]", result["why"])
+        self.assertEqual(self.kinds(), ["close.unknown"])
+        self.assertNotIn(TOKEN[3:], self.close_events()[0]["summary"].replace(" ", ""))
 
     def test_sibling_waits_for_unfinished_review_loop_steps(self):
         ctx = self.passed_build()
