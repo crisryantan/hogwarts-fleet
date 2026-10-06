@@ -107,6 +107,19 @@ Closing by hand stays exactly as it is. Auto-close is the other way, off by defa
 
 Headmaster events stay in the digest and on each prompt until you ack them with `castle event ack <id>`.
 
+### Owl reports (opt-in)
+
+Every owl another desk sends McGonagall already raises a headmaster event and a plain notification. With owl reports on, a short headless McGonagall turn reads each new owl instead and you get her one-line report as a macOS notification, titled with the sending desk and the task, without typing anything:
+
+```
+echo on > ~/.hogwarts/owl-reports
+rm ~/.hogwarts/owl-reports
+```
+
+The turn runs `claude -p` under `~/.hogwarts/desks/mcgonagall/owl-report-settings.json`, which allows only reading her inbox and the batch file of owl ids, adds no hooks, denies every write and every tool but Read, Grep and Glob, and loads no MCP server. Copy the kit's `office/desks/mcgonagall/owl-report-settings.json` there before you switch it on; the turn refuses to run under any file that isn't that locked down. Nothing from an owl goes into the command line or the prompt. Each report is also appended to `~/hogwarts/desks/mcgonagall/owl-reports.log`, so McGonagall can catch up on them in her session. An owl her turn skips is tried again, and after three turns reported as "(McGonagall could not summarise this owl)". A turn that fails sends the plain notification instead. If the turn can't sign in, you get "owl watcher: auth failed" once and one headmaster event; run `claude auth login`, and the next new owl tries again.
+
+To check it: no `castle` command sends an owl through the Owl Post. `castle owl send` stores an owl directly, so it gets no inbox copy, no event and no report. A real owl from a desk to McGonagall is the test.
+
 ## (e) Codex hooks: the push gate for your own Codex sessions
 
 File: `~/.codex/hooks.json`. Create it if it doesn't exist, and back it up first if it does. Merge `a3-codex-hooks-push-gate.merge.json` into it: the `PreToolUse` entry goes into its `hooks` object. Codex sends hooks the same fields as Claude Code and blocks on exit 2, so the same gate script works.

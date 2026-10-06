@@ -123,11 +123,11 @@ class NotifyTests(InboxCase):
                 mock.patch.object(run_desk.subprocess, "run", return_value=subprocess.CompletedProcess([], 0)) as run:
             self.assertTrue(REAL_NOTIFY(text))
         argv, kwargs = run.call_args[0][0], run.call_args[1]
-        script = argv[1:-1]
+        script = argv[1:-2]
         self.assertEqual(argv[0], "/usr/bin/osascript")
         self.assertEqual(script, ["-e", "on run argv", "-e",
-                                  'display notification (item 1 of argv) with title "Hogwarts"', "-e", "end run"])
-        self.assertEqual(argv[-1], text)
+                                  "display notification (item 1 of argv) with title (item 2 of argv)", "-e", "end run"])
+        self.assertEqual(argv[-2:], [text, "Hogwarts"])
         self.assertEqual((kwargs["env"], kwargs["timeout"], kwargs["check"]),
                          ({}, config.DESKTOP_NOTIFY_TIMEOUT_SECONDS, False))
         self.assertNotIn("shell", kwargs)

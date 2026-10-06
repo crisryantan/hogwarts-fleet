@@ -1,0 +1,75 @@
+{
+  "disableAllHooks": true,
+  "permissions": {
+    "allow": [
+      "Read(~/hogwarts/desks/mcgonagall/inbox/**)",
+      "Read(~/hogwarts/desks/mcgonagall/owl-report-batch.json)"
+    ],
+    "deny": [
+      "Read(~/.hogwarts/**)",
+      "Edit(~/.hogwarts/**)",
+      "Write(~/.hogwarts/**)",
+      "Edit",
+      "Write",
+      "Bash",
+      "WebFetch",
+      "WebSearch",
+      "Task",
+      "NotebookEdit"
+    ],
+    "disableBypassPermissionsMode": "disable"
+  },
+  "sandbox": {
+    "enabled": true,
+    "failIfUnavailable": true,
+    "autoAllowBashIfSandboxed": false,
+    "allowUnsandboxedCommands": false,
+    "filesystem": {
+      "allowWrite": [],
+      "denyWrite": [
+        "/Users/crisryantan/.hogwarts",
+        "/Users/crisryantan/hogwarts",
+        "/Users/crisryantan/hogwarts/.git",
+        "/Users/crisryantan/hogwarts/.claude",
+        "/Users/crisryantan/hogwarts/tasks",
+        "/Users/crisryantan/hogwarts/worktrees",
+        "/Users/crisryantan/hogwarts/CLAUDE.md",
+        "/Users/crisryantan/hogwarts/PLAN.md",
+        "/Users/crisryantan/hogwarts/standing-orders.md",
+        "/Users/crisryantan/hogwarts/.gitignore",
+        "/Users/crisryantan/hogwarts/desks/mcgonagall",
+        "/Users/crisryantan/hogwarts/desks/harry",
+        "/Users/crisryantan/hogwarts/desks/hermione",
+        "/Users/crisryantan/hogwarts/desks/moody",
+        "/Users/crisryantan/hogwarts/desks/ron",
+        "/Users/crisryantan/hogwarts/desks/snape",
+        "/Users/crisryantan/hogwarts/desks/portrait",
+        "/Users/crisryantan/hogwarts/desks/mcgonagall/inbox"
+      ],
+      "denyRead": [
+        "/Users/crisryantan/.hogwarts",
+        "/Users/crisryantan/.ssh",
+        "/Users/crisryantan/.aws",
+        "/Users/crisryantan/.codex",
+        "/Users/crisryantan/.claude.json",
+        "/Users/crisryantan/.claude/.credentials.json",
+        "/Users/crisryantan/.claude/settings.json",
+        "/Users/crisryantan/.claude/settings.local.json",
+        "/Users/crisryantan/.claude/history.jsonl",
+        "/Users/crisryantan/.claude/projects",
+        "/Users/crisryantan/.netrc",
+        "/Users/crisryantan/.npmrc",
+        "/Users/crisryantan/.docker",
+        "/Users/crisryantan/.kube",
+        "/Users/crisryantan/.gnupg",
+        "/Users/crisryantan/.config/gh"
+      ]
+    },
+    "network": {
+      "allowUnixSockets": [],
+      "allowAllUnixSockets": false,
+      "allowLocalBinding": false,
+      "allowedDomains": []
+    }
+  }
+}

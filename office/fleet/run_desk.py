@@ -1036,20 +1036,21 @@ def spawn_go_confirm(payload: bytes) -> None:
 
 OSASCRIPT_BIN = "/usr/bin/osascript"
 # A fixed script: the text arrives as its one argument and is only ever shown, never part of the script's source.
-NOTIFY_SCRIPT = ("on run argv", 'display notification (item 1 of argv) with title "Hogwarts"', "end run")
+NOTIFY_SCRIPT = ("on run argv", "display notification (item 1 of argv) with title (item 2 of argv)", "end run")
 NOTIFY_MAX_CHARS = 200
+NOTIFY_TITLE_MAX_CHARS = 80
 
 
-def notify_desktop(text: str) -> bool:
-    """Show one macOS notification with text, passed to a fixed AppleScript as an argv item, with an empty
-    environment and a short timeout. Off with config.DESKTOP_NOTIFY = False, and nothing at all off macOS. A failure
-    is ignored: it returns False and never raises."""
+def notify_desktop(text: str, title: str = "Hogwarts") -> bool:
+    """Show one macOS notification with text and title, each passed to a fixed AppleScript as an argv item, with an
+    empty environment and a short timeout. Off with config.DESKTOP_NOTIFY = False, and nothing at all off macOS. A
+    failure is ignored: it returns False and never raises."""
     if sys.platform != "darwin" or not config.DESKTOP_NOTIFY:
         return False
     argv = [OSASCRIPT_BIN]
     for line in NOTIFY_SCRIPT:
         argv += ["-e", line]
-    argv.append(common.one_line(text, NOTIFY_MAX_CHARS))
+    argv += [common.one_line(text, NOTIFY_MAX_CHARS), common.one_line(title, NOTIFY_TITLE_MAX_CHARS) or "Hogwarts"]
     try:
         done = subprocess.run(argv, env={}, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                               stderr=subprocess.DEVNULL, timeout=config.DESKTOP_NOTIFY_TIMEOUT_SECONDS, check=False,
@@ -1057,6 +1058,66 @@ def notify_desktop(text: str) -> bool:
     except (OSError, subprocess.SubprocessError):
         return False
     return done.returncode == 0
+
+
+def owl_report_argv(brief: str, prompt: str) -> tuple:
+    """(argv, cwd) for one headless McGonagall owl-report turn: claude -p under the report-only settings file, no MCP,
+    only Read, Grep and Glob, the fixed brief and the fixed prompt. The settings file is checked first as every Claude
+    desk's is, and more: no hooks, no write anywhere, and every other tool denied."""
+    desk = config.HOOK_DESK
+    check_report_settings(_read_office(desk, config.OWL_REPORT_SETTINGS_FILE, config.SETTINGS_MAX_BYTES,
+                                       "owl report settings"))
+    argv = [config.CLAUDE_BIN, "-p", "--restricted", "--settings",
+            f"{config.office_desk_dir(desk)}/{config.OWL_REPORT_SETTINGS_FILE}", "--strict-mcp-config",
+            "--tools", config.OWL_REPORT_TOOLS, "--permission-mode", "dontAsk", "--model", config.OWL_REPORT_MODEL,
+            "--append-system-prompt", brief, "--output-format", "text",
+            "--max-budget-usd", config.OWL_REPORT_MAX_BUDGET_USD, prompt]
+    return argv, config.castle_desk_dir(desk)
+
+
+REPORT_DENIED_TOOLS = ("Edit", "Write", "Bash", "WebFetch", "WebSearch", "Task", "NotebookEdit")
+
+
+def check_report_settings(raw: bytes) -> dict:
+    """The report-only settings: a locked-down Claude desk's (check_claude_settings), with no hooks, no write allowed
+    anywhere and every tool but Read, Grep and Glob denied."""
+    data = check_claude_settings(raw, config.HOOK_DESK)
+    if data.get("hooks") not in (None, {}) or data.get("disableAllHooks") is not True:
+        raise FleetError("the owl report settings must add no hooks and set disableAllHooks")
+    filesystem = data["sandbox"].get("filesystem") or {}
+    if filesystem.get("allowWrite") not in (None, []):
+        raise FleetError("the owl report settings must allow no writes")
+    deny = data["permissions"].get("deny") or []
+    allow = data["permissions"].get("allow") or []
+    if any(tool not in deny for tool in REPORT_DENIED_TOOLS):
+        raise FleetError("the owl report settings must deny every tool but Read, Grep and Glob")
+    if any(not isinstance(rule, str) or not rule.startswith(("Read(", "Grep(", "Glob(")) for rule in allow):
+        raise FleetError("the owl report settings may allow only reads")
+    return data
+
+
+def run_report_turn(argv: list, cwd: str) -> tuple:
+    """(exit status, stdout, auth failed) for one owl-report turn, run to its end or killed at the timeout (status
+    None). stderr is read only to classify an auth failure; its text is never kept, printed or logged."""
+    try:
+        done = subprocess.run(argv, cwd=cwd, env=child_env(), stdin=subprocess.DEVNULL, capture_output=True,
+                              timeout=config.OWL_REPORT_TIMEOUT_SECONDS, check=False, close_fds=True,
+                              start_new_session=True)
+    except subprocess.TimeoutExpired:
+        return None, b"", False
+    except OSError:
+        return None, b"", False
+    lowered = (done.stderr[-65536:] + done.stdout[-4096:]).decode("utf-8", "replace").lower()
+    auth = done.returncode != 0 and any(word in lowered for word in AUTH_WORDS)
+    return done.returncode, done.stdout[:config.OWL_REPORT_OUTPUT_MAX_BYTES], auth
+
+
+AUTH_WORDS = ("login", "log in", "auth", "401", "credential")
+
+
+def spawn_owl_report() -> None:
+    """Start one detached owl reporter (fleet/owl_report.py) through the wrapper line. Used by the Owl Post."""
+    _detach("owl_report", [], "owl-report.log")
 
 
 def _detach(module: str, args: list, log_name: str, hold_fd: Optional[int] = None) -> None:

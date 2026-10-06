@@ -95,7 +95,7 @@ None of these uses a model.
 
 ### Two homes
 
-- `~/.hogwarts` is the office. It holds the store (a SQLite database and its `castle` CLI), the `fleet` command, the hooks and scripts, each desk's brief, role card and locked-down settings, the launchd templates and the pending settings snippets. It also holds one switch for each automation: `auto-draft-pr`, `pr-followup`, `auto-close`, `worktree-cleanup` and `auto-portrait`. A switch is on only while it's a plain file you own, that no one else can write, holding exactly `on`, so all five are off until you write them. No desk can write here, and Claude desks can't read it.
+- `~/.hogwarts` is the office. It holds the store (a SQLite database and its `castle` CLI), the `fleet` command, the hooks and scripts, each desk's brief, role card and locked-down settings, the launchd templates and the pending settings snippets. It also holds one switch for each automation: `auto-draft-pr`, `pr-followup`, `auto-close`, `worktree-cleanup`, `auto-portrait` and `owl-reports`. A switch is on only while it's a plain file you own, that no one else can write, holding exactly `on`, so all six are off until you write them. With `owl-reports` on, a short read-only headless McGonagall turn reads each owl another desk sends her, and you get her one-line report as a notification. No desk can write here, and Claude desks can't read it.
 - `~/hogwarts` is the castle, where desks work. It holds the charter, the plan, your standing orders, each desk's scratchpad, inbox and outbox, the task folders and the git worktrees. It's a local git repo with no remote.
 
 ## Safety model

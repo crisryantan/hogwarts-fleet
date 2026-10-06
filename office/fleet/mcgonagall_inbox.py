@@ -50,8 +50,8 @@ def _dedupe(owl_id: str) -> str:
 
 
 def owl_meta(conn, owl_id: str) -> Optional[dict]:
-    row = db.fetch_one(conn, "SELECT id, sender, recipient, kind, task_id, subject FROM owls WHERE id = ?",
-                       (ids.check("owl", owl_id),))
+    row = db.fetch_one(conn, "SELECT id, sender, recipient, kind, task_id, subject, created_at FROM owls"
+                       " WHERE id = ?", (ids.check("owl", owl_id),))
     return None if row is None else dict(row)
 
 
@@ -72,6 +72,11 @@ def _announced(owl_id: str) -> None:
         pass
 
 
+def plain_text(owl: dict, body: Optional[str]) -> str:
+    """The plain delivery notification's text: sender, task and status, nothing else from the owl."""
+    return f"{owl['sender']} on {owl['task_id'] or '-'}: {status(owl['kind'], owl['subject'], body)}"
+
+
 def announce(conn, owl: dict, body: Optional[str], now: Optional[int] = None, notify: bool = True) -> bool:
     """The headmaster event, and with notify the notification, for one owl delivered to McGonagall. Called after its
     delivery is stored, never inside a transaction; nothing here can undo the delivery. Its pending marker goes once
@@ -89,7 +94,7 @@ def announce(conn, owl: dict, body: Optional[str], now: Optional[int] = None, no
         recorded = False
     if recorded:
         _announced(owl["id"])
-    if notify:
+    if notify and not common.opt_in_on(config.OWL_REPORTS_FILE):  # with owl reports on, her report is the notice
         try:
             run_desk.notify_desktop(f"{owl['sender']} on {task}: {said}")
         except Exception:  # noqa: BLE001 - a notification never matters to the delivery

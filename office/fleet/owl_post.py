@@ -65,7 +65,7 @@ from hogwarts.errors import (  # noqa: E402
     ConflictError, IntegrityError, NotFoundError, StoreError, ValidationError,
 )
 
-from fleet import common, config, mcgonagall_inbox, run_desk, safefs  # noqa: E402
+from fleet import common, config, mcgonagall_inbox, owl_report, run_desk, safefs  # noqa: E402
 from fleet.safefs import FleetError, Missing, Unsafe  # noqa: E402
 
 REQUIRED_FIELDS = ("to", "kind", "subject")
@@ -591,6 +591,10 @@ def deliver_file(conn, sender: str, outbox_fd: int, fname: str, now: Optional[in
         os.close(inbox_fd)
     rang = _ring(conn, owl["recipient"], owl, newly, now)
     if newly:  # after the delivery is stored: McGonagall hears of every owl sent to her, and nothing here undoes it
+        try:
+            owl_report.mark(owl)  # before any reporter starts, so a failed or killed one is retried
+        except (FleetError, OSError):
+            pass
         mcgonagall_inbox.announce(conn, owl, text, now)
     reviewing = _start_review(conn, owl, newly, now)
     _ack_replied(conn, sender, owl, now)
@@ -669,6 +673,10 @@ def run_pass(conn, now: Optional[int] = None) -> dict:
         mcgonagall_inbox.announce_pending(conn, now)
     except (StoreError, FleetError, OSError) as exc:
         summary["errors"].append({"desk": config.HOOK_DESK, "error": "could not announce owls: " + _reason(exc)})
+    try:  # owl reports: one headless McGonagall turn for the owls delivered to her, while the switch is on
+        owl_report.kick(conn)
+    except (StoreError, FleetError, OSError) as exc:
+        summary["errors"].append({"desk": config.HOOK_DESK, "error": "could not start owl reports: " + _reason(exc)})
     try:  # a go or close confirmation whose confirmer died is reported once, never run again
         from fleet import go_confirm
 

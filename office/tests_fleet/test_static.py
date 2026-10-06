@@ -99,12 +99,12 @@ def env_problems(source: str) -> list:
     return found
 
 
-OPT_IN_NAMES = ("auto-draft-pr", "auto-portrait", "pr-followup", "auto-close", "worktree-cleanup")
+OPT_IN_NAMES = ("auto-draft-pr", "auto-portrait", "pr-followup", "auto-close", "worktree-cleanup", "owl-reports")
 # An opt-in file named as a file: the whole string, or the last part of a path. The feature's name in a message
 # ("auto-portrait applied ...") is not a file name.
 OPT_IN_FILE_SHAPE = re.compile(r"(?:^|/)(?:" + "|".join(map(re.escape, OPT_IN_NAMES)) + r")/?$")
 OPT_IN_ATTRIBUTES = {"AUTO_DRAFT_PR_FILE", "AUTO_PORTRAIT_FILE", "PR_FOLLOWUP_FILE", "AUTO_CLOSE_FILE",
-                     "WORKTREE_CLEANUP_FILE", "OPT_IN_FILES"}
+                     "WORKTREE_CLEANUP_FILE", "OWL_REPORTS_FILE", "OPT_IN_FILES"}
 
 
 def _docstrings(tree: ast.AST) -> set:
@@ -205,7 +205,7 @@ class OptInTests(unittest.TestCase):
     def test_opt_in_files_are_read_only_through_the_shared_reader(self):
         self.assertEqual(set(config.OPT_IN_FILES), {config.AUTO_DRAFT_PR_FILE, config.AUTO_PORTRAIT_FILE,
                                                     config.PR_FOLLOWUP_FILE, config.AUTO_CLOSE_FILE,
-                                                    config.WORKTREE_CLEANUP_FILE})
+                                                    config.WORKTREE_CLEANUP_FILE, config.OWL_REPORTS_FILE})
         self.assertEqual(len(config.OPT_IN_FILES), len(set(config.OPT_IN_FILES)))
         self.assertEqual(set(OPT_IN_NAMES), set(config.OPT_IN_FILES))
         self.assertIn(FLEET / "hooks" / "session_start.py", SOURCES)
