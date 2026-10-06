@@ -13,12 +13,13 @@ A night with the switch on (night), after the export:
    under them, read his patch for the night's date once (portrait_patch.read_state). Arm the night in the store
    (pensieve.arm_auto_patch) with what was there: absent, present (and its sha256) or unreadable.
 2. Run him through run_desk.run with one slot (lock_held) and the others in keep_fds, so his process holds them
-   all. A run that is refused, capped, stopped, blocked or fails ends the night stopped with no event of its own:
-   the run's own event tells Ryan. A cap, vendor limit or blocked model ends the night in the very transaction that
-   writes its event (run_desk.run's on_told), and any other refusal is reported before the night is closed, so a
-   kill never leaves a night armed that Ryan was told of without its owl-keyed event, nor one closed untold. A
-   clean run that called a model blocked here (its result's blocked_model, which after_run told Ryan of) stops the
-   night with one event, so what that model wrote is left to Ryan, as with the switch off.
+   all. A run that is refused, capped, blocked or fails, or a clean one that called a model blocked here (its
+   result's blocked_model), ends the night stopped with the run's own event and no other: the night ends only in
+   the transaction that writes the event telling Ryan (Ending, run_desk's on_told), and once one event has told him
+   of the run no second one is written. A store that takes neither leaves the night armed for resume to tell, so no
+   kill leaves a night ended untold or told twice. A run Ollivander's stop kept from starting raises no event of
+   its own, so this lane's one event tells it. A clean run that called a blocked model applies nothing, so what that
+   model wrote is left to Ryan, as with the switch off.
 3. Still under the slots, read the patch once more (validate). Only a patch that was absent before the run goes
    on: the job held every slot from before the first read until this one, and a killed launcher's process keeps
    them all (see run_desk.desk_lock), so no other run of his wrote it in between. A patch that was there before, even
@@ -42,18 +43,23 @@ portrait.auto when the night applied what it could (what applied, what waits, an
 command for the rest, or castle portrait show <date> when that does not fit); portrait.auto-stopped, keyed by date and
 attempt, when the night stopped after it was armed (its text goes through common.scrubbed_line and never carries the
 sha256); portrait.patch-ready when the switch was off or the stop file in place at the apply. A clean run that wrote no
-patch ends done with no event. A run that failed or was refused raises only its own event, and a clean run that
-called a blocked model raises one portrait.auto-stopped event beside the run's own note naming the model, as the
-switch-off night has patch-ready beside it. The same line is the night's outcome in the store, which castle portrait
-patches and show print.
+patch ends done with no event. A run that failed, was refused or called a blocked model raises only its own event
+(rundesk.failed, rundesk.lock-wait, rundesk.cap, rundesk.plan-limit or rundesk.blocked), which ends the night; when
+the store refuses that one, this lane's portrait.auto-stopped tells it instead, that night or from resume. The
+same line is the night's outcome in the store, which castle portrait patches and show print.
 
-Kills and signals. A SIGKILL leaves the store as it was; resume, at the start of the next nightly job, finishes every
-night still armed or validated without reading the castle file again: an armed night whose run is over is told once
-and closed (unless its run's own owl-keyed event told Ryan already; a cap, vendor limit or blocked model closed it
-when it told him), and a validated one is applied from its snapshot. The ledger keys make an op apply at most once
-whatever was cut. SIGTERM, SIGHUP or Ctrl+C from arming until the snapshot commits ends the night stopped with one
-event; after the snapshot it leaves the night validated for resume, exactly as a SIGKILL there would, since the apply
-transaction rolls back whole.
+With the switch off for a run of a date an earlier killed attempt left armed, that night ends off in the transaction
+of the event that tells Ryan of tonight's run (patch-ready, or the run's own), never before it (off_ending), and a
+clean run with no patch ends it with none.
+
+Kills and signals. No night ends but in the transaction of its one event, or of none for a clean run with no patch,
+so a SIGKILL anywhere leaves each night ended and told, or armed or validated for resume. Resume, at the start of the
+next nightly job, finishes every night still armed or validated without reading the castle file again: an armed
+night whose run is over is told once and closed (with no new event when its run's owl-keyed event is there already),
+and a validated one is applied from its snapshot. The ledger keys make an op apply at most once whatever was cut.
+SIGTERM, SIGHUP or Ctrl+C from arming until the snapshot commits ends the night stopped with one event; after the
+snapshot it leaves the night validated for resume, exactly as a SIGKILL there would, since the apply transaction
+rolls back whole.
 
 It starts no process of its own.
 """
@@ -92,6 +98,9 @@ WHY_BEFORE_PRESENT = ("a patch for this date was already there before tonight's 
 WHY_MALFORMED = "the patch is not a valid patch ({reason})"
 WHY_BLOCKED_MODEL = ("tonight's run called a model that is blocked here, so nothing it wrote applies by itself; the"
                      " run's own row names the model")
+WHY_UNCHECKED = ("the models tonight's run called could not be checked against the ones blocked here, so nothing it"
+                 " wrote applies by itself")
+WHY_STOPPED = "Ollivander's stop or a CLI update was in place, so tonight's review did not run"
 WHY_NOT_STORED = "the patch could not be stored ({reason})"
 WHY_PLAN = "the plan it stored no longer checks out"
 WHY_BY_HAND = "you already applied some of it by hand, so the rest is yours too"
@@ -101,6 +110,8 @@ NO_PATCH = "Dumbledore wrote no patch for {date}, so nothing was applied"
 RUN_REFUSED = "the run was refused or failed before it ended, so nothing was read or applied; its own event says why"
 RUN_FAILED = "the run did not end cleanly, so nothing was read or applied; its own event says why"
 RUN_TOLD = "the run did not end cleanly and its own event told you, so nothing was read or applied"
+RUN_BLOCKED = ("the run called a model that is blocked here, so nothing it wrote was applied; its own event names the"
+               " model, and castle portrait show {date} lists the patch")
 OFF_TONIGHT = "auto-portrait was off for the run of {date}, so nothing was applied by it"
 OFF_AT_APPLY = ("auto-portrait was off or Ollivander's stop was in place when it came to apply, so nothing was"
                 " applied; castle portrait show {date} lists the patch")
@@ -239,42 +250,86 @@ def _end_quietly(conn, date: str, attempt: int, state: str, outcome: str, now: O
     return {"state": state}
 
 
-def _close_told(conn, date: str, attempt: int, now: Optional[int]):
-    """What run_desk.run calls inside the transaction that writes the event a refused or vendor-limited run ends with
-    (a cap, a vendor limit, a blocked model): attempt's armed night ends stopped there with no event of its own, so
-    the event and the ending commit together and no kill can leave the night armed once Ryan was told. An error here
-    undoes the event too, and the run raises it instead, which the night then reports as a failed run."""
-    def told(kind: str) -> None:
-        row = pensieve.auto_patch(conn, date)
-        if row is not None and row["state"] == "armed" and row["attempt"] == attempt:
-            outcome = RUN_FAILED if kind == "rundesk.plan-limit" else RUN_REFUSED
-            pensieve.end_auto_patch(conn, date, "stopped", outcome, now=_ts(now))
-    return told
+class Ending:
+    """An armed night's ending, written only in the transaction of the event that tells Ryan of it: what run_desk's
+    notifiers and report_patch take as on_told (run_desk.tell_ending). Called with the ending's name inside that
+    transaction, it ends the night as state with its outcome (a line, or a function of the ending's name) while
+    attempt still has it armed, and the event commits with it or neither does. Once attempt's night has ended, or
+    taken its snapshot, it returns False and that event is not written: an earlier one told Ryan of this run, or the
+    night is resume's to apply. attempt None, for a night that could not be read when this was made, ends whatever
+    attempt has the date armed and never holds an event back. Any other night, or none, is left alone."""
+
+    def __init__(self, conn, date: str, attempt: Optional[int], state: str, outcome, now: Optional[int]) -> None:
+        self.conn, self.date, self.attempt, self.now = conn, date, attempt, now
+        self.state, self.outcome = state, outcome
+
+    def __call__(self, ending: str) -> bool:
+        row = pensieve.auto_patch(self.conn, self.date)
+        if row is None or (self.attempt is not None and row["attempt"] != self.attempt):
+            return True
+        if row["state"] != "armed":
+            return self.attempt is None
+        line = self.outcome(ending) if callable(self.outcome) else self.outcome
+        pensieve.end_auto_patch(self.conn, self.date, self.state, line, now=_ts(self.now))
+        return True
+
+    def untold(self) -> dict:
+        """End the night with no event, since tonight's run left nothing to tell (a clean run that wrote no patch).
+        Best effort: a store that refuses it leaves the night armed for resume."""
+        try:
+            with db.transaction(self.conn):
+                self("untold")
+        except Exception:  # noqa: BLE001 - the night stays armed and the next job closes it
+            return {"state": "left", "left": "the ending could not be written"}
+        return ended(self.conn, self)
 
 
-def _tell_refusal(conn, exc: Exception, owl_id: str, now: Optional[int]) -> None:
-    """Tell Ryan of a run that raised before it ended, as the nightly job's own report would, before the night is
-    closed quietly: a kill between the two then leaves the night armed with its owl-keyed event, which resume reads
-    (RUN_TOLD_KEYS), never closed with no event at all. A cap or blocked model told Ryan, and closed the night, in
-    one commit (_close_told); a stop is Ollivander's to tell. Never raises but for a signal."""
-    if isinstance(exc, (run_desk.Capped, run_desk.Stopped, run_desk.Blocked)):
-        return
+def ended(conn, ending: Ending) -> dict:
+    """What an ending left of its night: the night's state, or left while attempt still has it armed (no ending could
+    be written, so resume tells it). Never raises but for a signal."""
+    try:
+        row = pensieve.auto_patch(conn, ending.date)
+    except Exception:  # noqa: BLE001 - unknown, so the next job reads it again
+        return {"state": "left", "left": "the ending could not be read"}
+    if row is not None and row["state"] == "armed" and row["attempt"] == ending.attempt:
+        return {"state": "left", "left": "the ending could not be written"}
+    return {"state": None if row is None else row["state"]}
+
+
+def _run_outcome(date: str):
+    """The outcome line of a night its run's own event ended, by the ending's name."""
+    def outcome(name: str) -> str:
+        if name == "rundesk.blocked-ran":
+            return RUN_BLOCKED.format(date=date)
+        return RUN_FAILED if name in ("rundesk.plan-limit", "rundesk.failed") else RUN_REFUSED
+    return outcome
+
+
+def _tell_refusal(conn, exc: Exception, owl_id: str, ending: Ending) -> dict:
+    """End attempt's night for a run that raised before it ended, in the transaction of the one event that tells
+    Ryan, never before it: the run's owl-keyed failed or lock-wait event, or for a stop this lane's own. A cap or
+    blocked model ended the night with its own event (on_told), so ending holds any other back. When the store takes
+    neither, the night stays armed and the next job tells it. Never raises but for a signal."""
+    if isinstance(exc, run_desk.Stopped):
+        return _stop(conn, ending.date, ending.attempt, WHY_STOPPED, ending.now)
     if isinstance(exc, safefs.Busy):
-        run_desk.report_lock_wait(conn, DESK, owl_id, now)
+        run_desk.report_lock_wait(conn, DESK, owl_id, ending.now, on_told=ending)
     else:
-        run_desk.report_failure(conn, DESK, owl_id, now)
+        run_desk.report_failure(conn, DESK, owl_id, ending.now, on_told=ending)
+    return ended(conn, ending)
 
 
-def close_unarmed(conn, date: str, now: Optional[int] = None) -> Optional[dict]:
-    """With the switch off tonight, end a same-date night an earlier killed attempt left armed as off, with no event:
-    tonight's own patch-ready or failure event tells Ryan. Best effort."""
+def off_ending(conn, date: str, now: Optional[int] = None) -> Optional[Ending]:
+    """With the switch off tonight, the Ending of a same-date night an earlier killed attempt left armed: it ends off
+    in the transaction of the event that tells Ryan of tonight's run (patch-ready, or the run's own), never before,
+    so a kill in between leaves it armed for resume. None when no night of date is armed."""
     try:
         row = pensieve.auto_patch(conn, date)
-    except Exception:  # noqa: BLE001 - nothing to close that can be read; resume tries again
-        return None
+    except Exception:  # noqa: BLE001 - unknown, so whatever attempt is armed ends with tonight's event
+        return Ending(conn, date, None, "off", OFF_TONIGHT.format(date=date), now)
     if row is None or row["state"] != "armed":
         return None
-    return _end_quietly(conn, date, row["attempt"], "off", OFF_TONIGHT.format(date=date), now)
+    return Ending(conn, date, row["attempt"], "off", OFF_TONIGHT.format(date=date), now)
 
 
 # The night
@@ -282,38 +337,41 @@ def close_unarmed(conn, date: str, now: Optional[int] = None) -> Optional[dict]:
 
 def night(conn, date: str, owl_id: str, now: Optional[int] = None, progress: Optional[dict] = None) -> tuple:
     """Run the night with the switch on: (the run's result, what the lane did, ids and counts only). progress gets
-    "attempt" once this attempt's night is armed, in one step, so the caller tells Ryan of a signal itself only
-    before that and a night never gets both. A FleetError or StoreError raised here comes from before the run
-    returned, and the caller reports it as today (a second report of an owl-keyed event changes nothing); once the
-    run has returned clean nothing the lane does raises one. Every slot Dumbledore could have is held from before
-    the first read of his outbox until the patch is stored, and his process inherits them all."""
+    "ending", the night's Ending for a run refused or cut short, in the step right after the night is armed: the
+    caller tells Ryan of a refusal or a signal through it, so whichever event comes first ends the night and no
+    second one is written, and before it the caller reports as for a plain run. A FleetError or StoreError raised
+    here comes from before the run returned; once the run has returned clean nothing the lane does raises one. Every
+    slot Dumbledore could have is held from before the first read of his outbox until the patch is stored, and his
+    process inherits them all."""
     progress = {} if progress is None else progress
     with run_desk.all_slots_lock(DESK) as slots:
         try:
             before, value = portrait_patch.read_state(date)
             before_sha = hashlib.sha256(value).hexdigest() if before == "present" else None
-            progress["attempt"] = pensieve.arm_auto_patch(conn, date, owl_id, before, before_sha, now=now)["attempt"]
+            attempt = pensieve.arm_auto_patch(conn, date, owl_id, before, before_sha, now=now)["attempt"]
+            progress["ending"] = Ending(conn, date, attempt, "stopped", RUN_REFUSED, now)
+            told = Ending(conn, date, attempt, "stopped", _run_outcome(date), now)
             result = run_desk.run(conn, DESK, owl_id, config.PORTRAIT_MCP_JOB, now=now, lock_held=slots[0],
-                                  keep_fds=tuple(slot.fd for slot in slots[1:]),
-                                  on_told=_close_told(conn, date, progress["attempt"], now))
+                                  keep_fds=tuple(slot.fd for slot in slots[1:]), on_told=told)
         except (FleetError, StoreError) as exc:
-            if "attempt" in progress:
-                _tell_refusal(conn, exc, owl_id, now)
-                _end_quietly(conn, date, progress["attempt"], "stopped", RUN_REFUSED, now)
+            if "ending" in progress:
+                _tell_refusal(conn, exc, owl_id, progress["ending"])
             raise
         except BaseException:
-            if "attempt" in progress:
-                _stop(conn, date, progress["attempt"], WHY_PART_WAY, now)
+            if "ending" in progress:
+                _stop(conn, date, progress["ending"].attempt, WHY_PART_WAY, now)
             raise
-        attempt = progress["attempt"]
         if result["exit_code"] != 0 or result["cap_source"] is not None:
+            # A vendor limit's own event ended the night inside the run; a failed run's ends it here, in one
+            # transaction, or leaves it armed for the next job when the store takes neither.
             if result["cap_source"] is None:
-                run_desk.report_failure(conn, DESK, owl_id, now)
-            ended = _end_quietly(conn, date, attempt, "stopped", RUN_FAILED, now)
-            return result, {"state": ended["state"]}
+                run_desk.report_failure(conn, DESK, owl_id, now, on_told=told)
+            return result, ended(conn, told)
         if result.get("blocked_model") is not None:
             # A clean run that called a model blocked here: what it wrote is left to Ryan, as with the switch off.
-            return result, _stop(conn, date, attempt, WHY_BLOCKED_MODEL, now)
+            # Its own note ended the night with it, unless the store or the blocklist refused that note.
+            why = WHY_UNCHECKED if result["blocked_model"] == "unchecked" else WHY_BLOCKED_MODEL
+            return result, _stop(conn, date, attempt, why, now)
         try:
             checked = validate(conn, date, {"attempt": attempt, "before": before}, now)
         except BaseException:

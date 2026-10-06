@@ -23,9 +23,11 @@ While Ryan has switched auto-portrait on (fleet/portrait_auto.py, the office fil
 the run goes through portrait_auto.night instead: the job holds every run slot Dumbledore could have from before
 the run until it has stored the patch tonight's run wrote, then applies its additions from the store, and the night
 ends in that lane's one event. Every job but --export-only first finishes the nights an earlier job left part way
-(portrait_auto.resume), without reading the castle. SIGTERM and SIGHUP end the job through its finally blocks
-and handlers (common.ended_by_signals); a signal after the owl exists and before the lane armed the night is
-reported like a failed run, as run_desk.main reports a run the Owl Post started.
+(portrait_auto.resume), without reading the castle. With the switch off, a night of the date an earlier killed
+attempt left armed ends off only in the transaction of the event that tells Ryan of tonight's run
+(portrait_auto.off_ending). SIGTERM and SIGHUP end the job through its finally blocks and handlers
+(common.ended_by_signals); a signal after the owl exists is reported like a failed run, as run_desk.main reports a
+run the Owl Post started, unless an event already told Ryan of tonight's run.
 
 --export-only writes the export file and nothing else: no owl and no run. scripts/portrait-setup.sh uses it
 to check the export by hand.
@@ -178,29 +180,33 @@ def export_day(conn, now: Optional[int] = None, deliver: bool = True) -> dict:
             "fact_candidates": len(export["fact_candidates"]), "current_facts": len(export["current_facts"])}
 
 
-def report_patch(conn, date: str, now: Optional[int] = None) -> bool:
+def report_patch(conn, date: str, now: Optional[int] = None, on_told: Optional[run_desk.OnTold] = None) -> bool:
     """One headmaster event once Dumbledore's patch for date is in his outbox, or one saying it was refused and why
-    when the file is there but cannot be read safely: an unreadable patch is never taken for no patch. True when
-    there is a file."""
+    when the file is there but cannot be read safely: an unreadable patch is never taken for no patch. on_told
+    commits with it (run_desk.tell_ending). True when there is a file."""
     state, value = portrait_patch.read_state(date)
     if state == "absent":
         return False
     summary = READY_SUMMARY.format(date=date) if state == "present" else common.scrubbed_line(
         portrait_patch.REFUSED_SUMMARY.format(date=date, reason=value), portrait_auto.STOP_LIMIT)
-    pensieve.add_event(conn, DESK, portrait_patch.READY_KIND, "headmaster", summary,
-                       dedupe_key=portrait_patch.READY_KEY.format(date=date), now=now)
+    run_desk.tell_ending(conn, portrait_patch.READY_KIND, on_told, lambda: pensieve.add_event(
+        conn, DESK, portrait_patch.READY_KIND, "headmaster", summary,
+        dedupe_key=portrait_patch.READY_KEY.format(date=date), now=now))
     return True
 
 
-def _report_problem(conn, exc: Exception, date: Optional[str], owl_id: Optional[str]) -> None:
-    """Tell Ryan about a night that went wrong, the way run_desk does for its own runs. Never raises."""
+def _report_problem(conn, exc: Exception, date: Optional[str], owl_id: Optional[str],
+                    on_told: Optional[run_desk.OnTold] = None) -> None:
+    """Tell Ryan about a night that went wrong, the way run_desk does for its own runs. on_told, the Ending of a
+    night of this date that is armed, ends it with the event, or holds the event back once an earlier one told Ryan
+    of tonight's run. Never raises."""
     try:
         if isinstance(exc, (run_desk.Capped, run_desk.Stopped, run_desk.Blocked)):
             return  # their own events already reached Ryan
         if owl_id is not None and isinstance(exc, safefs.Busy):
-            run_desk.report_lock_wait(conn, DESK, owl_id)
+            run_desk.report_lock_wait(conn, DESK, owl_id, on_told=on_told)
         elif owl_id is not None:
-            run_desk.report_failure(conn, DESK, owl_id)
+            run_desk.report_failure(conn, DESK, owl_id, on_told=on_told)
         elif date is not None:
             pensieve.add_event(conn, DESK, "portrait.export-failed", "headmaster",
                                EXPORT_FAILED_SUMMARY.format(date=date), dedupe_key=f"portrait:export-failed:{date}")
@@ -220,7 +226,9 @@ def nightly(conn, export_only: bool = False, now: Optional[int] = None) -> dict:
     stamp = common.now_stamp(now)  # one clock reading for the day and its export; the run keeps its own
     date, owl_id = review_day(stamp)[0], None
     resumed = {} if export_only else {"resumed": portrait_auto.resume(conn, date, now)}
-    progress: dict = {}  # "attempt" once auto-portrait armed tonight's night, "told" once a plain night was reported
+    # "ending" while a night of this date is armed: the portrait_auto.Ending that ends it in the transaction of the
+    # first event to tell Ryan of tonight's run, and holds back any later one. "told" once a plain night was reported.
+    progress: dict = {}
     try:
         try:
             exported = export_day(conn, stamp, deliver=not export_only)
@@ -231,27 +239,34 @@ def nightly(conn, export_only: bool = False, now: Optional[int] = None) -> dict:
                 result, auto = portrait_auto.night(conn, exported["date"], owl_id, now, progress)
             else:
                 auto = None
-                closed = portrait_auto.close_unarmed(conn, exported["date"], now)
-                result = run_desk.run(conn, DESK, owl_id, config.PORTRAIT_MCP_JOB, now=now)
+                # A night an earlier killed attempt left armed ends off only with tonight's own event.
+                progress["ending"] = portrait_auto.off_ending(conn, exported["date"], now)
+                result = run_desk.run(conn, DESK, owl_id, config.PORTRAIT_MCP_JOB, now=now,
+                                      on_told=progress["ending"])
         except (FleetError, StoreError) as exc:
             if not export_only:
-                _report_problem(conn, exc, date, owl_id)
+                _report_problem(conn, exc, date, owl_id, progress.get("ending"))
             raise
         clean = result["exit_code"] == 0 and result["cap_source"] is None
         if auto is not None:
             return {"ok": clean, "ran": True, **exported, "patch_ready": auto.get("patch_ready", False), **result,
                     "auto": portrait_auto.job_view(auto), **resumed}
+        ending = progress["ending"]
         if not clean and result["cap_source"] is None:
-            run_desk.report_failure(conn, DESK, owl_id, now)
-        ready = clean and report_patch(conn, exported["date"], now)
+            run_desk.report_failure(conn, DESK, owl_id, now, on_told=ending)
+        ready = clean and report_patch(conn, exported["date"], now, on_told=ending)
         progress["told"] = ready or not clean  # a failed run's own event, or the patch-ready one, told Ryan
         found = {"ok": clean, "ran": True, **exported, "patch_ready": ready, **result, **resumed}
-        return found if closed is None else {**found, "auto": portrait_auto.job_view(closed)}
+        if ending is None:
+            return found
+        lane = ending.untold() if clean and not ready else portrait_auto.ended(conn, ending)
+        return {**found, "auto": portrait_auto.job_view(lane)}
     except (SystemExit, KeyboardInterrupt):
-        # SIGTERM, SIGHUP or Ctrl+C. Once auto-portrait armed the night, it tells Ryan itself, and a failed run's own
-        # event shares this one's key.
-        if owl_id is not None and "attempt" not in progress and not progress.get("told"):
-            run_desk.report_failure(conn, DESK, owl_id, now)
+        # SIGTERM, SIGHUP or Ctrl+C. A night of this date still armed ends with this event; once auto-portrait's own
+        # event, or the run's, told Ryan of tonight's run, its Ending holds this one back. A failed run's own event
+        # shares this one's key.
+        if owl_id is not None and not progress.get("told"):
+            run_desk.report_failure(conn, DESK, owl_id, now, on_told=progress.get("ending"))
         raise
 
 

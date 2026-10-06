@@ -124,6 +124,7 @@ import os
 import re
 import secrets
 import shutil
+import sqlite3
 import subprocess
 import sys
 import time
@@ -801,23 +802,30 @@ def _limit_key(status: dict, cap: str) -> str:
     return repr(float(status["spend_limit_usd"]))
 
 
-def _tell_ending(conn, kind: str, on_told: Optional[Callable[[str], None]], tell: Callable[[], object]) -> None:
+# What a caller passes as on_told: called with the ending's name inside the transaction that writes the event a run
+# ends with, it writes the caller's own record that Ryan was told of that ending and returns True, or returns False
+# when an earlier event already told him how the caller's run ended, so no second one is written (see tell_ending).
+OnTold = Callable[[str], bool]
+
+
+def tell_ending(conn, ending: str, on_told: Optional[OnTold], tell: Callable[[], object]) -> None:
     """Write the owner event a run ends with (tell) and, with on_told, the caller's own record that Ryan was told of
-    it, in one transaction: both commit or neither does, and an error on_told raises undoes the event and goes on up
-    in place of the run's own error. on_told gets the event's kind, and is called even when the event's dedupe key
-    had told Ryan already today."""
+    it, in one transaction: both commit or neither does, and an error in either undoes both and goes on up. on_told
+    runs first and gets the ending's name: the event's kind, or rundesk.blocked-ran for a run that called a blocked
+    model. When it returns False, an earlier event already told Ryan how the caller's run ended, and nothing is
+    written. Its record stands when the event's dedupe key finds Ryan told of the same thing already today."""
     with db.transaction(conn):
+        if on_told is not None and not on_told(ending):
+            return
         tell()
-        if on_told is not None:
-            on_told(kind)
 
 
 def report_cap(conn, desk: str, now: Optional[int] = None, held: Optional[list] = None,
-               on_told: Optional[Callable[[str], None]] = None) -> None:
+               on_told: Optional[OnTold] = None) -> None:
     """Record a refusal by a fleet cap. Ryan hears once per desk, cap, effective limit and day: which cap,
     what waits, when it resets. After a bump, reaching the raised limit is news again. With held (the
     patrol's shadow mode), the note goes on that list instead of reaching Ryan. on_told commits with the event
-    (see _tell_ending)."""
+    (see tell_ending)."""
     status = cap_status(conn, desk, now)
     cap = status["reached"] or "runs"
     capacity.record_cap_hit(conn, desk, cap, "fleet", now=now)
@@ -828,7 +836,7 @@ def report_cap(conn, desk: str, now: Optional[int] = None, held: Optional[list] 
     if held is not None:
         held.append(summary)
         return
-    _tell_ending(conn, "rundesk.cap", on_told, lambda: pensieve.add_event(
+    tell_ending(conn, "rundesk.cap", on_told, lambda: pensieve.add_event(
         conn, desk, "rundesk.cap", "headmaster", summary,
         dedupe_key=f"rundesk:cap:{desk}:{cap}:{_limit_key(status, cap)}:{status['day_start']}", now=now))
 
@@ -859,10 +867,10 @@ def warn_near_cap(conn, desk: str, now: Optional[int] = None, held: Optional[lis
 
 
 def report_plan_limit(conn, desk: str, cap_source: str, run_id: str, now: Optional[int] = None,
-                      held: Optional[list] = None, on_told: Optional[Callable[[str], None]] = None) -> None:
+                      held: Optional[list] = None, on_told: Optional[OnTold] = None) -> None:
     """A run the vendor's own usage or rate limit stopped. No fleet bump lifts that, and the event says so.
     With held (the patrol's shadow mode), the note goes on that list instead of reaching Ryan. on_told commits with
-    the event (see _tell_ending)."""
+    the event (see tell_ending)."""
     capacity.record_cap_hit(conn, desk, "plan", cap_source, run_id=run_id, now=now)
     day_start, _ = capacity.day_bounds(common.now_stamp(now), config.CAP_RESET_UTC_SECONDS)
     summary = (f"{desk} stopped at the {PLAN_NAMES[cap_source]}'s own usage or rate limit, cap_source"
@@ -871,33 +879,41 @@ def report_plan_limit(conn, desk: str, cap_source: str, run_id: str, now: Option
     if held is not None:
         held.append(summary)
         return
-    _tell_ending(conn, "rundesk.plan-limit", on_told, lambda: pensieve.add_event(
+    tell_ending(conn, "rundesk.plan-limit", on_told, lambda: pensieve.add_event(
         conn, desk, "rundesk.plan-limit", "headmaster", summary,
         dedupe_key=f"rundesk:plan-limit:{desk}:{cap_source}:{day_start}", now=now))
 
 
-def report_lock_wait(conn, desk: str, owl_id: Optional[str], now: Optional[int] = None) -> None:
-    """A headmaster event for a run that gave up waiting for its desk lock, which is not a failed run.
-    Never raises, so it cannot hide the first error."""
+def report_lock_wait(conn, desk: str, owl_id: Optional[str], now: Optional[int] = None,
+                     on_told: Optional[OnTold] = None) -> bool:
+    """A headmaster event for a run that gave up waiting for its desk lock, which is not a failed run. on_told
+    commits with it (see tell_ending). True once Ryan is told, False when the store took neither. Never raises, so
+    it cannot hide the first error."""
     try:
         desk = ids.check("desk", desk)
         key = ids.check("owl", owl_id) if owl_id is not None else "no-owl"
         summary = LOCK_WAIT_SUMMARY.format(desk=desk, minutes=config.DESK_LOCK_WAIT_SECONDS // 60, owl=key)
-        pensieve.add_event(conn, desk, "rundesk.lock-wait", "headmaster", summary,
-                           dedupe_key=f"rundesk:lock-wait:{desk}:{key}", now=now)
-    except StoreError:
-        pass
+        tell_ending(conn, "rundesk.lock-wait", on_told, lambda: pensieve.add_event(
+            conn, desk, "rundesk.lock-wait", "headmaster", summary, dedupe_key=f"rundesk:lock-wait:{desk}:{key}",
+            now=now))
+    except (StoreError, sqlite3.Error):
+        return False
+    return True
 
 
-def report_failure(conn, desk: str, owl_id: Optional[str], now: Optional[int] = None) -> None:
-    """A headmaster event for a run that failed. Never raises, so it cannot hide the first error."""
+def report_failure(conn, desk: str, owl_id: Optional[str], now: Optional[int] = None,
+                   on_told: Optional[OnTold] = None) -> bool:
+    """A headmaster event for a run that failed. on_told commits with it (see tell_ending). True once Ryan is told,
+    False when the store took neither. Never raises, so it cannot hide the first error."""
     try:
         desk = ids.check("desk", desk)
         key = ids.check("owl", owl_id) if owl_id is not None else "no-owl"
-        pensieve.add_event(conn, desk, "rundesk.failed", "headmaster", FAILED_SUMMARY,
-                           dedupe_key=f"rundesk:failed:{desk}:{key}", now=now)
-    except StoreError:
-        pass
+        tell_ending(conn, "rundesk.failed", on_told, lambda: pensieve.add_event(
+            conn, desk, "rundesk.failed", "headmaster", FAILED_SUMMARY, dedupe_key=f"rundesk:failed:{desk}:{key}",
+            now=now))
+    except (StoreError, sqlite3.Error):
+        return False
+    return True
 
 
 def stop_requested() -> bool:
@@ -1208,13 +1224,15 @@ def full_ids(names: list) -> list:
 
 
 def after_run(conn, plan: dict, previous: Optional[str], real: Optional[str], exit_code: int,
-              now: Optional[int], cap_source: Optional[str] = None, used: Optional[list] = None) -> None:
+              now: Optional[int], cap_source: Optional[str] = None, used: Optional[list] = None,
+              on_told: Optional[OnTold] = None) -> None:
     """Tell Ryan when the real model moved, and count the run toward the trial after a switch.
 
     real is None when the run did not say which model worked (a Claude run with no modelUsage), and then
     no move is reported. used is every model the run named, checked against the blocklist; real alone
     when not given. A run plan_limit labelled with a cap_source stopped at a vendor limit and never
-    counts toward a trial. Never raises, so it cannot hide the run's own result.
+    counts toward a trial. on_told commits with the note of a run that called a blocked model, as
+    rundesk.blocked-ran (see tell_ending). Never raises, so it cannot hide the run's own result.
     """
     desk = plan["desk"]
     try:
@@ -1223,7 +1241,7 @@ def after_run(conn, plan: dict, previous: Optional[str], real: Optional[str], ex
             pensieve.add_event(conn, desk, "ollivander.moved", "headmaster",
                                f"{display} moved from {previous} to {real}",
                                dedupe_key=f"ollivander:moved:{desk}:{plan['run_id']}", now=now)
-        _report_blocked_run(conn, plan, display, used if used is not None else [real] if real else [], now)
+        _report_blocked_run(conn, plan, display, used if used is not None else [real] if real else [], now, on_told)
         if cap_source is not None:
             return  # a vendor limit stopped it
         outcome = wands.record_outcome(conn, desk, exit_code == 0, plan.get("change_id"), now,
@@ -1270,20 +1288,22 @@ def _blocked_used(used: list) -> Optional[str]:
         return "unchecked"
 
 
-def _report_blocked_run(conn, plan: dict, display: str, used: list, now: Optional[int]) -> None:
+def _report_blocked_run(conn, plan: dict, display: str, used: list, now: Optional[int],
+                        on_told: Optional[OnTold] = None) -> None:
     """Tell Ryan, once a day, that a run called a blocked model, whether or not it did most of the work.
-    The next run of the desk is refused."""
+    The next run of the desk is refused. on_told commits with the note (see tell_ending)."""
     try:
         real = next((name for name in used if wands.blocked_by(name, config.BLOCKED_MODEL_PREFIXES) is not None),
                     None)
         if real is None:
             return
         day_start, _ = capacity.day_bounds(common.now_stamp(now), config.CAP_RESET_UTC_SECONDS)
-        pensieve.add_event(conn, plan["desk"], "rundesk.blocked", "headmaster",
-                           f"{display} ran on {real}, which is blocked here: {plan['model']} resolved to it, so its"
-                           f" next runs are refused. castle desk model {plan['desk']} <model> pins an allowed one",
-                           dedupe_key=f"rundesk:blocked-ran:{plan['desk']}:{real}:{day_start}", now=now)
-    except (StoreError, FleetError):
+        tell_ending(conn, "rundesk.blocked-ran", on_told, lambda: pensieve.add_event(
+            conn, plan["desk"], "rundesk.blocked", "headmaster",
+            f"{display} ran on {real}, which is blocked here: {plan['model']} resolved to it, so its next runs are"
+            f" refused. castle desk model {plan['desk']} <model> pins an allowed one",
+            dedupe_key=f"rundesk:blocked-ran:{plan['desk']}:{real}:{day_start}", now=now))
+    except (StoreError, FleetError, sqlite3.Error):
         pass  # a bad blocklist is reported when the next run is planned; the trial still counts this run
 
 
@@ -1507,9 +1527,9 @@ def blocked_model(plan: dict, conn=None) -> Optional[str]:
     return wands.blocked_resolution(conn, model, blocked)
 
 
-def _refuse_blocked(conn, plan: dict, now: Optional[int], on_told: Optional[Callable[[str], None]] = None) -> None:
+def _refuse_blocked(conn, plan: dict, now: Optional[int], on_told: Optional[OnTold] = None) -> None:
     """Blocked, with its event to Ryan, when the plan would launch a blocked model. on_told commits with the event
-    (see _tell_ending)."""
+    (see tell_ending)."""
     model = blocked_model(plan, conn)
     if model is None:
         return
@@ -1527,12 +1547,12 @@ def _refuse_blocked(conn, plan: dict, now: Optional[int], on_told: Optional[Call
         else:
             fix = (f"Run fleet ollivander to give it its role's pick, or castle desk model {desk} <model> pins an"
                    " allowed one")
-        _tell_ending(conn, "rundesk.blocked", on_told, lambda: pensieve.add_event(
+        tell_ending(conn, "rundesk.blocked", on_told, lambda: pensieve.add_event(
             conn, desk, "rundesk.blocked", "headmaster", f"{why}. {fix}",
             dedupe_key=f"rundesk:blocked:{desk}:{CODEX_DEFAULT}:{day_start}", now=now))
         raise Blocked(why)
     named = model if model == plan["model"] else f"{plan['model']}, which once resolved to {model},"
-    _tell_ending(conn, "rundesk.blocked", on_told, lambda: pensieve.add_event(
+    tell_ending(conn, "rundesk.blocked", on_told, lambda: pensieve.add_event(
         conn, desk, "rundesk.blocked", "headmaster",
         f"{desk} was not started: its model {named} is blocked here. castle desk model {desk}"
         f" <model> pins an allowed one, or --role hands it back to Ollivander",
@@ -1581,7 +1601,7 @@ def launch_gate() -> Iterator[int]:
 def run(conn, desk: str, owl_id: str, mcp_job: Optional[str] = None, now: Optional[int] = None,
         on_start: Optional[Callable[[], None]] = None, lock_held: Optional[Slot] = None, keep_fds: tuple = (),
         shadow: bool = False, task_lock_fd: Optional[int] = None,
-        on_told: Optional[Callable[[str], None]] = None) -> dict:
+        on_told: Optional[OnTold] = None) -> dict:
     """Run one desk on one owl. on_start is called under the run's slot and the desk's launch lock once the
     caps allow the run, just before its launch is recorded, so a caller's own bookkeeping never runs for a
     refused run. lock_held is the Slot of this desk the caller already holds (the review script holds one, from
@@ -1590,15 +1610,15 @@ def run(conn, desk: str, owl_id: str, mcp_job: Optional[str] = None, now: Option
     passes the others in keep_fds, see fleet/portrait_auto.py); without it the run takes a free slot itself. Only those
     two pass it, and an owl of a review round runs only with the slot its round recorded, so every other launch of a
     round's owl is refused (ReviewOwl) before it waits for a slot. on_told, which only the nightly portrait job passes,
-    is called with the event's kind inside the transaction that writes the event a refused or vendor-limited run
-    ends with (rundesk.cap, rundesk.blocked, rundesk.plan-limit), so the caller's record that Ryan was told commits
-    with it or not at all (_tell_ending). The desk's process inherits every fd in keep_fds, its slot's and, on a desk
-    that holds spend, its own run lock's, so the locks they hold outlive this process if it is killed mid-run. shadow
-    is the patrol's shadow mode: the cap, near-cap and vendor-limit notes go in the result's held list, not to Ryan (a
-    cap refusal's own reason is the Capped error), and the caps and accounting are unchanged. A build desk's run on
-    its own task holds the task's review lock from before it waits for a slot until it ends, and its process inherits
-    it: task_lock_fd is that lock when the run was handed it (spawn hold_fd), and otherwise the run takes it itself
-    (see _hold_task_lock)."""
+    is called inside the transaction of each event the run ends with (rundesk.cap, rundesk.blocked, the
+    rundesk.blocked note of a run that called a blocked model, rundesk.plan-limit), so the caller's record that Ryan
+    was told commits with it or not at all, and once one has told him the next is not written (tell_ending). The
+    desk's process inherits every fd in keep_fds, its slot's and, on a desk that holds spend, its own run lock's, so
+    the locks they hold outlive this process if it is killed mid-run. shadow is the patrol's shadow mode: the cap,
+    near-cap and vendor-limit notes go in the result's held list, not to Ryan (a cap refusal's own reason is the
+    Capped error), and the caps and accounting are unchanged. A build desk's run on its own task holds the task's
+    review lock from before it waits for a slot until it ends, and its process inherits it: task_lock_fd is that lock
+    when the run was handed it (spawn hold_fd), and otherwise the run takes it itself (see _hold_task_lock)."""
     notes = [] if shadow else None
     desk = ids.check("desk", desk)
     if lock_held is not None and (not isinstance(lock_held, Slot) or lock_held.desk != desk):
@@ -1647,7 +1667,7 @@ def run(conn, desk: str, owl_id: str, mcp_job: Optional[str] = None, now: Option
             # Counted from here, before the process starts: a run killed or interrupted below still uses a run.
             # The launch lock ends here, so the next run of the desk reads the caps with this launch in them.
             capacity.record_launch(conn, desk, plan["run_id"], plan["model"], task_id=plan.get("task_id"), now=now)
-        result = _launch(conn, plan, now, keep_fds, own)
+        result = _launch(conn, plan, now, keep_fds, own, on_told)
     warn_near_cap(conn, plan["desk"], now, notes)
     if result["cap_source"] is not None:
         report_plan_limit(conn, plan["desk"], result["cap_source"], run_id=result["run_id"], now=now, held=notes,
@@ -1792,11 +1812,12 @@ def _record_orphan(conn, plan: dict, run_fd: int, row: dict, now: Optional[int])
                                  spend_unknown=usage.get("spend_unknown") is True)
 
 
-def _launch(conn, plan: dict, now: Optional[int], keep_fds: tuple = (), own: Optional[RunLock] = None) -> dict:
+def _launch(conn, plan: dict, now: Optional[int], keep_fds: tuple = (), own: Optional[RunLock] = None,
+            on_told: Optional[OnTold] = None) -> dict:
     """Start the planned run, whose launch run() has recorded, and record what it did. The process inherits every
     fd in keep_fds. own is the run's own lock on a desk that holds spend: its file is kept from just before the
     process starts until the run's usage is recorded, so a run that unwinds without recording it leaves its lock
-    for reconcile_launches."""
+    for reconcile_launches. on_told commits with the note of a run that called a blocked model (see after_run)."""
     desk, run_id = plan["desk"], plan["run_id"]
     if plan.get("temp"):
         fresh_temp(plan["temp"])  # here, under its slot, not in build_plan: a dry run never empties a live run's folder
@@ -1855,12 +1876,14 @@ def _launch(conn, plan: dict, now: Optional[int], keep_fds: tuple = (), own: Opt
         for full_id in full_ids(used):
             _record_resolution(conn, plan["model"], full_id, now)
     cap_source = plan_limit(plan["family"], output, exit_code != 0, errors, timed_out=exit_code == -1)
-    after_run(conn, plan, previous, real, exit_code, now, cap_source, used)
+    after_run(conn, plan, previous, real, exit_code, now, cap_source, used, on_told=on_told)
     found = {"desk": desk, "run_id": run_id, "exit_code": exit_code, "timed_out": exit_code == -1,
              "cap_source": cap_source, **usage}
     blocked = _blocked_used(used)
     if blocked is not None:
-        found["blocked_model"] = blocked  # after_run told Ryan; a caller that acts on the output can refuse it
+        # after_run told Ryan, unless the store or the blocklist refused it; a caller that acts on the output can
+        # refuse it.
+        found["blocked_model"] = blocked
     return found
 
 
