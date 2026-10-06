@@ -22,7 +22,7 @@ WORKTREES_ROOT = CASTLE_ROOT + "/worktrees"
 REVIEWS_ROOT = OFFICE_ROOT + "/reviews"
 INTENT_FILE = "TASK.md"
 
-PREFIXES = {"task": "tk", "request": "rq", "owl": "owl", "review": "rv"}
+PREFIXES = {"task": "tk", "request": "rq", "owl": "owl", "review": "rv", "followup": "fu"}
 
 PATTERNS = {
     "task": re.compile(r"tk_[0-9a-f]{16}"),
@@ -45,6 +45,11 @@ PATTERNS = {
     "branch": re.compile(r"[a-z0-9][a-z0-9._/-]{0,99}"),
     "ref": re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,199}"),
     "sha256": re.compile(r"[0-9a-f]{64}"),
+    # A PR follow-up, a GitHub comment or review id (decimal, as GitHub's database ids are), and the label an item of
+    # a follow-up has in its threads file and in a build desk's THREADS section.
+    "followup": re.compile(r"fu_[0-9a-f]{16}"),
+    "github_id": re.compile(r"[1-9][0-9]{0,19}"),
+    "item_label": re.compile(r"T[1-9][0-9]{0,2}"),
 }
 
 NAMES = {
@@ -67,6 +72,9 @@ NAMES = {
     "branch": "branch",
     "ref": "ref",
     "sha256": "sha256",
+    "followup": "follow-up id",
+    "github_id": "GitHub id",
+    "item_label": "item label",
 }
 
 _STRIPPED = re.compile(r"[\x01-\x08\x0b-\x1f\x7f-\x9f]")

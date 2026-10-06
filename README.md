@@ -1,6 +1,6 @@
 # Hogwarts fleet
 
-A kit for running a small fleet of single-purpose AI coding agents on your Mac, with Claude Code and Codex. Each agent does one job. Before an agent's change can be pushed, a reviewer from the other model family has to pass that exact commit. Plain scripts move messages, watch your PRs, take backups and pick models without spending tokens. You stay in charge: merges, deploys, credentials and anything sent to a person always come back to you.
+A kit for running a small fleet of single-purpose AI coding agents on your Mac, with Claude Code and Codex. Each agent does one job. Before an agent's change can be pushed, a reviewer from the other model family has to pass that exact commit. Plain scripts move messages, watch your PRs, take backups and pick models without spending tokens. You stay in charge: merges, deploys, credentials and anything sent to a person always come back to you, apart from two things you can switch on: a draft PR for each passed task, and replies to teammates' review comments on those PRs.
 
 The agents are called desks. Each one is named after a Harry Potter character, with its job after the name, like Hermione - Staff Engineer. In the theme, you are the Headmaster.
 
@@ -88,7 +88,7 @@ None of these uses a model.
 3. `fleet verify` runs each acceptance check and records the command, exit code and output for that commit.
 4. `fleet review` sends Codex-written work to Hermione and Claude-written work to Moody. A pass counts only for that exact commit, and only when the reviewer's family differs from the author's. Harry's handoff starts his review by itself, and CHANGES starts his fix round, up to the round cap.
 5. You run `fleet push`, which pushes exactly the reviewed commit and prints the `gh` command for a draft PR. You open the PR yourself, unless you opt in to the review loop doing both after its PASS, as a draft only. The push gate blocks any agent's own `git push` that has no pass.
-6. The patrol (the Map, Ron and Hermione's bot pass) watches CI and review comments. You merge and deploy, then close the task by typing `Mischief managed <task-id>`.
+6. The patrol (the Map, Ron and Hermione's bot pass) watches CI and review comments. If you switch on follow-ups, a teammate's review comment on a PR the loop opened goes back to Harry, the other family reviews his fix and his replies, and the loop pushes to the same PR and posts the replies. You merge and deploy, then close the task by typing `Mischief managed <task-id>`.
 
 ### Two homes
 
@@ -105,7 +105,7 @@ The design answers five ways a group of agents can go wrong. [DESIGN.md](docs/DE
 4. Faked identity. A desk can post only to its own outbox, and the Owl Post stamps the sender from the folder.
 5. Code loading from folders agents can write. The controls live in the office, and the store runs on the system Python with a cleared environment.
 
-Some things always come back to you: merges, deploys, prod changes, credentials and sign-ins, security settings, installs, anything sent to a person (opening a ready PR included), force pushes and deletions. The only pre-approvals are the standing orders you write yourself, and they can never include a merge or a deploy.
+Some things always come back to you: merges, deploys, prod changes, credentials and sign-ins, security settings, installs, anything sent to a person (opening a ready PR included, and replies to teammates unless you switch on follow-ups), force pushes and deletions. The only pre-approvals are the standing orders you write yourself, and they can never include a merge or a deploy.
 
 The push gate is a guardrail, not a wall. It reads an agent's Bash command as text and blocks a `git push` that has no pass, which stops a push made by habit or mistake. A desk's real boundary is its sandbox, where the network is off or limited to named hosts. Pushes you type in your own terminal never reach the gate.
 
@@ -143,6 +143,7 @@ Two test suites cover the kit: `tests` for the store and `tests_fleet` for the f
 
 - The review loop is tested against temporary git repos.
 - The patrol is tested against a faked GitHub and faked desks. It starts in shadow mode: while `~/.hogwarts/patrol/shadow` exists, the patrol and Gringotts only write files under the office, and none of their findings reach you.
+- PR follow-ups are tested against a faked GitHub. They follow only PRs the review loop opened once this version was installed, and only while `~/.hogwarts/pr-followup` holds `on`.
 - The weeknight memory review by Dumbledore - Knowledge Manager is tested against temporary stores. He only proposes changes, and nothing applies until you run `castle portrait apply`, unless you switch on auto-portrait with `echo on > ~/.hogwarts/auto-portrait` (`rm ~/.hogwarts/auto-portrait` switches it off). It applies only his additions and never removes anything: every retire, edit and archive move waits for you, and so does an addition the store refused. Each night with a patch ends in one row for you that says what applied and what waits, with the command for the rest. If the job is killed, the next weeknight job finishes that night from the copy it stored, or tells you once that it was cut off, and nothing applies twice. The [handbook](docs/HANDBOOK.md#daily-rhythm) has the details.
 - The Codex desks' read boundary rests on Codex permission profiles, which Codex marks as beta. Rerun `scripts/codex-boundary-test.sh` after every Codex upgrade.
 - The fleet runs on macOS only, for one person on one Mac.

@@ -10,7 +10,10 @@ task the run is for, so in_flight can tell which of a desk's many tasks has a ru
 a metrics row tied to that launch when it ends, and the spend cap reads the recorded cost.
 
 A newer commit supersedes a review that is still waiting, and a round past the cap waits for Ryan's
-castle task allow-round. A waiting round holds nothing, not even an allowance it took, since the next
+castle task allow-round. Rounds count in groups: the build's own rounds against its cap, and each PR follow-up's
+rounds against the follow-up cap, apart from them. An allowance lifts only the group that was open when it was
+granted: the open follow-up's, or the build's when none was. A round's number stays the count of every round of the
+task that holds one, plus one, so it is unique among rounds with a verdict. A waiting round holds nothing, not even an allowance it took, since the next
 review of the task supersedes it. Only a reviewer run that recorded a verdict uses up a round, and the proof is
 the verdict itself: record_round_verdict stores the review and ties it to its round in one transaction,
 so a review recorded before a later step failed still counts. A result owl or a request phase alone is
@@ -23,7 +26,7 @@ import sqlite3
 import time
 from typing import Optional
 
-from . import db, ids, owlery, pensieve
+from . import db, followups, ids, owlery, pensieve
 from .errors import ConflictError, NotFoundError, ValidationError
 
 DAY = 86400
@@ -53,12 +56,15 @@ Conn = sqlite3.Connection
 
 
 class RoundCapReached(ConflictError):
-    """An author task asked for a review round past its cap, with no allowance from Ryan left."""
+    """An author task asked for a review round past its cap, with no allowance left. followup_number names
+    the PR follow-up whose own cap it reached, None for the build's."""
 
-    def __init__(self, task_id: str, round_no: int, max_rounds: int) -> None:
-        super().__init__(f"task {task_id} asked for review round {round_no}; rounds past {max_rounds}"
+    def __init__(self, task_id: str, round_no: int, max_rounds: int, followup_number: Optional[int] = None) -> None:
+        group = "" if followup_number is None else f" of follow-up {followup_number}"
+        super().__init__(f"task {task_id} asked for review round {round_no}; rounds{group} past {max_rounds}"
                          f" need castle task allow-round {task_id}")
         self.task_id, self.round, self.max_rounds = task_id, round_no, max_rounds
+        self.followup_number = followup_number
 
 
 # The cap day
@@ -325,23 +331,34 @@ def _left_by_dead_review(row: dict) -> bool:
     return not row["has_verdict"] and row["reviewer_task_status"] == "active"
 
 
-def _unused_allowances(conn: Conn, task_id: str, holding: list) -> list[int]:
+def _unused_allowances(conn: Conn, task_id: str, holding: list, followup_id: Optional[str] = None) -> list[int]:
+    """The task's allowances for one group (a follow-up's, or the build's for None) no holding round has used."""
     used = {row["allowance_id"] for row in holding if row["allowance_id"] is not None}
-    rows = db.fetch_all(conn, "SELECT id FROM round_allowances WHERE task_id = ? ORDER BY id", (task_id,))
+    rows = db.fetch_all(conn, "SELECT id FROM round_allowances WHERE task_id = ? AND followup_id IS ? ORDER BY id",
+                        (task_id, followup_id))
     return [row["id"] for row in rows if row["id"] not in used]
 
 
-def _needs_allowance(conn: Conn, task_id: str, holding: list, max_rounds: int) -> bool:
-    return len(holding) >= max_rounds and not _unused_allowances(conn, task_id, holding)
+def _in_group(rows: list, followup_id: Optional[str]) -> list:
+    """The rounds of one group: a follow-up's, or the build's own (no follow-up) for None."""
+    return [row for row in rows if row.get("followup_id") == followup_id]
 
 
-def needs_allowance(conn: Conn, task_id: str, max_rounds: int = 3) -> bool:
-    """Whether the task's next review round waits for Ryan: max_rounds rounds count, and none of his
-    allowances for the task is unused."""
-    task_id = pensieve.get_task(conn, ids.check("task", task_id))["id"]
+def _needs_allowance(conn: Conn, task_id: str, holding: list, max_rounds: int,
+                     followup_id: Optional[str] = None) -> bool:
+    return (len(_in_group(holding, followup_id)) >= max_rounds
+            and not _unused_allowances(conn, task_id, holding, followup_id))
+
+
+def needs_allowance(conn: Conn, task_id: str, max_rounds: int = 3, followup_id: Optional[str] = None) -> bool:
+    """Whether the task's next review round in a group waits for an allowance: max_rounds rounds of that group count, and
+    none of his allowances for that group is unused. The group is the follow-up followup_id, or the build's own
+    rounds for None."""
+    followup_id = ids.optional("followup", followup_id)
     max_rounds = ids.check_int(max_rounds, "max rounds", minimum=1, maximum=MAX_ROUNDS_LIMIT)
+    task_id = pensieve.get_task(conn, ids.check("task", task_id))["id"]
     holding = [row for row in _round_rows(conn, task_id) if _holds_round(row)]
-    return _needs_allowance(conn, task_id, holding, max_rounds)
+    return _needs_allowance(conn, task_id, holding, max_rounds, followup_id)
 
 
 def review_rounds(conn: Conn, task_id: str) -> list[dict]:
@@ -375,24 +392,28 @@ def stranded_rounds(conn: Conn, reviewer_desk: str) -> list[dict]:
 
 
 def allow_round(conn: Conn, task_id: str, now: Optional[int] = None) -> dict:
-    """Ryan's allowance for exactly one more review round. A second call before it is used changes nothing,
-    and a round still waiting does not use it: the review that supersedes that round takes it instead."""
+    """The Headmaster's allowance for exactly one more review round of the group open now: the task's open PR follow-up, or the
+    build's own rounds when none is. It lifts only that group. A second call before it is used changes nothing, and a
+    round still waiting does not use it: the review that supersedes that round takes it instead."""
     task_id = ids.check("task", task_id)
     ts = ids.stamp(now)
     with db.transaction(conn):
         if pensieve.get_task(conn, task_id)["status"] == "closed":
             raise ConflictError("task is closed")
+        followup = followups.open_for_task(conn, task_id)
+        group = None if followup is None else followup["id"]
         holding = [row for row in _round_rows(conn, task_id) if _holds_round(row)]
-        unused = _unused_allowances(conn, task_id, holding)
+        unused = _unused_allowances(conn, task_id, holding, group)
         created = not unused
         if created:
             allowance_id = conn.execute(
-                "INSERT INTO round_allowances(task_id, granted_at) VALUES (?, ?)", (task_id, ts)
+                "INSERT INTO round_allowances(task_id, granted_at, followup_id) VALUES (?, ?, ?)", (task_id, ts, group)
             ).lastrowid
         else:
             allowance_id = unused[0]
         row = db.fetch_one(conn, "SELECT * FROM round_allowances WHERE id = ?", (allowance_id,))
-    return {**row, "created": created, "rounds": len(holding)}
+    lifts = "the build's review rounds" if followup is None else f"follow-up {followup['number']}'s review rounds"
+    return {**row, "created": created, "rounds": len(_in_group(holding, group)), "lifts": lifts}
 
 
 def _ack_request_owl(conn: Conn, request_id: str, reviewer: str, ts: int) -> None:
@@ -404,7 +425,8 @@ def _ack_request_owl(conn: Conn, request_id: str, reviewer: str, ts: int) -> Non
 
 def open_review_round(conn: Conn, task_id: str, reviewer_desk: str, sha: str, title: str,
                       body: Optional[str] = None, max_rounds: int = 3, idempotency_key: Optional[str] = None,
-                      review_locked: bool = False, slot: Optional[int] = None, now: Optional[int] = None) -> dict:
+                      review_locked: bool = False, slot: Optional[int] = None, now: Optional[int] = None,
+                      followup_id: Optional[str] = None, followup_max_rounds: Optional[int] = None) -> dict:
     """Open the review request for one commit of an author task, as its next round.
 
     A review of this task still waiting for its reviewer's run is superseded by this one: its request
@@ -422,8 +444,16 @@ def open_review_round(conn: Conn, task_id: str, reviewer_desk: str, sha: str, ti
     slot is the reviewer desk's run slot the caller's review holds, recorded on the round when it opens, so a
     later review knows whose lock to try before closing a reviewer task this round leaves active. None when the
     caller holds no slot, as for a round queued while every slot was busy.
+
+    followup_id names the task's PR follow-up the round belongs to, which then counts it against
+    followup_max_rounds, its own cap, apart from the build's max_rounds; the store refuses a round that names
+    another follow-up than the one building, or none while one is building, and any round while one is starting.
     """
     task_id = ids.check("task", task_id)
+    followup_id = ids.optional("followup", followup_id)
+    if followup_id is not None:
+        followup_max_rounds = ids.check_int(followup_max_rounds, "follow-up max rounds", minimum=1,
+                                            maximum=MAX_ROUNDS_LIMIT)
     reviewer_desk = ids.check("desk", reviewer_desk, "reviewer desk")
     sha = ids.check("sha", sha)
     max_rounds = ids.check_int(max_rounds, "max rounds", minimum=1, maximum=MAX_ROUNDS_LIMIT)
@@ -436,11 +466,13 @@ def open_review_round(conn: Conn, task_id: str, reviewer_desk: str, sha: str, ti
         waiting = {row["request_id"]: row for row in live if _is_waiting(row) and row["reviewer"] == reviewer_desk}
         counted = [row for row in live if _holds_round(row) and not (review_locked and _left_by_dead_review(row))]
         round_no = len(counted) + 1
+        cap = max_rounds if followup_id is None else followup_max_rounds
         allowance_id = None
-        if round_no > max_rounds:
-            free = _unused_allowances(conn, task_id, counted)
+        if len(_in_group(counted, followup_id)) + 1 > cap:
+            free = _unused_allowances(conn, task_id, counted, followup_id)
             if not free:
-                raise RoundCapReached(task_id, round_no, max_rounds)
+                number = None if followup_id is None else followups.get(conn, followup_id)["number"]
+                raise RoundCapReached(task_id, round_no, cap, number)
             allowance_id = free[0]
         opened = owlery.open_request(conn, task["desk"], reviewer_desk, title, body=body, parent_task_id=task_id,
                                      idempotency_key=idempotency_key, now=ts)
@@ -449,8 +481,8 @@ def open_review_round(conn: Conn, task_id: str, reviewer_desk: str, sha: str, ti
             existing = db.fetch_one(conn, "SELECT * FROM review_rounds WHERE request_id = ?", (request_id,))
             if existing is None:
                 raise ConflictError("that request was not opened as a review round")
-            return {**opened, "round": existing["round"], "max_rounds": max_rounds,
-                    "allowance_id": existing["allowance_id"], "superseded": []}
+            return {**opened, "round": existing["round"], "max_rounds": cap,
+                    "allowance_id": existing["allowance_id"], "superseded": [], "followup_id": existing["followup_id"]}
         superseded = []
         for old_id, row in waiting.items():
             conn.execute(
@@ -462,12 +494,12 @@ def open_review_round(conn: Conn, task_id: str, reviewer_desk: str, sha: str, ti
             _ack_request_owl(conn, old_id, reviewer_desk, ts)
             superseded.append({"request_id": old_id, "sha": row["sha"], "round": row["round"]})
         conn.execute(
-            "INSERT INTO review_rounds(request_id, task_id, reviewer, sha, round, allowance_id, created_at, slot)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (request_id, task_id, reviewer_desk, sha, round_no, allowance_id, ts, slot),
+            "INSERT INTO review_rounds(request_id, task_id, reviewer, sha, round, allowance_id, created_at, slot,"
+            " followup_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (request_id, task_id, reviewer_desk, sha, round_no, allowance_id, ts, slot, followup_id),
         )
-    return {**opened, "round": round_no, "max_rounds": max_rounds, "allowance_id": allowance_id,
-            "superseded": superseded}
+    return {**opened, "round": round_no, "max_rounds": cap, "allowance_id": allowance_id,
+            "superseded": superseded, "followup_id": followup_id}
 
 
 def record_round_verdict(conn: Conn, request_id: str, repo: str, verdict: str, review_path: Optional[str] = None,
@@ -516,10 +548,10 @@ def review_task_ids(conn: Conn) -> set:
 
 
 def request_round(conn: Conn, request_id: str) -> Optional[dict]:
-    """The review round a request opened, with its author task and the run slot its review recorded, or None for
-    any other request."""
-    return db.fetch_one(conn, "SELECT request_id, task_id, reviewer, slot FROM review_rounds WHERE request_id = ?",
-                        (ids.check("request", request_id),))
+    """The review round a request opened, with its author task, the run slot its review recorded and the PR follow-up
+    it belongs to (None for the build's own rounds), or None for any other request."""
+    return db.fetch_one(conn, "SELECT request_id, task_id, reviewer, slot, followup_id FROM review_rounds"
+                              " WHERE request_id = ?", (ids.check("request", request_id),))
 
 
 def round_author(conn: Conn, reviewer_task_id: str) -> Optional[str]:
@@ -564,14 +596,25 @@ def _flight_state(task: dict, latest: Optional[dict], running: bool, needs_allow
     return "running" if running else "working"
 
 
-def _flight_row(conn: Conn, task: dict, since: int, max_rounds: int) -> dict:
+def _flight_row(conn: Conn, task: dict, since: int, max_rounds: int, followup_max_rounds: int) -> dict:
     rows = review_rounds(conn, task["id"])
     # The latest attempt says where the task stands, even one whose run ended without a verdict and so does
     # not count toward the cap.
     live = [row for row in rows if row["superseded_by"] is None]
     latest = live[-1] if live else None
     holding = [row for row in rows if row["counts"]]
-    needs_allowance = _needs_allowance(conn, task["id"], holding, max_rounds)
+    # While a PR follow-up is open, its own rounds and cap are the ones that count.
+    open_followup = followups.open_for_task(conn, task["id"])
+    group = None if open_followup is None else open_followup["id"]
+    if group is not None:
+        max_rounds = followup_max_rounds
+    needs_allowance = _needs_allowance(conn, task["id"], holding, max_rounds, group)
+    used = len(_in_group(holding, group))
+    followup = None
+    if open_followup is not None:
+        binding = followups.pr_for_task(conn, task["id"])
+        followup = {"number": open_followup["number"], "state": open_followup["state"],
+                    "pr": f"{binding['repo']}#{binding['number']}", "rounds_used": used, "max_rounds": max_rounds}
     running = _running(conn, task["id"], since)
     return {
         "id": task["id"], "desk": task["desk"], "title": task["title"], "status": task["status"],
@@ -580,13 +623,13 @@ def _flight_row(conn: Conn, task: dict, since: int, max_rounds: int) -> dict:
         "reviewer": None if latest is None else latest["reviewer"],
         "verdict": None if latest is None else latest["verdict"],
         "waiting": bool(latest is not None and latest["waiting"]),
-        "rounds_used": len(holding), "max_rounds": max_rounds, "needs_allowance": needs_allowance,
-        "running": running, "state": _flight_state(task, latest, running, needs_allowance),
+        "rounds_used": used, "max_rounds": max_rounds, "needs_allowance": needs_allowance,
+        "running": running, "state": _flight_state(task, latest, running, needs_allowance), "followup": followup,
     }
 
 
 def in_flight(conn: Conn, now: Optional[int] = None, running_window: int = 3600, desk: Optional[str] = None,
-              max_rounds: int = 3) -> dict:
+              max_rounds: int = 3, followup_max_rounds: int = 2) -> dict:
     """Every active or awaiting-close author task, and every other task its desk has a run going for, grouped
     by desk, with where it stands. Owl Post starts an ordinary request's run without starting its task, so a
     queued task whose run is going is listed as running, and so is one closed while its run still goes.
@@ -596,6 +639,8 @@ def in_flight(conn: Conn, now: Optional[int] = None, running_window: int = 3600,
     reviewer mid-review never shows no tasks. running means a launch for the task, or for one of its rounds'
     reviewer tasks, has no usage yet and started within running_window: a run killed before it recorded usage
     stops counting as running once the window passes.
+    A task with an open PR follow-up carries it (followup: its number, state, PR, rounds used and cap), and its
+    rounds are counted against that follow-up's cap, followup_max_rounds, while it is open.
     A latest round with no verdict reads "in review" while its run is going, and "review died" once none is or
     once its run ended without a verdict: that round does not count toward the cap, and the task needs its
     review run again.
@@ -605,6 +650,8 @@ def in_flight(conn: Conn, now: Optional[int] = None, running_window: int = 3600,
     running_window = ids.check_int(running_window, "running window", minimum=1, maximum=7 * DAY)
     desk = ids.optional("desk", desk)
     max_rounds = ids.check_int(max_rounds, "max rounds", minimum=1, maximum=MAX_ROUNDS_LIMIT)
+    followup_max_rounds = ids.check_int(followup_max_rounds, "follow-up max rounds", minimum=1,
+                                        maximum=MAX_ROUNDS_LIMIT)
     with db.snapshot(conn):
         if desk is not None:
             pensieve.get_desk(conn, desk)
@@ -615,7 +662,7 @@ def in_flight(conn: Conn, now: Optional[int] = None, running_window: int = 3600,
                   + _OPEN_LAUNCH_TASKS + ")) AND (? IS NULL OR desk = ? OR id IN (" + _REVIEWING + "))"
                   " ORDER BY created_at, rowid",
             (since, desk, desk, desk)) if task["id"] not in reviews]
-        rows = [_flight_row(conn, task, since, max_rounds) for task in tasks]
+        rows = [_flight_row(conn, task, since, max_rounds, followup_max_rounds) for task in tasks]
     desks: dict = {}
     for row in rows:
         desks.setdefault(row["desk"], []).append(row)

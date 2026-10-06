@@ -123,7 +123,7 @@ You don't need to remember which desk does what. Start every piece of work with 
 3. **Ask in your own words.** For example: "Add a unit test for the retry path when the cache is empty, in my web-app repo." Small questions she answers directly.
 4. **Check her ticket.** For real work she writes `tasks/<id>/TASK.md`: your words under Intent, numbered acceptance criteria with the check for each, a Spec that opens with the repo, a new branch and its base, and what's out of scope. Claude asks you before she writes it. Fix anything that's wrong. For a build, type `go <task-id>` as your whole message: that registers the task, gives Harry a fresh worktree on the new branch and starts his run once he's switched on. For any other desk she hands you one `castle task create` command to run in Terminal instead. A data question skips all of this: she hands you a prompt to run with Snape in another session.
 5. **Let it move.** A build runs on its own from here. Harry's handoff starts his review, a CHANGES verdict starts his fix round, and the loop stops at a PASS, a HEADMASTER verdict or the third round. Other work she posts to the right desk through her outbox, and Claude asks you before each post. The Owl Post delivers it. You'll see rows for anything that needs you at the start of your next message to her.
-6. **Push, merge and close.** After a PASS, push with `fleet push <task-id>`. Or switch on draft PRs once, with `echo on > ~/.hogwarts/auto-draft-pr`, and the loop pushes the reviewed commit and opens a draft PR for you; delete that file to switch it off. When a PR is green and reviewed, you merge it yourself. Then type `Mischief managed <task-id>` to her. That exact phrase is the only thing that closes a task.
+6. **Push, merge and close.** After a PASS, push with `fleet push <task-id>`. Or switch on draft PRs once, with `echo on > ~/.hogwarts/auto-draft-pr`, and the loop pushes the reviewed commit and opens a draft PR for you; delete that file to switch it off. Once draft PRs are on, you can also switch on follow-ups with `echo on > ~/.hogwarts/pr-followup` (and off with `rm ~/.hogwarts/pr-followup`): a teammate's review comment on a PR the loop opened goes back to Harry, and after the other family passes his fix and his replies, the loop pushes to the same PR and posts one reply per comment. Follow-ups need draft PRs on, the patrol out of shadow mode, Harry and Hermione enabled, and `gh` signed in as your `GITHUB_ACCOUNT`, the only account replies ever go out as. Switching off stops routing and the next push or reply at once; an open follow-up is still tidied up by the next Map round, even one that cannot read GitHub. Before every reply the loop reads the PR again, and stops if it closed, its head moved or `gh` is signed in as someone else. A reply that names a teammate whose name is also a fleet word is refused, so replies leave names out. When a PR is green and reviewed, you merge it yourself. Then type `Mischief managed <task-id>` to her. That exact phrase is the only thing that closes a task.
 
 Good first prompts:
 
@@ -250,6 +250,7 @@ The day resets at local midnight on your Mac, daylight saving included. A run co
 - **Look and lift.** `castle desk caps` shows today's numbers for every headless desk. McGonagall, Snape and the scripts have no cap, so they don't appear. `castle desk cap <desk> --runs +N` or `--spend +X` raises one cap until the next reset, then it falls back. A bump is at most +500 runs or +$500. `--spend` works only for Hermione, Ron and Dumbledore, because Harry and Moody have no spend cap.
 - **Reviews never wait.** One review of a task runs at a time. Start a second while the first is going and it stops at once with "a review of this task, or a run of its build desk on it, is going; run this again when it ends", without touching anything. Harry's run on a task holds the same lock until it ends, so a review you start meanwhile stops the same way, and the automatic one waits for his run to end. If the reviewer is busy, meaning other runs hold every one of its run slots, or at its cap, the review request is queued and the command says so. A reviewer's other tasks never make it busy. Run `fleet review <task-id>` again later, after the reset or a bump if it was the cap. A review the Owl Post started on Harry's handoff tries again by itself on each pass while the reviewer is busy, for up to four hours. For a task from your own Claude sessions, run `fleet review own --repo-dir <checkout> --task <task-id>` instead. The new review replaces that task's queued one, never another task's, so only the newest commit of a task gets reviewed.
 - **Three rounds per task.** A task gets three review rounds, and only a round where the reviewer recorded a verdict counts. A crash, a timeout, a cap refusal or a vendor limit doesn't use one up. After the third, `castle task allow-round <task-id>` allows exactly one more, and a queued round doesn't use it up. `castle task rounds <task-id>` lists every round and whether it counts.
+- **Follow-ups have their own cap.** Each follow-up on a PR gets two review rounds of its own, apart from the task's three, and a task takes at most five follow-ups. `castle task allow-round <task-id>` lifts the cap of whatever is open when you run it: the open follow-up's, or the build's when none is. It says which.
 - **A review that dies.** If a review gets killed partway, its reviewer keeps going until it finishes. Until then that task can't be reviewed again, and the reviewer has one run slot fewer. After that the round doesn't count, and the next review that gets that slot cleans up after it. Until then, and once any review ends without a verdict, `castle task board` and the digest show the task as review died, so run its review again.
 - **Which limit hit.** The note says whether it was the fleet's cap or the vendor's own limit: `cap_source fleet`, or `claude_plan` or `codex_plan` when your Claude or Codex plan's own usage or rate limit stopped the run. A bump can't lift a plan limit. It clears on the vendor's own reset.
 
@@ -269,7 +270,7 @@ Moody reviews work from your own Claude sessions. Those tasks sit under the desk
 
 ## The patrol and the backups
 
-Plain scripts patrol your PRs, and Ron and Hermione only judge what the scripts found. All of it reads GitHub and never writes to it, and nothing is ever posted to a PR or a chat.
+Plain scripts patrol your PRs, and Ron and Hermione only judge what the scripts found. All of it reads GitHub and never writes to it, and nothing is posted to a PR or a chat, apart from the follow-up replies you switch on.
 
 | Job | When | What it writes |
 | --- | --- | --- |
@@ -277,7 +278,8 @@ Plain scripts patrol your PRs, and Ron and Hermione only judge what the scripts 
 | Ron's morning lineup | Weekdays 08:30, or the next Map round if the Mac was asleep or offline then | `patrol/lineup/<date>.md`: your PRs with checks, approvals, unresolved threads and age (stale ones grouped at the bottom), the reviews people asked of you (bot and stale requests counted at the bottom), overnight reds and Dumbledore's note, then Ron's words. |
 | Ron's keeper's watch | 09:00, 13:00 and 17:00 on weekdays | `patrol/keeper/`: no model while everything is green. A new red gets Ron's REAL, FLAKY, INFRA or UNSURE call and a fix brief for a real failure. A gate waiting on a person is a row for you. |
 | Ron's weekly scoreboard | Mondays 09:00 | `patrol/scoreboard/<date>.md`: PRs merged, time to first review, review rounds, red rate on main, cost per desk and the share of Map rounds that ran no model, all from a script. Ron writes only the words. |
-| Hermione's bot pass | A Map round, once a PR is 15 minutes old and has review threads she hasn't seen | `patrol/bot-pass/`: a triage table and a reply draft per thread. Drafts only. |
+| Hermione's bot pass | A Map round, once a PR is 15 minutes old and has review threads she hasn't seen | `patrol/bot-pass/`: a triage table and a reply draft per thread. Drafts only. Threads a PR follow-up took are left out, even after you switch follow-ups off. |
+| PR follow-ups | A Map round, once a teammate's comment is five minutes old | The threads file next to TASK.md, Harry's follow-up run, then the usual review; on PASS a push to the same PR and one reply per comment. In shadow mode, only `patrol/followup/`: what it would send Harry, counting the last seven days of comments as if it had been live. |
 | Gringotts - Backup | Daily 23:30 | `backups/gringotts-<date>.tar.gz`, mode 0600, 14 days kept and never synced anywhere: your Claude, Codex and fleet setup with credentials, tokens, auth files and git history left out, and every `env`, headers or secret-named value in settings, MCP and Codex config blanked. |
 
 The folders are in the office, `~/.hogwarts`. Read them in the Terminal, since your own Claude sessions are denied the office.
@@ -367,7 +369,9 @@ Everything `castle` prints is JSON. If you added the shortcut in one-time setup,
 | `castle desk cap <desk> --runs +N` | Lift a desk's run cap until the next reset |
 | `castle desk cap <desk> --spend +X` | Lift a desk's spend cap until the next reset |
 | `castle task rounds <task-id>` | See a task's review rounds and which count |
-| `castle task allow-round <task-id>` | Allow one more review round |
+| `castle task allow-round <task-id>` | Allow one more review round, for the open follow-up if there is one |
+| `castle followup list` | See every PR follow-up and its state |
+| `castle followup show <task-id>` | See a task's PR, each follow-up's comments and the replies, posted or not |
 | `castle desk models` | See each desk's tier, model, pin and pending pick |
 | `castle desk model <desk> --approve` | Approve a costlier pick that's waiting |
 | `castle desk model <desk> <model>` | Pin a desk to a model |
@@ -419,7 +423,7 @@ Six things only you do.
 
 - **Merge and deploy.** No desk can merge, deploy, press a pipeline gate or change prod.
 - **Close tasks.** Only "Mischief managed <task-id>" in McGonagall's session closes one. Silence and a green build don't.
-- **Send things.** Desks draft messages. You send them.
+- **Send things.** Desks draft messages. You send them, except the follow-up replies you switched on.
 - **Sign in.** Desks never see a password or token. If something needs a login, it stops and tells you.
 - **Change settings.** Security, permissions, hooks and background jobs are yours to apply. The fleet only prepares the change.
 - **Never bypass.** Don't start Claude or Codex with any skip-permissions or bypass flag, and don't run a desk that can run commands inside herdr.
@@ -435,7 +439,8 @@ Six things only you do.
 | A tool name with `<warehouse-mcp>`, `<observability-mcp>` or `<chat-mcp>` in it | A placeholder was never filled. See onboarding stage 2. |
 | A headless desk never answers | Run `claude auth status`. Headless desks need the command line signed in. Check the desk has an `enabled` file. Then run `castle audit` to see where the request stopped. If a note says a cap is reached, see [Busy days and caps](#busy-days-and-caps). |
 | No headless desk launches, and a note mentions Ollivander | His stop file is in place. Read the note and his log in `~/.hogwarts/logs`, then run `castle ollivander clear`. |
-| A review round was refused | The task has used its three rounds. Run `castle task rounds <task-id>` to look, then `castle task allow-round <task-id>` if one more is worth it. |
+| A review round was refused | The task has used its three rounds, or its follow-up its two. Run `castle task rounds <task-id>` to look, then `castle task allow-round <task-id>` if one more is worth it. |
+| A follow-up stopped | Read the event: it names the step and why. `castle followup show <task-id>` lists which replies went out and the text of the rest. `fleet push <task-id>` pushes by hand. A task in a follow-up is active again, so `Mischief managed` waits; close it from your terminal if you're done with it, which also ends its follow-up. |
 | A desk keeps an old model after a note said it would move | A costlier move waits for you: `castle desk model <desk> --approve`. A pinned desk never moves. `castle desk models` shows both. |
 | `hogwarts-spaces` prints FAILED | herdr isn't running or isn't at `~/.local/bin/herdr`. Open herdr, or pass `--herdr <path>`. A space it already made is left alone when you run it again. If the line says refused, that agent's definition has no `tools:` line or lists a tool that isn't on its trusted list in `~/.hogwarts/desks/<agent>/live-tools.json`. Compare it with the repo copy, `claude-agents/snape.md` or `castle/.claude/agents/mcgonagall.md`, and put it right, or trust a read-only tool as [CUSTOMISE.md](CUSTOMISE.md#trust-a-tool-in-a-live-space) shows. If it says the list is not trusted, it's a link or others can write it; put a plain copy back with `chmod 600`. Then run it again. If it says claude is not at a path, fix `CLAUDE_BIN` in `~/.hogwarts/fleet/config.py`. |
 | McGonagall doesn't introduce herself | Make sure the session's folder is `~/hogwarts`. Her settings only apply there. |

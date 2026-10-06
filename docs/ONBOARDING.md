@@ -327,6 +327,12 @@ Prove the cheap jobs are right before they can interrupt you.
 
 **You're done when** the morning lineup has matched `gh` three days running, a spot check of 50 of Ron's verdicts finds nothing urgent marked routine, and at least 75% of Map rounds cost zero tokens. Then delete `~/.hogwarts/patrol/shadow` to let their rows and owls reach you.
 
+**Follow-ups (optional).** Once draft PRs are on, a teammate's review comment on a PR the loop opened can go back to Harry by itself, and the loop pushes his reviewed fix to the same PR and posts his one-line replies in your name.
+
+- Fill `FOLLOWUP_IGNORED_LOGINS` in `~/.hogwarts/fleet/config.py` with your org's CI and service accounts that GitHub lists as people, and check `gh auth status` shows the account in `GITHUB_ACCOUNT`. Replies only ever go out as that account.
+- Switch follow-ups on while the patrol is still in shadow mode, with `echo on > ~/.hogwarts/pr-followup`, and read `~/.hogwarts/patrol/followup/` for a few days: each file lists what a round would have sent Harry, with no comment text. It counts comments from the last seven days as if follow-ups had been live then (`FOLLOWUP_SHADOW_WINDOW_SECONDS`), so it works from your very first round.
+- Then take the patrol out of shadow mode. Only comments written from then on are routed; the ones the dry run counted are not. Switch follow-ups off any time with `rm ~/.hogwarts/pr-followup`: routing stops at once, and so does the next push or reply. An open follow-up is still tidied up by the next Map round, even one that cannot read GitHub.
+
 ### 5.3 Dumbledore's nightly review
 
 Dumbledore reviews the fleet's memory each weeknight and proposes changes. You approve every one at first.
@@ -429,6 +435,7 @@ From here on, the [handbook](HANDBOOK.md) is your guide: which desk to ask, the 
 - [ ] **4** A TASK.md registered with `castle task create`, then closed as abandoned.
 - [ ] **5.1** Review loop on, `a2` applied, Hermione on. Codex desks only after approval and both boundary tests.
 - [ ] **5.2** Map, Ron and Gringotts in shadow for three days. Restore drill done. Shadow file deleted once the checks pass.
+- [ ] **5.2** Follow-ups, if you want them: `FOLLOWUP_IGNORED_LOGINS` filled, `pr-followup` on in shadow mode, `patrol/followup/` read for a few days.
 - [ ] **5.3** Dumbledore's proposals reviewed twice. RTK go or no-go.
 - [ ] **5.4** RTK hook and standing orders, only if the numbers say so.
 - [ ] **5.5** Role cards read, any forbidden models listed, `fleet ollivander --dry-run` read, the daily job loaded, a first pass run, and `castle desk models` shows a tier for every desk that has a role card.

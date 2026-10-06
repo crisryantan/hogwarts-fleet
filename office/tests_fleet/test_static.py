@@ -61,6 +61,8 @@ KNOWN_FLAGS = {
     "--drill",
     # the review loop's draft PR, gh pr create --draft with its body on stdin (gitops.draft_pr_argv)
     "--draft", "--repo", "--head", "--body-file",
+    # a PR follow-up's replies, gh api --method POST with their JSON on stdin (gitops.reply_argv, pr_comment_argv)
+    "--method", "--input",
     # Dumbledore's nightly job: the export alone, with no owl and no run
     "--export-only",
 }
@@ -92,11 +94,11 @@ def env_problems(source: str) -> list:
     return found
 
 
-OPT_IN_NAMES = ("auto-draft-pr", "auto-portrait")
+OPT_IN_NAMES = ("auto-draft-pr", "auto-portrait", "pr-followup")
 # An opt-in file named as a file: the whole string, or the last part of a path. The feature's name in a message
 # ("auto-portrait applied ...") is not a file name.
 OPT_IN_FILE_SHAPE = re.compile(r"(?:^|/)(?:" + "|".join(map(re.escape, OPT_IN_NAMES)) + r")/?$")
-OPT_IN_ATTRIBUTES = {"AUTO_DRAFT_PR_FILE", "AUTO_PORTRAIT_FILE", "OPT_IN_FILES"}
+OPT_IN_ATTRIBUTES = {"AUTO_DRAFT_PR_FILE", "AUTO_PORTRAIT_FILE", "PR_FOLLOWUP_FILE", "OPT_IN_FILES"}
 
 
 def _docstrings(tree: ast.AST) -> set:
@@ -195,9 +197,13 @@ class EnvironmentTests(unittest.TestCase):
 
 class OptInTests(unittest.TestCase):
     def test_opt_in_files_are_read_only_through_the_shared_reader(self):
-        self.assertEqual(set(config.OPT_IN_FILES), {config.AUTO_DRAFT_PR_FILE, config.AUTO_PORTRAIT_FILE})
+        self.assertEqual(set(config.OPT_IN_FILES),
+                         {config.AUTO_DRAFT_PR_FILE, config.AUTO_PORTRAIT_FILE, config.PR_FOLLOWUP_FILE})
+        self.assertEqual(len(config.OPT_IN_FILES), len(set(config.OPT_IN_FILES)))
         self.assertEqual(set(OPT_IN_NAMES), set(config.OPT_IN_FILES))
         self.assertIn(FLEET / "hooks" / "session_start.py", SOURCES)
+        self.assertIn(FLEET / "portrait_auto.py", SOURCES)
+        self.assertIn(FLEET / "followup.py", SOURCES)
         for path in SOURCES:
             with self.subTest(path=str(path.relative_to(ROOT))):
                 self.assertEqual(opt_in_problems(path.name, path.read_text()), [])
@@ -213,6 +219,11 @@ class OptInTests(unittest.TestCase):
             ("portrait_auto.py", "on = common.opt_in_on(name) or config.OPT_IN_FILES"),
             ("common.py", "def other(name):\n    return safefs.read_regular(fd, name, 64)"),
             ("hooks/x.py", "on = other.opt_in_on(config.AUTO_PORTRAIT_FILE)"),
+            ("followup.py", 'x = "pr-followup"'),
+            ("map.py", 'raw = safefs.read_regular(fd, "pr-followup", 64)'),
+            ("patrol.py", "raw = safefs.read_regular(fd, config.PR_FOLLOWUP_FILE, 64)"),
+            ("followup.py", "from fleet.config import PR_FOLLOWUP_FILE"),
+            ("followup.py", "on = PR_FOLLOWUP_FILE in names"),
         ):
             with self.subTest(snippet=snippet):
                 self.assertNotEqual(opt_in_problems(name.rsplit("/", 1)[-1], snippet), [])
@@ -220,6 +231,8 @@ class OptInTests(unittest.TestCase):
             ("push.py", "on = common.opt_in_on(config.AUTO_DRAFT_PR_FILE)"),
             ("portrait_auto.py", 'SUMMARY = "auto-portrait applied {count} ops"'),
             ("portrait_auto.py", '"""Reads config.AUTO_PORTRAIT_FILE, the auto-portrait file."""'),
+            ("followup.py", "on = common.opt_in_on(config.PR_FOLLOWUP_FILE)"),
+            ("followup.py", 'STOP = "pr-followup is off"'),
             ("common.py", "def opt_in_on(name):\n    return safefs.read_regular(fd, name, 64)"),
             ("common.py", 'def other():\n    return safefs.read_regular(fd, "fixed", 64)'),
         ):
@@ -239,6 +252,20 @@ class ProcessTests(unittest.TestCase):
                     self.assertEqual((modules, calls), (PROCESS_MODULES_ALLOWED[path.name], []))
                 else:
                     self.assertEqual((sorted(modules), calls), ([], []))
+
+    def test_only_gitops_writes_to_github_in_three_shapes(self):
+        # A gh command that writes is built only in gitops, from its fixed shapes: no other fleet module names a gh
+        # write method or the draft PR command, and followup.py, which posts the replies, starts no process at all.
+        writes = {"--method", "--input", "--draft", "--body-file", "POST", "PATCH", "PUT", "DELETE"}
+        for path in SOURCES:
+            if path.name == "gitops.py":
+                continue
+            constants = {node.value for node in ast.walk(ast.parse(path.read_text()))
+                         if isinstance(node, ast.Constant) and isinstance(node.value, str)}
+            with self.subTest(path=path.name):
+                self.assertEqual(constants & writes, set())
+        self.assertNotIn("followup.py", PROCESS_MODULES_ALLOWED)
+        self.assertEqual(imported_modules(ast.parse((FLEET / "followup.py").read_text())) & PROCESS_MODULES, set())
 
     def test_no_process_module_uses_a_shell_keyword(self):
         for path in [FLEET / name for name in PROCESS_MODULES_ALLOWED] + [RUNNER]:

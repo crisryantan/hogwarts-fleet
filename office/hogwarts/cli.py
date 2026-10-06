@@ -13,7 +13,7 @@ import sys
 from pathlib import Path
 from typing import Callable, Optional, Sequence
 
-from . import capacity, db, facts, ids, owlery, pensieve, wands
+from . import capacity, db, facts, followups, ids, owlery, pensieve, wands
 from .errors import ConflictError, IntegrityError, NotFoundError, StoreError, ValidationError
 
 _WHOLE = re.compile(r"[0-9]{1,18}")
@@ -268,7 +268,8 @@ def _task_board(conn: sqlite3.Connection, args: argparse.Namespace) -> dict:
     """Every active or awaiting-close author task by desk, and any task with a run going for it: its round,
     verdict and whether a run is going."""
     caps = _fleet_caps()
-    return capacity.in_flight(conn, _clock(), caps.RUNNING_WINDOW_SECONDS, args.desk, caps.REVIEW_ROUND_CAP)
+    return capacity.in_flight(conn, _clock(), caps.RUNNING_WINDOW_SECONDS, args.desk, caps.REVIEW_ROUND_CAP,
+                              caps.FOLLOWUP_ROUND_CAP)
 
 
 def _task_start(conn: sqlite3.Connection, args: argparse.Namespace) -> dict:
@@ -328,6 +329,8 @@ HANDLERS: dict[str, Callable] = {
     "task board": _task_board,
     "task allow-round": lambda c, a: capacity.allow_round(c, a.task, _clock()),
     "task rounds": lambda c, a: capacity.review_rounds(c, a.task),
+    "followup list": lambda c, a: followups.list_followups(c, a.task),
+    "followup show": lambda c, a: followups.show(c, a.task),
     "token mint": lambda c, a: owlery.mint(c, a.task, "cli", a.ttl),
     "owl send": lambda c, a: owlery.send(
         c, a.sender, a.recipient, a.kind, a.subject, _body(a), a.body_path, a.task, a.request,
@@ -481,6 +484,13 @@ def _task_parsers(commands: argparse._SubParsersAction) -> None:
     which.add_argument("--status")
     which.add_argument("--open", action="store_true", help="queued, active or awaiting close")
     _sub(group, "board", "task board").add_argument("--desk")
+
+
+def _followup_parsers(commands: argparse._SubParsersAction) -> None:
+    """PR follow-ups, read only: there is no command that changes one."""
+    group = _group(commands, "followup")
+    _sub(group, "list", "followup list").add_argument("--task")
+    _sub(group, "show", "followup show").add_argument("task")
 
 
 def _token_parsers(commands: argparse._SubParsersAction) -> None:
@@ -664,7 +674,7 @@ def build_parser() -> argparse.ArgumentParser:
     commands = parser.add_subparsers(dest="command", required=True, parser_class=_Parser)
     for name in ("init", "doctor"):
         _sub(commands, name, name)
-    for build in (_desk_parsers, _task_parsers, _token_parsers, _owl_parsers, _request_parsers,
+    for build in (_desk_parsers, _task_parsers, _followup_parsers, _token_parsers, _owl_parsers, _request_parsers,
                   _review_parsers, _event_parsers, _pensieve_parsers, _fact_parsers, _metric_parsers,
                   _model_parsers, _portrait_parsers):
         build(commands)

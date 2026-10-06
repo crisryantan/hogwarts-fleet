@@ -56,6 +56,8 @@ RECORDED_SECONDS = {
     "tests_fleet/test_review_rounds.py": 30,
     "tests_fleet/test_spaces.py": 29,
     "tests_fleet/test_review_loop.py": 17,
+    "tests_fleet/test_pr_followup_post.py": 150,
+    "tests_fleet/test_pr_followup.py": 90,
     "tests_fleet/test_push.py": 11,
     "tests_fleet/test_toolchain.py": 9,
 }

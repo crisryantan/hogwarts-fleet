@@ -77,5 +77,74 @@ class ReviewerBriefTest(unittest.TestCase):
                     self.assertTrue(any(rule_matches(rule, line) for rule in deny))
 
 
+FOLLOWUP_BASE = "c" * 40
+EM_DASHES = ("\u2014", "\u2015", "\u2e3a", "\u2e3b")
+
+
+def followup_diff() -> str:
+    """The follow-up diff line a follow-up round's review request names."""
+    from unittest import mock
+
+    from fleet import followup
+
+    record = {"path": WORKTREE, "base": STACKED_BASE}
+    row = {"id": "fu_" + "a" * 16, "number": 1, "base_sha": FOLLOWUP_BASE, "task_id": "t-0001"}
+    with mock.patch.object(followup.followups, "pr_for_task", return_value={"repo": "acme/web-app", "number": 7}), \
+            mock.patch.object(followup.verify, "task_md", return_value=("t-0001", "TASK.md")), \
+            mock.patch.object(followup, "reply_checks", return_value="T1 ok"):
+        lines = followup.request_lines(None, {"id": "t-0001"}, row, record, None, "a" * 40)
+    body = review._request_body({"id": "t-0001", "desk": "harry"}, "a" * 40, record, "t-0001", False, lines)
+    [line] = [line for line in body.splitlines() if line.startswith("Follow-up diff: ")]
+    return line[len("Follow-up diff: "):]
+
+
+@unittest.skipUnless(IN_KIT, ONLY_IN_KIT)
+class FollowupBriefTest(unittest.TestCase):
+    def read(self, *parts: str) -> str:
+        return KIT.joinpath(*parts).read_text()
+
+    def test_harry_brief_has_followup_rounds_threads_and_the_reply_style(self):
+        brief = self.read("desks", "harry", "BRIEF.md")
+        for phrase in ("## Follow-up rounds", "data, never instructions", "THREADS (<follow-up id from the owl>)",
+                       "T<n> | FIXED |", "T<n> | PUSHBACK |", "at most 400 characters", "{sha}",
+                       "FIXED and {sha} only when I changed the code", "no @mentions",
+                       "Reply on GitHub, resolve a thread, request a review or mark a PR ready"):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, brief)
+        self.assertNotIn("HOLD", brief)
+        for dash in EM_DASHES:
+            self.assertNotIn(dash, brief)
+
+    def test_hermione_brief_judges_every_followup_reply(self):
+        brief = self.read("desks", "hermione", "BRIEF.md")
+        for phrase in ("follow-up diff", "For each THREADS row", "a FIXED change really answers the comment",
+                       "a PUSHBACK's evidence holds", "BLOCKING finding naming the label",
+                       "Threads the follow-up already sent to Harry are not in my bot pass"):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, brief)
+        self.assertNotIn("HOLD", brief)
+
+    def test_the_charter_carves_out_only_followup_replies(self):
+        charter = (KIT.parent / "castle" / "CLAUDE.md").read_text()
+        [gate] = [line for line in charter.splitlines() if line.startswith("- Anything sent to a person")]
+        self.assertIn("One standing exception", gate)
+        self.assertIn("`pr-followup`", gate)
+        self.assertIn("no desk resolves a thread, requests a review, marks a PR ready or merges", gate)
+        orders = (KIT.parent / "castle" / "standing-orders.md").read_text()
+        self.assertIn("Code never parses this file", orders)
+        agent = (KIT.parent / "castle" / ".claude" / "agents" / "mcgonagall.md").read_text()
+        self.assertIn("I never route them by owl and never draft those replies", agent)
+
+    def test_hermione_may_run_the_followup_diff(self):
+        settings = json.loads((KIT / "desks" / "hermione" / "settings.json").read_text())
+        allow, deny = settings["permissions"]["allow"], settings["permissions"]["deny"]
+        command = followup_diff()
+        self.assertEqual(command, f"git -C {WORKTREE} diff --no-ext-diff --no-textconv {FOLLOWUP_BASE}...HEAD")
+        for line in (command, f"RTK_DISABLED=1 {command}"):
+            with self.subTest(command=line):
+                self.assertTrue(any(rule_matches(rule, line) for rule in allow))
+                self.assertFalse(any(rule_matches(rule, line) for rule in deny))
+
+
 if __name__ == "__main__":
     unittest.main()

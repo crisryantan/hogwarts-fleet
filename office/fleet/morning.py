@@ -5,7 +5,8 @@ The script gathers every number, with the patrol's read-only GitHub queries (fle
 - the open PRs that ask Ryan for a review;
 - overnight reds: his PRs whose checks are red now, and main-branch commits of the watched repos that went red
   since the last weekday morning (since Friday's on a Monday);
-- the portrait's morning note, his newest morning-<date>.md in the castle, when there is one.
+- the portrait's morning note, his newest morning-<date>.md in the castle, when there is one;
+- the PR follow-ups from the store (fleet/followup.py), open or ended in the last day.
 
 It writes those tables to patrol/lineup/<date>.md, once a day: when that file is already there, from this job or
 from a Map round that wrote a missed lineup, it changes nothing. Then it wakes Ron, on the fast tier, to write the lineup's words
@@ -29,7 +30,7 @@ if __name__ == "__main__" and "/Users/crisryantan/.hogwarts" not in sys.path:
 
 from hogwarts.errors import StoreError  # noqa: E402
 
-from fleet import common, config, patrol, safefs  # noqa: E402
+from fleet import common, config, followup, patrol, safefs  # noqa: E402
 from fleet.safefs import FleetError  # noqa: E402
 
 DAY = 86400
@@ -86,7 +87,8 @@ def main_reds(seen: dict, since: int) -> tuple:
     return reds, errors
 
 
-def render(seen: dict, reds: list, errors: list, note: Optional[dict], ts: int, since: int) -> str:
+def render(seen: dict, reds: list, errors: list, note: Optional[dict], ts: int, since: int,
+           followups_text: Optional[str] = None) -> str:
     pr_reds = [(key, (record["head"] or "-")[:12], patrol.checks_text(record), record["url"])
                for key, record in sorted(seen["prs"].items()) if record["checks"] in patrol.RED]
     main_rows = [(f"{commit['repo']} main", commit["sha"][:12], patrol.checks_text(commit), commit["url"])
@@ -101,6 +103,8 @@ def render(seen: dict, reds: list, errors: list, note: Optional[dict], ts: int, 
         parts.append("\nNot read: " + "; ".join(errors) + "\n")
     if not seen["complete"]:
         parts.append("\nGitHub's list of open PRs could not be read to its end, so this list is cut.\n")
+    if followups_text is not None:
+        parts.append("\n## Follow-ups\n\n" + followups_text)
     parts.append("\n## The portrait's note\n\n")
     if note is None:
         parts.append("No note from the portrait this morning.\n")
@@ -122,7 +126,7 @@ def lineup(conn, now: Optional[int] = None) -> dict:
     since = since_last_morning(ts)
     reds, errors = main_reds(seen, since)
     note = portrait_note(since)
-    text = render(seen, reds, errors, note, ts, since)
+    text = render(seen, reds, errors, note, ts, since, followup.lineup_text(conn, now))
     path = patrol.write_text("lineup", out, text)
     try:
         woke = patrol.wake(conn, "ron", "lineup", "morning lineup", text, out, now, shadow=shadow)

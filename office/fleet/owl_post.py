@@ -81,12 +81,12 @@ HANDOFF_HEADER = re.compile(r"HANDOFF (tk_[0-9a-f]{16})(?:\s.*)?")
 # automatic review starts work on it, and auto-<owl>.done once a review is finished with it, whatever came of it.
 HANDOFF_RECORD = re.compile(r"auto-(owl_[0-9a-f]{16})\.(pending|done|try[1-9])")
 # And after-<request>.json for each round the review loop opens: where it is with what follows that round's verdict.
-# "review" from before the reviewer starts, "acting" with the step (fix-round, push or pr) before anything that reaches
-# outside the office starts, and "done" once it has ended and said what it must. Written whole, so a reader sees the
-# old record or the new one.
+# "review" from before the reviewer starts, "acting" with the step (fix-round, push, pr, or followup for a PR
+# follow-up's push and replies) before anything that reaches outside the office starts, and "done" once it has ended
+# and said what it must. Written whole, so a reader sees the old record or the new one.
 AFTER_RECORD = re.compile(r"after-(rq_[0-9a-f]{16})\.json")
 AFTER_STATES = ("review", "acting", "done")
-AFTER_STEPS = ("fix-round", "push", "pr")
+AFTER_STEPS = ("fix-round", "push", "pr", "followup")
 AFTER_MAX_BYTES = 1024
 REVIEW_STARTED = "review started"
 

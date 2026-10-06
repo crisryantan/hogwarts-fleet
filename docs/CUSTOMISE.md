@@ -199,6 +199,12 @@ All in `~/.hogwarts/fleet/config.py`:
 | `CAP_WARN_FRACTION` | The share of a cap, 0.8, at which a desk sends one warning that day |
 | `PATROL_STALE_DAYS` | Days without activity (a commit, review, comment or edit) after which a PR moves to the stale group at the bottom of the lineup, 30. Review requests from bots are listed there too and never wake Ron |
 | `REVIEW_ROUND_CAP` | Review rounds per author task, 3. The next one waits for `castle task allow-round <task-id>` |
+| `FOLLOWUP_ROUND_CAP` | Review rounds of one PR follow-up, 2, apart from the task's own. The next one waits for `castle task allow-round <task-id>` run while that follow-up is open |
+| `FOLLOWUP_MAX_PER_TASK` | Follow-ups one task takes, 5. Comments after that wait for you, and you hear once a day |
+| `FOLLOWUP_SETTLE_SECONDS` | How old a PR's newest teammate comment must be before its follow-up starts, 300, so one review's comments go as one follow-up |
+| `FOLLOWUP_WRITE_ASSOCIATIONS` | Whose comments a follow-up takes, by GitHub's authorAssociation: OWNER, MEMBER and COLLABORATOR |
+| `FOLLOWUP_IGNORED_LOGINS` | Service and CI accounts that GitHub lists as people; their comments are never routed. Empty in the kit: fill it before you switch follow-ups on. Compared without letter case |
+| `FOLLOWUP_SHADOW_WINDOW_SECONDS` | How far back the shadow-mode dry run in `patrol/followup/` counts comments as if follow-ups had been live, seven days. It never opens a live period, so nothing it counts is ever routed |
 | `RUN_SLOTS` | How many runs a desk may have going at once: Moody 2, Hermione 2 and every other desk 1, so two reviews of different tasks run at once. Each slot has its own lock, Codex work folder and temp folder, and the caps stay per desk across all of them. Raise it only for a desk whose runs never write the same file, at most 8 |
 | `RUN_TIMEOUT_SECONDS` | How long one run may take |
 | `TEMPUS_THRESHOLD` | Context size that triggers the Tempus warning |

@@ -13,7 +13,10 @@ from .errors import ConflictError, IntegrityError, NotFoundError, StoreError, Va
 
 DEFAULT_DB = Path("/Users/crisryantan/.hogwarts/state/pensieve.db")
 CODE_ROOT = Path(os.path.abspath(__file__)).parent.parent
-SCHEMA_VERSION = 10
+# The PR follow-up migration (V_PR_FOLLOWUPS), the one after auto-portrait's AUTO_PATCHES. Its number is kept here
+# and nowhere else.
+PR_FOLLOWUP_MIGRATION = 11
+SCHEMA_VERSION = PR_FOLLOWUP_MIGRATION
 WAL_ATTEMPTS = 50
 BYTECODE_SUFFIXES = (".pyc", ".pyo", ".so")
 SIDECARS = ("-wal", "-shm")
@@ -69,6 +72,26 @@ AUTO_PATCH_BEFORE = ("absent", "present", "unreadable")
 AUTO_PATCH_OPS_MAX = 1048576
 AUTO_PATCH_IDS_MAX = 2499
 AUTO_PATCH_OUTCOME_MAX = 500
+# PR follow-ups (V_PR_FOLLOWUPS): teammates' review comments on a PR the review loop opened, sent back to the build
+# desk and answered after the other family's review. A follow-up moves routing, starting, building, then pushing
+# (when the reviewed commit is new) or straight to posting, then done; it can stop from any state that is not final.
+FOLLOWUP_STATES = ("routing", "starting", "building", "pushing", "posting", "done", "stopped")
+FOLLOWUP_FINAL_STATES = ("done", "stopped")
+FOLLOWUP_OPEN_STATES = tuple(state for state in FOLLOWUP_STATES if state not in FOLLOWUP_FINAL_STATES)
+FOLLOWUP_EDGES = ("routing>starting", "starting>building", "building>pushing", "building>posting", "pushing>posting",
+                  "posting>done") + tuple(f"{state}>stopped" for state in FOLLOWUP_OPEN_STATES)
+FOLLOWUP_ITEM_KINDS = ("thread", "review", "comment")
+# Every routed comment gets a reply: FIXED with a code change, or PUSHBACK with none (an answer, a decline, evidence).
+REPLY_MARKS = ("FIXED", "PUSHBACK")
+REPLY_STATES = ("planned", "posting", "posted", "failed", "unknown")
+REPLY_FINAL_STATES = ("posted", "failed", "unknown")
+# The script desk that sends a follow-up's fix request owl: the patrol's own (fleet config PATROL_SENDER).
+FOLLOWUP_SENDER = "map"
+FOLLOWUP_REASON_MAX = 300
+REPLY_BODY_MAX = 1000
+QUOTE_MAX = 120
+PR_URL_MAX = 300
+PR_NUMBER_MAX = 9999999999
 
 PathLike = Union[str, Path]
 
@@ -106,6 +129,13 @@ _ENUMS = {
     "trial_ends": _choices(MODEL_TRIAL_ENDS),
     "auto_states": _choices(AUTO_PATCH_STATES),
     "auto_before": _choices(AUTO_PATCH_BEFORE),
+    "followup_states": _choices(FOLLOWUP_STATES),
+    "followup_final": _choices(FOLLOWUP_FINAL_STATES),
+    "followup_edges": _choices(FOLLOWUP_EDGES),
+    "item_kinds": _choices(FOLLOWUP_ITEM_KINDS),
+    "reply_marks": _choices(REPLY_MARKS),
+    "reply_states": _choices(REPLY_STATES),
+    "reply_final": _choices(REPLY_FINAL_STATES),
 }
 
 
@@ -874,7 +904,316 @@ AUTO_PATCHES = (
     ),
 )
 
-MIGRATIONS = ((1, V1), (2, V2), (3, V3), (4, V4), (5, V5), (6, V6), (7, V7), (8, V8), (9, V9), (10, AUTO_PATCHES))
+
+# PR follow-ups. task_prs binds the PR the review loop opened to its task, once. followup_live keeps every period the
+# follow-up was live as Map rounds saw it, so a comment written live but not routed then stays routable. pr_followups
+# is one follow-up of one task; pr_followup_items what it asks the build desk to answer; pr_comments the ledger of every
+# GitHub comment it handled, so none is routed twice; pr_replies the reply ledger, so none is posted twice. A review
+# round names the follow-up it belongs to, and an allowance the follow-up that was open when it was granted. A task
+# awaiting close goes back to active only in the transaction that opens a follow-up, once for it, and stays active
+# until a round of that follow-up passes. Every row is kept: nothing here is ever deleted.
+_SHA40 = "length({0}) = 40 AND {0} NOT GLOB '*[^0-9a-f]*'"
+_GITHUB_ID = "length({0}) BETWEEN 1 AND 20 AND {0} GLOB '[1-9]*' AND {0} NOT GLOB '*[^0-9]*'"
+_FOLLOWUP_ID = "length({0}) = 19 AND {0} GLOB 'fu_*' AND substr({0}, 4) NOT GLOB '*[^0-9a-f]*'"
+_ITEM_LABEL = "length({0}) BETWEEN 2 AND 4 AND {0} GLOB 'T[1-9]*' AND substr({0}, 2) NOT GLOB '*[^0-9]*'"
+_REPO = ("length({0}) BETWEEN 3 AND 201 AND {0} GLOB '?*/?*' AND {0} NOT GLOB '*/*/*'"
+         " AND {0} NOT GLOB '*[^A-Za-z0-9._/-]*'")
+_OPEN_FOLLOWUP = "state NOT IN {followup_final}"
+_FRAGMENT = ("CASE NEW.kind WHEN 'thread' THEN '#discussion_r' WHEN 'review' THEN '#pullrequestreview-'"
+             " ELSE '#issuecomment-' END")
+
+V_PR_FOLLOWUPS = (
+    _table(
+        f"""CREATE TABLE IF NOT EXISTS task_prs (
+        task_id TEXT PRIMARY KEY NOT NULL REFERENCES tasks(id),
+        repo TEXT NOT NULL CHECK ({_REPO.format('repo')}),
+        number INTEGER NOT NULL CHECK (number BETWEEN 1 AND {PR_NUMBER_MAX}),
+        branch TEXT NOT NULL CHECK (length(branch) BETWEEN 1 AND {SPEC_BRANCH_MAX}
+            AND branch GLOB '[a-z0-9]*' AND branch NOT GLOB '*[^a-z0-9._/-]*'),
+        base TEXT NOT NULL CHECK (length(base) BETWEEN 1 AND {SPEC_BASE_MAX}
+            AND base GLOB '[A-Za-z0-9]*' AND base NOT GLOB '*[^A-Za-z0-9._/-]*'),
+        opened_sha TEXT NOT NULL CHECK ({_SHA40.format('opened_sha')}),
+        url TEXT NOT NULL CHECK (url = 'https://github.com/' || repo || '/pull/' || number
+            AND length(url) <= {PR_URL_MAX}),
+        opened_at INTEGER NOT NULL,
+        UNIQUE (repo, number)
+    )"""
+    ),
+    # GitHub takes a repo in any letter case, so one PR is bound once however its repo is spelled.
+    "CREATE UNIQUE INDEX IF NOT EXISTS task_prs_one_task_per_pr ON task_prs(lower(repo), number)",
+    _guard("task_prs_immutable", "BEFORE UPDATE ON task_prs", "a task keeps the PR it was bound to"),
+    _guard("task_prs_no_delete", "BEFORE DELETE ON task_prs", "PR bindings are never deleted"),
+    _guard(
+        "task_prs_on_a_passed_task",
+        "BEFORE INSERT ON task_prs WHEN NOT EXISTS (SELECT 1 FROM tasks WHERE id = NEW.task_id"
+        " AND status = 'awaiting_close' AND worktree IS NOT NULL)",
+        "a PR is bound to a task awaiting close with its worktree",
+    ),
+    _table(
+        """CREATE TABLE IF NOT EXISTS followup_live (
+        id INTEGER PRIMARY KEY,
+        since INTEGER NOT NULL,
+        until INTEGER,
+        CHECK (until IS NULL OR until >= since)
+    )"""
+    ),
+    _guard(
+        "followup_live_one_open",
+        "BEFORE INSERT ON followup_live WHEN NEW.until IS NOT NULL"
+        " OR EXISTS (SELECT 1 FROM followup_live WHERE until IS NULL)",
+        "a live period opens only while none is open",
+    ),
+    _guard(
+        "followup_live_closes_once",
+        "BEFORE UPDATE ON followup_live WHEN OLD.until IS NOT NULL OR NEW.until IS NULL"
+        " OR NEW.since IS NOT OLD.since OR NEW.id IS NOT OLD.id",
+        "a live period keeps its start and closes once",
+    ),
+    _guard("followup_live_no_delete", "BEFORE DELETE ON followup_live", "live periods are never deleted"),
+    _table(
+        f"""CREATE TABLE IF NOT EXISTS pr_followups (
+        id TEXT PRIMARY KEY NOT NULL CHECK ({_FOLLOWUP_ID.format('id')}),
+        task_id TEXT NOT NULL REFERENCES task_prs(task_id),
+        number INTEGER NOT NULL CHECK (number >= 1),
+        state TEXT NOT NULL CHECK (state IN {{followup_states}}),
+        base_sha TEXT NOT NULL CHECK ({_SHA40.format('base_sha')}),
+        owl_id TEXT NOT NULL UNIQUE REFERENCES owls(id),
+        pass_sha TEXT CHECK (pass_sha IS NULL OR ({_SHA40.format('pass_sha')})),
+        stop_reason TEXT CHECK (stop_reason IS NULL OR (length(stop_reason) BETWEEN 1 AND {FOLLOWUP_REASON_MAX}
+            AND stop_reason NOT GLOB '*[^ -~]*')),
+        reopened_at INTEGER,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        UNIQUE (task_id, number),
+        CHECK ((state = 'stopped') = (stop_reason IS NOT NULL)),
+        CHECK (state NOT IN ('pushing', 'posting', 'done') OR pass_sha IS NOT NULL),
+        CHECK (state = 'routing' OR reopened_at IS NOT NULL)
+    )"""
+    ),
+    "CREATE UNIQUE INDEX IF NOT EXISTS pr_followups_one_open ON pr_followups(task_id)"
+    " WHERE state NOT IN " + _choices(FOLLOWUP_FINAL_STATES),
+    _guard(
+        "pr_followups_open_routing",
+        "BEFORE INSERT ON pr_followups WHEN NEW.state IS NOT 'routing' OR NEW.pass_sha IS NOT NULL"
+        " OR NEW.stop_reason IS NOT NULL OR NEW.reopened_at IS NOT NULL",
+        "a follow-up opens routing, with no pass, stop or reopen yet",
+    ),
+    _guard(
+        "pr_followups_on_a_bound_passed_task",
+        "BEFORE INSERT ON pr_followups WHEN NOT EXISTS (SELECT 1 FROM tasks WHERE id = NEW.task_id"
+        " AND status = 'awaiting_close') OR NOT EXISTS (SELECT 1 FROM task_prs WHERE task_id = NEW.task_id)",
+        "a follow-up opens on a task awaiting close with its PR bound",
+    ),
+    _guard(
+        "pr_followups_count_up",
+        "BEFORE INSERT ON pr_followups WHEN NEW.number IS NOT"
+        " 1 + (SELECT COUNT(*) FROM pr_followups WHERE task_id = NEW.task_id)",
+        "the follow-ups of a task count up from 1",
+    ),
+    _guard(
+        "pr_followups_owl_from_map",
+        "BEFORE INSERT ON pr_followups WHEN NOT EXISTS (SELECT 1 FROM owls JOIN tasks ON tasks.id = NEW.task_id"
+        f" WHERE owls.id = NEW.owl_id AND owls.kind = 'fyi' AND owls.sender = '{FOLLOWUP_SENDER}'"
+        " AND owls.recipient = tasks.desk AND owls.task_id = NEW.task_id AND owls.request_id IS NULL)",
+        "the owl of a follow-up is an fyi from map to the desk of its task, about that task",
+    ),
+    _guard(
+        "pr_followups_fixed",
+        "BEFORE UPDATE OF id, task_id, number, base_sha, owl_id, created_at ON pr_followups WHEN NEW.id IS NOT OLD.id"
+        " OR NEW.task_id IS NOT OLD.task_id OR NEW.number IS NOT OLD.number OR NEW.base_sha IS NOT OLD.base_sha"
+        " OR NEW.owl_id IS NOT OLD.owl_id OR NEW.created_at IS NOT OLD.created_at",
+        "a follow-up keeps its task, number, base commit and owl",
+    ),
+    _guard("pr_followups_final", _enums("BEFORE UPDATE ON pr_followups WHEN OLD.state IN {followup_final}"),
+           "a follow-up that ended is final"),
+    _guard(
+        "pr_followups_edges",
+        _enums("BEFORE UPDATE OF state ON pr_followups WHEN NEW.state IS NOT OLD.state"
+               " AND (OLD.state || '>' || NEW.state) NOT IN {followup_edges}"),
+        "a follow-up moves only along its states",
+    ),
+    _guard(
+        "pr_followups_pass_once",
+        "BEFORE UPDATE OF pass_sha ON pr_followups WHEN OLD.pass_sha IS NOT NULL AND NEW.pass_sha IS NOT OLD.pass_sha",
+        "a follow-up keeps the commit that passed",
+    ),
+    _guard(
+        "pr_followups_reopened_once",
+        "BEFORE UPDATE OF reopened_at ON pr_followups WHEN OLD.reopened_at IS NOT NULL"
+        " AND NEW.reopened_at IS NOT OLD.reopened_at",
+        "a follow-up reopens its task once",
+    ),
+    _guard("pr_followups_no_delete", "BEFORE DELETE ON pr_followups", "follow-ups are never deleted"),
+    _table(
+        f"""CREATE TABLE IF NOT EXISTS pr_followup_items (
+        followup_id TEXT NOT NULL REFERENCES pr_followups(id),
+        label TEXT NOT NULL CHECK ({_ITEM_LABEL.format('label')}),
+        kind TEXT NOT NULL CHECK (kind IN {{item_kinds}}),
+        thread_id TEXT CHECK (thread_id IS NULL OR (length(thread_id) BETWEEN 1 AND 100
+            AND thread_id NOT GLOB '*[^A-Za-z0-9_=-]*')),
+        reply_to TEXT NOT NULL CHECK ({_GITHUB_ID.format('reply_to')}),
+        url TEXT NOT NULL CHECK (length(url) <= {PR_URL_MAX} AND url NOT GLOB '*[^!-~]*'),
+        quote TEXT CHECK (quote IS NULL OR (length(quote) BETWEEN 1 AND {QUOTE_MAX} AND quote NOT GLOB '*[^ -~]*')),
+        PRIMARY KEY (followup_id, label),
+        CHECK ((kind = 'thread') = (thread_id IS NOT NULL)),
+        CHECK (kind <> 'thread' OR quote IS NULL)
+    )"""
+    ),
+    _guard(
+        "pr_followup_items_while_routing",
+        "BEFORE INSERT ON pr_followup_items WHEN NOT EXISTS (SELECT 1 FROM pr_followups"
+        " WHERE id = NEW.followup_id AND state = 'routing')",
+        "items are written only while their follow-up is routing",
+    ),
+    _guard(
+        "pr_followup_items_link",
+        "BEFORE INSERT ON pr_followup_items WHEN NOT EXISTS (SELECT 1 FROM pr_followups AS f"
+        " JOIN task_prs AS p ON p.task_id = f.task_id WHERE f.id = NEW.followup_id AND lower(NEW.url) ="
+        f" lower('https://github.com/' || p.repo || '/pull/' || p.number || {_FRAGMENT} || NEW.reply_to))",
+        "an item links to the comment it answers on the PR of its follow-up",
+    ),
+    _guard("pr_followup_items_immutable", "BEFORE UPDATE ON pr_followup_items", "follow-up items never change"),
+    _guard("pr_followup_items_no_delete", "BEFORE DELETE ON pr_followup_items", "follow-up items are never deleted"),
+    _table(
+        f"""CREATE TABLE IF NOT EXISTS pr_comments (
+        repo TEXT NOT NULL CHECK ({_REPO.format('repo')} AND repo = lower(repo)),
+        kind TEXT NOT NULL CHECK (kind IN {{item_kinds}}),
+        comment_id TEXT NOT NULL CHECK ({_GITHUB_ID.format('comment_id')}),
+        task_id TEXT NOT NULL REFERENCES tasks(id),
+        followup_id TEXT NOT NULL,
+        label TEXT NOT NULL,
+        recorded_at INTEGER NOT NULL,
+        PRIMARY KEY (repo, kind, comment_id),
+        FOREIGN KEY (followup_id, label) REFERENCES pr_followup_items(followup_id, label)
+    )"""
+    ),
+    "CREATE INDEX IF NOT EXISTS pr_comments_task ON pr_comments(task_id)",
+    _guard(
+        "pr_comments_with_a_routing_item",
+        "BEFORE INSERT ON pr_comments WHEN NOT EXISTS (SELECT 1 FROM pr_followups AS f"
+        " JOIN task_prs AS p ON p.task_id = f.task_id JOIN pr_followup_items AS i ON i.followup_id = f.id"
+        " WHERE f.id = NEW.followup_id AND f.state = 'routing' AND f.task_id = NEW.task_id"
+        " AND lower(p.repo) = NEW.repo AND i.label = NEW.label AND i.kind = NEW.kind)",
+        "a comment is handled only with an item of the routing follow-up of its task",
+    ),
+    _guard("pr_comments_immutable", "BEFORE UPDATE ON pr_comments", "handled comments never change"),
+    _guard("pr_comments_no_delete", "BEFORE DELETE ON pr_comments", "handled comments are never deleted"),
+    _table(
+        f"""CREATE TABLE IF NOT EXISTS pr_replies (
+        followup_id TEXT NOT NULL,
+        label TEXT NOT NULL,
+        mark TEXT NOT NULL CHECK (mark IN {{reply_marks}}),
+        body TEXT NOT NULL CHECK (length(body) BETWEEN 1 AND {REPLY_BODY_MAX} AND body NOT GLOB '*[^ -~{chr(10)}]*'),
+        state TEXT NOT NULL CHECK (state IN {{reply_states}}),
+        posted_id TEXT CHECK (posted_id IS NULL OR ({_GITHUB_ID.format('posted_id')})),
+        begun_at INTEGER,
+        ended_at INTEGER,
+        PRIMARY KEY (followup_id, label),
+        FOREIGN KEY (followup_id, label) REFERENCES pr_followup_items(followup_id, label),
+        CHECK ((state = 'posted') = (posted_id IS NOT NULL)),
+        CHECK ((state = 'planned') = (begun_at IS NULL)),
+        CHECK ((state IN {{reply_final}}) = (ended_at IS NOT NULL))
+    )"""
+    ),
+    _guard(
+        "pr_replies_planned_while_building",
+        "BEFORE INSERT ON pr_replies WHEN NEW.state IS NOT 'planned' OR NEW.posted_id IS NOT NULL"
+        " OR NEW.begun_at IS NOT NULL OR NEW.ended_at IS NOT NULL OR NOT EXISTS (SELECT 1 FROM pr_followups"
+        " WHERE id = NEW.followup_id AND state = 'building')",
+        "replies are planned once, while their follow-up is building",
+    ),
+    _guard(
+        "pr_replies_fixed",
+        "BEFORE UPDATE OF followup_id, label, mark, body ON pr_replies WHEN NEW.followup_id IS NOT OLD.followup_id"
+        " OR NEW.label IS NOT OLD.label OR NEW.mark IS NOT OLD.mark OR NEW.body IS NOT OLD.body",
+        "a reply keeps its mark and its text",
+    ),
+    _guard("pr_replies_final", _enums("BEFORE UPDATE ON pr_replies WHEN OLD.state IN {reply_final}"),
+           "a reply that ended is final"),
+    _guard(
+        "pr_replies_edges",
+        "BEFORE UPDATE OF state ON pr_replies WHEN NEW.state IS NOT OLD.state AND NOT ("
+        "(OLD.state = 'planned' AND NEW.state = 'posting' AND EXISTS (SELECT 1 FROM pr_followups"
+        " WHERE id = NEW.followup_id AND state = 'posting'))"
+        " OR (OLD.state = 'posting' AND NEW.state IN ('posted', 'failed', 'unknown')))",
+        "a reply moves planned, then posting while its follow-up posts, then posted, failed or unknown",
+    ),
+    # A reply begins only once every reply begun before it is posted: one whose outcome is not a clean post (still
+    # posting, failed or unknown) holds back every reply after it, whatever code asks.
+    _guard(
+        "pr_replies_one_at_a_time",
+        "BEFORE UPDATE OF state ON pr_replies WHEN OLD.state = 'planned' AND NEW.state = 'posting'"
+        " AND EXISTS (SELECT 1 FROM pr_replies AS other WHERE other.followup_id = NEW.followup_id"
+        " AND other.label IS NOT NEW.label AND other.state IN ('posting', 'failed', 'unknown'))",
+        "a reply begins only while every reply begun before it is posted",
+    ),
+    # A reply that failed or may or may not be on the PR ends only as its follow-up stops, in the same transaction, so
+    # a kill can never leave that outcome without the stop it implies.
+    _guard(
+        "pr_replies_fail_only_with_stop",
+        "BEFORE UPDATE OF state ON pr_replies WHEN NEW.state IN ('failed', 'unknown') AND NEW.state IS NOT OLD.state"
+        " AND NOT EXISTS (SELECT 1 FROM pr_followups WHERE id = NEW.followup_id AND state = 'stopped')",
+        "a reply ends failed or unknown only as its follow-up stops",
+    ),
+    _guard(
+        "pr_replies_begun_once",
+        "BEFORE UPDATE OF begun_at ON pr_replies WHEN OLD.begun_at IS NOT NULL AND NEW.begun_at IS NOT OLD.begun_at",
+        "a reply keeps when it began",
+    ),
+    _guard("pr_replies_no_delete", "BEFORE DELETE ON pr_replies", "replies are never deleted"),
+    ("review_rounds", "followup_id",
+     "ALTER TABLE review_rounds ADD COLUMN followup_id TEXT REFERENCES pr_followups(id)"),
+    "CREATE INDEX IF NOT EXISTS review_rounds_followup ON review_rounds(followup_id)",
+    _guard(
+        "review_rounds_followup_starting",
+        "BEFORE INSERT ON review_rounds WHEN EXISTS (SELECT 1 FROM pr_followups WHERE task_id = NEW.task_id"
+        " AND state IN ('routing', 'starting'))",
+        "a teammate follow-up of this task is still starting",
+    ),
+    _guard(
+        "review_rounds_followup_group",
+        "BEFORE INSERT ON review_rounds WHEN NEW.followup_id IS NOT"
+        " (SELECT id FROM pr_followups WHERE task_id = NEW.task_id AND state = 'building')"
+        " AND NOT EXISTS (SELECT 1 FROM pr_followups WHERE task_id = NEW.task_id AND state IN ('routing', 'starting'))",
+        "a round of a task in a follow-up names that follow-up, and only such a round names one",
+    ),
+    _guard(
+        "review_rounds_followup_fixed",
+        "BEFORE UPDATE OF followup_id ON review_rounds WHEN OLD.followup_id IS NOT NEW.followup_id",
+        "a review round keeps its follow-up",
+    ),
+    ("round_allowances", "followup_id",
+     "ALTER TABLE round_allowances ADD COLUMN followup_id TEXT REFERENCES pr_followups(id)"),
+    _guard(
+        "round_allowances_followup_open",
+        "BEFORE INSERT ON round_allowances WHEN NEW.followup_id IS NOT"
+        " (SELECT id FROM pr_followups WHERE task_id = NEW.task_id AND " + _enums(_OPEN_FOLLOWUP) + ")",
+        "an allowance belongs to the follow-up open when it is granted, or to the build when none is",
+    ),
+    _guard(
+        "tasks_reopen_only_for_followup",
+        "BEFORE UPDATE OF status ON tasks WHEN OLD.status = 'awaiting_close' AND NEW.status IS NOT OLD.status"
+        " AND NEW.status <> 'closed' AND NOT (NEW.status = 'active' AND EXISTS (SELECT 1 FROM pr_followups"
+        " WHERE task_id = NEW.id AND state = 'routing' AND reopened_at IS NULL))",
+        "a task awaiting close goes back to active only to start a PR follow-up",
+    ),
+    """CREATE TRIGGER IF NOT EXISTS tasks_reopened_marks_followup AFTER UPDATE OF status ON tasks
+        WHEN OLD.status = 'awaiting_close' AND NEW.status = 'active' BEGIN
+        UPDATE pr_followups SET reopened_at = CAST(strftime('%s', 'now') AS INTEGER)
+            WHERE task_id = NEW.id AND state = 'routing' AND reopened_at IS NULL;
+    END""",
+    _guard(
+        "tasks_followup_holds_active",
+        "BEFORE UPDATE OF status ON tasks WHEN OLD.status = 'active' AND NEW.status = 'awaiting_close'"
+        " AND EXISTS (SELECT 1 FROM pr_followups AS f WHERE f.task_id = NEW.id"
+        " AND f.state IN ('routing', 'starting', 'building') AND NOT EXISTS (SELECT 1 FROM review_rounds AS r"
+        " JOIN review_passes AS p ON p.id = r.review_id WHERE r.followup_id = f.id AND p.verdict = 'PASS'))",
+        "a task in a PR follow-up awaits close only after a round of that follow-up passes",
+    ),
+)
+
+MIGRATIONS = ((1, V1), (2, V2), (3, V3), (4, V4), (5, V5), (6, V6), (7, V7), (8, V8), (9, V9), (10, AUTO_PATCHES),
+              (PR_FOLLOWUP_MIGRATION, V_PR_FOLLOWUPS))
 
 
 def _uid() -> int:

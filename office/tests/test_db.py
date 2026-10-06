@@ -805,5 +805,59 @@ class DoctorTests(StoreCase):
         scan.assert_called_once_with(self.code)
 
 
+class MigrationPrFollowupTests(unittest.TestCase):
+    """The PR follow-up migration, found by its name, so it can take another number without these tests changing."""
+
+    def number(self) -> int:
+        return next(number for number, statements in db.MIGRATIONS if statements is db.V_PR_FOLLOWUPS)
+
+    def older_database(self):
+        """A store from just before the follow-up migration, with a build task that passed and a review round."""
+        path = temp_dir(self) / "state" / "pensieve.db"
+        older = [migration for migration in db.MIGRATIONS if migration[0] < self.number()]
+        with mock.patch.object(db, "MIGRATIONS", tuple(older)), mock.patch.object(db, "SCHEMA_VERSION", older[-1][0]):
+            conn = db.connect(path)
+            for name, family in (("alpha", "claude"), ("beta", "codex")):
+                pensieve.add_desk(conn, name, family, now=NOW)
+            pensieve.allow_many_tasks(conn, "beta", now=NOW)
+            task = pensieve.start_task(conn, pensieve.create_task(conn, "beta", "build", now=NOW)["id"], now=NOW)["id"]
+            pensieve.record_commit(conn, task, "acme/web-app", "a" * 40)
+            opened = owlery.open_request(conn, "beta", "alpha", "review it", parent_task_id=task, now=NOW)
+            conn.execute("INSERT INTO review_rounds(request_id, task_id, reviewer, sha, round, created_at)"
+                         " VALUES (?, ?, 'alpha', ?, 1, ?)", (opened["request"]["id"], task, "a" * 40, NOW))
+            conn.execute("INSERT INTO round_allowances(task_id, granted_at) VALUES (?, ?)", (task, NOW))
+            pensieve.mark_awaiting_close(conn, task, now=NOW)
+            self.assertIsNone(conn.execute("SELECT name FROM sqlite_master WHERE name = 'pr_followups'").fetchone())
+            conn.close()
+        self.task = task
+        conn = db.connect(path)
+        self.addCleanup(conn.close)
+        return conn
+
+    def test_an_older_database_migrates_and_no_task_has_a_pr_or_followup(self):
+        conn = self.older_database()
+        self.assertEqual(db.schema_version(conn), db.SCHEMA_VERSION)
+        self.assertGreaterEqual(db.SCHEMA_VERSION, self.number())
+        for table in ("task_prs", "followup_live", "pr_followups", "pr_followup_items", "pr_comments", "pr_replies"):
+            with self.subTest(table=table):
+                self.assertEqual(conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0], 0)
+        self.assertEqual([row[0] for row in conn.execute("SELECT followup_id FROM review_rounds")], [None])
+        self.assertEqual([row[0] for row in conn.execute("SELECT followup_id FROM round_allowances")], [None])
+        self.assertEqual(pensieve.get_task(conn, self.task)["status"], "awaiting_close")
+        self.assertEqual(conn.execute("PRAGMA integrity_check").fetchone()[0], "ok")
+        self.assertEqual(conn.execute("PRAGMA foreign_key_check").fetchall(), [])
+        # An older round and allowance count for the build, as before.
+        self.assertFalse(capacity.needs_allowance(conn, self.task, 1))
+        changes = conn.total_changes
+        self.assertEqual(db.migrate(conn), db.SCHEMA_VERSION)
+        with db.transaction(conn):
+            for statement in db.pending_statements(conn, db.V_PR_FOLLOWUPS):
+                conn.execute(statement)
+        self.assertEqual(conn.total_changes, changes)
+        # The one way back to active is in place: no raw write reopens a passed task.
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "only to start a PR follow-up"):
+            conn.execute("UPDATE tasks SET status = 'active' WHERE id = ?", (self.task,))
+
+
 if __name__ == "__main__":
     unittest.main()

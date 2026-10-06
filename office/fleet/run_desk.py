@@ -70,7 +70,8 @@ check before a launch tries the launch lock without waiting too, and Ollivander 
 no deadlock can form.
 
 A desk works in a worktree only when the owl belongs to a request addressed to that desk
-and the request's task is the desk's own. Any other owl runs in its slot's work folder. That task
+and the request's task is the desk's own, or when it is the fix request of a PR follow-up of the desk's own task while
+that follow-up is starting or building (the store says so, by its owl). Any other owl runs in its slot's work folder. That task
 is the run's task, never "the desk's active task": its launch row names it, and a run whose task
 is closed is refused before it waits for a slot. A desk may hold many tasks, and its runs share its slots,
 so a slot's work folder and private temp folder never serve two processes at once.
@@ -133,7 +134,7 @@ from typing import Callable, Iterator, NamedTuple, Optional
 if __name__ == "__main__" and "/Users/crisryantan/.hogwarts" not in sys.path:
     sys.path.insert(0, "/Users/crisryantan/.hogwarts")
 
-from hogwarts import capacity, db, ids, owlery, pensieve, wands  # noqa: E402
+from hogwarts import capacity, db, followups, ids, owlery, pensieve, wands  # noqa: E402
 from hogwarts.errors import ConflictError, NotFoundError, StoreError  # noqa: E402
 
 from fleet import common, config, gitops, safefs, toolchain  # noqa: E402
@@ -333,13 +334,29 @@ def _castle_path(store_path: str) -> str:
 
 
 def _own_task(conn, desk: str, owl: Optional[dict]) -> Optional[dict]:
-    """This desk's own task, but only when the owl belongs to a request addressed to this desk."""
-    if owl is None or owl["request_id"] is None:
+    """This desk's own task, but only when the owl belongs to a request addressed to this desk, or is the fix request
+    of a PR follow-up of that task (_followup_task)."""
+    if owl is None:
         return None
+    if owl["request_id"] is None:
+        return _followup_task(conn, desk, owl)
     request = owlery.get_request(conn, owl["request_id"])
     if request["recipient"] != desk or request["task_id"] is None:
         return None
     task = pensieve.get_task(conn, request["task_id"])
+    return task if task["desk"] == desk else None
+
+
+def _followup_task(conn, desk: str, owl: dict) -> Optional[dict]:
+    """The task of a PR follow-up whose own fix request this owl is: an fyi from the patrol's desk about that task, the
+    owl of a follow-up of it that is starting or building, the task this desk's own. Any other owl without a request
+    binds no task. A store error raises."""
+    if owl["kind"] != "fyi" or owl["sender"] != config.PATROL_SENDER or owl["task_id"] is None:
+        return None
+    row = followups.by_owl(conn, owl["id"])
+    if row is None or row["state"] not in ("starting", "building") or row["task_id"] != owl["task_id"]:
+        return None
+    task = pensieve.get_task(conn, row["task_id"])
     return task if task["desk"] == desk else None
 
 
