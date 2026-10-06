@@ -8,6 +8,7 @@ import os
 import shutil
 import stat
 import subprocess
+import time
 from unittest import mock
 
 from hogwarts import pensieve
@@ -20,7 +21,10 @@ from tests_fleet.support import OFFICE, FleetCase
 REAL_ANNOUNCE = mcgonagall_inbox.announce
 SECRET = "sk-ant-abcdefghijklmnopqrstuvwxyz0123456789"
 FAKE = """#!/usr/bin/python3
-import json, os, sys
+import json, os, sys, time
+if sys.argv[-1] == "hang":
+    time.sleep(60)
+    sys.exit(0)
 state = {state!r}
 mode = open(os.path.join(state, "mode")).read().strip()
 owl = json.load(open("owl.json"))
@@ -90,7 +94,7 @@ class OwlReportCase(FleetCase):
         self.write_owl(sender, f"o{self.count:02d}.json", {"to": "mcgonagall", "kind": "fyi", "subject": subject,
                                                            "body": f"body text {self.count}",
                                                            "task_id": self.task["id"]})
-        return owl_post.run_pass(self.conn, now=NOW)["delivered"][-1]["owl_id"]
+        return owl_post.run_pass(self.conn, now=NOW + self.count)["delivered"][-1]["owl_id"]
 
     def runs(self) -> list:
         path = self.state / "runs.jsonl"
@@ -162,7 +166,7 @@ class HappyPathTests(OwlReportCase):
             self.assertNotIn(SECRET, text)
             self.assertNotIn("second line", text)
         self.assertEqual(call[0][1], f"Owl: ron {self.task['id']}")
-        self.assertIn(f" {owl_id} token ", self.log()[0])
+        self.assertIn(f"\t{owl_id}\ttoken ", self.log()[0])
 
     def test_a_folder_a_killed_run_left_is_removed_before_the_next_turn(self):
         stale = self.root / "turn-00000000000000aa"
@@ -184,7 +188,7 @@ class HappyPathTests(OwlReportCase):
         with mock.patch.object(run_desk.subprocess, "Popen", side_effect=spy):
             owl_report.run(self.conn)
         [fds] = seen
-        self.assertEqual(len(fds), 1)
+        self.assertEqual(len(fds), 2)  # the reporter lock and the launch gate
         self.assertFalse(owl_report._running())  # released once the reporter and its turn are done
 
 
@@ -306,7 +310,7 @@ class RetryTests(OwlReportCase):
         self.assertEqual(len(self.reports()), 1)
         self.assertEqual(len(self.runs()), 1)
 
-    def test_a_failed_notification_is_retried_then_dropped_with_its_log_line_kept(self):
+    def test_a_failed_notification_is_retried_then_kept_as_notify_failed_with_one_event(self):
         owl_id = self.send()
         self.notified.return_value = False
         owl_report.run(self.conn)
@@ -314,10 +318,36 @@ class RetryTests(OwlReportCase):
         owl_report.run(self.conn)
         self.assertEqual(self.pending()[owl_id]["notify_tries"], 2)
         owl_report.run(self.conn)
-        self.assertEqual(self.pending(), {})
+        self.assertEqual(self.pending()[owl_id]["state"], "done")  # kept, never deleted, and not retried
+        owl_report.run(self.conn)
         self.assertEqual(len(self.reports()), config.OWL_REPORT_NOTIFY_TRIES)
+        events = self.conn.execute("SELECT summary FROM events WHERE kind = 'owl-report.notify-failed'").fetchall()
+        self.assertEqual(len(events), 1)
+        self.assertIn(f"The owl report on {owl_id} from ron", events[0]["summary"])
+        self.assertIn("owl-reports.log, but its notification failed 3 times", events[0]["summary"])
         self.assertEqual(len(self.log()), 1)
         self.assertEqual(len(self.runs()), 1)
+
+    def test_a_kill_after_notify_failed_still_raises_its_event_once(self):
+        owl_id = self.send()
+        self.notified.return_value = False
+        real = owl_report.pensieve.add_event
+
+        def killed(conn, desk, kind, *args, **kwargs):
+            if kind == "owl-report.notify-failed":
+                raise SystemExit(143)
+            return real(conn, desk, kind, *args, **kwargs)
+
+        owl_report.run(self.conn)
+        owl_report.run(self.conn)
+        with mock.patch.object(owl_report.pensieve, "add_event", side_effect=killed), self.assertRaises(SystemExit):
+            owl_report.run(self.conn)
+        self.assertEqual(self.pending()[owl_id]["state"], "notify_failed")
+        owl_report.run(self.conn)
+        owl_report.run(self.conn)
+        self.assertEqual(self.pending()[owl_id]["state"], "done")
+        count = self.conn.execute("SELECT COUNT(*) FROM events WHERE kind = 'owl-report.notify-failed'").fetchone()[0]
+        self.assertEqual(count, 1)
 
     def test_a_failed_turn_sends_the_plain_notification_once_it_shows(self):
         owl_id = self.send(subject="first")
@@ -438,3 +468,145 @@ class SwitchTests(OwlReportCase):
         self.assertEqual(len(self.runs()), 1)
         self.assertEqual(len(self.pending()), 2)  # the first is held before publishing, the second untouched
         self.assertEqual(self.reports(), [])
+
+
+class LogRecordTests(OwlReportCase):
+    def log_path(self):
+        return self.castle / "desks" / "mcgonagall" / owl_report.LOG_FILE
+
+    def test_an_owl_id_inside_another_report_does_not_count_as_logged(self):
+        first = self.send(subject="first")
+        second = self.send(subject="second")
+        self.write_file(self.log_path(), owl_report.record(
+            {"sender": "ron", "task_id": None, "id": first}, f"see also {second} and\tmore", NOW).decode())
+        owl_report.run(self.conn)
+        records = [line.split("\t") for line in self.log()]
+        self.assertTrue(all(len(fields) == 5 for fields in records))
+        self.assertEqual(sorted(fields[3] for fields in records), sorted([first, second]))
+        self.assertEqual(records[0][4], f"see also {second} and more")  # no tab inside a field
+
+    def test_a_record_cut_short_never_counts_and_the_next_one_starts_on_its_own_line(self):
+        owl_id = self.send()
+        whole = owl_report.record({"sender": "ron", "task_id": self.task["id"], "id": owl_id}, "ron says status", NOW)
+        self.write_file(self.log_path(), whole[:-10])  # a kill or a full disk cut it short
+        self.write_file(self.folder() / owl_id, json.dumps({"state": "logging", "summary": "ron says status"}))
+        owl_report.run(self.conn)
+        raw = self.log_path().read_bytes()
+        self.assertTrue(raw.endswith(b"\n"))
+        lines = raw.decode().split("\n")[:-1]
+        self.assertEqual(lines[0], whole[:-10].decode())
+        self.assertEqual(lines[1].split("\t")[3:], [owl_id, "ron says status"])
+        self.assertEqual(self.runs(), [])  # recovered from the marker's own summary, no new turn
+        self.assertEqual(self.pending(), {})
+
+
+class AuthWatermarkTests(OwlReportCase):
+    def test_four_hundred_pending_owls_block_with_a_small_watermark(self):
+        from hogwarts import owlery
+        for index in range(400):
+            owl = owlery.send(self.conn, "ron", "mcgonagall", "fyi", f"note {index}", body="x", now=NOW)
+            owlery.mark_delivered(self.conn, owl["id"], now=NOW + index)
+            self.write_file((self.folder() if self.folder().exists() else self._folder()) / owl["id"],
+                            json.dumps({"state": "pending", "tries": 0}))
+        self.mode("auth")
+        self.assertEqual(owl_report.run(self.conn), ["auth"])
+        raw = (self.folder() / owl_report.BLOCKED).read_bytes()
+        self.assertLess(len(raw), 512)
+        self.assertEqual(json.loads(raw)["mark"][0], NOW + 399)
+        self.assertEqual(owl_report.run(self.conn), [])
+        self.assertEqual(owl_report.kick(self.conn), "waiting for a new owl after an auth failure")
+        self.mode("ok")
+        self.count = 500
+        self.send(subject="after")
+        self.assertIn("done", owl_report.run(self.conn))
+
+    def _folder(self):
+        self.folder().mkdir(mode=0o700)
+        return self.folder()
+
+    def test_a_stale_writer_never_restores_an_old_block_and_the_alert_is_sent_once(self):
+        self.send()
+        self.mode("auth")
+        with mock.patch.object(owl_report, "_shown", return_value=False):
+            owl_report.run(self.conn)  # the alert could not show: still pending
+        fd = os.open(self.folder(), os.O_RDONLY | os.O_DIRECTORY)
+        self.addCleanup(os.close, fd)
+        old = markers.read(fd, owl_report.BLOCKED)
+        self.assertEqual(old["alert"], "pending")
+        os.unlink(self.folder() / owl_report.BLOCKED)  # a reporter lifted it meanwhile
+        self.assertFalse(owl_report._replace_block(fd, old["token"], {**old, "alert": "sent"}))
+        self.assertFalse((self.folder() / owl_report.BLOCKED).exists())
+        markers.replace(fd, owl_report.BLOCKED, old)
+        with owl_report._alert_lock() as mine:  # another publisher holds the alert lock: kick leaves it to them
+            self.assertTrue(mine)
+            owl_report.kick(self.conn)
+        self.assertEqual([call[0][0] for call in self.plain()].count("owl watcher: auth failed"), 0)
+        owl_report.kick(self.conn)
+        owl_report.kick(self.conn)
+        self.assertEqual([call[0][0] for call in self.plain()].count("owl watcher: auth failed"), 1)
+
+    def test_a_pending_alert_waits_while_the_switch_is_off(self):
+        self.send()
+        self.mode("auth")
+        with mock.patch.object(owl_report, "_shown", return_value=False):
+            owl_report.run(self.conn)
+        os.unlink(self.office / config.OWL_REPORTS_FILE)
+        fd = os.open(self.folder(), os.O_RDONLY | os.O_DIRECTORY)
+        self.addCleanup(os.close, fd)
+        owl_report._alert(self.conn, fd)
+        self.assertEqual(self.plain(), [])
+        self.assertEqual(markers.read(fd, owl_report.BLOCKED)["alert"], "pending")
+
+
+class GateTests(OwlReportCase):
+    def test_a_stop_or_an_update_runs_no_turn_and_counts_no_try(self):
+        owl_id = self.send()
+        state = self.office / config.STATE_DIR
+        state.mkdir(mode=0o700, exist_ok=True)
+        self.write_file(state / config.STOP_FILE, "")
+        self.assertEqual(owl_report.run(self.conn), ["stopped"])
+        self.assertEqual(self.runs(), [])
+        self.assertEqual(self.pending()[owl_id]["tries"], 0)
+        os.unlink(state / config.STOP_FILE)
+        with run_desk.safefs.opened_dir(str(self.office), "locks", create=True) as locks_fd, \
+                run_desk.safefs.held_lock(locks_fd, config.UPDATE_LOCK, blocking=False):
+            self.assertEqual(owl_report.run(self.conn), ["stopped"])
+        self.assertEqual(self.runs(), [])
+        self.assertEqual(self.pending()[owl_id]["tries"], 0)
+        self.assertEqual(owl_report.run(self.conn), ["done"])
+
+    def test_a_blocked_model_runs_no_turn_and_sends_the_plain_notification_once(self):
+        self.send()
+        with mock.patch.object(config, "BLOCKED_MODEL_PREFIXES", ("haiku",)):
+            self.assertEqual(owl_report.run(self.conn), ["stopped"])
+            self.assertEqual(owl_report.run(self.conn), ["stopped"])
+        self.assertEqual(self.runs(), [])
+        self.assertEqual(len(self.plain()), 1)
+
+
+class HungTurnTests(OwlReportCase):
+    def test_a_hung_turn_a_dead_reporter_left_is_killed_once_past_its_deadline(self):
+        self.mode("ok")
+        settings = f"{self.office}/desks/mcgonagall/{config.OWL_REPORT_SETTINGS_FILE}"
+        hung = subprocess.Popen(["/bin/sleep", "60"], start_new_session=True)
+        self.addCleanup(hung.kill)
+        self.assertFalse(run_desk.kill_report_turn(hung.pid))  # not the report command: left alone
+        self.assertIsNone(hung.poll())
+        fake = subprocess.Popen([config.CLAUDE_BIN, "--settings", settings, "hang"], start_new_session=True,
+                                cwd=str(self.tmp), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        self.addCleanup(fake.kill)
+        with mock.patch.object(run_desk, "report_turn_command",
+                               return_value=f"{config.CLAUDE_BIN} --settings {settings} hang"):
+            self.send()
+            fd = os.open(self.folder(), os.O_RDONLY | os.O_DIRECTORY)
+            self.addCleanup(os.close, fd)
+            old = int(time.time()) - config.OWL_REPORT_TIMEOUT_SECONDS - owl_report.REAP_MARGIN_SECONDS - 5
+            markers.replace(fd, owl_report.TURN, {"state": "running", "pid": fake.pid, "at": int(time.time())})
+            with mock.patch.object(owl_report, "_running", return_value=True):
+                self.assertEqual(owl_report.kick(self.conn), "a reporter is running")  # not past its deadline
+                markers.replace(fd, owl_report.TURN, {"state": "running", "pid": fake.pid, "at": old})
+                self.assertEqual(owl_report.kick(self.conn), "a hung turn was stopped")
+        self.assertIsNone(hung.poll())
+        fake.wait(timeout=10)
+        self.assertEqual(fake.returncode, -9)  # killed, not ended on its own
+        self.assertFalse((self.folder() / owl_report.TURN).exists())

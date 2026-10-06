@@ -50,7 +50,7 @@ def _dedupe(owl_id: str) -> str:
 
 
 def owl_meta(conn, owl_id: str) -> Optional[dict]:
-    row = db.fetch_one(conn, "SELECT id, sender, recipient, kind, task_id, subject, created_at FROM owls"
+    row = db.fetch_one(conn, "SELECT id, sender, recipient, kind, task_id, subject, created_at, delivered_at FROM owls"
                        " WHERE id = ?", (ids.check("owl", owl_id),))
     return None if row is None else dict(row)
 

@@ -131,6 +131,7 @@ import re
 import secrets
 import select
 import shutil
+import signal
 import sqlite3
 import subprocess
 import sys
@@ -1127,19 +1128,67 @@ AUTH_MESSAGES = ("Invalid API key", "Not logged in", "OAuth token has expired", 
                  "Please run /login", "Invalid bearer token")
 
 
-def run_report_turn(argv: list, cwd: str, lock_fd: Optional[int] = None) -> tuple:
+def check_report_launch(conn) -> None:
+    """The gates every headless launch passes, for the owl-report turn: no Ollivander stop or CLI update in place
+    (Stopped), and its model not blocked here, by name or by any full id the alias is known to have run as
+    (Blocked)."""
+    _check_stop()
+    model = blocked_model({"model": config.OWL_REPORT_MODEL, "family": "claude"}, conn)
+    if model is not None:
+        raise Blocked(f"the owl report model {config.OWL_REPORT_MODEL} is blocked here ({model}), so no turn runs")
+
+
+def report_turn_command(pid: int) -> str:
+    """The command line process pid runs now, or "" when there is none or it cannot be read."""
+    try:
+        done = subprocess.run(["/bin/ps", "-p", str(int(pid)), "-o", "command="], env={}, stdin=subprocess.DEVNULL,
+                              capture_output=True, timeout=10, check=False, close_fds=True)
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return ""
+    return done.stdout.decode("utf-8", "replace").strip() if done.returncode == 0 else ""
+
+
+def kill_report_turn(pid: int) -> bool:
+    """Kill a hung owl-report turn a dead reporter left, and its process group, only while pid still runs the
+    report-only claude command. True when it was killed."""
+    command = report_turn_command(pid)
+    settings = f"{config.office_desk_dir(config.HOOK_DESK)}/{config.OWL_REPORT_SETTINGS_FILE}"
+    if not command.startswith(config.CLAUDE_BIN + " ") or settings not in command:
+        return False
+    try:
+        os.killpg(int(pid), signal.SIGKILL)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        try:
+            os.kill(int(pid), signal.SIGKILL)
+        except OSError:
+            return False
+    return True
+
+
+def run_report_turn(argv: list, cwd: str, hand: tuple = (), on_start: Optional[Callable[[int], None]] = None) -> tuple:
     """(outcome, text) for one owl-report turn. outcome is "ok" with the result text, "auth" when claude could not
-    sign in, or "failed". stdout is read as it comes, at most OWL_REPORT_OUTPUT_MAX_BYTES, and the process is killed on
-    overflow, at the timeout, or when this process is stopped. stderr is never read. lock_fd, the reporter's lock, is
-    handed to the child, so no other reporter starts while it lives, even if this process dies first."""
-    if lock_fd is not None:
-        safefs.hand_over(lock_fd)
+    sign in, or "failed". stdout is read as it comes, at most OWL_REPORT_OUTPUT_MAX_BYTES, and the process (a session
+    of its own) is killed on overflow, at the timeout, or when this process is stopped. stderr is never read. hand
+    holds the reporter's lock and the launch gate, handed to the child, so no other reporter starts and no CLI update
+    runs while it lives, even if this process dies first. on_start gets the child's pid as soon as it runs."""
+    for fd in hand:
+        safefs.hand_over(fd)
     try:
         child = subprocess.Popen(argv, cwd=cwd, env=child_env(), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                                 stderr=subprocess.DEVNULL, close_fds=True,
-                                 pass_fds=() if lock_fd is None else (lock_fd,))
+                                 stderr=subprocess.DEVNULL, close_fds=True, pass_fds=tuple(hand),
+                                 start_new_session=True)
     except OSError:
         return "failed", ""
+    if on_start is not None:
+        try:
+            on_start(child.pid)
+        except BaseException:
+            child.kill()
+            child.wait()
+            child.stdout.close()
+            raise
     chunks, total, deadline = [], 0, time.monotonic() + config.OWL_REPORT_TIMEOUT_SECONDS
     try:
         fd = child.stdout.fileno()
@@ -1162,7 +1211,10 @@ def run_report_turn(argv: list, cwd: str, lock_fd: Optional[int] = None) -> tupl
         return "failed", ""
     finally:
         if child.poll() is None:
-            child.kill()
+            try:
+                os.killpg(child.pid, signal.SIGKILL)  # its whole session, so nothing it started keeps the lock
+            except OSError:
+                child.kill()
             try:
                 child.wait(timeout=5)
             except subprocess.TimeoutExpired:

@@ -47,6 +47,9 @@ from fleet.safefs import FleetError
 DESK = config.HOOK_DESK
 MARKER_DIR = "owl-report-pending"
 BLOCKED = "auth-blocked"
+TURN = "turn"
+ALERT_LOCK = "owl-report-alert.lock"
+REAP_MARGIN_SECONDS = 60
 LOG_FILE = "owl-reports.log"
 OWL_FILE = "owl.json"
 OWL_ID = re.compile(r"owl_[0-9a-f]{16}")
@@ -99,7 +102,7 @@ def _markers(fd: int) -> dict:
     for name in os.listdir(fd):
         if OWL_ID.fullmatch(name):
             marker = markers.read(fd, name)
-            if marker is not None and marker.get("state") in ("pending", "logging", "logged"):
+            if marker is not None and marker.get("state") in ("pending", "logging", "logged", "notify_failed"):
                 found[name] = marker
     return found
 
@@ -113,13 +116,56 @@ def _drop(fd: int, name: str) -> None:
 
 def _blocked(fd: int) -> Optional[dict]:
     marker = markers.read(fd, BLOCKED)
-    return marker if marker and marker.get("state") == "blocked" and isinstance(marker.get("ids"), list) else None
+    mark = marker.get("mark") if marker else None
+    ok = (isinstance(mark, list) and len(mark) == 2 and type(mark[0]) is int and isinstance(mark[1], str)
+          and isinstance(marker.get("token"), str))
+    return marker if ok and marker.get("state") == "blocked" else None
 
 
-def _waiting_out_auth(fd: int, pending: dict) -> bool:
-    """Whether every pending owl was already pending when claude last failed to sign in."""
+def _order(owl: dict) -> list:
+    return [int(owl.get("delivered_at") or 0), owl["id"]]
+
+
+def _waiting_out_auth(conn, fd: int, pending: dict) -> bool:
+    """Whether no pending owl was delivered after the watermark the last auth failure recorded (the newest pending
+    owl's delivered time and id)."""
     blocked = _blocked(fd)
-    return blocked is not None and set(pending) <= set(blocked["ids"])
+    if blocked is None:
+        return False
+    for owl_id in pending:
+        owl = mcgonagall_inbox.owl_meta(conn, owl_id)
+        if owl is not None and _order(owl) > blocked["mark"]:
+            return False
+    return True
+
+
+@contextlib.contextmanager
+def _alert_lock():
+    """The lock every write of the auth block takes, without waiting; yields False when another holds it."""
+    with safefs.opened_dir(config.OFFICE_ROOT, "locks", create=True) as locks_fd:
+        try:
+            lock = safefs.held_lock(locks_fd, ALERT_LOCK, blocking=False)
+            lock.__enter__()
+        except safefs.Busy:
+            yield False
+            return
+        try:
+            yield True
+        finally:
+            lock.__exit__(None, None, None)
+
+
+def _replace_block(fd: int, token: str, data: Optional[dict]) -> bool:
+    """Replace (or with None drop) the auth block only while it is still the one with token, so a stale writer never
+    restores an old block. Called under the alert lock."""
+    current = markers.read(fd, BLOCKED)
+    if not current or current.get("token") != token:
+        return False
+    if data is None:
+        _drop(fd, BLOCKED)
+    else:
+        markers.replace(fd, BLOCKED, data)
+    return True
 
 
 def _shown(text: str, title: str = "Hogwarts") -> bool:
@@ -140,14 +186,34 @@ def _plain(conn, fd: int, owl_id: str) -> None:
 
 
 def _alert(conn, fd: int) -> None:
-    """Finish a pending auth alert: one headmaster event, then one notification, then marked sent."""
-    blocked = _blocked(fd)
-    if blocked is None or blocked.get("alert") != "pending":
+    """Finish a pending auth alert, under the alert lock and while reports are on: one headmaster event, then one
+    notification, then marked sent."""
+    if not on():
         return
-    pensieve.add_event(conn, DESK, "owl-report.auth", "headmaster", AUTH_SUMMARY,
-                       dedupe_key=f"owl-report:auth:{blocked.get('token', 'x')}")
-    if _shown("owl watcher: auth failed"):
-        markers.replace(fd, BLOCKED, {**blocked, "alert": "sent"})
+    with _alert_lock() as mine:
+        if not mine:
+            return
+        blocked = _blocked(fd)
+        if blocked is None or blocked.get("alert") != "pending":
+            return
+        pensieve.add_event(conn, DESK, "owl-report.auth", "headmaster", AUTH_SUMMARY,
+                           dedupe_key=f"owl-report:auth:{blocked['token']}")
+        if _shown("owl watcher: auth failed"):
+            _replace_block(fd, blocked["token"], {**blocked, "alert": "sent"})
+
+
+def _reap(fd: int) -> bool:
+    """When a reporter is gone but the turn it started still holds the lock past its deadline: kill that turn, so the
+    lock comes free. True when one was killed."""
+    turn = markers.read(fd, TURN)
+    if not turn or turn.get("state") != "running" or type(turn.get("pid")) is not int:
+        return False
+    if markers.age(fd, TURN, turn, time.time()) <= config.OWL_REPORT_TIMEOUT_SECONDS + REAP_MARGIN_SECONDS:
+        return False
+    if markers.gone(turn) or run_desk.kill_report_turn(turn["pid"]):
+        _drop(fd, TURN)
+        return True
+    return False
 
 
 def kick(conn) -> str:
@@ -161,10 +227,10 @@ def kick(conn) -> str:
             pending = _markers(fd)
             if not pending:
                 return "nothing pending"
-            if _waiting_out_auth(fd, pending):
+            if _waiting_out_auth(conn, fd, pending):
                 return "waiting for a new owl after an auth failure"
             if _running():
-                return "a reporter is running"
+                return "a hung turn was stopped" if _reap(fd) else "a reporter is running"
             try:
                 run_desk.spawn_owl_report()
             except (FleetError, OSError):
@@ -257,54 +323,80 @@ def _workdir(conn, owl_id: str):
 
 # Publishing
 
-def _logged_already(owl_id: str) -> bool:
+def _log_state(owl_id: str) -> tuple:
+    """(logged, cut): whether a complete record of this owl (five tab-separated fields, its id the fourth, ending in
+    a newline) is in the log's tail, and whether the log ends part way through a line."""
     try:
         with safefs.opened_dir(config.CASTLE_ROOT, "desks", DESK) as fd:
-            tail, _ = safefs.read_range(fd, LOG_FILE, None, LOG_TAIL_BYTES, "owl report log")
+            tail, size = safefs.read_range(fd, LOG_FILE, None, LOG_TAIL_BYTES, "owl report log")
     except safefs.Missing:
-        return False
-    return f" {owl_id} ".encode("ascii") in tail
+        return False, False
+    lines = tail.split(b"\n")[:-1]  # the last piece is empty, or a record cut part way
+    if size > len(tail) and lines:
+        lines = lines[1:]  # the first may start part way through a record
+    wanted = owl_id.encode("ascii")
+    logged = any(len(fields) == 5 and fields[3] == wanted for fields in (line.split(b"\t") for line in lines))
+    return logged, bool(tail) and not tail.endswith(b"\n")
+
+
+def record(owl: dict, summary: str, now: float) -> bytes:
+    """One log record: time, sender, task, owl id and summary, tab-separated, one line. No field holds a tab."""
+    stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now))
+    fields = [stamp, owl["sender"], owl["task_id"] or "-", owl["id"], summary]
+    return ("\t".join(common.one_line(field, 400) for field in fields) + "\n").encode("ascii")
 
 
 def _log(owl: dict, summary: str) -> None:
-    if _logged_already(owl["id"]):
+    """Append the owl's record unless a complete one is in the log; a line a kill or a full disk cut short is ended
+    first, so it never counts and never joins this one."""
+    logged, cut = _log_state(owl["id"])
+    if logged:
         return
-    stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-    line = common.one_line(f"{stamp} {owl['sender']} {owl['task_id'] or '-'} {owl['id']} {summary}", 400)
     with safefs.opened_dir(config.CASTLE_ROOT, "desks", DESK) as fd:
         log_fd = safefs.open_append(fd, LOG_FILE, "owl report log")
         try:
             info = os.fstat(log_fd)
             if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_uid != os.getuid():
                 raise FleetError("the owl report log is not a plain file of yours")
-            safefs.write_all(log_fd, line.encode("ascii") + b"\n")
+            safefs.write_all(log_fd, (b"\n" if cut else b"") + record(owl, summary, time.time()))
         finally:
             os.close(log_fd)
 
 
-def _notify(fd: int, owl: dict, marker: dict) -> None:
-    """Show a logged report; the marker goes once it showed, or after OWL_REPORT_NOTIFY_TRIES failures."""
+def _notify(conn, fd: int, owl: dict, marker: dict) -> None:
+    """Show a logged report; the marker goes once it showed. After OWL_REPORT_NOTIFY_TRIES failures it is marked
+    notify_failed, then one headmaster event says the report is in the log, and only then is it marked done."""
     if not on():
         return
-    if _shown(marker["summary"], f"Owl: {owl['sender']} {owl['task_id'] or '-'}"):
-        _drop(fd, owl["id"])
-        return
-    tries = int(marker.get("notify_tries", 0)) + 1
-    if tries >= config.OWL_REPORT_NOTIFY_TRIES:
-        _drop(fd, owl["id"])  # the log line stays
-    else:
-        markers.replace(fd, owl["id"], {**marker, "notify_tries": tries})
+    if marker["state"] == "logged":
+        if _shown(marker["summary"], f"Owl: {owl['sender']} {owl['task_id'] or '-'}"):
+            _drop(fd, owl["id"])
+            return
+        tries = int(marker.get("notify_tries", 0)) + 1
+        marker = {**marker, "notify_tries": tries}
+        if tries < config.OWL_REPORT_NOTIFY_TRIES:
+            markers.replace(fd, owl["id"], marker)
+            return
+        marker = {**marker, "state": "notify_failed"}
+        markers.replace(fd, owl["id"], marker)
+    if marker["state"] == "notify_failed":
+        pensieve.add_event(conn, DESK, "owl-report.notify-failed", "headmaster",
+                           f"The owl report on {owl['id']} from {owl['sender']} ({owl['task_id'] or '-'}) is in"
+                           f" desks/{DESK}/{LOG_FILE}, but its notification failed"
+                           f" {config.OWL_REPORT_NOTIFY_TRIES} times.",
+                           task_id=owl["task_id"], dedupe_key=f"owl-report:notify-failed:{owl['id']}")
+        markers.replace(fd, owl["id"], {**marker, "state": "done"})
 
 
-def _publish(fd: int, owl: dict, summary: str) -> None:
+def _publish(conn, fd: int, owl: dict, summary: str) -> None:
     """Record, log once, mark logged, then notify, in that order, so a kill never loses or repeats a log line."""
     if not on():
         return
     markers.replace(fd, owl["id"], {"state": "logging", "summary": summary})
-    _resume(fd, owl, markers.read(fd, owl["id"]) or {})
+    _resume(conn, fd, owl, markers.read(fd, owl["id"]) or {})
 
 
-def _resume(fd: int, owl: dict, marker: dict) -> None:
+def _resume(conn, fd: int, owl: dict, marker: dict) -> None:
     """Carry on publishing a report a run recorded: log it unless the log has it, then notify."""
     if not on() or not isinstance(marker.get("summary"), str):
         return
@@ -312,19 +404,37 @@ def _resume(fd: int, owl: dict, marker: dict) -> None:
         _log(owl, marker["summary"])
         marker = {"state": "logged", "summary": marker["summary"], "notify_tries": 0}
         markers.replace(fd, owl["id"], marker)
-    _notify(fd, owl, marker)
+    _notify(conn, fd, owl, marker)
 
 
 def _turn(conn, fd: int, owl: dict, marker: dict, lock_fd: int) -> str:
-    """One headless turn on one owl. Returns "done", "skipped", "failed" or "auth"."""
+    """One headless turn on one owl. Returns "done", "skipped", "failed", "auth" or "stopped". Every headless launch's
+    gates come first: no stop or CLI update in place, the model not blocked, and the launch gate held, shared, by
+    the turn's process for its whole life, with the reporter lock."""
+    try:
+        run_desk.check_report_launch(conn)
+    except run_desk.Blocked:
+        _plain(conn, fd, owl["id"])  # a blocked model will not clear itself: the plain notice, once
+        return "stopped"
+    except run_desk.Stopped:
+        return "stopped"
     tries = int(marker.get("tries", 0))
     markers.replace(fd, owl["id"], {**marker, "tries": tries + 1})  # counted first, so endless kills still end
+
+    def started(pid: int) -> None:
+        markers.replace(fd, TURN, {**markers.pending(), "state": "running", "pid": pid})
+
     try:
-        with _workdir(conn, owl["id"]) as folder:
+        with run_desk.launch_gate() as gate_fd, _workdir(conn, owl["id"]) as folder:
             argv = run_desk.owl_report_argv(BRIEF, PROMPT)
-            outcome, text = run_desk.run_report_turn(argv, folder, lock_fd)
+            outcome, text = run_desk.run_report_turn(argv, folder, (lock_fd, gate_fd), started)
+    except run_desk.Stopped:
+        markers.replace(fd, owl["id"], marker)  # a CLI update: not a try
+        return "stopped"
     except (FleetError, OSError):
         outcome, text = "failed", ""
+    finally:
+        _drop(fd, TURN)
     if outcome == "auth":
         markers.replace(fd, owl["id"], marker)  # not a try: it waits for the next new owl
         return "auth"
@@ -334,14 +444,28 @@ def _turn(conn, fd: int, owl: dict, marker: dict, lock_fd: int) -> str:
     summary = clean_summary(text)
     if not summary:
         return "skipped"
-    _publish(fd, owl, summary)
+    _publish(conn, fd, owl, summary)
     return "done"
 
 
-def _block(conn, fd: int, pending: dict) -> None:
-    markers.replace(fd, BLOCKED, {"state": "blocked", "ids": sorted(pending), "alert": "pending",
-                                  "token": secrets.token_hex(8)})
+def _block(conn, fd: int, owls: list) -> None:
+    """Record the auth failure's watermark, the newest pending owl, and its alert, then send the alert."""
+    newest = max(_order(owl) for owl in owls)
+    with _alert_lock() as mine:
+        if mine:
+            markers.replace(fd, BLOCKED, {"state": "blocked", "mark": newest, "alert": "pending",
+                                          "token": secrets.token_hex(8)})
     _alert(conn, fd)
+
+
+def _lift(fd: int) -> None:
+    """Drop the auth block an owl delivered after it lifts, only while it is still the block that was read."""
+    blocked = _blocked(fd)
+    if blocked is None:
+        return
+    with _alert_lock() as mine:
+        if mine:
+            _replace_block(fd, blocked["token"], None)
 
 
 def run(conn) -> list:
@@ -362,14 +486,13 @@ def run(conn) -> list:
                 if owl is None:
                     _drop(fd, owl_id)
                 else:
-                    _resume(fd, owl, marker)
+                    _resume(conn, fd, owl, marker)
         turns = 0
         while turns < config.OWL_REPORT_MAX_TURNS and on():
             pending = {owl_id: marker for owl_id, marker in _markers(fd).items() if marker["state"] == "pending"}
-            if not pending or _waiting_out_auth(fd, pending):
+            if not pending or _waiting_out_auth(conn, fd, pending):
                 break
-            if _blocked(fd) is not None:
-                _drop(fd, BLOCKED)  # an owl that came after the auth failure: try again
+            _lift(fd)  # an owl that came after the auth failure: try again
             owls = [owl for owl in (mcgonagall_inbox.owl_meta(conn, owl_id) for owl_id in pending) if owl]
             for owl_id in set(pending) - {owl["id"] for owl in owls}:
                 _drop(fd, owl_id)
@@ -380,15 +503,15 @@ def run(conn) -> list:
             marker = pending[owl["id"]]
             turns += 1
             if int(marker.get("tries", 0)) >= config.OWL_REPORT_MAX_TRIES:
-                _publish(fd, owl, FALLBACK)  # out of tries: no other turn
+                _publish(conn, fd, owl, FALLBACK)  # out of tries: no other turn
                 outcomes.append("fallback")
                 continue
             outcome = _turn(conn, fd, owl, marker, lock_fd)
             outcomes.append(outcome)
             if outcome == "auth":
-                _block(conn, fd, pending)
+                _block(conn, fd, owls)
                 break
-            if outcome == "failed":
+            if outcome in ("failed", "stopped"):
                 break
     return outcomes
 

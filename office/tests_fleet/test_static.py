@@ -54,6 +54,7 @@ KNOWN_FLAGS = {
     # git ls-files --others --ignored: a read-only list of a worktree's ignored files, before a removal
     "--others", "--exclude-standard", "--directory", "--no-empty-directory",
     "-v",  # git ls-files -v: which tracked files are marked assume-unchanged or skip-worktree
+    "-o",  # ps -p <pid> -o command=: read-only, whether a hung owl-report turn still runs the report command
     # the review, worktree, verify and push scripts and the push gate
     "--task", "--repo-dir", "--branch", "--base", "--title", "--no-fetch", "--yes", "--mode",
     "--intent-file", "--permission-profile", "--cd", "--noprofile", "--norc", "sandbox",
