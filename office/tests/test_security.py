@@ -378,6 +378,7 @@ class InputSecurityTests(StoreCase):
         "claude_ids_only": False, "blocked": (), "default_model": None, "retiring_within": DAY,
         "running_window": 3600, "branch": "fix/site", "slot": None,
         "repo_dir": "/private/tmp/checkout", "base": "origin/main", "intent_sha256": "a" * 64,
+        "date": "2027-01-15", "before": "absent", "before_sha256": None,
     }
     OVERRIDES = {
         ("record_review", "verdict"): "CHANGES", ("record_round_verdict", "verdict"): "CHANGES",
@@ -679,6 +680,9 @@ class TransactionCoverageTests(unittest.TestCase):
         facts.apply_ops(conn, [{"op": "archive", "fact_id": older}], now=NOW + 3)
         pensieve.add_metric(conn, "alpha", "run-1", "model-x", 1, 1, 1, 0.5, 1, ts=NOW)
         owl = owlery.send(conn, "alpha", "beta", "fyi", "note", body="b", now=NOW)["id"]
+        pensieve.arm_auto_patch(conn, "2027-01-15", owl, "absent", None, now=NOW)
+        pensieve.snapshot_auto_patch(conn, "2027-01-15", "b" * 64, "[]", ["f1"], ["f1"], [], now=NOW)
+        pensieve.end_auto_patch(conn, "2027-01-15", "done", "nothing applied", [], now=NOW)
         owlery.mark_delivered(conn, owl, now=NOW)
         owlery.read(conn, owl, "beta", now=NOW)
         owlery.ack(conn, owl, "beta", now=NOW)

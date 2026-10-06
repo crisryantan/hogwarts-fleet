@@ -157,6 +157,9 @@ class MigrationTests(StoreCase):
                 self.conn.execute(statement)
         self.assertEqual(db.schema_version(self.conn), db.SCHEMA_VERSION)
 
+    def test_migration_numbers_have_no_gap(self):
+        self.assertEqual([version for version, _ in db.MIGRATIONS], list(range(1, db.SCHEMA_VERSION + 1)))
+
     def test_newer_schema_is_refused(self):
         self.conn.execute("INSERT INTO schema_version(version, applied_at) VALUES (99, 0)")
         with self.assertRaises(IntegrityError):
@@ -415,6 +418,215 @@ class MigrationV9Tests(unittest.TestCase):
                              " VALUES (?, ?, ?, ?, ?, ?)", (self.DRAFTED, values["repo_dir"], values["branch"],
                                                            values["base"], values["intent_sha256"], NOW))
         self.assertIsNone(pensieve.task_spec(conn, self.DRAFTED))
+
+
+class MigrationAutoPatchesTests(unittest.TestCase):
+    """The auto-portrait migration, found by name: its number is kept in db.MIGRATIONS only."""
+
+    SHA = "e" * 64
+    OTHER = "f" * 64
+
+    @staticmethod
+    def version() -> int:
+        return next(version for version, statements in db.MIGRATIONS if statements is db.AUTO_PATCHES)
+
+    def older_database(self):
+        """A store from just before the migration, with an owl filed."""
+        path = temp_dir(self) / "state" / "pensieve.db"
+        older = tuple(migration for migration in db.MIGRATIONS if migration[0] < self.version())
+        with mock.patch.object(db, "MIGRATIONS", older), mock.patch.object(db, "SCHEMA_VERSION", older[-1][0]):
+            conn = db.connect(path)
+            pensieve.add_desk(conn, "alpha", "claude", now=NOW)
+            pensieve.add_desk(conn, "beta", "script", now=NOW)
+            self.owl = owlery.send(conn, "beta", "alpha", "fyi", "export", body="the day", now=NOW)["id"]
+            self.assertIsNone(conn.execute("SELECT name FROM sqlite_master WHERE name = 'auto_patches'").fetchone())
+            conn.close()
+        conn = db.connect(path)
+        self.addCleanup(conn.close)
+        return conn
+
+    def armed(self, conn, date: str = "2027-01-15", before: str = "absent", before_sha=None) -> dict:
+        return pensieve.arm_auto_patch(conn, date, self.owl, before, before_sha, now=NOW)
+
+    def validated(self, conn, date: str = "2027-01-15") -> dict:
+        self.armed(conn, date)
+        return pensieve.snapshot_auto_patch(conn, date, self.SHA, "[]", ["f1", "f2"], ["f2"], [], now=NOW + 1)
+
+    def test_an_older_database_migrates_with_no_auto_rows(self):
+        conn = self.older_database()
+        self.assertEqual(db.schema_version(conn), db.SCHEMA_VERSION)
+        self.assertEqual(conn.execute("SELECT COUNT(*) FROM auto_patches").fetchone()[0], 0)
+        self.assertEqual(pensieve.open_auto_patches(conn), [])
+        row = self.armed(conn)
+        self.assertEqual((row["state"], row["attempt"], row["owl_acked_at"]), ("armed", 1, None))
+        self.assertEqual(conn.execute("PRAGMA integrity_check").fetchone()[0], "ok")
+        self.assertEqual(conn.execute("PRAGMA foreign_key_check").fetchall(), [])
+        changes = conn.total_changes
+        self.assertEqual(db.migrate(conn), db.SCHEMA_VERSION)
+        with db.transaction(conn):
+            for statement in db.pending_statements(conn, db.AUTO_PATCHES):
+                conn.execute(statement)
+        self.assertEqual(conn.total_changes, changes)
+
+    def test_an_auto_row_opens_armed_with_no_snapshot(self):
+        conn = self.older_database()
+        row = self.armed(conn, before="present", before_sha=self.OTHER)
+        self.assertEqual((row["state"], row["attempt"], row["before"], row["before_sha256"], row["sha256"],
+                          row["ops"], row["outcome"], row["finished_at"]),
+                         ("armed", 1, "present", self.OTHER, None, None, None, None))
+        base = {"date": "'2027-01-16'", "attempt": "1", "state": "'armed'", "owl_id": "?", "armed_at": "?",
+                "before": "'absent'"}
+        for column, value in (("state", "'validated'"), ("attempt", "2"), ("sha256", f"'{self.SHA}'"),
+                              ("outcome", "'x'"), ("applied_ids", "''"), ("finished_at", "1")):
+            values = {**base, column: value}
+            with self.subTest(insert=column), self.assertRaisesRegex(sqlite3.IntegrityError, "opens armed"):
+                conn.execute(f"INSERT INTO auto_patches({', '.join(values)}) VALUES ({', '.join(values.values())})",
+                             (self.owl, NOW))
+        self.assertIsNone(pensieve.auto_patch(conn, "2027-01-16"))
+
+    def test_a_snapshot_is_written_once(self):
+        conn = self.older_database()
+        row = self.validated(conn)
+        self.assertEqual((row["state"], row["sha256"], row["ops"], row["order_ids"], row["held_ids"], row["unfit_ids"]),
+                         ("validated", self.SHA, "[]", "f1,f2", "f2", ""))
+        with self.assertRaisesRegex(ConflictError, "only an armed night"):
+            pensieve.snapshot_auto_patch(conn, "2027-01-15", self.OTHER, "[]", ["f1"], [], [], now=NOW)
+        for column, value in (("sha256", self.OTHER), ("ops", "[1]"), ("order_ids", "f1"), ("held_ids", ""),
+                              ("unfit_ids", "f2"), ("validated_at", NOW + 5)):
+            with self.subTest(column=column), self.assertRaisesRegex(sqlite3.IntegrityError, "written once"):
+                conn.execute(f"UPDATE auto_patches SET {column} = ? WHERE date = '2027-01-15'", (value,))
+        pensieve.end_auto_patch(conn, "2027-01-15", "done", "applied f1", ["f1"], now=NOW + 2)
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "written once"):
+            conn.execute("UPDATE auto_patches SET sha256 = ? WHERE date = '2027-01-15'", (self.OTHER,))
+        # A snapshot is written only as an armed night is validated, never on the way to another state.
+        self.armed(conn, "2027-01-16")
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "written once"):
+            conn.execute("UPDATE auto_patches SET state = 'done', sha256 = ?, ops = '[]', order_ids = 'f1',"
+                         " held_ids = '', unfit_ids = '', validated_at = 1, outcome = 'x', finished_at = 1"
+                         " WHERE date = '2027-01-16'", (self.SHA,))
+        self.assertEqual(pensieve.auto_patch(conn, "2027-01-15")["sha256"], self.SHA)
+
+    def test_states_only_move_forward_and_a_night_that_read_nothing_can_rearm(self):
+        conn = self.older_database()
+        self.armed(conn)
+        stopped = pensieve.end_auto_patch(conn, "2027-01-15", "stopped", "cut off", now=NOW + 1)
+        self.assertEqual((stopped["state"], stopped["outcome"], stopped["finished_at"]), ("stopped", "cut off", NOW + 1))
+        with self.assertRaisesRegex(ConflictError, "never changes"):
+            pensieve.end_auto_patch(conn, "2027-01-15", "off", "again", now=NOW + 2)
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "ending is written"):
+            conn.execute("UPDATE auto_patches SET outcome = 'rewritten' WHERE date = '2027-01-15'")
+        again = self.armed(conn, before="present", before_sha=self.OTHER)
+        self.assertEqual((again["attempt"], again["state"], again["outcome"], again["finished_at"], again["before"]),
+                         (2, "armed", None, None, "present"))
+        pensieve.end_auto_patch(conn, "2027-01-15", "off", "switched off", now=NOW + 3)
+        self.assertEqual(self.armed(conn)["attempt"], 3)
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "armed again only"):
+            conn.execute("UPDATE auto_patches SET attempt = attempt + 2 WHERE date = '2027-01-15'")
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "armed again only"):
+            conn.execute("UPDATE auto_patches SET before = 'unreadable' WHERE date = '2027-01-15'")
+        # After a snapshot: forward to an ending only, and no ending is ever armed again.
+        self.validated(conn, "2027-01-16")
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "only moves forward|armed again only"):
+            conn.execute("UPDATE auto_patches SET state = 'armed' WHERE date = '2027-01-16'")
+        pensieve.end_auto_patch(conn, "2027-01-16", "stopped", "could not apply", now=NOW + 4)
+        with self.assertRaisesRegex(ConflictError, "never armed again"):
+            self.armed(conn, "2027-01-16")
+        for state in ("armed", "validated", "done", "off"):
+            with self.subTest(state=state), self.assertRaises(sqlite3.IntegrityError):
+                conn.execute("UPDATE auto_patches SET state = ? WHERE date = '2027-01-16'", (state,))
+        self.validated(conn, "2027-01-17")
+        pensieve.end_auto_patch(conn, "2027-01-17", "done", "applied f1", ["f1"], now=NOW + 5)
+        for state in ("armed", "validated", "stopped", "off"):
+            with self.subTest(done_to=state), self.assertRaises(sqlite3.IntegrityError):
+                conn.execute("UPDATE auto_patches SET state = ? WHERE date = '2027-01-17'", (state,))
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "ending is written"):
+            conn.execute("UPDATE auto_patches SET applied_ids = 'f2' WHERE date = '2027-01-17'")
+        # A night with no patch ends done with no snapshot, and done is final.
+        self.armed(conn, "2027-01-18")
+        pensieve.end_auto_patch(conn, "2027-01-18", "done", "no patch", now=NOW + 6)
+        with self.assertRaisesRegex(ConflictError, "never armed again"):
+            self.armed(conn, "2027-01-18")
+        self.assertEqual([row["date"] for row in pensieve.open_auto_patches(conn)], ["2027-01-15"])
+
+    def test_auto_rows_are_never_deleted(self):
+        conn = self.older_database()
+        self.armed(conn)
+        self.validated(conn, "2027-01-16")
+        for date in ("2027-01-15", "2027-01-16"):
+            with self.subTest(date=date), self.assertRaisesRegex(sqlite3.IntegrityError, "never deleted"):
+                conn.execute("DELETE FROM auto_patches WHERE date = ?", (date,))
+        self.assertEqual(conn.execute("SELECT COUNT(*) FROM auto_patches").fetchone()[0], 2)
+
+    def test_an_auto_row_keeps_its_date(self):
+        conn = self.older_database()
+        self.armed(conn, "2027-01-11")
+        self.validated(conn, "2027-01-12")
+        self.validated(conn, "2027-01-13")
+        pensieve.end_auto_patch(conn, "2027-01-13", "done", "applied", [], now=NOW)
+        for date, state in (("2027-01-14", "stopped"), ("2027-01-15", "off")):
+            self.armed(conn, date)
+            pensieve.end_auto_patch(conn, date, state, "ended", now=NOW)
+        for row in conn.execute("SELECT date, state FROM auto_patches").fetchall():
+            with self.subTest(state=row["state"]), self.assertRaisesRegex(sqlite3.IntegrityError, "keeps its date"):
+                conn.execute("UPDATE auto_patches SET date = '2027-02-01' WHERE date = ?", (row["date"],))
+        self.assertIsNone(pensieve.auto_patch(conn, "2027-02-01"))
+
+    def test_auto_rows_keep_plain_shapes(self):
+        conn = self.older_database()
+        for date in ("2027-1-15", "2027-02-30", "../2027-01-15", "", None):
+            with self.subTest(date=date), self.assertRaises(ValidationError):
+                pensieve.arm_auto_patch(conn, date, self.owl, "absent", None, now=NOW)
+        for before, before_sha in (("present", None), ("absent", self.SHA), ("present", "E" * 64), ("there", None)):
+            with self.subTest(before=before, sha=before_sha), self.assertRaises(ValidationError):
+                pensieve.arm_auto_patch(conn, "2027-01-15", self.owl, before, before_sha, now=NOW)
+        with self.assertRaises(ValidationError):
+            pensieve.arm_auto_patch(conn, "2027-01-15", "owl_nope", "absent", None, now=NOW)
+        self.armed(conn)
+        good = {"sha256": self.SHA, "ops_json": "[]", "order_ids": ["f1"], "held_ids": [], "unfit_ids": []}
+        for field, bad in (("sha256", "E" * 64), ("sha256", "e" * 63), ("ops_json", "[\"caf\u00e9\"]"),
+                           ("ops_json", "[\"a\nb\"]"), ("ops_json", "x" * (db.AUTO_PATCH_OPS_MAX + 1)),
+                           ("order_ids", []), ("order_ids", ["F1"]), ("order_ids", ["f1", "f1"]),
+                           ("order_ids", ["f,1"]), ("held_ids", ["f2"]), ("unfit_ids", ["a" * 25]),
+                           ("held_ids", "f1")):
+            with self.subTest(field=field, bad=str(bad)[:20]), self.assertRaises(ValidationError):
+                pensieve.snapshot_auto_patch(conn, "2027-01-15", **{**good, field: bad}, now=NOW)
+        for outcome in ("", "caf\u00e9", "two\nlines", "x" * (db.AUTO_PATCH_OUTCOME_MAX + 1), None):
+            with self.subTest(outcome=str(outcome)[:20]), self.assertRaises(ValidationError):
+                pensieve.end_auto_patch(conn, "2027-01-15", "stopped", outcome, now=NOW)
+        with self.assertRaises(ValidationError):
+            pensieve.end_auto_patch(conn, "2027-01-15", "stopped", "x", ["f1"], now=NOW)
+        with self.assertRaises(ValidationError):
+            pensieve.end_auto_patch(conn, "2027-01-15", "validated", "x", now=NOW)
+        self.assertEqual(pensieve.auto_patch(conn, "2027-01-15")["state"], "armed")
+        full = '"' + "a" * (db.AUTO_PATCH_OPS_MAX - 2) + '"'
+        stored = pensieve.snapshot_auto_patch(conn, "2027-01-15", self.SHA, full, ["f1"], [], [], now=NOW)
+        self.assertEqual(len(stored["ops"]), db.AUTO_PATCH_OPS_MAX)
+        # The same shapes hold for raw writes.
+        raw = ("INSERT INTO auto_patches(date, attempt, state, owl_id, armed_at, before, before_sha256)"
+               " VALUES (?, 1, 'armed', ?, ?, ?, ?)")
+        for date, before, before_sha in (("2027-1-15", "absent", None), ("2027-01-1x", "absent", None),
+                                         ("2027-01-16", "present", None), ("2027-01-16", "absent", self.SHA),
+                                         ("2027-01-16", "present", "E" * 64), ("2027-01-16", "there", None)):
+            with self.subTest(raw_date=date, before=before), self.assertRaisesRegex(sqlite3.IntegrityError, "CHECK"):
+                conn.execute(raw, (date, self.owl, NOW, before, before_sha))
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "FOREIGN KEY"):
+            conn.execute(raw, ("2027-01-16", "owl_0000000000000000", NOW, "absent", None))
+        self.armed(conn, "2027-01-16")
+        snapshot = ("UPDATE auto_patches SET state = 'validated', sha256 = ?, ops = ?, order_ids = ?, held_ids = '',"
+                    " unfit_ids = '', validated_at = 1 WHERE date = '2027-01-16'")
+        for sha, ops, order in ((self.SHA, "[\"caf\u00e9\"]", "f1"), (self.SHA, "x" * (db.AUTO_PATCH_OPS_MAX + 1), "f1"),
+                                (self.SHA, "[]", "F1"), (self.SHA, "[]", "f1;f2"), ("E" * 64, "[]", "f1"),
+                                (self.SHA, "[]", "")):
+            with self.subTest(raw_ops=ops[:12], order=order), self.assertRaisesRegex(sqlite3.IntegrityError, "CHECK"):
+                conn.execute(snapshot, (sha, ops, order))
+        conn.execute(snapshot, (self.SHA, "x" * db.AUTO_PATCH_OPS_MAX, "f1"))
+        for outcome in ("caf\u00e9", "x" * (db.AUTO_PATCH_OUTCOME_MAX + 1), ""):
+            with self.subTest(raw_outcome=outcome[:12]), self.assertRaisesRegex(sqlite3.IntegrityError, "CHECK"):
+                conn.execute("UPDATE auto_patches SET state = 'stopped', outcome = ?, finished_at = 1"
+                             " WHERE date = '2027-01-16'", (outcome,))
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "CHECK"):
+            conn.execute("UPDATE auto_patches SET state = 'stopped', outcome = 'x', finished_at = 1,"
+                         " applied_ids = 'f1' WHERE date = '2027-01-16'")
 
 
 class TransactionTests(StoreCase):

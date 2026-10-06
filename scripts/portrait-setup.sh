@@ -10,7 +10,8 @@
 #
 # It prints OK or FAILED after each step and stops at the first failure.
 # Nothing here applies a patch. Dumbledore only proposes, and you apply what
-# you accept with castle portrait apply.
+# you accept with castle portrait apply. auto-portrait stays off until you
+# write ~/.hogwarts/auto-portrait yourself.
 set -u
 
 ok() { printf '   OK      %s\n' "$1"; }

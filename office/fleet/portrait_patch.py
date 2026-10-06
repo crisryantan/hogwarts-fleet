@@ -23,6 +23,11 @@ from a desk:
   is a note Ryan acts on by hand if he agrees.
 - Each applied op is recorded as a routine portrait.applied event on the portrait desk, whose dedupe key
   names the patch date and op id, so an op is applied at most once.
+- Auto-portrait (fleet/portrait_auto.py), only while Ryan has switched it on, applies the fact_add and
+  memory_note_add ops (AUTO_TYPES) of the patch his nightly run wrote, from the checked copy it stored, never
+  from the file again. It records each one as a routine portrait.auto-applied event under the same dedupe key,
+  so the two paths share one ledger and an op applies at most once whichever gets there first. Every other op
+  waits for Ryan's apply. Show and patches print what the lane did on each night.
 
 Nothing in a patch is executed, evaluated or used as a path. Show checks the ops that are in schema by
 running them in a store transaction that is always rolled back, so it reports what the store would refuse
@@ -70,6 +75,20 @@ APPLIED_KEY = "portrait:applied:{date}:{op_id}"
 # The fact source a patch op leaves on the facts it writes, so each one points back at its patch and op.
 SOURCE_LABEL = "portrait:{date}:{op_id}"
 APPLIED_SUMMARY = "Ryan applied {type} {op_id} from Dumbledore's {date} patch (sha256 {sha}): {done}"
+# The op types auto-portrait may apply: additions only. An allowlist, so a type added to TYPES later waits for Ryan
+# until someone adds it here on purpose.
+AUTO_TYPES = ("fact_add", "memory_note_add")
+AUTO_APPLIED_KIND = "portrait.auto-applied"
+AUTO_APPLIED_SUMMARY = "auto-portrait applied {type} {op_id} from Dumbledore's {date} patch (sha256 {sha}): {done}"
+# The headmaster event a night with a patch raises when nothing applies it by itself.
+READY_KIND = "portrait.patch-ready"
+READY_KEY = "portrait:patch-ready:{date}"
+READY_SUMMARY = ("Dumbledore's patch for {date} is ready. castle portrait show {date} lists it, and nothing"
+                 " changes until you apply what you accept")
+REFUSED_SUMMARY = ("Dumbledore's patch for {date} was refused, so nothing in it can be applied. castle portrait show"
+                   " {date} says why: {reason}")
+FILE_CHANGED_NOTE = ("the patch file changed since auto-portrait read it, so the ops shown as applied were applied"
+                     " from the patch with the sha256 auto-portrait shows, not from the file as it is now")
 MOVE_BY_HAND = "accepted: the move is yours to make by hand"
 COMMON_FIELDS = ("id", "type", "reason", "source")
 # Each op type: its required fields, then its optional ones.
@@ -115,14 +134,16 @@ def read_patch(date: str) -> bytes:
         raise ValidationError(f"the patch for {date} was refused: {common.one_line(exc, 200)}") from None
 
 
-def patch_exists(date: str) -> bool:
-    """True when a plain patch file for date is in Dumbledore's outbox."""
+def read_state(date: str) -> tuple:
+    """The patch for date read once, three ways: ("absent", None), ("present", its bytes) or ("unreadable", why).
+    A file that is there but refused, or a read that fails, is unreadable, never absent. The reason never quotes
+    the file. Never raises."""
     try:
-        name = PATCH_NAME.format(date=check_date(date))
-        with _outbox() as fd:
-            return safefs.is_safe_regular(fd, name)
-    except (FleetError, StoreError):
-        return False
+        return "present", read_patch(date)
+    except NotFoundError:
+        return "absent", None
+    except (StoreError, FleetError, OSError) as exc:
+        return "unreadable", common.one_line(exc, 200)
 
 
 def _unique_pairs(pairs: list) -> dict:
@@ -267,13 +288,47 @@ def parse_patch(raw: bytes, date: str) -> dict:
     return {"date": date, "ops": entries}
 
 
+def classify(patch: dict) -> dict:
+    """A parsed patch's ops sorted for auto-portrait: auto, the checked ops of the AUTO_TYPES; held, the ids of the
+    other ops in schema; unfit, the ids of the ops out of schema; order, every id in patch order."""
+    found: dict = {"auto": [], "held": [], "unfit": [], "order": []}
+    for entry in patch["ops"]:
+        found["order"].append(entry["id"])
+        if entry["problem"] is not None:
+            found["unfit"].append(entry["id"])
+        elif entry["type"] in AUTO_TYPES:
+            found["auto"].append(entry["op"])
+        else:
+            found["held"].append(entry["id"])
+    return found
+
+
 # Applying
 
 
 def applied_ops(conn, date: str) -> dict:
-    """The ops of date's patch already applied: op id to the event that recorded each."""
+    """The ops of date's patch already applied, by Ryan or by auto-portrait: op id to the event that recorded each."""
     prefix = APPLIED_KEY.format(date=check_date(date), op_id="")
     return {event["dedupe_key"][len(prefix):]: event for event in pensieve.events_with_key_prefix(conn, prefix)}
+
+
+def hand_applied(conn, date: str) -> list:
+    """The ops of date's patch Ryan applied himself with castle portrait apply, in id order."""
+    return sorted(op_id for op_id, event in applied_ops(conn, date).items() if event["kind"] == APPLIED_KIND)
+
+
+def memory_marks(conn, ts: int) -> tuple:
+    """(current facts, key points) as sets of whole rows, so a caller can tell exactly what an op added, took away
+    or changed. Rows, not ids: a key point can be deleted, and SQLite then hands its id to the next one, so an id
+    alone would not show a key point swapped for another. A fact's last_used_at is left out, since using a fact
+    changes nothing it says. A read that fails is a StoreError, never an empty memory."""
+    try:
+        current = frozenset(tuple(sorted((key, value) for key, value in row.items() if key != "last_used_at"))
+                            for row in facts.current_facts(conn, now=ts))
+        points = frozenset(tuple(row) for row in conn.execute("SELECT * FROM keypoints").fetchall())
+    except sqlite3.Error as exc:
+        raise StoreError(f"what memory holds could not be read: {common.one_line(exc, 100)}") from None
+    return current, points
 
 
 def _current_fact(conn, fact_id: int, ts: int) -> dict:
@@ -324,13 +379,15 @@ def _run_op(conn, op: dict, date: str, ts: int) -> dict:
             "done": f"fact {fact['id']} replaced by fact {replaced['fact_id']}"}
 
 
-def _apply_one(conn, op: dict, date: str, sha: str, ts: int) -> dict:
-    """Run one op and record it as applied. Errors name the op."""
+def _apply_one(conn, op: dict, date: str, sha: str, ts: int, kind: str = APPLIED_KIND,
+               summary: str = APPLIED_SUMMARY) -> dict:
+    """Run one op and record it as applied, as kind with summary, under the one ledger key of its date and id.
+    Errors name the op."""
     try:
         done = _run_op(conn, op, date, ts)
         event = pensieve.add_event(
-            conn, DESK, APPLIED_KIND, "routine",
-            APPLIED_SUMMARY.format(type=op["type"], op_id=op["id"], date=date, sha=sha[:12], done=done["done"]),
+            conn, DESK, kind, "routine",
+            summary.format(type=op["type"], op_id=op["id"], date=date, sha=sha[:12], done=done["done"]),
             dedupe_key=APPLIED_KEY.format(date=date, op_id=op["id"]), now=ts)
         if not event["created"]:
             raise ConflictError("it was already applied")
@@ -376,11 +433,35 @@ def _shown(entry: dict, applied: dict, checks: dict) -> dict:
     return {**item, "status": "ready", "would": check["would"]}
 
 
+def split_ids(text: Optional[str]) -> list:
+    """A stored comma list of op ids as a list."""
+    return [] if not text else text.split(",")
+
+
+def _lane(row: dict, sha: Optional[str]) -> dict:
+    """What auto-portrait did on one night, for show: its state, the sha256 it read, its outcome line, the ops it
+    applied, and whether the file now on disk (sha, None when gone) is another one."""
+    changed = row["sha256"] is not None and sha != row["sha256"]
+    lane = {"state": row["state"], "attempt": row["attempt"], "before": row["before"], "sha256": row["sha256"],
+            "outcome": row["outcome"], "applied": split_ids(row["applied_ids"]), "file_changed": changed}
+    if changed:
+        lane["note"] = FILE_CHANGED_NOTE
+    return lane
+
+
 def show(conn, date: str, now: Optional[int] = None) -> dict:
     """Every op in date's patch with its status (ready, applied, out of schema, or what the store would
-    refuse), its fields, and the exact command that applies the ready ones. Changes nothing."""
+    refuse), its fields, and the exact command that applies the ready ones, with what auto-portrait did on that
+    night when it took it on, even once the file is gone. Changes nothing."""
     date = check_date(date)
-    raw = read_patch(date)
+    row = pensieve.auto_patch(conn, date)
+    try:
+        raw = read_patch(date)
+    except NotFoundError:
+        if row is None:
+            raise
+        return {"date": date, "file": None, "sha256": None, "ops": [], "ready": [], "apply_command": None,
+                "auto": _lane(row, None)}
     sha = hashlib.sha256(raw).hexdigest()
     patch = parse_patch(raw, date)
     applied = applied_ops(conn, date)
@@ -393,7 +474,10 @@ def show(conn, date: str, now: Optional[int] = None) -> dict:
         command = f"castle portrait apply {date} --sha256 {sha}"
         if len(ready) < len(ops):
             command += " --only " + ",".join(ready)
-    return {"date": date, "sha256": sha, "ops": ops, "ready": ready, "apply_command": command}
+    shown = {"date": date, "sha256": sha, "ops": ops, "ready": ready, "apply_command": command}
+    if row is not None:
+        shown["auto"] = _lane(row, sha)
+    return shown
 
 
 def _check_sha(value: object) -> str:
@@ -479,20 +563,33 @@ def _patch_names() -> Iterator[str]:
     return iter(sorted(names, reverse=True)[:LIST_LIMIT])
 
 
+def _lane_line(row: dict) -> dict:
+    return {"state": row["state"], "outcome": row["outcome"], "applied": split_ids(row["applied_ids"])}
+
+
 def patches(conn) -> list:
     """The newest patches in Dumbledore's outbox, newest first: each one's sha256, its op ids, the ones out
-    of schema and the ones applied. A patch that cannot be read or parsed says why instead."""
+    of schema and the ones applied, and what auto-portrait did on its night. A patch that cannot be read or
+    parsed says why instead. A night auto-portrait took on whose file is gone is listed too, with file null."""
+    lane = {row["date"]: row for row in pensieve.recent_auto_patches(conn, LIST_LIMIT)}
     found = []
     for name in _patch_names():
+        named = PATCH_FILE.fullmatch(name).group(1)
         item = {"file": name}
         try:
-            date = check_date(PATCH_FILE.fullmatch(name).group(1))
+            date = check_date(named)
             item.update(date=date, applied=sorted(applied_ops(conn, date)))
+            if date in lane:
+                item["auto"] = _lane_line(lane.pop(date))
             raw = read_patch(date)
             patch = parse_patch(raw, date)
             item.update(sha256=hashlib.sha256(raw).hexdigest(), ops=[entry["id"] for entry in patch["ops"]],
                         out_of_schema=[entry["id"] for entry in patch["ops"] if entry["problem"] is not None])
         except StoreError as exc:
             item["problem"] = common.one_line(exc, 200)
-        found.append(item)
-    return found
+        found.append((named, item))
+    for date, row in lane.items():
+        found.append((date, {"file": None, "date": date, "applied": sorted(applied_ops(conn, date)),
+                             "auto": _lane_line(row)}))
+    found.sort(key=lambda pair: pair[0], reverse=True)
+    return [item for _, item in found[:LIST_LIMIT]]

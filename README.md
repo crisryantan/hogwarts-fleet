@@ -64,7 +64,7 @@ From there, follow [docs/ONBOARDING.md](docs/ONBOARDING.md) from stage 2. You sw
 | Moody - Security Reviewer | Codex | Read-only, security-first review of Claude-written code, including work from your own Claude sessions. |
 | Ron - Release Engineer | Claude | Sorts PR and CI changes into routine or for you, and writes the morning lineup and weekly scoreboard. |
 | Snape - Data Analyst | Claude | Read-only warehouse and observability queries, with the source of every number. |
-| Dumbledore - Knowledge Manager | Claude | Reviews the day each weeknight and proposes memory changes, which you apply or skip. |
+| Dumbledore - Knowledge Manager | Claude | Reviews the day each weeknight and proposes memory changes. You apply them, or switch on auto-portrait to let his additions apply themselves. |
 
 Each desk's role card asks for a tier (frontier, workhorse or fast), not a model. Ollivander - Model Keeper maps that tier to a model inside the desk's own family, so a desk never changes family and the review rule holds.
 
@@ -143,7 +143,7 @@ Two test suites cover the kit: `tests` for the store and `tests_fleet` for the f
 
 - The review loop is tested against temporary git repos.
 - The patrol is tested against a faked GitHub and faked desks. It starts in shadow mode: while `~/.hogwarts/patrol/shadow` exists, the patrol and Gringotts only write files under the office, and none of their findings reach you.
-- The weeknight memory review by Dumbledore - Knowledge Manager is tested against temporary stores. He only proposes changes, and nothing applies until you run `castle portrait apply`.
+- The weeknight memory review by Dumbledore - Knowledge Manager is tested against temporary stores. He only proposes changes, and nothing applies until you run `castle portrait apply`, unless you switch on auto-portrait, which applies only his additions and never removes anything.
 - The Codex desks' read boundary rests on Codex permission profiles, which Codex marks as beta. Rerun `scripts/codex-boundary-test.sh` after every Codex upgrade.
 - The fleet runs on macOS only, for one person on one Mac.
 

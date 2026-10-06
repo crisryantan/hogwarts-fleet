@@ -43,7 +43,7 @@ From McGonagall to the whole fleet. Part 1 works as soon as onboarding stage 4 p
 9. **Terminal: switch on the later stages, in order.** Onboarding stage 5 has the steps for each one and a check at the end. Finish one stage before you start the next.
    - **5.1 The review loop.** Apply `a2` from `~/.hogwarts/pending` to wire in the push gate, then enable Hermione. Enable Harry and Moody only once Codex is approved and both `scripts/codex-boundary-test.sh` and `scripts/codex-exec-boundary-test.py` pass on your Mac.
    - **5.2 Patrol in shadow mode.** `sh scripts/patrol-setup.sh` switches on Ron, the Map, Hermione's bot pass and Gringotts. Leave them in shadow mode for three weekdays, as in [The patrol and the backups](#the-patrol-and-the-backups).
-   - **5.3 Dumbledore's nightly review.** `sh scripts/portrait-setup.sh` switches it on. He only proposes memory changes, and you apply them.
+   - **5.3 Dumbledore's nightly review.** `sh scripts/portrait-setup.sh` switches it on. He proposes memory changes and you apply them. Once you have read a couple of his patches, you can let his additions apply themselves (see Dumbledore's patch in [Daily rhythm](#daily-rhythm)).
    - **5.5 and 5.6.** Ollivander and the live view can go on any time after stage 4.
 10. **Terminal: read each desk's dry run.** Before a desk goes on, read the exact command the fleet would run for it. `--dry-run` prints it as JSON and runs nothing. The 5.2 and 5.3 scripts run it for Ron and Dumbledore before they switch them on. For Hermione, Harry and Moody, run it yourself, with the desk's id at the end:
 
@@ -177,6 +177,7 @@ A desk switches on when you create its `enabled` file after reading its dry run,
 - **Reviews.** They happen before anything is pushed, by the other model family, and Harry's handoffs start them on their own. You'll see the verdict in your rows.
 - **Model notes.** Ollivander's notes arrive with your other rows. A move to a cheaper or equal model has already happened. A costlier one waits for `castle desk model <desk> --approve`.
 - **Dumbledore's patch.** After his weeknight review a row says his patch is ready, and it changes nothing until you apply it. `castle portrait show <date>` lists each operation with its reason, its source and whether the store would take it, then prints the exact apply command with the patch's hash. Run it as printed, or with `--only` naming just the operations you accept. Archive moves are yours to make by hand.
+- **Auto-portrait.** Switch it on with `echo on > ~/.hogwarts/auto-portrait` and off with `rm ~/.hogwarts/auto-portrait`. While it is on, his additions (new facts and memory notes) apply the night he writes them, each only if the store takes it, and that night's one row says what applied and what waits, with the exact command for the rest (or `castle portrait show <date>` when the command does not fit in the row). Anything that retires, edits or moves memory still waits for you, and so does an addition the store refused. A night that stops tells you once why and names `castle portrait show <date>`. If a patch for the date was already in his outbox before the night's review, nothing applies that night and you are told. Ollivander's stop file holds it too. A night with no patch sends no row. `castle portrait patches` and `castle portrait show <date>` keep each night's line.
 - **Cap warnings.** A desk at 80% of a daily cap sends one note. At the cap its next run waits for the reset or a bump, as in [Busy days and caps](#busy-days-and-caps).
 - **Wrapping up.** Merge what's ready yourself, then type `Mischief managed <task-id>` for each finished task.
 
@@ -358,8 +359,8 @@ Everything `castle` prints is JSON. If you added the shortcut in one-time setup,
 | `castle request list --open` | See requests between desks still in flight |
 | `castle audit` | Find stuck requests and unanswered owls |
 | `castle fact current` | See what the fleet currently believes |
-| `castle portrait patches` | See Dumbledore's dated patches and which operations you applied |
-| `castle portrait show <date>` | Read one patch, and get the command that applies it |
+| `castle portrait patches` | See Dumbledore's dated patches, which operations you applied, and what auto-portrait applied and what waits on each night, even after a file is gone |
+| `castle portrait show <date>` | Read one patch, and get the command that applies it. It also says what auto-portrait applied and whether the file changed since |
 | `castle portrait apply <date> --sha256 <hash> [--only <ids>]` | Apply the operations you accept from that patch |
 | `castle desk list` | See every desk, its job and whether it takes many tasks |
 | `castle desk caps` | See today's runs and spend against each desk's caps |

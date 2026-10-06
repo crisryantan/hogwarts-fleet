@@ -329,10 +329,11 @@ Prove the cheap jobs are right before they can interrupt you.
 
 ### 5.3 Dumbledore's nightly review
 
-Dumbledore reviews the fleet's memory each weeknight and proposes changes. You approve every one.
+Dumbledore reviews the fleet's memory each weeknight and proposes changes. You approve every one at first.
 
 - What it is: a nightly export of the day's extracts and fact candidates into Dumbledore's inbox, his proposals-only run on it at 22:30 on weekdays, and `castle portrait` to read and apply his patches.
 - To switch it on: run `sh scripts/portrait-setup.sh` yourself. It reads Dumbledore's dry run, exports today once by hand, enables his desk and loads his job, printing OK or FAILED after each step. His chat stays off until you give him a read-only MCP job ([CUSTOMISE.md](CUSTOMISE.md#change-budgets-and-limits)). Each morning after a run, `castle portrait show <date>` lists his patch and prints the exact `castle portrait apply <date> --sha256 <hash>` command. Add `--only <ids>` to apply just the operations you accept.
+- After your two reviewed patches, you may switch on auto-portrait with `echo on > ~/.hogwarts/auto-portrait`. It applies only his additions (new facts and memory notes) the night he writes them; everything that retires, edits or moves memory still waits for you. `rm ~/.hogwarts/auto-portrait` switches it off. The rules are in `~/.hogwarts/pending/README.md`.
 - If you installed RTK, run `rtk discover --all --since 30` to see what it would save on your own sessions. Don't add its hook yet.
 
 **You're done when** you have reviewed two nightly patches, the first weekly scoreboard shows the budgets held, and you have a go or no-go on RTK.

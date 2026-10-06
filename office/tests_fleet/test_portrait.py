@@ -259,6 +259,62 @@ class NightlyRunTests(PortraitCase):
                 self.assertEqual(portrait.main([]), 1)
         self.assertIn("lock", json.loads(err.getvalue())["error"])
 
+    def test_lane_off_an_unreadable_patch_is_reported_not_skipped(self):
+        self.enable("portrait")
+        self.write_file(self.patch_path(), json.dumps({"format": FORMAT, "date": DATE, "ops": []}))
+        os.link(self.patch_path(), self.tmp / "second-link")
+        with self.desk_writes({f"morning-{DATE}.md": "Nothing urgent.\n"}):
+            result = portrait.nightly(self.conn, now=NOW)
+        self.assertEqual((result["ok"], result["patch_ready"]), (True, True))
+        [ready] = self.events_of("portrait.patch-ready")
+        self.assertEqual(ready["verdict"], "headmaster")
+        self.assertIn("was refused", ready["summary"])
+        self.assertIn("more than one hard link", ready["summary"])
+        self.assertIn(f"castle portrait show {DATE}", ready["summary"])
+
+    def lane_night(self) -> str:
+        """A night with auto-portrait on whose run writes a patch: one addition, one note and one retire."""
+        self.enable("portrait")
+        self.write_file(self.office / config.AUTO_PORTRAIT_FILE, "on\n")
+        stale = self.fact("the release train leaves on tuesdays", key="release.train")
+        raw = json.dumps({"format": FORMAT, "date": DATE, "ops": [
+            op("f1", "fact_add", scope="fleet", text="the store runs on the system python", tier="aging"),
+            op("n1", "memory_note_add", text="the export reached the inbox"),
+            op("r1", "fact_retire", fact_id=stale, how="archive")]}).encode("utf-8")
+        with self.desk_writes({f"patch-{DATE}.ops": raw}):
+            portrait.nightly(self.conn, now=NOW)
+        return hashlib.sha256(raw).hexdigest()
+
+    def test_lane_state_shows_in_show_and_patches(self):
+        sha = self.lane_night()
+        [event] = self.events_of("portrait.auto")
+        lane = portrait_patch.show(self.conn, DATE, now=NOW)["auto"]
+        self.assertEqual((lane["state"], lane["sha256"], lane["outcome"], lane["applied"], lane["file_changed"]),
+                         ("done", sha, event["summary"], ["f1", "n1"], False))
+        self.assertNotIn("note", lane)
+        [listed] = portrait_patch.patches(self.conn)
+        self.assertEqual(listed["auto"], {"state": "done", "outcome": event["summary"], "applied": ["f1", "n1"]})
+        self.write_patch([op("f1", "fact_add", scope="fleet", text="a later file reuses the id", tier="aging")])
+        shown = portrait_patch.show(self.conn, DATE, now=NOW)
+        self.assertEqual((shown["auto"]["file_changed"], shown["auto"]["sha256"]), (True, sha))
+        self.assertIn("not from the file as it is now", shown["auto"]["note"])
+        self.assertEqual(shown["ops"][0]["status"], "applied")
+
+    def test_lane_rows_are_listed_after_their_file_is_gone(self):
+        self.lane_night()
+        [event] = self.events_of("portrait.auto")
+        os.unlink(self.patch_path())
+        self.write_patch([op("a", "archive_move", entry="e", to="t")], date="2027-01-14")
+        listed = portrait_patch.patches(self.conn)
+        self.assertEqual([(item["file"], item["date"]) for item in listed],
+                         [(None, DATE), ("patch-2027-01-14.ops", "2027-01-14")])
+        self.assertEqual(listed[0]["auto"], {"state": "done", "outcome": event["summary"], "applied": ["f1", "n1"]})
+        self.assertEqual(listed[0]["applied"], ["f1", "n1"])
+        shown = portrait_patch.show(self.conn, DATE, now=NOW)
+        self.assertEqual((shown["file"], shown["ops"], shown["auto"]["outcome"]), (None, [], event["summary"]))
+        with self.assertRaises(NotFoundError):
+            portrait_patch.show(self.conn, "2027-01-13", now=NOW)
+
 
 # The patch: schema, show, apply and the list
 

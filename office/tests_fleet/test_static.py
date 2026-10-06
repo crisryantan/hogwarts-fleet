@@ -92,6 +92,60 @@ def env_problems(source: str) -> list:
     return found
 
 
+OPT_IN_NAMES = ("auto-draft-pr", "auto-portrait")
+# An opt-in file named as a file: the whole string, or the last part of a path. The feature's name in a message
+# ("auto-portrait applied ...") is not a file name.
+OPT_IN_FILE_SHAPE = re.compile(r"(?:^|/)(?:" + "|".join(map(re.escape, OPT_IN_NAMES)) + r")/?$")
+OPT_IN_ATTRIBUTES = {"AUTO_DRAFT_PR_FILE", "AUTO_PORTRAIT_FILE", "OPT_IN_FILES"}
+
+
+def _docstrings(tree: ast.AST) -> set:
+    found = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)) and node.body:
+            first = node.body[0]
+            if (isinstance(first, ast.Expr) and isinstance(first.value, ast.Constant)
+                    and isinstance(first.value.value, str)):
+                found.add(id(first.value))
+    return found
+
+
+def _is_opt_in_call(node: ast.AST) -> bool:
+    return (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "opt_in_on"
+            and isinstance(node.func.value, ast.Name) and node.func.value.id == "common")
+
+
+def opt_in_problems(name: str, source: str) -> list:
+    """Each place a fleet module named name reads an office opt-in file other than through common.opt_in_on."""
+    tree = ast.parse(source)
+    found = []
+    if name != "config.py":
+        docs = _docstrings(tree)
+        found += [f"line {node.lineno}: names an opt-in file" for node in ast.walk(tree)
+                  if isinstance(node, ast.Constant) and isinstance(node.value, str) and id(node) not in docs
+                  and OPT_IN_FILE_SHAPE.search(node.value.strip())]
+    if name not in ("config.py", "common.py"):
+        through_reader = {id(node.args[0]) for node in ast.walk(tree) if _is_opt_in_call(node) and node.args}
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Attribute) and node.attr in OPT_IN_ATTRIBUTES and id(node) not in through_reader:
+                found.append(f"line {node.lineno}: {node.attr} outside common.opt_in_on")
+            elif isinstance(node, ast.Name) and node.id in OPT_IN_ATTRIBUTES:
+                found.append(f"line {node.lineno}: {node.id} by name")
+            elif isinstance(node, ast.ImportFrom) and any(alias.name in OPT_IN_ATTRIBUTES for alias in node.names):
+                found.append(f"line {node.lineno}: imports an opt-in name")
+    if name == "common.py":
+        for function in [node for node in ast.walk(tree) if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))]:
+            for node in ast.walk(function):
+                if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                        and node.func.attr == "read_regular"):
+                    continue
+                named = node.args[1] if len(node.args) > 1 else next(
+                    (keyword.value for keyword in node.keywords if keyword.arg == "name"), None)
+                if not isinstance(named, ast.Constant) and function.name != "opt_in_on":
+                    found.append(f"line {node.lineno}: {function.name} reads an office file by a name it is given")
+    return found
+
+
 def imported_modules(tree: ast.AST) -> set:
     found = set()
     for node in ast.walk(tree):
@@ -137,6 +191,40 @@ class EnvironmentTests(unittest.TestCase):
         self.assertEqual(set(config.MAX_BUDGET_USD), set(config.HEADLESS_CLAUDE))
         self.assertEqual(set(config.CODEX_ACCESS), set(config.HEADLESS_CODEX))
         self.assertEqual(config.CODEX_ACCESS, {"harry": "write", "moody": "read"})
+
+
+class OptInTests(unittest.TestCase):
+    def test_opt_in_files_are_read_only_through_the_shared_reader(self):
+        self.assertEqual(set(config.OPT_IN_FILES), {config.AUTO_DRAFT_PR_FILE, config.AUTO_PORTRAIT_FILE})
+        self.assertEqual(set(OPT_IN_NAMES), set(config.OPT_IN_FILES))
+        self.assertIn(FLEET / "hooks" / "session_start.py", SOURCES)
+        for path in SOURCES:
+            with self.subTest(path=str(path.relative_to(ROOT))):
+                self.assertEqual(opt_in_problems(path.name, path.read_text()), [])
+
+    def test_the_shared_reader_check_catches_every_other_read(self):
+        for name, snippet in (
+            ("push.py", 'x = "auto-portrait"'),
+            ("push.py", 'path = f"{root}/auto-draft-pr"'),
+            ("owl_post.py", 'raw = safefs.read_regular(fd, "auto-portrait", 64)'),
+            ("review.py", "raw = safefs.read_regular(fd, config.AUTO_DRAFT_PR_FILE, 64)"),
+            ("portrait_auto.py", "on = config.AUTO_PORTRAIT_FILE in names"),
+            ("portrait_auto.py", "from fleet.config import AUTO_PORTRAIT_FILE"),
+            ("portrait_auto.py", "on = common.opt_in_on(name) or config.OPT_IN_FILES"),
+            ("common.py", "def other(name):\n    return safefs.read_regular(fd, name, 64)"),
+            ("hooks/x.py", "on = other.opt_in_on(config.AUTO_PORTRAIT_FILE)"),
+        ):
+            with self.subTest(snippet=snippet):
+                self.assertNotEqual(opt_in_problems(name.rsplit("/", 1)[-1], snippet), [])
+        for name, snippet in (
+            ("push.py", "on = common.opt_in_on(config.AUTO_DRAFT_PR_FILE)"),
+            ("portrait_auto.py", 'SUMMARY = "auto-portrait applied {count} ops"'),
+            ("portrait_auto.py", '"""Reads config.AUTO_PORTRAIT_FILE, the auto-portrait file."""'),
+            ("common.py", "def opt_in_on(name):\n    return safefs.read_regular(fd, name, 64)"),
+            ("common.py", 'def other():\n    return safefs.read_regular(fd, "fixed", 64)'),
+        ):
+            with self.subTest(allowed=snippet):
+                self.assertEqual(opt_in_problems(name, snippet), [])
 
 
 class ProcessTests(unittest.TestCase):

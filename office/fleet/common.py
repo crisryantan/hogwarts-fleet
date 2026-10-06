@@ -13,10 +13,11 @@ from typing import Callable, Iterator, Optional, Sequence
 from hogwarts import db, ids, pensieve
 from hogwarts.errors import StoreError
 
-from . import config
+from . import config, safefs
 from .safefs import FleetError
 
 _PRINTABLE = re.compile(r"[^\x20-\x7e]")
+OPT_IN_MAX_BYTES = 64
 
 
 def connect():
@@ -64,6 +65,21 @@ def signals_held() -> Iterator[None]:
             signal.signal(number, signal.SIG_DFL if handler is None else handler)
         for number in dict.fromkeys(came):
             signal.raise_signal(number)
+
+
+def opt_in_on(name: str) -> bool:
+    """Whether Ryan opted in with the office file name, one of config.OPT_IN_FILES: a plain file in the office, his
+    own and writable by no one else, reached with no link on the way, holding exactly "on". It is read from nowhere
+    else, so nothing a desk can write turns it on. Any other name, a missing or unreadable file, or any other text
+    is off."""
+    if not isinstance(name, str) or name not in config.OPT_IN_FILES:
+        return False
+    try:
+        with safefs.opened_dir(config.OFFICE_ROOT) as fd:
+            raw = safefs.read_regular(fd, name, OPT_IN_MAX_BYTES, "an opt-in file")
+    except (FleetError, OSError):
+        return False
+    return raw.strip() == b"on"
 
 
 def _no_constants(name: str) -> None:

@@ -175,3 +175,23 @@ rm ~/.hogwarts/auto-draft-pr
 8. To rerun the acceptance checks on their own: `~/.hogwarts/bin/fleet verify <task-id>`. Each check runs inside a Codex permission profile with no network and no office, through `codex sandbox`, which runs no model.
 
 Moody's reviews send the diff to OpenAI, so `fleet review own` runs only once Moody is enabled, after your organization approves Codex for its source code.
+
+## (h) Dumbledore applies his own additions (opt-in)
+
+Off by default. With it on, Dumbledore's weeknight job applies the additions in the patch his run wrote that night: each `fact_add` and `memory_note_add` the store takes, one by one. Every `fact_retire`, `fact_edit` and `archive_move` waits for you, and so does an addition the store refused or one that would change memory already there. An operation out of schema never applies. Dumbledore still applies nothing himself: the office script does.
+
+Turn it on from your terminal, and off by deleting the file:
+
+```
+echo on > ~/.hogwarts/auto-portrait
+rm ~/.hogwarts/auto-portrait
+```
+
+It follows the same rules as the draft PR switch in (g): it counts only while it is a plain file in the office that you own and no one else can write, holding exactly `on`. A file anywhere else, a desk folder, his inbox, outbox or scratchpad, an owl, the patch itself or `standing-orders.md`, is ignored, and no flag or store row turns it on. It is read twice each night, before his run and again just before anything applies. Off at either read, nothing applies that night, and you get the usual row saying his patch is ready.
+
+- **Which patch.** Only a patch file that did not exist before his nightly run started is applied. The job holds his only run slot from before it looks in his outbox until it has stored the patch, and his process keeps that slot even if the job is killed, so no other run of his can write the file in between. A patch any other run of his wrote, such as one McGonagall's request started, is never applied by it, even if the nightly run edits it: that night stops and tells you, and you apply what you accept by hand.
+- **What it keeps.** It reads the file once, then keeps the checked additions and the file's sha256 in the store, and applies from that copy, never from the file again. No text that fails the store's scrubber is ever stored.
+- **What you hear.** Each night with a patch ends in one headmaster row: what applied and what waits, with the exact `castle portrait apply <date> --sha256 <hash> --only <ids>` command for the rest (or `castle portrait show <date>` when the command does not fit). A night that stops, for a patch that was there before the run, a file that was refused, a kill or a store refusal, tells you once why and names `castle portrait show <date>`. A night whose run failed or was refused gets only that run's own row. A night with no patch sends none. `castle portrait patches` and `castle portrait show <date>` keep each night's line, even after the file is gone, and `show` says when the file changed since.
+- **Kills.** A kill is finished by the next weeknight job without reading his file again: a night cut off before the patch was stored is told once and closed, and a night cut after it is applied from the stored copy. Nothing applies twice: this switch and `castle portrait apply` share one ledger, and a patch you have started applying by hand is left to you.
+- **The brake.** Ollivander's stop file holds it too: with the stop in place, nothing applies, on the first night or on the next.
+- **The store.** The store adds its `auto_patches` table, a new schema version, the first time anything opens it after you update the office. Going back to older code then means restoring a Gringotts backup.

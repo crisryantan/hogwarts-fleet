@@ -1488,9 +1488,10 @@ def _refuse_blocked(conn, plan: dict, now: Optional[int]) -> None:
 
 def _refuse_review_round(plan: dict, lock_held: Optional[Slot]) -> None:
     """Refuse an owl of a review round unless the review that opened the round runs it, holding the run slot the
-    round recorded. Only the review script passes a slot it holds (lock_held), and it holds the author task's
-    review lock as well, so a launch by hand, by the Owl Post or by a patrol holds no review lock: it could share
-    the author task's pad with the review running now, or run in a slot other than its round's."""
+    round recorded. Only the review script passes a slot it holds for a round (lock_held; the nightly portrait job
+    passes Dumbledore's, whose owls are never a round's), and it holds the author task's review lock as well, so a
+    launch by hand, by the Owl Post or by a patrol holds no review lock: it could share the author task's pad with
+    the review running now, or run in a slot other than its round's."""
     found = plan["review_round"]
     if found is None or (lock_held is not None and found["slot"] == lock_held.index):
         return
@@ -1529,9 +1530,10 @@ def run(conn, desk: str, owl_id: str, mcp_job: Optional[str] = None, now: Option
     """Run one desk on one owl. on_start is called under the run's slot and the desk's launch lock once the
     caps allow the run, just before its launch is recorded, so a caller's own bookkeeping never runs for a
     refused run. lock_held is the Slot of this desk the caller already holds (the review script holds one, from
-    before its round opens until its reviewer task closes); without it the run takes a free slot itself. Only the
-    review script passes it, and an owl of a review round runs only with the slot its round recorded, so every
-    other launch of a round's owl is refused (ReviewOwl) before it waits for a slot. The desk's process inherits
+    before its round opens until its reviewer task closes, and the nightly portrait job holds Dumbledore's only one,
+    from before it reads his outbox until it has stored the patch his run wrote, see fleet/portrait_auto.py); without
+    it the run takes a free slot itself. Only those two pass it, and an owl of a review round runs only with the slot
+    its round recorded, so every other launch of a round's owl is refused (ReviewOwl) before it waits for a slot. The desk's process inherits
     every fd in keep_fds, its slot's and, on a desk that holds spend, its own run lock's, so the locks they hold
     outlive this process if it is killed mid-run. shadow is the patrol's shadow mode: the cap, near-cap and
     vendor-limit notes go in the result's held list, not to Ryan (a cap refusal's own reason is the Capped error),

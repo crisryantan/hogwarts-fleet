@@ -15,12 +15,12 @@ never with --force, so a remote branch that moved makes git refuse. It opens no 
 gh command for a draft PR, which Ryan runs after reading the PR text.
 
 push_draft_pr is the review loop's push after a PASS, only while Ryan has opted in with the one file
-config.AUTO_DRAFT_PR_FILE in the office (auto_draft_pr_on). His opt-in stands in for the typed branch name;
-every other check is check()'s, run the same way. It pushes only the commit that passed, to the branch the
-worktree record holds, then opens a draft PR whose title is the handoff's commit subject and whose body is
-its PR BODY DRAFT, through gitops.open_draft_pr. Before anything is pushed, the PR text and the commit
-messages are refused when they hold a fleet word or anything shaped like a credential, key or email. It
-never opens a ready PR, merges, forces or retries. Any failure stops it where it is and raises a
+config.AUTO_DRAFT_PR_FILE in the office (auto_draft_pr_on, read through common.opt_in_on, the one reader of every
+office switch). His opt-in stands in for the typed branch name; every other check is check()'s, run the same way.
+It pushes only the commit that passed, to the branch the worktree record holds, then opens a draft PR whose title
+is the handoff's commit subject and whose body is its PR BODY DRAFT, through gitops.open_draft_pr. Before anything
+is pushed, the PR text and the commit messages are refused when they hold a fleet word or anything shaped like a
+credential, key or email. It never opens a ready PR, merges, forces or retries. Any failure stops it where it is and raises a
 FleetError naming what was and was not done.
 """
 from __future__ import annotations
@@ -30,12 +30,12 @@ from typing import Callable, Optional
 
 from hogwarts import ids, owlery, pensieve
 
-from fleet import common, config, gitops, safefs, worktree
+from fleet import common, config, gitops, worktree
 from fleet.safefs import FleetError
 
 ADDED_LINE_PREFIX = "+"
 MAX_LISTED = 20
-OPT_IN_MAX_BYTES = 64
+OPT_IN_MAX_BYTES = common.OPT_IN_MAX_BYTES  # the shared reader's limit, kept here by its old name
 # What pensieve.scrub puts in place of a credential, key or email. Text any of its patterns matches this way never
 # goes out by itself. Its hex and IP address marks are left out, since commit shas and version numbers look like them.
 SENSITIVE_MARKS = ("[private_key]", "[credentials]", "[jwt]", "[token]", "[secret]", "[aws_key]", "[email]")
@@ -121,14 +121,10 @@ def _push_exact(record: dict, sha: str, branch: str) -> str:
 
 def auto_draft_pr_on() -> bool:
     """Whether Ryan opted in to the automatic draft PR: the plain file config.AUTO_DRAFT_PR_FILE in the office, his
-    own and writable by no one else, reached with no link on the way, holds exactly "on". It is read from nowhere
-    else, so nothing a desk can write turns it on. Missing, unreadable or anything else is off."""
-    try:
-        with safefs.opened_dir(config.OFFICE_ROOT) as fd:
-            raw = safefs.read_regular(fd, config.AUTO_DRAFT_PR_FILE, OPT_IN_MAX_BYTES, "the draft PR opt-in")
-    except (FleetError, OSError):
-        return False
-    return raw.strip() == b"on"
+    own and writable by no one else, reached with no link on the way, holds exactly "on". It is read through
+    common.opt_in_on, the one reader of every office switch, from nowhere else, so nothing a desk can write turns it
+    on. Missing, unreadable or anything else is off."""
+    return common.opt_in_on(config.AUTO_DRAFT_PR_FILE)
 
 
 def sensitive_mark(text: str) -> Optional[str]:

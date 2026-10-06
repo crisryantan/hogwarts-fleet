@@ -116,6 +116,14 @@ AUTO_REVIEW_LOCK_WAIT_SECONDS = 10
 #   echo on > ~/.hogwarts/auto-draft-pr
 # A file anywhere else, a link, a file someone else owns or can write, or any other text leaves it off.
 AUTO_DRAFT_PR_FILE = "auto-draft-pr"
+# Auto-portrait (fleet/portrait_auto.py), off by default: after Dumbledore's clean nightly run, the job applies the
+# fact and key point additions in the patch tonight's run wrote, and every other op waits for Ryan. It is on only
+# while this plain file in the office holds exactly "on", by the same rules as the draft PR file:
+#   echo on > ~/.hogwarts/auto-portrait
+AUTO_PORTRAIT_FILE = "auto-portrait"
+# Every office opt-in file. common.opt_in_on reads only these names, so a typo never reads another office file as a
+# switch, and every switch is read through that one reader.
+OPT_IN_FILES = (AUTO_DRAFT_PR_FILE, AUTO_PORTRAIT_FILE)
 # A failed run whose error text matches one of these hit the vendor's own usage, rate, quota or credit
 # limit, not a fleet cap. Matched without case against Claude's result text when is_error is set, and
 # against the message that ended a failed Codex run (its last turn.failed, else its last error event).

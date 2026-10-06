@@ -3,6 +3,7 @@ from __future__ import annotations
 import ipaddress
 import re
 import sqlite3
+import time
 from typing import Iterable, Optional
 
 from . import db, ids
@@ -198,6 +199,144 @@ def record_spec(conn: Conn, task_id: str, repo_dir: str, branch: str, base: str,
 def task_spec(conn: Conn, task_id: str) -> Optional[dict]:
     """The repo folder, branch, base and TASK.md sha256 a go recorded on this task, or None."""
     return db.fetch_one(conn, "SELECT * FROM task_specs WHERE task_id = ?", (ids.check("task", task_id),))
+
+
+# Auto-portrait nights: one row per local date the nightly job took on with the opt-in on (see db.AUTO_PATCHES).
+
+AUTO_DATE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
+AUTO_OP_ID = re.compile(r"[a-z0-9][a-z0-9-]{0,23}")
+AUTO_ENDINGS = ("done", "stopped", "off")
+_AUTO_SELECT = ("SELECT auto_patches.*, owls.acked_at AS owl_acked_at FROM auto_patches"
+                " JOIN owls ON owls.id = auto_patches.owl_id")
+_PRINTABLE_ASCII = re.compile(r"[ -~]*")
+
+
+def _auto_date(value: object) -> str:
+    if not isinstance(value, str) or AUTO_DATE.fullmatch(value) is None:
+        raise ValidationError("an auto-portrait date is YYYY-MM-DD")
+    try:
+        time.strptime(value, "%Y-%m-%d")
+    except ValueError:
+        raise ValidationError("an auto-portrait date is YYYY-MM-DD") from None
+    return value
+
+
+def _op_ids(values: object, field: str, empty: bool = True) -> str:
+    """Patch op ids as the store keeps them: one comma list, each id once."""
+    if not isinstance(values, (list, tuple)) or (not values and not empty):
+        raise ValidationError(f"{field} must be a list of op ids")
+    if any(not isinstance(value, str) or AUTO_OP_ID.fullmatch(value) is None for value in values):
+        raise ValidationError(f"{field} holds something that is not an op id")
+    if len(set(values)) != len(values):
+        raise ValidationError(f"{field} names an op twice")
+    return ",".join(values)
+
+
+def _ascii_line(value: object, field: str, limit: int) -> str:
+    if not isinstance(value, str) or not 1 <= len(value) <= limit or _PRINTABLE_ASCII.fullmatch(value) is None:
+        raise ValidationError(f"{field} must be 1 to {limit} characters of printable ASCII")
+    return value
+
+
+def auto_patch(conn: Conn, date: str) -> Optional[dict]:
+    """The auto-portrait night of date, with its owl's acked_at as owl_acked_at, or None. Read only."""
+    return db.fetch_one(conn, _AUTO_SELECT + " WHERE auto_patches.date = ?", (_auto_date(date),))
+
+
+def open_auto_patches(conn: Conn) -> list[dict]:
+    """The nights still armed or validated, oldest date first, each with its owl's acked_at. Read only."""
+    return db.fetch_all(conn, _AUTO_SELECT + " WHERE auto_patches.state IN ('armed', 'validated')"
+                        " ORDER BY auto_patches.date")
+
+
+def recent_auto_patches(conn: Conn, limit: int = 30) -> list[dict]:
+    """The newest auto-portrait nights, newest date first. Read only."""
+    limit = ids.check_int(limit, "limit", minimum=1, maximum=1000)
+    return db.fetch_all(conn, _AUTO_SELECT + " ORDER BY auto_patches.date DESC LIMIT ?", (limit,))
+
+
+def arm_auto_patch(conn: Conn, date: str, owl_id: str, before: str, before_sha256: Optional[str],
+                   now: Optional[int] = None) -> dict:
+    """Arm the night of date for its export owl, recording what Dumbledore's outbox held for that date just before
+    his run: absent, present (with its sha256) or unreadable. A new night is attempt 1. A night that took no snapshot
+    and is armed, stopped or off is armed again as its next attempt; any other night is a ConflictError."""
+    date = _auto_date(date)
+    owl_id = ids.check("owl", owl_id)
+    before = ids.check_enum(before, db.AUTO_PATCH_BEFORE, "before")
+    if (before == "present") != (before_sha256 is not None):
+        raise ValidationError("a patch that was there before the run is recorded with its sha256, and only that one")
+    if before_sha256 is not None:
+        before_sha256 = ids.check("sha256", before_sha256, "the earlier patch's sha256")
+    ts = ids.stamp(now)
+    with db.transaction(conn):
+        row = db.fetch_one(conn, "SELECT * FROM auto_patches WHERE date = ?", (date,))
+        if row is None:
+            conn.execute(
+                "INSERT INTO auto_patches(date, attempt, state, owl_id, armed_at, before, before_sha256)"
+                " VALUES (?, 1, 'armed', ?, ?, ?, ?)",
+                (date, owl_id, ts, before, before_sha256),
+            )
+        elif row["sha256"] is None and row["state"] in ("armed", "stopped", "off"):
+            conn.execute(
+                "UPDATE auto_patches SET attempt = attempt + 1, state = 'armed', owl_id = ?, armed_at = ?, before = ?,"
+                " before_sha256 = ?, outcome = NULL, applied_ids = NULL, finished_at = NULL WHERE date = ?",
+                (owl_id, ts, before, before_sha256, date),
+            )
+        else:
+            raise ConflictError("this night took its snapshot or finished, so it is never armed again")
+    return auto_patch(conn, date)
+
+
+def snapshot_auto_patch(conn: Conn, date: str, sha256: str, ops_json: str, order_ids: list, held_ids: list,
+                        unfit_ids: list, now: Optional[int] = None) -> dict:
+    """Move an armed night to validated with its one snapshot: the patch's sha256, the checked additions as
+    canonical ASCII JSON, and the op ids in patch order, held for Ryan and out of schema."""
+    date = _auto_date(date)
+    sha256 = ids.check("sha256", sha256, "the patch's sha256")
+    if (not isinstance(ops_json, str) or not 2 <= len(ops_json) <= db.AUTO_PATCH_OPS_MAX
+            or _PRINTABLE_ASCII.fullmatch(ops_json) is None):
+        raise ValidationError(f"the stored ops must be 2 to {db.AUTO_PATCH_OPS_MAX} characters of printable ASCII")
+    order = _op_ids(order_ids, "the op order", empty=False)
+    held, unfit = _op_ids(held_ids, "the held ops"), _op_ids(unfit_ids, "the ops out of schema")
+    if not set(held_ids) | set(unfit_ids) <= set(order_ids) or set(held_ids) & set(unfit_ids):
+        raise ValidationError("held and out of schema ops are ops of the patch, and never both")
+    ts = ids.stamp(now)
+    with db.transaction(conn):
+        row = db.fetch_one(conn, "SELECT state FROM auto_patches WHERE date = ?", (date,))
+        if row is None:
+            raise NotFoundError("this night was never armed")
+        if row["state"] != "armed":
+            raise ConflictError("only an armed night takes its snapshot")
+        conn.execute(
+            "UPDATE auto_patches SET state = 'validated', sha256 = ?, ops = ?, order_ids = ?, held_ids = ?,"
+            " unfit_ids = ?, validated_at = ? WHERE date = ?",
+            (sha256, ops_json, order, held, unfit, ts, date),
+        )
+    return auto_patch(conn, date)
+
+
+def end_auto_patch(conn: Conn, date: str, state: str, outcome: str, applied_ids: Optional[list] = None,
+                   now: Optional[int] = None) -> dict:
+    """End an armed or validated night as done, stopped or off with its outcome line, and for done the ops it
+    applied. An ending never changes."""
+    date = _auto_date(date)
+    state = ids.check_enum(state, AUTO_ENDINGS, "auto-portrait ending")
+    outcome = _ascii_line(outcome, "the outcome", db.AUTO_PATCH_OUTCOME_MAX)
+    if applied_ids is not None and state != "done":
+        raise ValidationError("only a night that is done records the ops it applied")
+    applied = None if applied_ids is None else _op_ids(applied_ids, "the applied ops")
+    ts = ids.stamp(now)
+    with db.transaction(conn):
+        row = db.fetch_one(conn, "SELECT state FROM auto_patches WHERE date = ?", (date,))
+        if row is None:
+            raise NotFoundError("this night was never armed")
+        if row["state"] not in ("armed", "validated"):
+            raise ConflictError("this night has ended, and its ending never changes")
+        conn.execute(
+            "UPDATE auto_patches SET state = ?, outcome = ?, applied_ids = ?, finished_at = ? WHERE date = ?",
+            (state, outcome, applied, ts, date),
+        )
+    return auto_patch(conn, date)
 
 
 def set_worktree(conn: Conn, task_id: str, worktree: str) -> dict:

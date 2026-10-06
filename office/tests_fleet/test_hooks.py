@@ -23,6 +23,19 @@ from tests_fleet.support import (
 SESSION = "0b6f8c1e-1111-4222-8333-944455556666"
 
 
+def remembered(conn) -> list:
+    """Memory with distinctive text, as auto-portrait leaves it: a fact and a key point from a patch, and the routine
+    ledger rows that record them. Returns the texts that must never reach a desk's context."""
+    fact = pensieve.add_fact(conn, "fleet", "zebra crossings need a lollipop man", "aging", "portrait:2027-01-15:f1",
+                             now=NOW)
+    point = pensieve.add_keypoint(conn, "quokkas guard the backup drive", ["portrait"], now=NOW)
+    pensieve.add_fact(conn, "mcgonagall", "narwhals approve every release", "pinned", "portrait:2027-01-15:f2", now=NOW)
+    for op_id in ("f1", "f2", "n1"):
+        pensieve.add_event(conn, "portrait", "portrait.auto-applied", "routine", f"auto-portrait applied {op_id}",
+                           dedupe_key=f"portrait:applied:2027-01-15:{op_id}", now=NOW)
+    return [fact["text"], point["text"], "narwhals approve every release"]
+
+
 class HookCase(FleetCase):
     def hook_input(self, event: str, transcript: str = "", **fields) -> dict:
         return {"session_id": SESSION, "transcript_path": transcript, "cwd": str(self.castle),
@@ -111,6 +124,18 @@ class SessionStartTests(HookCase):
         self.run_hook(session_start, self.hook_input("SessionStart", source="resume"))
         self.assertEqual(len(owlery.inbox(self.conn, "mcgonagall")), 1)
 
+    def test_the_digest_never_prints_fact_or_key_point_text(self):
+        texts = remembered(self.conn)
+        self.headmaster(2)
+        for argv in ([], *(["--desk", desk] for desk in config.INTERACTIVE_DESKS)):
+            for source in ("startup", "clear", "compact", "resume"):
+                with self.subTest(argv=argv, source=source):
+                    code, out, err = self.run_hook(session_start, self.hook_input("SessionStart", source=source), argv)
+                    self.assertEqual(code, 0, err)
+                    self.assertTrue(out)
+                    for text in texts:
+                        self.assertNotIn(text, out)
+
     def test_bad_input_never_exits_2(self):
         for raw in (b"{not json", b"[1]", b'{"source": NaN}'):
             with self.subTest(raw=raw):
@@ -167,6 +192,20 @@ class UserPromptSubmitTests(HookCase):
         self.assertTrue(all(event["acked_at"] is None for event in self.events()))
         _, digest, _ = self.run_hook(session_start, self.hook_input("SessionStart", source="startup"))
         self.assertIn("Headmaster events, unacked (8 shown, 32 more)", digest)
+
+    def test_the_prompt_hook_never_prints_fact_or_key_point_text(self):
+        texts = remembered(self.conn)
+        self.headmaster(2)
+        for prompt in ("what's up", "castle fact list", texts[0]):
+            with self.subTest(prompt=prompt):
+                code, out, err = self.prompt(prompt)
+                self.assertEqual(code, 0, err)
+                self.assertTrue(out)
+                data = json.loads(out)
+                said = data["systemMessage"] + data["hookSpecificOutput"]["additionalContext"]
+                for text in texts:
+                    if text != prompt:  # a prompt Ryan typed is his own text
+                        self.assertNotIn(text, said)
 
     def test_routine_events_are_never_drained(self):
         pensieve.add_event(self.conn, "ron", "ci.green", "routine", "all green", now=NOW)

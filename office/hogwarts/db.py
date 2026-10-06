@@ -13,7 +13,7 @@ from .errors import ConflictError, IntegrityError, NotFoundError, StoreError, Va
 
 DEFAULT_DB = Path("/Users/crisryantan/.hogwarts/state/pensieve.db")
 CODE_ROOT = Path(os.path.abspath(__file__)).parent.parent
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 WAL_ATTEMPTS = 50
 BYTECODE_SUFFIXES = (".pyc", ".pyo", ".so")
 SIDECARS = ("-wal", "-shm")
@@ -61,6 +61,14 @@ RUN_SLOT_LIMIT = 8
 SPEC_PATH_MAX = 1024
 SPEC_BRANCH_MAX = 100
 SPEC_BASE_MAX = 200
+# Auto-portrait's nights (AUTO_PATCHES): the states a night moves through, what was in Dumbledore's outbox for its date
+# just before his run, the most stored plan bytes, the most bytes of op ids in one comma list (100 ops of 24
+# characters and their commas) and the longest outcome line.
+AUTO_PATCH_STATES = ("armed", "validated", "done", "stopped", "off")
+AUTO_PATCH_BEFORE = ("absent", "present", "unreadable")
+AUTO_PATCH_OPS_MAX = 1048576
+AUTO_PATCH_IDS_MAX = 2499
+AUTO_PATCH_OUTCOME_MAX = 500
 
 PathLike = Union[str, Path]
 
@@ -96,6 +104,8 @@ _ENUMS = {
     "model_families": _choices(MODEL_FAMILIES),
     "change_reasons": _choices(MODEL_CHANGE_REASONS),
     "trial_ends": _choices(MODEL_TRIAL_ENDS),
+    "auto_states": _choices(AUTO_PATCH_STATES),
+    "auto_before": _choices(AUTO_PATCH_BEFORE),
 }
 
 
@@ -772,7 +782,99 @@ V9 = (
     ),
 )
 
-MIGRATIONS = ((1, V1), (2, V2), (3, V3), (4, V4), (5, V5), (6, V6), (7, V7), (8, V8), (9, V9))
+
+def _id_list(column: str) -> str:
+    """A comma list of patch op ids: lowercase letters, digits, hyphens and commas, in printable ASCII, or empty."""
+    return (f"{column} IS NULL OR (length(CAST({column} AS BLOB)) <= {AUTO_PATCH_IDS_MAX}"
+            f" AND length({column}) = length(CAST({column} AS BLOB)) AND {column} NOT GLOB '*[^a-z0-9,-]*')")
+
+
+# Auto-portrait: one row per local date the nightly job took on with the opt-in on. It is armed under Dumbledore's run
+# slot, before his run, with what his outbox held for the date (before, and its sha256 when present). After a clean
+# run it takes one snapshot of the patch: its sha256, the checked additions as canonical ASCII JSON (no raw patch
+# bytes ever), and the op ids in patch order, held for Ryan and out of schema. The additions are applied from the
+# snapshot, never from the file again, in the transaction that ends the night done. A night ends done, stopped or
+# off with one outcome line. A night that took no snapshot can be armed again, with the next attempt number; a
+# snapshot is written once, a date never changes, done is final, and rows are never deleted.
+AUTO_PATCHES = (
+    _table(
+        f"""CREATE TABLE IF NOT EXISTS auto_patches (
+        date TEXT PRIMARY KEY NOT NULL CHECK (length(date) = 10
+            AND date GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]'),
+        attempt INTEGER NOT NULL CHECK (attempt >= 1),
+        state TEXT NOT NULL CHECK (state IN {{auto_states}}),
+        owl_id TEXT NOT NULL REFERENCES owls(id),
+        armed_at INTEGER NOT NULL,
+        before TEXT NOT NULL CHECK (before IN {{auto_before}}),
+        before_sha256 TEXT CHECK (before_sha256 IS NULL OR (length(before_sha256) = 64
+            AND before_sha256 NOT GLOB '*[^0-9a-f]*')),
+        sha256 TEXT CHECK (sha256 IS NULL OR (length(sha256) = 64 AND sha256 NOT GLOB '*[^0-9a-f]*')),
+        ops TEXT CHECK (ops IS NULL OR (length(CAST(ops AS BLOB)) BETWEEN 2 AND {AUTO_PATCH_OPS_MAX}
+            AND length(ops) = length(CAST(ops AS BLOB)) AND ops NOT GLOB '*[^ -~]*')),
+        order_ids TEXT CHECK (order_ids IS NULL OR length(order_ids) >= 1) CHECK ({_id_list("order_ids")}),
+        held_ids TEXT CHECK ({_id_list("held_ids")}),
+        unfit_ids TEXT CHECK ({_id_list("unfit_ids")}),
+        applied_ids TEXT CHECK ({_id_list("applied_ids")}),
+        outcome TEXT CHECK (outcome IS NULL OR (length(CAST(outcome AS BLOB)) BETWEEN 1 AND {AUTO_PATCH_OUTCOME_MAX}
+            AND length(outcome) = length(CAST(outcome AS BLOB)) AND outcome NOT GLOB '*[^ -~]*')),
+        validated_at INTEGER,
+        finished_at INTEGER,
+        CHECK ((before = 'present') = (before_sha256 IS NOT NULL)),
+        CHECK ((sha256 IS NULL) = (ops IS NULL) AND (ops IS NULL) = (order_ids IS NULL)
+            AND (order_ids IS NULL) = (held_ids IS NULL) AND (held_ids IS NULL) = (unfit_ids IS NULL)
+            AND (unfit_ids IS NULL) = (validated_at IS NULL)),
+        CHECK (state <> 'armed' OR sha256 IS NULL),
+        CHECK (state <> 'validated' OR sha256 IS NOT NULL),
+        CHECK ((finished_at IS NULL) = (state IN ('armed', 'validated'))),
+        CHECK ((outcome IS NULL) = (finished_at IS NULL)),
+        CHECK (applied_ids IS NULL OR state = 'done')
+    )"""
+    ),
+    _guard("auto_patches_no_delete", "BEFORE DELETE ON auto_patches", "auto-portrait nights are never deleted"),
+    _guard("auto_patches_date_fixed", "BEFORE UPDATE OF date ON auto_patches WHEN OLD.date IS NOT NEW.date",
+           "an auto-portrait night keeps its date"),
+    _guard(
+        "auto_patches_open_armed",
+        "BEFORE INSERT ON auto_patches WHEN NEW.state IS NOT 'armed' OR NEW.attempt IS NOT 1"
+        " OR NEW.sha256 IS NOT NULL OR NEW.ops IS NOT NULL OR NEW.order_ids IS NOT NULL OR NEW.held_ids IS NOT NULL"
+        " OR NEW.unfit_ids IS NOT NULL OR NEW.validated_at IS NOT NULL OR NEW.applied_ids IS NOT NULL"
+        " OR NEW.outcome IS NOT NULL OR NEW.finished_at IS NOT NULL",
+        "an auto-portrait night opens armed, as attempt 1, with no snapshot and no ending",
+    ),
+    _guard(
+        "auto_patches_snapshot_once",
+        "BEFORE UPDATE ON auto_patches WHEN (OLD.sha256 IS NOT NULL AND (NEW.sha256 IS NOT OLD.sha256"
+        " OR NEW.ops IS NOT OLD.ops OR NEW.order_ids IS NOT OLD.order_ids OR NEW.held_ids IS NOT OLD.held_ids"
+        " OR NEW.unfit_ids IS NOT OLD.unfit_ids OR NEW.validated_at IS NOT OLD.validated_at))"
+        " OR (OLD.sha256 IS NULL AND NEW.sha256 IS NOT NULL AND (OLD.state IS NOT 'armed' OR NEW.state IS NOT 'validated'))",
+        "an auto-portrait snapshot is written once, as an armed night is validated",
+    ),
+    _guard(
+        "auto_patches_forward",
+        "BEFORE UPDATE OF state ON auto_patches WHEN OLD.state IS NOT NEW.state AND NOT (OLD.state = 'armed'"
+        " OR (OLD.state = 'validated' AND NEW.state IN ('done', 'stopped', 'off'))"
+        " OR (OLD.state IN ('stopped', 'off') AND NEW.state = 'armed' AND OLD.sha256 IS NULL))",
+        "an auto-portrait night only moves forward",
+    ),
+    _guard(
+        "auto_patches_rearm",
+        "BEFORE UPDATE ON auto_patches WHEN ((NEW.attempt IS NOT OLD.attempt OR NEW.armed_at IS NOT OLD.armed_at"
+        " OR NEW.owl_id IS NOT OLD.owl_id OR NEW.before IS NOT OLD.before"
+        " OR NEW.before_sha256 IS NOT OLD.before_sha256 OR (NEW.state = 'armed' AND OLD.state IS NOT 'armed'))"
+        " AND NOT (NEW.state = 'armed' AND OLD.state IN ('armed', 'stopped', 'off') AND OLD.sha256 IS NULL"
+        " AND NEW.attempt = OLD.attempt + 1))",
+        "an auto-portrait night is armed again only with no snapshot, as its next attempt",
+    ),
+    _guard(
+        "auto_patches_ending_fixed",
+        "BEFORE UPDATE ON auto_patches WHEN (NEW.outcome IS NOT OLD.outcome OR NEW.applied_ids IS NOT OLD.applied_ids"
+        " OR NEW.finished_at IS NOT OLD.finished_at) AND NOT ((OLD.state IN ('armed', 'validated')"
+        " AND NEW.state IN ('done', 'stopped', 'off')) OR (OLD.state IN ('stopped', 'off') AND NEW.state = 'armed'))",
+        "an auto-portrait ending is written with the final state and cleared only by arming the night again",
+    ),
+)
+
+MIGRATIONS = ((1, V1), (2, V2), (3, V3), (4, V4), (5, V5), (6, V6), (7, V7), (8, V8), (9, V9), (10, AUTO_PATCHES))
 
 
 def _uid() -> int:
