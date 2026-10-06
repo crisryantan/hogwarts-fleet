@@ -1328,10 +1328,18 @@ def approved_digest(task_id: str) -> tuple:
 
 def review_own(conn, repo_dir: str, title: Optional[str] = None, intent: Optional[str] = None,
                task_id: Optional[str] = None, base: str = config.DEFAULT_BASE, fetch: bool = True) -> dict:
-    """A commit from one of Ryan's own Claude sessions, reviewed by Moody in a detached worktree."""
+    """A commit from one of Ryan's own Claude sessions, reviewed by Moody in a detached worktree. It runs in the
+    foreground, so a checkout in a macOS privacy-protected folder is not refused, but the result warns that the
+    closer, a background job, cannot auto-close its task."""
     target = ids.new_id("task") if task_id is None else ids.check("task", task_id)
     with task_review_lock(target) as lock_fd:
-        return _review_own(conn, repo_dir, title, intent, task_id, target, base, fetch, lock_fd)
+        result = _review_own(conn, repo_dir, title, intent, task_id, target, base, fetch, lock_fd)
+    protected = gitops.protected_folder(repo_dir) if isinstance(repo_dir, str) else None
+    if protected is None or not isinstance(result, dict):
+        return result
+    return {**result, "warning": (f"this checkout is inside ~/{protected}, which macOS keeps from the fleet's"
+                                  " background jobs, so the closer cannot auto-close this task; close it by hand, or"
+                                  " clone the repo elsewhere in your home folder for the next one")}
 
 
 def _review_own(conn, repo_dir: str, title: Optional[str], intent: Optional[str], task_id: Optional[str],

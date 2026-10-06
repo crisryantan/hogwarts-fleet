@@ -27,6 +27,7 @@ import os
 import re
 import stat
 import subprocess
+import sys
 from typing import Optional
 
 from hogwarts import ids, pensieve
@@ -101,6 +102,36 @@ def check_repo_dir(path: object) -> str:
         raise FleetError("the repo folder must not go through a symlink")
     if not os.path.isdir(path) or os.path.islink(path + "/.git") or not os.path.isdir(path + "/.git"):
         raise FleetError("the repo folder must be a main checkout with its own .git folder")
+    return path
+
+
+def protected_folder(path: str) -> Optional[str]:
+    """On macOS, the folder of config.PROTECTED_HOME_DIRS a repo folder sits in, else None. Elsewhere always None."""
+    if sys.platform != "darwin":
+        return None
+    folded = path.lower()
+    for name in config.PROTECTED_HOME_DIRS:
+        root = f"{config.USER_HOME_DIR}/{name}".lower()
+        if folded == root or folded.startswith(root + "/"):
+            return name
+    return None
+
+
+def protected_reason(path: str) -> Optional[str]:
+    name = protected_folder(path)
+    if name is None:
+        return None
+    repo = os.path.basename(path.rstrip("/")) or "repo"
+    return (f"the repo folder is inside ~/{name}, which macOS keeps from the fleet's background jobs (the Owl Post, the"
+            " Map and the closer) without a privacy grant, so git there fails for them; clone the repo elsewhere in"
+            f" your home folder, for example ~/{config.SUGGESTED_REPOS_DIR}/{repo}, and use that checkout")
+
+
+def check_unprotected(path: str) -> str:
+    """Refuse, on macOS, a build's repo folder inside a privacy-protected home folder (protected_reason)."""
+    reason = protected_reason(path)
+    if reason is not None:
+        raise FleetError(reason)
     return path
 
 

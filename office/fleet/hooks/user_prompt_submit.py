@@ -30,7 +30,10 @@ What it says (each part only when there is something to say):
 3. Unacked headmaster events, newest per task, cut to about 1500 characters, with a
    count of the rest. The hook never acks them. They stay until Ryan runs
    castle event ack in his terminal.
-4. One Tempus line when the last assistant call in the transcript carried more than
+4. In McGonagall's session only, her delivered owls she has not read and has not been shown,
+   one line each with a scrubbed one-line status, at most config.INBOX_NOTICE_CAP and a count
+   of the rest, each listed once (fleet/mcgonagall_inbox.py). No owl body beyond that line.
+5. One Tempus line when the last assistant call in the transcript carried more than
    200k tokens of context (input plus cache read plus cache creation).
 
 The close runs only when every check passes:
@@ -323,7 +326,8 @@ def read_spec(raw: bytes, task_id: str) -> dict:
         raise FleetError(SPEC_BLOCK)
     if sum(1 for line in section if SPEC_KEY_ANYWHERE.match(line)) != len(SPEC_KEYS):
         raise FleetError("the ## Spec section names repo:, branch: or base: more than once")
-    checks = (("repo", gitops.check_repo_dir), ("branch", gitops.check_branch),
+    checks = (("repo", lambda value: gitops.check_unprotected(gitops.check_repo_dir(value))),
+              ("branch", gitops.check_branch),
               ("base", lambda value: gitops.check_ref(value, "the base")))
     for key, check in checks:
         try:
@@ -595,6 +599,12 @@ def _body(data: dict, desk: str, out, now: int) -> None:
         elif attempt:
             shown.append(GO_EXACT)
             context.append(GO_EXACT)
+        if common.session_desk(data, desk) == TASK_DESK:
+            from fleet import mcgonagall_inbox  # only her session pays for this import
+
+            owls, _ = mcgonagall_inbox.safe_unseen(conn, now)
+            shown += owls
+            context += owls
         pending, count = events(conn)
     finally:
         conn.close()

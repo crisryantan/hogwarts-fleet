@@ -115,6 +115,16 @@ Four programs, and only one you need every day. Three of them live in the termin
 
    Check: the last line says all six steps passed. The sent file is renamed to `owl_<id>-hello.json`, and the owl lands in Hermione's inbox as `owl_<id>.json`.
 
+Keep the repos the fleet builds in outside `~/Documents`, `~/Desktop`, `~/Downloads` and iCloud Drive. macOS keeps background jobs out of those folders unless you grant them access, and the Owl Post, the Map and the closer run as background jobs, so git can't see a worktree's repo there and every automatic review fails. The go, `fleet worktree` and `fleet adopt` refuse such a repo and say where to clone it instead, for example:
+
+```
+gh repo clone <owner>/<repo> ~/fleet-repos/<repo>
+```
+
+`fleet review own` still reviews a checkout in one of those folders, since it runs in your terminal, but its result warns that the closer can't auto-close that task.
+
+Every owl another desk sends McGonagall reaches you too: a headmaster event and a macOS notification naming the desk, the task and a one-line status, and a list of her new owls on your next message in her session. Set `DESKTOP_NOTIFY = False` in `~/.hogwarts/fleet/config.py` to turn the notifications off.
+
 ## Your first session
 
 You don't need to remember which desk does what. Start every piece of work with McGonagall, and she writes it up and sends it to the right desk.

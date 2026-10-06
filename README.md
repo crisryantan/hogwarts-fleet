@@ -30,6 +30,7 @@ It isn't a hosted service and it isn't multi-user. The fleet runs locally on one
 - Homebrew, and from it the Claude Code CLI, the Codex CLI, `jq`, `gh`, `ripgrep` and `shellcheck`.
 - `claude`, `codex` and `gh` signed in from your own terminal.
 - Your organization's approval before its code goes to OpenAI. Harry and Moody run on Codex, and both start switched off.
+- Repos the fleet builds in cloned outside `~/Documents`, `~/Desktop`, `~/Downloads` and iCloud Drive, for example under `~/fleet-repos/<repo>`. macOS keeps background jobs out of those folders without a privacy grant, and the Owl Post, the Map and the closer are background jobs, so the go, `fleet worktree` and `fleet adopt` refuse a repo there. `fleet review own` still runs on one, but its task can't be auto-closed.
 
 Optional:
 

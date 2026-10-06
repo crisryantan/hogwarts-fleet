@@ -12,7 +12,9 @@ For each regular *.json file in /Users/crisryantan/hogwarts/desks/<sender>/outbo
 5. Store the owl through the owlery API with an idempotency key derived from the file.
 6. Write a delivered copy to the recipient's inbox as <owl_id>.json (mode 0600) and mark it
    delivered. The copy names the task's parent and the TASK.md path found up the task chain.
-7. Ring the doorbell: a routine event for an interactive desk. A request to an enabled
+7. An owl newly delivered to McGonagall, from any desk, also raises one headmaster event and a macOS notification
+   naming its sender, task and a scrubbed one-line status (fleet/mcgonagall_inbox.py), once the store has it.
+   Ring the doorbell: a routine event for an interactive desk. A request to an enabled
    headless desk under its daily cap starts run_desk. No other owl starts a run. A desk that
    builds in a worktree (Harry) is not started until its task has one: Ryan gets a headmaster
    event instead, and the worktree script starts the run once the worktree is attached.
@@ -60,7 +62,7 @@ from hogwarts.errors import (  # noqa: E402
     ConflictError, IntegrityError, NotFoundError, StoreError, ValidationError,
 )
 
-from fleet import common, config, run_desk, safefs  # noqa: E402
+from fleet import common, config, mcgonagall_inbox, run_desk, safefs  # noqa: E402
 from fleet.safefs import FleetError, Missing, Unsafe  # noqa: E402
 
 REQUIRED_FIELDS = ("to", "kind", "subject")
@@ -584,6 +586,8 @@ def deliver_file(conn, sender: str, outbox_fd: int, fname: str, now: Optional[in
     finally:
         os.close(inbox_fd)
     rang = _ring(conn, owl["recipient"], owl, newly, now)
+    if newly:  # after the delivery is stored: McGonagall hears of every owl sent to her, and nothing here undoes it
+        mcgonagall_inbox.announce(conn, owl, text, now)
     reviewing = _start_review(conn, owl, newly, now)
     _ack_replied(conn, sender, owl, now)
     _flag_forged_sender(conn, sender, message, owl, now)

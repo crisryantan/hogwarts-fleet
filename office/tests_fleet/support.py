@@ -20,7 +20,7 @@ from unittest import mock
 from hogwarts import capacity, db, ids, pensieve
 from tests.support import NOW, temp_dir
 
-from fleet import config, run_desk
+from fleet import config, mcgonagall_inbox, run_desk
 
 REGISTRY = (
     ("mcgonagall", "claude", "McGonagall - Chief of Staff", "opus"),
@@ -179,6 +179,15 @@ class FleetCase(unittest.TestCase):
         confirms = mock.patch.object(run_desk, "spawn_go_confirm")
         self.spawned_confirms = confirms.start()
         self.addCleanup(confirms.stop)
+        # The Owl Post's word to McGonagall about each owl sent to her (an event and a notification) is recorded here,
+        # so tests that count events see only their own; test_mcgonagall_inbox.py runs the real one.
+        announced = mock.patch.object(mcgonagall_inbox, "announce")
+        self.announced = announced.start()
+        self.addCleanup(announced.stop)
+        # No desktop notification is ever shown: a test that wants one reads this mock's calls.
+        notices = mock.patch.object(run_desk, "notify_desktop", return_value=True)
+        self.notified = notices.start()
+        self.addCleanup(notices.stop)
         # A desk run empties its private folder under the per-user temp folder, so every test gets its own temp
         # folder there unless it sets one. Without this a faked Harry run empties the real hogwarts-harry folder.
         user_temp = self.tmp / "user-temp"

@@ -299,6 +299,17 @@ GO_CONFIRM_KEEP_SECONDS = 86400
 GO_CONFIRM_INPUT_MAX_BYTES = 16384
 # The most distinct gos one prompt may start, one "go <task-id>" per line.
 GO_MAX_PER_PROMPT = 5
+# Folders in your home that macOS keeps from launchd jobs without a privacy grant. The Owl Post, the Map and the
+# closer run as launchd jobs, so git cannot read a worktree's git dir in a repo under one of these, and every automatic
+# review of it fails. On macOS a build's repo folder (the go, fleet worktree, fleet adopt) must be outside them.
+PROTECTED_HOME_DIRS = ("Documents", "Desktop", "Downloads", "Library/Mobile Documents")
+# Where the refusal suggests cloning such a repo instead, under your home folder.
+SUGGESTED_REPOS_DIR = "fleet-repos"
+# A desktop notification for each owl delivered to McGonagall's inbox (macOS only). False turns it off.
+DESKTOP_NOTIFY = True
+DESKTOP_NOTIFY_TIMEOUT_SECONDS = 5
+# How many new owls in McGonagall's inbox the prompt hook lists at once, with a count of the rest.
+INBOX_NOTICE_CAP = 10
 
 # The doorbell carries no text from any desk.
 DOORBELL_KIND = "owl.doorbell"

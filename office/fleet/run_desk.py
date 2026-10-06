@@ -1028,6 +1028,31 @@ def spawn_go_confirm(payload: bytes) -> None:
             pass
 
 
+OSASCRIPT_BIN = "/usr/bin/osascript"
+# A fixed script: the text arrives as its one argument and is only ever shown, never part of the script's source.
+NOTIFY_SCRIPT = ("on run argv", 'display notification (item 1 of argv) with title "Hogwarts"', "end run")
+NOTIFY_MAX_CHARS = 200
+
+
+def notify_desktop(text: str) -> bool:
+    """Show one macOS notification with text, passed to a fixed AppleScript as an argv item, with an empty
+    environment and a short timeout. Off with config.DESKTOP_NOTIFY = False, and nothing at all off macOS. A failure
+    is ignored: it returns False and never raises."""
+    if sys.platform != "darwin" or not config.DESKTOP_NOTIFY:
+        return False
+    argv = [OSASCRIPT_BIN]
+    for line in NOTIFY_SCRIPT:
+        argv += ["-e", line]
+    argv.append(common.one_line(text, NOTIFY_MAX_CHARS))
+    try:
+        done = subprocess.run(argv, env={}, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                              stderr=subprocess.DEVNULL, timeout=config.DESKTOP_NOTIFY_TIMEOUT_SECONDS, check=False,
+                              close_fds=True)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return done.returncode == 0
+
+
 def _detach(module: str, args: list, log_name: str, hold_fd: Optional[int] = None) -> None:
     """Start fleet.<module>'s main with args in a new session, with an empty environment, logging to the office. The
     process inherits no fd but hold_fd, a lock this process holds, which is handed over to it (safefs.hand_over)
