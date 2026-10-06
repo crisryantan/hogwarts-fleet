@@ -118,7 +118,7 @@ import json
 import os
 import re
 import sys
-from typing import Optional
+from typing import Callable, Optional
 
 if __name__ == "__main__" and "/Users/crisryantan/.hogwarts" not in sys.path:
     sys.path.insert(0, "/Users/crisryantan/.hogwarts")
@@ -396,7 +396,7 @@ def _undo(claim: dict, inbox_copy: Optional[str], exc: BaseException) -> Optiona
     return None if stuck is None else f"{worktree.cause(exc)}; removing {stuck} also failed, so remove it by hand"
 
 
-def _go(conn, task_id: str, now: int) -> tuple:
+def _go(conn, task_id: str, now: int, note: Optional[Callable[[dict], None]] = None) -> tuple:
     """(lines, started) for a go Ryan's typing confirmed. Every refusal before the commit leaves nothing."""
     from fleet import verify, worktree  # only a go pays for these imports
 
@@ -424,6 +424,9 @@ def _go(conn, task_id: str, now: int) -> tuple:
                 opened = owlery.open_request(conn, TASK_DESK, BUILD_DESK, drafted["title"], body=body,
                                              parent_task_id=task_id, idempotency_key=f"go:{task_id}", now=now)
                 _unchanged(task_id, spec)
+                if note is not None:  # the confirmer records what it is about to make, before git makes it
+                    note({"task_id": task_id, "repo_dir": spec["repo_dir"], "branch": spec["branch"],
+                          "worktree": config.worktree_dir(opened["task"]["id"])})
                 # The worktree is this go's to take back from before git makes it until this transaction commits:
                 # create fills claim before its first git change and never takes back what a claim holds.
                 made = worktree.create(conn, opened["task"]["id"], spec["repo_dir"], spec["branch"], spec["base"],
@@ -453,12 +456,12 @@ def _go(conn, task_id: str, now: int) -> tuple:
     return lines, True
 
 
-def run_go(conn, task_id: str, now: int) -> tuple:
+def run_go(conn, task_id: str, now: int, note: Optional[Callable[[dict], None]] = None) -> tuple:
     """(lines, started) for one go whose typing is confirmed: the go above, ended by SIGTERM or SIGHUP through its
     take-back, with every refusal said in one line."""
     try:
         with common.ended_by_signals():
-            return _go(conn, task_id, now)
+            return _go(conn, task_id, now) if note is None else _go(conn, task_id, now, note)
     except (FleetError, StoreError) as exc:
         return [f"Go was not applied to {task_id}: {common.one_line(exc, 600)}"], False
     except Exception as exc:  # noqa: BLE001 - the go has rolled back and taken back what it made; say so
@@ -607,15 +610,21 @@ def _body(data: dict, desk: str, out, now: int) -> None:
     with its output written, so they are shown on the next prompt instead of never."""
     made: list = []
     try:
-        text = _output(data, desk, now, made)
-        if text is not None:
-            out.write(text)
+        with common.ended_by_signals():  # SIGTERM or SIGHUP ends the hook through this cleanup too
+            text = _output(data, desk, now, made)
+            if text is not None:
+                out.write(text)
+                out.flush()  # a write still buffered fails here, not after the markers say shown
     except BaseException:
         if made:
             from fleet import mcgonagall_inbox
 
             mcgonagall_inbox.release(made)
         raise
+    if made:
+        from fleet import mcgonagall_inbox
+
+        mcgonagall_inbox.shown(made)
 
 
 def _output(data: dict, desk: str, now: int, made: list) -> Optional[str]:
@@ -648,7 +657,7 @@ def _output(data: dict, desk: str, now: int, made: list) -> Optional[str]:
         if common.session_desk(data, desk) == TASK_DESK:
             from fleet import mcgonagall_inbox  # only her session pays for this import
 
-            owls, _ = mcgonagall_inbox.safe_unseen(conn, made, now)
+            owls, _ = mcgonagall_inbox.safe_unseen(conn, made)  # marker ages are by the real clock
             shown += owls
             context += owls
         pending, count = events(conn)

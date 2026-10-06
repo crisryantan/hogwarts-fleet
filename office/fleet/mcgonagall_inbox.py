@@ -2,14 +2,16 @@
 
 - announce: when the Owl Post delivers an owl to her inbox, after the store has it, one headmaster event names the
   sender desk, the task and a one-line status (dedupe key per owl id), and a macOS notification says the same
-  (run_desk.notify_desktop). A failed notification changes nothing. announce_pending, on every Owl Post pass, announces
-  each recent unacked owl delivered to her that has no such event yet, so a pass that stopped after the delivery, or
-  an event write that failed, is made good once; the dedupe key keeps it single. Notifications are not retried.
+  (run_desk.notify_desktop). A failed notification changes nothing. Before the owl is marked delivered, the Owl Post
+  writes a pending-announcement marker for it (announce-pending/<owl id>), removed only once the event is in the store;
+  announce_pending, on every pass, announces each owl that still has one, whatever its age or ack state. The dedupe key
+  keeps it single. Notifications are not retried.
 - unseen: the prompt hook, in her session only, lists her delivered owls she has not read yet and has not been shown
-  yet, one line each, capped at config.INBOX_NOTICE_CAP with a count of the rest. Each is shown once: the hook claims
-  a marker named after the owl id in the office's inbox-seen folder, create-exclusive, before it shows the owl, and
-  shows only the owls whose marker it made. When the hook ends without writing its output, it releases the markers it
-  made, so those owls are shown on the next prompt. Markers of owls she has read or acked go away.
+  yet, one line each, capped at config.INBOX_NOTICE_CAP with a count of the rest. A hook claims each owl's seen marker
+  (inbox-seen/<owl id>) as pending before it shows it, shows only the owls it claimed, and sets them shown only once its
+  output is written and flushed; ended any other way, it releases them. A pending marker whose hook is gone, or older
+  than config.SEEN_PENDING_SECONDS, is taken over by the next hook, so the owl is listed again. Markers of owls she has
+  read or acked go away.
 The status comes from the owl's metadata and its scrubbed subject only. For a build handoff it is "round N handed
 off", N read strictly as digits from the HANDOFF header; no other body text is used anywhere.
 """
@@ -17,14 +19,16 @@ from __future__ import annotations
 
 import os
 import re
+import time
 from typing import Optional
 
 from hogwarts import db, ids, owlery, pensieve
 
-from fleet import common, config, run_desk, safefs
+from fleet import common, config, markers, run_desk, safefs
 
 DESK = config.HOOK_DESK
 SEEN_DIR = "inbox-seen"
+ANNOUNCE_DIR = "announce-pending"
 STATUS_MAX = 160
 EVENT_KIND = "owl.to-mcgonagall"
 HANDOFF_ROUND = re.compile(r"HANDOFF tk_[0-9a-f]{16} round ([0-9]{1,3})")
@@ -45,25 +49,52 @@ def _dedupe(owl_id: str) -> str:
     return f"owl:to-mcgonagall:{owl_id}"
 
 
-def announce(conn, owl: dict, body: Optional[str], now: Optional[int] = None, notify: bool = True) -> None:
-    """The headmaster event, and with notify the notification, for one owl delivered to McGonagall. Called after its
-    delivery is stored, never inside a transaction; nothing here can undo the delivery."""
+def owl_meta(conn, owl_id: str) -> Optional[dict]:
+    row = db.fetch_one(conn, "SELECT id, sender, recipient, kind, task_id, subject FROM owls WHERE id = ?",
+                       (ids.check("owl", owl_id),))
+    return None if row is None else dict(row)
+
+
+def mark_pending(owl: dict) -> None:
+    """Before an owl to McGonagall is marked delivered: its pending-announcement marker, create-exclusive, so a pass
+    that stops before the event is in the store leaves it for announce_pending."""
     if owl["recipient"] != DESK:
         return
+    with safefs.opened_dir(config.OFFICE_ROOT, ANNOUNCE_DIR, create=True) as fd:
+        markers.publish(fd, owl["id"], {"state": "pending"})
+
+
+def _announced(owl_id: str) -> None:
+    try:
+        with safefs.opened_dir(config.OFFICE_ROOT, ANNOUNCE_DIR) as fd:
+            os.unlink(owl_id, dir_fd=fd)
+    except (FileNotFoundError, safefs.FleetError, OSError):
+        pass
+
+
+def announce(conn, owl: dict, body: Optional[str], now: Optional[int] = None, notify: bool = True) -> bool:
+    """The headmaster event, and with notify the notification, for one owl delivered to McGonagall. Called after its
+    delivery is stored, never inside a transaction; nothing here can undo the delivery. Its pending marker goes once
+    the event is in the store. Returns whether it is."""
+    if owl["recipient"] != DESK:
+        return False
     said = status(owl["kind"], owl["subject"], body)
     task = owl["task_id"] or "-"
     summary = f"owl from {owl['sender']} to {DESK} on {task}: {said}"
     try:
         pensieve.add_event(conn, owl["sender"], EVENT_KIND, "headmaster", summary, task_id=owl["task_id"],
                            dedupe_key=_dedupe(owl["id"]), now=now)
-    except Exception:  # noqa: BLE001 - the owl is delivered; announce_pending tries again on the next pass
-        pass
-    if not notify:
-        return
-    try:
-        run_desk.notify_desktop(f"{owl['sender']} on {task}: {said}")
-    except Exception:  # noqa: BLE001 - a notification never matters to the delivery
-        pass
+        recorded = True
+    except Exception:  # noqa: BLE001 - the owl is delivered; its marker stays for announce_pending
+        recorded = False
+    if recorded:
+        _announced(owl["id"])
+    if notify:
+        try:
+            run_desk.notify_desktop(f"{owl['sender']} on {task}: {said}")
+        except Exception:  # noqa: BLE001 - a notification never matters to the delivery
+            pass
+    return recorded
 
 
 def _body(conn, owl_id: str) -> Optional[str]:
@@ -74,27 +105,59 @@ def _body(conn, owl_id: str) -> Optional[str]:
 
 
 def announce_pending(conn, now: Optional[int] = None) -> int:
-    """Announce each unacked owl delivered to McGonagall in the last config.ANNOUNCE_RETRY_SECONDS that has no event
-    yet, with no notification. Returns how many it tried."""
-    since = common.now_stamp(now) - config.ANNOUNCE_RETRY_SECONDS
-    tried = 0
-    for owl in owlery.inbox(conn, DESK):
-        if owl["delivered_at"] is None or owl["delivered_at"] < since:
+    """Each Owl Post pass: announce every owl with a pending-announcement marker, whatever its age or ack state, with
+    no notification. A marker for an owl the store does not hold goes. Returns how many were announced."""
+    try:
+        with safefs.opened_dir(config.OFFICE_ROOT, ANNOUNCE_DIR) as fd:
+            names = [name for name in os.listdir(fd) if OWL_ID.fullmatch(name)]
+    except safefs.Missing:
+        return 0
+    done = 0
+    for owl_id in sorted(names):
+        owl = owl_meta(conn, owl_id)
+        if owl is None or owl["recipient"] != DESK:
+            _announced(owl_id)
             continue
-        if db.fetch_one(conn, "SELECT id FROM events WHERE dedupe_key = ?", (_dedupe(owl["id"]),)) is not None:
-            continue
-        announce(conn, owl, _body(conn, owl["id"]), now, notify=False)
-        tried += 1
-    return tried
+        done += announce(conn, owl, _body(conn, owl_id), now, notify=False)
+    return done
 
 
-def release(markers: list) -> None:
-    """Remove the seen markers one hook made, when it ends without showing them."""
-    if not markers:
+# Seen markers, inbox-seen/<owl id>: markers.pending() while a hook is showing the owl, {"state": "shown"} once its
+# output is written and flushed. A pending marker whose process is gone, or older than SEEN_PENDING_SECONDS, is taken
+# over by the next hook, so an owl a killed hook claimed is listed again.
+
+def _take(fd: int, owl_id: str, now: float) -> bool:
+    """Claim the owl's seen marker for this hook. False when it is shown, or another live hook is showing it."""
+    if markers.publish(fd, owl_id, markers.pending()):
+        return True
+    marker = markers.read(fd, owl_id)
+    if marker is None or marker.get("state") == "shown":
+        return False
+    if not (markers.gone(marker) or markers.age(fd, owl_id, marker, now) > config.SEEN_PENDING_SECONDS):
+        return False
+    aside = f".{owl_id}.stale-{os.getpid()}"
+    try:
+        os.rename(owl_id, aside, src_dir_fd=fd, dst_dir_fd=fd)  # only one taker moves it
+    except OSError:
+        return False
+    if markers.read(fd, aside) != marker:  # another hook made it fresh meanwhile: give it back
+        try:
+            os.link(aside, owl_id, src_dir_fd=fd, dst_dir_fd=fd, follow_symlinks=False)
+        except OSError:
+            pass
+        os.unlink(aside, dir_fd=fd)
+        return False
+    os.unlink(aside, dir_fd=fd)
+    return markers.publish(fd, owl_id, markers.pending())
+
+
+def release(made: list) -> None:
+    """Remove the seen markers one hook claimed, when it ends without its output written."""
+    if not made:
         return
     try:
         with safefs.opened_dir(config.OFFICE_ROOT, SEEN_DIR) as fd:
-            for name in markers:
+            for name in made:
                 try:
                     os.unlink(name, dir_fd=fd)
                 except OSError:
@@ -103,10 +166,26 @@ def release(markers: list) -> None:
         pass
 
 
-def unseen(conn, made: list, now: Optional[int] = None) -> tuple:
+def shown(made: list) -> None:
+    """Set the seen markers one hook claimed to shown, once its output is written and flushed."""
+    if not made:
+        return
+    try:
+        with safefs.opened_dir(config.OFFICE_ROOT, SEEN_DIR) as fd:
+            for name in made:
+                try:
+                    markers.replace(fd, name, {"state": "shown"})
+                except (safefs.FleetError, OSError):
+                    pass  # stays pending: the next hook lists it again once it is stale
+    except (safefs.FleetError, OSError):
+        pass
+
+
+def unseen(conn, made: list, now: Optional[float] = None) -> tuple:
     """(lines, count) for McGonagall's delivered, unread owls not shown before, oldest first, capped. Each owl shown is
-    one whose seen marker this call made, create-exclusive; the markers it made are appended to made, for the caller to
-    release when it ends without output. A failure part way releases what this call made and raises."""
+    one whose seen marker this call claimed (_take); those are appended to made, for the caller to set shown after its
+    output is flushed, or release when it ends without output. A failure part way releases what this call claimed."""
+    now = time.time() if now is None else now
     waiting = [owl for owl in owlery.inbox(conn, DESK)
                if owl["delivered_at"] is not None and owl["read_at"] is None]
     mine = []
@@ -121,15 +200,12 @@ def unseen(conn, made: list, now: Optional[int] = None) -> tuple:
                         pass
             won, rest = [], 0
             for owl in waiting:
-                if safefs.lstat(fd, owl["id"]) is not None:
-                    continue  # shown before, or another hook is showing it now
                 if len(won) >= config.INBOX_NOTICE_CAP:
-                    rest += 1
+                    marker = markers.read(fd, owl["id"])
+                    rest += 1 if marker is None or marker.get("state") != "shown" else 0
                     continue
-                try:
-                    os.close(safefs.create_new(fd, owl["id"]))
-                except FileExistsError:
-                    continue  # another hook won this one
+                if not _take(fd, owl["id"], now):
+                    continue
                 mine.append(owl["id"])
                 won.append(owl)
             if not won:
@@ -145,7 +221,7 @@ def unseen(conn, made: list, now: Optional[int] = None) -> tuple:
     return lines, len(won) + rest
 
 
-def safe_unseen(conn, made: list, now: Optional[int] = None) -> tuple:
+def safe_unseen(conn, made: list, now: Optional[float] = None) -> tuple:
     try:
         return unseen(conn, made, now)
     except Exception:  # noqa: BLE001 - a notice never breaks the prompt

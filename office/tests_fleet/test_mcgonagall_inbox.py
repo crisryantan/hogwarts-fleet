@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import subprocess
 import sys
+import time
 from unittest import mock
 
 from hogwarts import owlery, pensieve
@@ -14,6 +16,7 @@ from tests.support import NOW
 from fleet import config, mcgonagall_inbox, owl_post, run_desk
 from fleet.hooks import user_prompt_submit
 from tests_fleet.support import FleetCase
+from tests_fleet.test_go_confirm import dead_pid
 
 REAL_NOTIFY = run_desk.notify_desktop  # before FleetCase patches it
 REAL_ANNOUNCE = mcgonagall_inbox.announce
@@ -184,20 +187,67 @@ class RaceAndRollbackTests(InboxCase):
         folder = self.office / mcgonagall_inbox.SEEN_DIR
         return sorted(path.name for path in folder.iterdir()) if folder.exists() else []
 
-    def test_an_owl_another_hook_claimed_first_is_not_shown_twice(self):
+    def test_an_owl_another_live_hook_claimed_first_is_not_shown_twice(self):
         self.send("ron", name="a.json", subject="first")
         [owl] = owlery.inbox(self.conn, "mcgonagall")
-        real = mcgonagall_inbox.safefs.create_new
+        real = mcgonagall_inbox.markers.publish
 
-        def other_hook_wins(fd, name, mode=0o600):
-            os.close(real(fd, name, mode))  # the other hook makes the marker between this one's look and its claim
-            return real(fd, name, mode)
+        def other_hook_wins(fd, name, data):
+            real(fd, name, {**data, "pid": os.getppid()})  # a live hook claims it between this one's look and claim
+            return real(fd, name, data)
 
-        with mock.patch.object(mcgonagall_inbox.safefs, "create_new", side_effect=other_hook_wins):
+        with mock.patch.object(mcgonagall_inbox.markers, "publish", side_effect=other_hook_wins):
             made = []
             self.assertEqual(mcgonagall_inbox.unseen(self.conn, made), ([], 0))
         self.assertEqual(made, [])
         self.assertEqual(self.markers(), [owl["id"]])
+
+    def seen(self, owl_id: str) -> dict:
+        return json.loads((self.office / mcgonagall_inbox.SEEN_DIR / owl_id).read_text())
+
+    def test_a_marker_a_killed_hook_left_pending_is_listed_again(self):
+        self.send("ron", name="a.json", subject="first")
+        [owl] = owlery.inbox(self.conn, "mcgonagall")
+        folder = self.office / mcgonagall_inbox.SEEN_DIR
+        folder.mkdir(mode=0o700)
+        now = int(time.time())
+        # A hook still running a moment ago holds it: nothing is listed.
+        self.write_file(folder / owl["id"], json.dumps({"state": "pending", "pid": os.getppid(), "at": now}))
+        self.assertNotIn("New owls", self.prompt())
+        # Its hook is gone (SIGKILL): the next prompt lists it again and marks it shown.
+        self.write_file(folder / owl["id"], json.dumps({"state": "pending", "pid": dead_pid(), "at": now}))
+        self.assertIn("- ron fyi", self.prompt())
+        self.assertEqual(self.seen(owl["id"]), {"state": "shown"})
+        # A pending marker past the bound is taken over even when its pid is in use again.
+        self.write_file(folder / owl["id"], json.dumps({"state": "pending", "pid": os.getppid(), "at": now}))
+        later = time.time() + config.SEEN_PENDING_SECONDS + 1
+        with mock.patch.object(mcgonagall_inbox.time, "time", return_value=later):
+            self.assertIn("- ron fyi", self.prompt())
+        self.assertNotIn("New owls", self.prompt())
+
+    def test_sigterm_during_the_hook_releases_its_claims(self):
+        self.send("ron", name="a.json", subject="first")
+
+        def terminated(data):
+            signal.raise_signal(signal.SIGTERM)
+
+        with mock.patch.object(user_prompt_submit, "tempus", side_effect=terminated), \
+                self.assertRaises(SystemExit) as stopped:
+            self.prompt()
+        self.assertEqual(stopped.exception.code, 128 + signal.SIGTERM)
+        self.assertEqual(self.markers(), [])
+        self.assertIn("- ron fyi", self.prompt())
+
+    def test_a_buffered_write_that_fails_on_flush_releases_its_claims(self):
+        self.send("ron", name="a.json", subject="first")
+        buffered = mock.Mock()
+        buffered.flush.side_effect = BrokenPipeError("reader gone")
+        with self.assertRaises(BrokenPipeError):
+            user_prompt_submit._body({"prompt": "hi", "agent_type": "mcgonagall", "transcript_path": ""},
+                                     "mcgonagall", buffered, NOW)
+        buffered.write.assert_called_once()
+        self.assertEqual(self.markers(), [])
+        self.assertIn("- ron fyi", self.prompt())
 
     def test_a_hook_that_ends_without_output_releases_its_markers(self):
         self.send("ron", name="a.json", subject="first")
@@ -217,15 +267,15 @@ class RaceAndRollbackTests(InboxCase):
     def test_a_marker_that_cannot_be_made_part_way_shows_nothing_and_keeps_nothing(self):
         self.send("ron", name="a.json", subject="first")
         self.send("ron", name="b.json", subject="second")
-        real, calls = mcgonagall_inbox.safefs.create_new, []
+        real, calls = mcgonagall_inbox.markers.publish, []
 
-        def second_fails(fd, name, mode=0o600):
+        def second_fails(fd, name, data):
             calls.append(name)
             if len(calls) == 2:
                 raise OSError("disk full")
-            return real(fd, name, mode)
+            return real(fd, name, data)
 
-        with mock.patch.object(mcgonagall_inbox.safefs, "create_new", side_effect=second_fails):
+        with mock.patch.object(mcgonagall_inbox.markers, "publish", side_effect=second_fails):
             self.assertNotIn("New owls", self.prompt())
         self.assertEqual(self.markers(), [])
         shown = json.loads(self.prompt())["systemMessage"]
@@ -246,18 +296,38 @@ class PendingAnnouncementTests(InboxCase):
             self.send("ron", subject="first")
         self.assertEqual(self.told(), [])
         self.assertEqual(self.notified.call_count, 1)
+        self.assertEqual(len(self.pending_markers()), 1)
         for _ in range(3):
             owl_post.run_pass(self.conn, now=NOW + 60)
         [event] = self.told()
         self.assertTrue(event["summary"].endswith("fyi: first"))
         self.assertEqual(self.notified.call_count, 1)  # notifications are best effort, never retried
+        self.assertEqual(self.pending_markers(), [])
 
-    def test_a_pass_stopped_after_the_delivery_is_made_good_and_old_owls_are_left_alone(self):
+    def pending_markers(self) -> list:
+        folder = self.office / mcgonagall_inbox.ANNOUNCE_DIR
+        return sorted(path.name for path in folder.iterdir()) if folder.exists() else []
+
+    def test_a_pass_stopped_after_the_delivery_is_announced_later_even_once_acked_and_old(self):
         with mock.patch.object(mcgonagall_inbox, "announce", side_effect=SystemExit(143)), \
                 self.assertRaises(SystemExit):
             self.send("hermione", subject="stopped")
-        self.assertIsNotNone(owlery.inbox(self.conn, "mcgonagall")[0]["delivered_at"])
-        owl_post.run_pass(self.conn, now=NOW + config.ANNOUNCE_RETRY_SECONDS + 1)
-        self.assertEqual(self.told(), [])  # older than the retry window
-        owl_post.run_pass(self.conn, now=NOW + 5)
+        [owl] = owlery.inbox(self.conn, "mcgonagall")
+        self.assertIsNotNone(owl["delivered_at"])
+        self.assertEqual(self.pending_markers(), [owl["id"]])
+        owlery.read(self.conn, owl["id"], "mcgonagall", now=NOW)
+        owlery.ack(self.conn, owl["id"], "mcgonagall", now=NOW)
+        owl_post.run_pass(self.conn, now=NOW + 30 * 86400)
+        [event] = self.told()
+        self.assertTrue(event["summary"].endswith("fyi: stopped"))
+        self.assertEqual(self.pending_markers(), [])
+        owl_post.run_pass(self.conn, now=NOW + 30 * 86400)
         self.assertEqual(len(self.told()), 1)
+
+    def test_a_delivered_owl_drops_its_marker_once_its_event_is_in_the_store(self):
+        self.send("ron", subject="fine")
+        self.assertEqual(len(self.told()), 1)
+        self.assertEqual(self.pending_markers(), [])
+        self.write_owl("hermione", "x.json", {"to": "ron", "kind": "fyi", "subject": "not hers", "body": "x"})
+        owl_post.run_pass(self.conn, now=NOW)
+        self.assertEqual(self.pending_markers(), [])

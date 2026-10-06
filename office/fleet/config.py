@@ -313,8 +313,8 @@ DESKTOP_NOTIFY = True
 DESKTOP_NOTIFY_TIMEOUT_SECONDS = 5
 # How many new owls in McGonagall's inbox the prompt hook lists at once, with a count of the rest.
 INBOX_NOTICE_CAP = 10
-# How far back each Owl Post pass looks for owls to McGonagall whose headmaster event was lost, to announce them.
-ANNOUNCE_RETRY_SECONDS = 86400
+# A seen marker a prompt hook left pending this long, or whose hook process is gone, is taken over by the next hook.
+SEEN_PENDING_SECONDS = 60
 
 # The doorbell carries no text from any desk.
 DOORBELL_KIND = "owl.doorbell"

@@ -224,7 +224,8 @@ class DeferredGoTests(ConfirmCase):
         raw = json.dumps(data, sort_keys=True).encode()
         folder = self.office / config.GO_CONFIRM_DIR
         folder.mkdir(mode=0o700, exist_ok=True)
-        self.write_file(folder / go_confirm.claim_key(PROMPT_ID), hashlib.sha256(raw).hexdigest() + "\n")
+        self.write_file(folder / go_confirm.claim_key(PROMPT_ID), json.dumps(
+            {"state": "claimed", "sha256": hashlib.sha256(raw).hexdigest(), "kind": "go", "task_ids": [TASK_ID]}))
         self.confirm(raw)
         self.assert_unchanged(before)
         [event] = self.headmaster_events()
@@ -468,21 +469,24 @@ class InterruptedTests(ConfirmCase):
         self.key = go_confirm.claim_key(PROMPT_ID)
         self.old = int(time.time()) - config.GO_CONFIRM_WAIT_SECONDS - config.GO_CONFIRM_STALE_MARGIN_SECONDS - 5
 
-    def marker(self) -> str:
-        return (self.folder / f"{self.key}.ran").read_text().split()[0]
+    def marker(self) -> dict:
+        return json.loads((self.folder / f"{self.key}.ran").read_text())
 
-    def pending(self, pid: int, stamp: int) -> None:
-        self.write_file(self.folder / f"{self.key}.ran", f"pending {pid} {stamp}\n")
+    def pending(self, pid: int, stamp: int, made: list = ()) -> None:
+        self.write_file(self.folder / f"{self.key}.ran", json.dumps(
+            {"state": "pending", "pid": pid, "at": stamp, "kind": "go", "task_ids": [TASK_ID], "made": list(made)}))
 
-    def assert_interrupted_once(self, shown: str = None) -> None:
+    def assert_interrupted_once(self, shown: str = None) -> dict:
         events = self.headmaster_events()
         self.assertEqual(len(events), 1)
-        said = (f"The confirmation for {TASK_ID} was interrupted; check castle task show {TASK_ID} and type the go"
-                " again if it is not registered.")
+        said = (f"The confirmation for {TASK_ID} was interrupted; check castle task show {TASK_ID}. Type the go again"
+                " if it is not registered.")
         self.assertEqual(events[0]["summary"], said)
+        self.assertEqual(events[0]["dedupe_key"], f"go-confirm:{TASK_ID}:{self.key[:16]}")
         if shown is not None:
             self.assertIn(said, shown)
-        self.assertEqual(self.marker(), "done")
+        self.assertEqual(self.marker(), {"state": "done"})
+        return events[0]
 
     def test_a_confirmer_that_died_is_reported_by_the_next_hook_and_never_run_again(self):
         path = self.later()
@@ -498,15 +502,40 @@ class InterruptedTests(ConfirmCase):
         self.assert_interrupted_once()
         self.assert_unchanged(before)
 
-    def test_a_claim_no_confirmer_ever_took_is_reported_once_it_is_old(self):
+    def test_the_owl_post_sweep_reports_a_dead_confirmer_with_no_retry_after_time_passes(self):
         path = self.later()
+        before = self.snapshot()
         self.deferred(f"go {TASK_ID}", transcript=path)
-        shown, _, _ = self.said(f"go {TASK_ID}", transcript=path)
-        self.assertIn("is already being confirmed", shown)  # still young: it may yet start
-        os.utime(self.folder / self.key, (self.old, self.old))
+        self.pending(dead_pid(), int(time.time()))
         with mock.patch.object(user_prompt_submit, "_go", side_effect=AssertionError("a go ran")):
-            shown, _, _ = self.said(f"go {TASK_ID}", transcript=path)
-        self.assert_interrupted_once(shown)
+            from fleet import owl_post
+            owl_post.run_pass(self.conn, now=NOW)
+            self.assertEqual(self.headmaster_events(), [])  # not old enough yet
+            later = time.time() + config.GO_CONFIRM_WAIT_SECONDS + config.GO_CONFIRM_STALE_MARGIN_SECONDS + 1
+            with mock.patch.object(go_confirm.time, "time", return_value=later):
+                owl_post.run_pass(self.conn, now=NOW)
+                owl_post.run_pass(self.conn, now=NOW)
+        self.assert_interrupted_once()
+        self.assert_unchanged(before)
+
+    def test_the_sweep_reports_a_claim_no_confirmer_ever_took(self):
+        self.deferred(f"go {TASK_ID}")
+        self.assertEqual(go_confirm.sweep(self.conn), [])
+        os.utime(self.folder / self.key, (self.old, self.old))
+        self.assertEqual(len(go_confirm.sweep(self.conn)), 1)
+        self.assert_interrupted_once()
+        self.assertEqual(go_confirm.sweep(self.conn), [])
+
+    def test_a_go_killed_while_making_its_worktree_names_what_to_remove(self):
+        self.deferred(f"go {TASK_ID}")
+        made = {"task_id": TASK_ID, "repo_dir": str(self.repo), "branch": "fix/widget",
+                "worktree": str(self.castle / "worktrees" / "tk_00000000000000bb")}
+        self.pending(dead_pid(), self.old, [made])
+        go_confirm.sweep(self.conn)
+        [event] = self.headmaster_events()
+        self.assertIn(f"It was making the worktree {made['worktree']} on branch fix/widget in {self.repo}: if castle"
+                      " task show finds no Harry task with this worktree, remove that worktree and branch by hand,"
+                      " then type the go again.", event["summary"])
 
     def test_a_live_confirmer_is_left_alone_and_a_second_one_refuses(self):
         path = self.later()
@@ -515,8 +544,9 @@ class InterruptedTests(ConfirmCase):
         shown, _, _ = self.said(f"go {TASK_ID}", transcript=path)
         self.assertIn("is already being confirmed", shown)
         self.assertEqual(self.confirm(payload), ["refused: another confirmer has this prompt"])
+        self.assertEqual(go_confirm.sweep(self.conn), [])
         self.assertEqual(self.headmaster_events(), [])
-        self.assertEqual(self.marker(), "pending")
+        self.assertEqual(self.marker()["state"], "pending")
 
     def test_a_confirmer_finding_a_dead_ones_marker_reports_it_and_runs_nothing(self):
         path = self.later()
@@ -529,27 +559,37 @@ class InterruptedTests(ConfirmCase):
         self.assert_interrupted_once()
         self.assert_unchanged(before)
 
-    def test_a_store_outage_leaves_the_marker_pending_and_a_success_marks_it_done(self):
+    def test_a_store_outage_leaves_the_marker_pending_for_the_sweep(self):
         path = self.later()
         _, _, payload = self.deferred(f"go {TASK_ID}", transcript=path)
         entry = user_entry(f"go {TASK_ID}", promptId=PROMPT_ID)
         with mock.patch.object(go_confirm.common, "connect", side_effect=sqlite3.OperationalError("locked")):
             lines = self.confirm(payload, self.appears(path, entry, after=1))
         self.assertIn("the store could not be opened", lines[0])
-        self.assertEqual(self.marker(), "pending")
-        self.assertEqual(self.headmaster_events(), [])
-        # Its process has ended: the next hook reports it as interrupted, and the go is typed again by hand.
-        stamp = (self.folder / f"{self.key}.ran").read_text().split()
-        self.pending(dead_pid(), self.old)
-        shown, _, _ = self.said(f"go {TASK_ID}", transcript=path)
-        self.assertIn("was interrupted", shown)
-        self.assertEqual(stamp[0], "pending")
+        marker = self.marker()
+        self.assertEqual((marker["state"], marker["pid"], marker["kind"], marker["task_ids"]),
+                         ("pending", os.getpid(), "go", [TASK_ID]))
+        self.assertNotIn(PROMPT_ID, json.dumps(marker))
+        self.pending(dead_pid(), self.old)  # its process has ended
+        go_confirm.sweep(self.conn)
+        self.assert_interrupted_once()
 
-    def test_a_confirmed_go_marks_its_prompt_done(self):
+    def test_a_confirmed_go_records_its_worktree_first_and_ends_done(self):
         path = self.later()
         _, _, payload = self.deferred(f"go {TASK_ID}", transcript=path)
-        self.confirm(payload, self.appears(path, user_entry(f"go {TASK_ID}", promptId=PROMPT_ID), after=1))
-        self.assertEqual(self.marker(), "done")
+        seen = []
+        real = worktree.create
+
+        def create(*args, **kwargs):
+            seen.append(self.marker()["made"])  # recorded before git makes anything
+            return real(*args, **kwargs)
+
+        with mock.patch.object(worktree, "create", side_effect=create):
+            self.confirm(payload, self.appears(path, user_entry(f"go {TASK_ID}", promptId=PROMPT_ID), after=1))
+        built = self.harry_task()
+        self.assertEqual(seen, [[{"task_id": TASK_ID, "repo_dir": str(self.repo), "branch": "fix/widget",
+                                  "worktree": config.worktree_dir(built["id"])}]])
+        self.assertEqual(self.marker(), {"state": "done"})
 
 
 class KilledWhileMakingTheWorktreeTests(ConfirmCase):
@@ -569,8 +609,8 @@ class KilledWhileMakingTheWorktreeTests(ConfirmCase):
         self.assert_unchanged(before)
         [event] = self.headmaster_events()
         self.assertIn(f"Go for {TASK_ID} was stopped by a signal while it ran", event["summary"])
-        self.assertEqual((self.office / config.GO_CONFIRM_DIR / f"{go_confirm.claim_key(PROMPT_ID)}.ran")
-                         .read_text().strip(), "done")
+        self.assertEqual(json.loads((self.office / config.GO_CONFIRM_DIR / f"{go_confirm.claim_key(PROMPT_ID)}.ran")
+                                    .read_text()), {"state": "done"})
 
     def test_a_kill_after_the_commit_when_the_store_cannot_say_names_what_is_left(self):
         path = self.later()

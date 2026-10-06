@@ -7,10 +7,12 @@ module as one detached process (run_desk.spawn_go_confirm), with its input on a 
 - the claim holds the sha256 of that input and is published whole (temp file, then linked into place), so the process
   runs only on the input the hook checked. Once the process has its whole input the claim is its own, whatever signal
   comes; if it never got it, the process is reaped and the claim removed;
-- it takes the prompt with a run marker, <key>.ran, made create-exclusive as "pending <pid> <time>", and sets it to
-  "done" only once every outcome is a headmaster event. A marker whose process is gone, or a claim no confirmer
-  took, past the wait window plus GO_CONFIRM_STALE_MARGIN_SECONDS, is reported by the next hook or confirmer for that
-  prompt as an interrupted confirmation, under the outcome's own dedupe key, and the go or close is never run again;
+- it takes the prompt with a run marker, <key>.ran (fleet/markers.py), pending with its pid, the kind and task ids,
+  and, before git makes anything, the repo folder, branch and worktree path each go is about to make; it is set done
+  only once every outcome is a headmaster event. A marker whose process is gone, or a claim no confirmer took, past
+  the wait window plus GO_CONFIRM_STALE_MARGIN_SECONDS, is an interrupted confirmation: each Owl Post pass (sweep), or
+  a later hook or confirmer for that prompt, reports it once under the outcome's own dedupe key, naming any worktree
+  and branch it may have left, and the go or close is never run again;
 - it reads the transcript tail every config.GO_CONFIRM_POLL_SECONDS for at most config.GO_CONFIRM_WAIT_SECONDS, until
   the prompt's own entry is there. A missing file or a cut last line is "not yet", never a pass;
 - it runs the hook's own checks on that entry (user_prompt_submit.typing_entry: entrypoint, typed prompt, at most
@@ -28,20 +30,21 @@ import hashlib
 import hmac
 import json
 import os
-import secrets
+import re
 import sys
 import time
 from typing import Callable, Optional
 
 from hogwarts import pensieve
 
-from fleet import common, config, run_desk, safefs, transcript
+from fleet import common, config, markers, run_desk, safefs, transcript
 from fleet.hooks import user_prompt_submit as hook
 from fleet.safefs import FleetError
 
 KINDS = ("go", "close")
 INPUT_FIELDS = ("prompt", "prompt_id", "transcript_path", "session_id", "agent_type")
-CLAIM_MAX_BYTES = 128
+CLAIM_NAME = re.compile(r"[0-9a-f]{32}")
+TASK_ID = re.compile(r"tk_[0-9a-f]{16}")
 DIFFERENT = hook.DIFFERENT
 
 
@@ -53,29 +56,6 @@ def claim_key(prompt_id: str) -> str:
 def _payload(data: dict, desk: str, kind: str) -> bytes:
     fields = {key: data[key] for key in INPUT_FIELDS if isinstance(data.get(key), str)}
     return json.dumps({**fields, "kind": kind, "desk": desk}, ensure_ascii=True, sort_keys=True).encode("ascii")
-
-
-def _publish(fd: int, name: str, data: bytes) -> bool:
-    """Put a whole file at name, create-exclusive: written to a temp file first, then linked into place, so no reader
-    ever sees it half written and a failed write leaves nothing. False when name exists already."""
-    temp = f".{name}.{secrets.token_hex(6)}.tmp"
-    temp_fd = safefs.create_new(fd, temp)
-    try:
-        try:
-            safefs.write_all(temp_fd, data)
-            os.fsync(temp_fd)
-        finally:
-            os.close(temp_fd)
-        try:
-            os.link(temp, name, src_dir_fd=fd, dst_dir_fd=fd, follow_symlinks=False)
-        except FileExistsError:
-            return False
-        return True
-    finally:
-        try:
-            os.unlink(temp, dir_fd=fd)
-        except OSError:
-            pass
 
 
 def claimed(data: dict) -> bool:
@@ -102,7 +82,9 @@ def start(data: dict, desk: str, kind: str) -> bool:
         raise FleetError("the prompt is too long to confirm")
     key = claim_key(prompt_id)
     with safefs.opened_dir(config.OFFICE_ROOT, config.GO_CONFIRM_DIR, create=True) as fd:
-        if not _publish(fd, key, hashlib.sha256(payload).hexdigest().encode("ascii") + b"\n"):
+        claim = {"state": "claimed", "sha256": hashlib.sha256(payload).hexdigest(), "kind": kind,
+                 "task_ids": hook.requests_in(kind, data.get("prompt")) or []}
+        if not markers.publish(fd, key, claim):
             return False
         handed = False
         try:
@@ -116,74 +98,78 @@ def start(data: dict, desk: str, kind: str) -> bool:
     return True
 
 
-# The run marker, <key>.ran: "pending <pid> <unix time>" from the moment a confirmer takes the prompt, "done" once
-# its outcome is recorded. A pending marker whose process is gone, or a claim no confirmer ever marked, older than
-# the wait window plus GO_CONFIRM_STALE_MARGIN_SECONDS, is an interrupted confirmation: it is reported, never run.
+# The claim, <key>: {"state": "claimed", sha256 of the input, kind, task ids}, written by the hook. The run marker,
+# <key>.ran: markers.pending(kind, task_ids, made) from the moment a confirmer takes the prompt, with made naming each
+# worktree a go is about to make before git makes it, and {"state": "done"} once every outcome is recorded. A run
+# marker whose process is gone, or a claim no confirmer took, older than the wait window plus
+# GO_CONFIRM_STALE_MARGIN_SECONDS, is an interrupted confirmation: the Owl Post's sweep, a later hook or confirmer for
+# that prompt reports it, never runs it.
 
-def _ran(fd: int, key: str) -> Optional[tuple]:
-    """("done",), ("pending", pid, stamp), ("unknown",) for an unreadable marker, or None when there is none."""
-    try:
-        raw = safefs.read_regular(fd, f"{key}.ran", 64, "confirm marker")
-    except safefs.Missing:
-        return None
-    except (FleetError, OSError):
-        return ("unknown",)
-    words = raw.decode("ascii", "replace").split()
-    if words == ["done"]:
-        return ("done",)
-    if len(words) == 3 and words[0] == "pending" and words[1].isdigit() and words[2].isdigit():
-        return ("pending", int(words[1]), int(words[2]))
-    return ("unknown",)
+def _ran(fd: int, key: str) -> Optional[dict]:
+    return markers.read(fd, f"{key}.ran")
 
 
-def _alive(pid: int) -> bool:
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except OSError:
-        return True
-    return True
-
-
-def _stale(fd: int, key: str) -> bool:
+def _stale(fd: int, key: str, now: Optional[float] = None) -> bool:
     """Whether this prompt's confirmation was interrupted: its confirmer is gone with no outcome recorded."""
     limit = config.GO_CONFIRM_WAIT_SECONDS + config.GO_CONFIRM_STALE_MARGIN_SECONDS
-    now = time.time()
-    state = _ran(fd, key)
-    if state is None:
-        info = safefs.lstat(fd, key)
-        return info is not None and now - info.st_mtime > limit
-    if state[0] == "pending":
-        return not _alive(state[1]) and now - state[2] > limit
-    if state[0] == "unknown":
-        info = safefs.lstat(fd, f"{key}.ran")
-        return info is not None and now - info.st_mtime > limit
-    return False
+    now = time.time() if now is None else now
+    ran = _ran(fd, key)
+    if ran is None:
+        claim = markers.read(fd, key)
+        return claim is not None and markers.age(fd, key, {}, now) > limit
+    if ran["state"] == "done":
+        return False
+    return markers.gone(ran) and markers.age(fd, f"{key}.ran", ran, now) > limit
 
 
 def _finish(fd: int, key: str) -> None:
-    safefs.write_new(fd, f"{key}.ran", b"done\n")
+    markers.replace(fd, f"{key}.ran", {"state": "done"})
 
 
-def interrupted_lines(kind: str, task_id: str) -> list:
+def _plain_list(value: object, kind: str) -> list:
+    if not isinstance(value, list):
+        return []
+    if kind == "made":
+        return [item for item in value if isinstance(item, dict)
+                and all(isinstance(item.get(field), str) for field in ("task_id", "repo_dir", "branch", "worktree"))]
+    return [item for item in value if isinstance(item, str) and TASK_ID.fullmatch(item)]
+
+
+def _what(fd: int, key: str) -> tuple:
+    """(kind, task ids, made) an interrupted confirmation is reported with: from its run marker, else its claim."""
+    for marker in (_ran(fd, key), markers.read(fd, key)):
+        if marker and marker.get("kind") in KINDS:
+            return marker["kind"], _plain_list(marker.get("task_ids"), "ids"), _plain_list(marker.get("made"), "made")
+    return None, [], []
+
+
+def interrupted_lines(kind: str, task_id: str, made: list = ()) -> list:
     if kind == "close":
         return [f"The confirmation of Mischief managed for {task_id} was interrupted; check castle task show {task_id}"
                 " and type Mischief managed again if it is not closed."]
-    return [f"The confirmation for {task_id} was interrupted; check castle task show {task_id} and type the go again"
-            " if it is not registered."]
+    lines = [f"The confirmation for {task_id} was interrupted; check castle task show {task_id}."]
+    left = [item for item in made if item["task_id"] == task_id]
+    for item in left:
+        lines.append(f"It was making the worktree {item['worktree']} on branch {item['branch']} in"
+                     f" {item['repo_dir']}: if castle task show finds no Harry task with this worktree, remove that"
+                     " worktree and branch by hand, then type the go again.")
+    if not left:
+        lines.append("Type the go again if it is not registered.")
+    return lines
 
 
-def _report_interrupted(conn, fd: int, key: str, kind: str, task_ids: list) -> list:
+def _report_interrupted(conn, fd: int, key: str) -> list:
     """One headmaster event per task saying the confirmation was interrupted, under the same dedupe key as an outcome,
-    so a recorded outcome is never told twice; then the marker is done once every event is written."""
-    out, written = [], True
+    so a recorded outcome is never told twice; then the marker is done once every event is written. It never runs the
+    go or the close."""
+    kind, task_ids, made = _what(fd, key)
+    out, written = [], kind is not None
     for task_id in task_ids:
-        line, ok = _report(conn, kind, task_id, key, interrupted_lines(kind, task_id), False)
+        line, ok = _report(conn, kind, task_id, key, interrupted_lines(kind, task_id, made), False)
         out.append(line)
         written = written and ok
-    if written:
-        _finish(fd, key)
+    if written or (kind is None and conn is not None):
+        _finish(fd, key)  # nothing named to report: the marker is closed so it is not looked at again
     return out
 
 
@@ -194,14 +180,15 @@ def finished(data: dict) -> bool:
         return False
     try:
         with safefs.opened_dir(config.OFFICE_ROOT, config.GO_CONFIRM_DIR) as fd:
-            return _ran(fd, claim_key(prompt_id)) == ("done",)
+            ran = _ran(fd, claim_key(prompt_id))
+            return ran is not None and ran["state"] == "done"
     except (FleetError, OSError):
         return False
 
 
 def interrupted(conn, data: dict, kind: str, task_ids: list) -> list:
     """For a hook that found this prompt claimed: the interrupted lines when its confirmation was interrupted (and
-    they are recorded as events), else []. It never runs the go or the close."""
+    they are recorded as events), else []."""
     prompt_id = common.text_field(data, "prompt_id", 200)
     if prompt_id is None:
         return []
@@ -210,13 +197,46 @@ def interrupted(conn, data: dict, kind: str, task_ids: list) -> list:
         with safefs.opened_dir(config.OFFICE_ROOT, config.GO_CONFIRM_DIR) as fd:
             if not _stale(fd, key):
                 return []
-            _report_interrupted(conn, fd, key, kind, task_ids)
+            _, _, made = _what(fd, key)
+            _report_interrupted(conn, fd, key)
     except (FleetError, OSError):
         return []
     lines = []
     for task_id in task_ids:
-        lines += interrupted_lines(kind, task_id)
+        lines += interrupted_lines(kind, task_id, made)
     return lines
+
+
+def sweep(conn, now: Optional[float] = None) -> list:
+    """Each Owl Post pass: report every interrupted confirmation in the office once (_report_interrupted), whoever
+    typed it and whether or not the prompt is retried. Returns the lines it reported."""
+    out = []
+    try:
+        with safefs.opened_dir(config.OFFICE_ROOT, config.GO_CONFIRM_DIR) as fd:
+            for name in sorted(os.listdir(fd)):
+                if CLAIM_NAME.fullmatch(name) is None:
+                    continue
+                try:
+                    if _stale(fd, name, now):
+                        out += _report_interrupted(conn, fd, name)
+                except (FleetError, OSError):
+                    continue
+    except safefs.Missing:
+        return out
+    return out
+
+
+def _noter(key: str) -> Callable[[dict], None]:
+    """note for run_go: adds what a go is about to make to this prompt's run marker before git makes it."""
+    def note(item: dict) -> None:
+        try:
+            with safefs.opened_dir(config.OFFICE_ROOT, config.GO_CONFIRM_DIR) as fd:
+                ran = _ran(fd, key) or {}
+                made = _plain_list(ran.get("made"), "made") + [item]
+                markers.replace(fd, f"{key}.ran", {**ran, "made": made})
+        except (FleetError, OSError) as exc:
+            raise FleetError("the confirmer could not record the worktree it was about to make") from exc
+    return note
 
 
 def _read_input(raw: bytes) -> dict:
@@ -318,7 +338,7 @@ def _confirmed(data: dict, conn, key: str, clock: Callable[[], float], sleep: Ca
                 lines = hook.close_confirmed(conn, task_id, int(clock()))
                 ok = lines[0].startswith("Mischief managed:")
             else:
-                lines, ok = hook.run_go(conn, task_id, int(clock()))
+                lines, ok = hook.run_go(conn, task_id, int(clock()), note=_noter(key))
             report(task_id, lines, ok)
             done.append(task_id)
     except SystemExit:
@@ -365,19 +385,19 @@ def confirm(raw: bytes, clock: Callable[[], float] = time.time,
     try:
         try:
             with safefs.opened_dir(config.OFFICE_ROOT, config.GO_CONFIRM_DIR) as fd:
-                try:
-                    claim = safefs.read_regular(fd, key, CLAIM_MAX_BYTES, "confirm claim")
-                except safefs.Missing:
+                claim = markers.read(fd, key)
+                if claim is None:
                     return ["refused: no claim was made for this input"]
-                if not hmac.compare_digest(claim.strip(), hashlib.sha256(raw).hexdigest().encode("ascii")):
+                sha = claim.get("sha256") if isinstance(claim.get("sha256"), str) else ""
+                if not hmac.compare_digest(sha.encode("ascii", "replace"), hashlib.sha256(raw).hexdigest().encode()):
                     return ["refused: the input is not the one the hook claimed"]
-                marker = f"pending {os.getpid()} {int(time.time())}\n".encode("ascii")
-                if not _publish(fd, f"{key}.ran", marker):
-                    state = _ran(fd, key)
-                    if state is not None and state[0] != "done" and _stale(fd, key):
-                        expected = hook.requests_in(data["kind"], data["prompt"]) or []
-                        return _report_interrupted(conn, fd, key, data["kind"], expected)
-                    if state is not None and state[0] == "done":
+                task_ids = hook.requests_in(data["kind"], data["prompt"]) or []
+                if not markers.publish(fd, f"{key}.ran", markers.pending(kind=data["kind"], task_ids=task_ids,
+                                                                         made=[])):
+                    ran = _ran(fd, key)
+                    if ran is not None and ran["state"] != "done" and _stale(fd, key):
+                        return _report_interrupted(conn, fd, key)
+                    if ran is not None and ran["state"] == "done":
                         return ["refused: this prompt was confirmed already"]
                     return ["refused: another confirmer has this prompt"]
                 _prune(fd, key)

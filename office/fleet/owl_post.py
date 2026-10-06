@@ -14,7 +14,9 @@ For each regular *.json file in /Users/crisryantan/hogwarts/desks/<sender>/outbo
    delivered. The copy names the task's parent and the TASK.md path found up the task chain.
 7. An owl newly delivered to McGonagall, from any desk, also raises one headmaster event and a macOS notification
    naming its sender, task and a one-line status from its metadata and scrubbed subject (fleet/mcgonagall_inbox.py),
-   once the store has it. Each pass also announces any such owl whose event a stopped pass or a failed write lost.
+   once the store has it. A pending-announcement marker written before the delivery is removed only once the event
+   is in the store, and each pass announces every owl that still has one. Each pass also reports, once, every go or
+   close confirmation whose confirmer was interrupted (fleet/go_confirm.py sweep), and never runs it again.
    Ring the doorbell: a routine event for an interactive desk. A request to an enabled
    headless desk under its daily cap starts run_desk. No other owl starts a run. A desk that
    builds in a worktree (Harry) is not started until its task has one: Ryan gets a headmaster
@@ -581,6 +583,7 @@ def deliver_file(conn, sender: str, outbox_fd: int, fname: str, now: Optional[in
         newly = owl["delivered_at"] is None
         if newly:
             text = ids.clean_text(body, "body", owlery.BODY_LIMIT, keep_format=True)
+            mcgonagall_inbox.mark_pending(owl)  # before delivery: an event this pass loses is announced on a later one
             copy = _inbox_copy(owl, text, body_file, task_context(conn, owl["task_id"]))
             safefs.write_new(inbox_fd, f"{owl['id']}.json", copy)
             owlery.mark_delivered(conn, owl["id"], now=now)
@@ -666,6 +669,12 @@ def run_pass(conn, now: Optional[int] = None) -> dict:
         mcgonagall_inbox.announce_pending(conn, now)
     except (StoreError, FleetError, OSError) as exc:
         summary["errors"].append({"desk": config.HOOK_DESK, "error": "could not announce owls: " + _reason(exc)})
+    try:  # a go or close confirmation whose confirmer died is reported once, never run again
+        from fleet import go_confirm
+
+        go_confirm.sweep(conn)
+    except (StoreError, FleetError, OSError) as exc:
+        summary["errors"].append({"desk": config.HOOK_DESK, "error": "could not sweep confirmations: " + _reason(exc)})
     return summary
 
 
