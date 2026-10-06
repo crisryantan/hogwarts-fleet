@@ -933,6 +933,12 @@ def spawn(desk: str, owl_id: str, hold_fd: Optional[int] = None) -> None:
     _detach("run_desk", [desk, "--owl", owl_id, *held], f"run-desk-{desk}.log", hold_fd)
 
 
+def spawn_closer() -> None:
+    """Start one detached closer pass (fleet/closer.py) through the wrapper line. Used by the Map's round. Like a
+    review, it inherits no fd, so never the patrol lock the Map holds."""
+    _detach("closer", [], "closer.log")
+
+
 def spawn_review(task_id: str) -> None:
     """Start a detached automatic review of a build task's newest handoff through the wrapper line (see
     review.auto_review). Used by the Owl Post. Like a run, it inherits no fd, so no lock the Owl Post holds."""
@@ -1525,7 +1531,8 @@ def launch_gate() -> Iterator[int]:
 
 def run(conn, desk: str, owl_id: str, mcp_job: Optional[str] = None, now: Optional[int] = None,
         on_start: Optional[Callable[[], None]] = None, lock_held: Optional[Slot] = None, keep_fds: tuple = (),
-        shadow: bool = False, task_lock_fd: Optional[int] = None) -> dict:
+        shadow: bool = False, task_lock_fd: Optional[int] = None,
+        on_run_id: Optional[Callable[[str], None]] = None) -> dict:
     """Run one desk on one owl. on_start is called under the run's slot and the desk's launch lock once the
     caps allow the run, just before its launch is recorded, so a caller's own bookkeeping never runs for a
     refused run. lock_held is the Slot of this desk the caller already holds (the review script holds one, from
@@ -1537,7 +1544,10 @@ def run(conn, desk: str, owl_id: str, mcp_job: Optional[str] = None, now: Option
     vendor-limit notes go in the result's held list, not to Ryan (a cap refusal's own reason is the Capped error),
     and the caps and accounting are unchanged. A build desk's run on its own task holds the task's review lock from
     before it waits for a slot until it ends, and its process inherits it: task_lock_fd is that lock when the run was
-    handed it (spawn hold_fd), and otherwise the run takes it itself (see _hold_task_lock)."""
+    handed it (spawn hold_fd), and otherwise the run takes it itself (see _hold_task_lock). on_run_id is called with
+    the plan's run id under the slot and the launch lock, right after on_start and just before the launch is recorded,
+    so a caller can keep the id before the process exists; a raise from it stops the run before launch, as on_start's
+    does."""
     notes = [] if shadow else None
     desk = ids.check("desk", desk)
     if lock_held is not None and (not isinstance(lock_held, Slot) or lock_held.desk != desk):
@@ -1578,6 +1588,8 @@ def run(conn, desk: str, owl_id: str, mcp_job: Optional[str] = None, now: Option
                 ensure_pad(plan)
             if on_start is not None:
                 on_start()
+            if on_run_id is not None:
+                on_run_id(plan["run_id"])
             own = None
             if holds_spend(desk):
                 # Held before the launch counts, so no launch of this desk is ever without its lock.

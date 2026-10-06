@@ -99,6 +99,8 @@ Then tell McGonagall it's registered, so she routes it, and give Harry's task it
 
 Paste the token from the first command into the second when it waits for stdin. The token works once and expires.
 
+Closing by hand stays exactly as it is. Auto-close is the other way, off by default: while the office file `~/.hogwarts/auto-close` holds `on`, the closer closes a passed task after its merge, once scripts prove the reviewed commit landed, CI on the merge commit is green and every after-merge check holds. It closes through its own store call, which nothing in `castle` reaches, and you hear about every close. Step 7 of (g) has the details.
+
 Headmaster events stay in the digest and on each prompt until you ack them with `castle event ack <id>`.
 
 ## (e) Codex hooks: the push gate for your own Codex sessions
@@ -125,7 +127,7 @@ Every `fleet` command prints one JSON object with `"ok": true` or `"ok": false` 
 
 `--repo-dir` below is the main checkout of your repo: a folder inside your home folder, outside the office and the castle, with its own `.git` folder and no symlink on the way.
 
-1. McGonagall writes TASK.md and you type `go <task-id>` in her session, as in (d). The hook registers her task, routes it to Harry, gives his task its worktree on the Spec's new branch and starts his run if Harry is enabled. Then carry on at step 4. Each acceptance check is either one backtick command and nothing else, which verify runs, or plain words with no backticks, which the reviewer judges. A check that mixes a backtick command with other text is marked malformed in the evidence and never runs.
+1. McGonagall writes TASK.md and you type `go <task-id>` in her session, as in (d). The hook registers her task, routes it to Harry, gives his task its worktree on the Spec's new branch and starts his run if Harry is enabled. Then carry on at step 4. Each acceptance check is either one backtick command and nothing else, which verify runs, or plain words with no backticks, which the reviewer judges. A check that mixes a backtick command with other text is marked malformed in the evidence and never runs. A criterion labelled `| after merge:` instead of `| check:` follows the same rule but is checked after the merge: verify lists it and never runs it, and the reviewer never holds a PASS back for one. Any other label, two labels on one line, or one AC id on two lines is malformed.
 2. Steps 2 and 3 are the fallback, for a go the hook couldn't confirm, and for a build McGonagall routes by owl. You register her task by hand as in (d), and she posts a request to Harry. The Owl Post holds it and you get a headmaster event: a build task is waiting for its worktree.
 3. Give Harry's task a worktree on a new branch. If Harry is enabled, his run starts. Under a TASK.md a go started, it takes only the repo, branch and base the go stored:
 
@@ -166,12 +168,35 @@ rm ~/.hogwarts/auto-draft-pr
 
    It counts only while it is a plain file you own that no one else can write, holding exactly `on`. A file anywhere else, a desk folder, a task folder, an owl, TASK.md or `standing-orders.md`, is ignored. Write the same order in `standing-orders.md` for people to read, but code never parses it.
 
-7. For a commit from one of your own Claude sessions, Moody reviews it in a detached worktree. On PASS, that session's `git push` gets through the gate. For a fix round, pass `--task <id>` instead of `--title`:
+7. After the merge. While `~/.hogwarts/auto-close` holds `on`, each Map round starts the closer, which takes each task awaiting close after a round PASS: a build your go registered, or a task from your own sessions. A build registered by hand, or a PASS no round holds, stays yours to close. For each one it proves, in order:
+
+   - that the TASK.md the passing round read is the one you approved: your go's for a build, the TASK.md `fleet review own` wrote for your own task. An edit after that, a scope change included, sends the task to a hand close;
+   - that the reviewed commit landed: one merged PR from the task's branch into its base at the reviewed commit (squash and rebase merges included), or the reviewed commit on the freshly fetched base. A PR from the branch merged at any other head stops it;
+   - that CI on the merge commit is green, read again on every attempt, and counted only 30 minutes after the merge was first seen. A red stops it at once;
+   - that every after-merge command exits 0, run in a fresh detached worktree at the merge commit under the same sandbox rule as verify, with scrubbed evidence written next to TASK.md. Sandboxed commands get three tries; your own sessions' commands, which run without the sandbox, are started at most once per merge commit, and one cut short is never run again by the closer. Nothing runs while Ollivander's stop is in place;
+   - that every written after-merge check holds, judged by the reviewer of the other family from a scrubbed pack in its own inbox, never from the castle TASK.md, with the verdict read from its own run output and decided by the script.
+
+   Then it closes the task, and McGonagall's go task with it when nothing else is open under it, and you get one headmaster event naming the PR or commit and what proved each check. Anything it can't prove stops that task with one headmaster event, and it never tries that task again by itself. A read that keeps failing tells you once after two hours, and a wait that keeps going (CI pending, open work, a busy judge, a PR merged into another base) once after a day. To try a stopped task once more, in the foreground:
+
+```
+~/.hogwarts/bin/fleet close <task-id>
+```
+
+   It keeps every result already proven, so it never runs the judge again for a merge commit with a kept verdict, and a red, a CHANGES verdict or a merge at another head stops it again. The closer never writes to GitHub: it reads it through the patrol's read-only queries. Switch it on and off from your terminal:
+
+```
+echo on > ~/.hogwarts/auto-close
+rm ~/.hogwarts/auto-close
+```
+
+   Like the draft PR opt-in, it counts only while it is a plain file you own that no one else can write, holding exactly `on`.
+
+8. For a commit from one of your own Claude sessions, Moody reviews it in a detached worktree. On PASS, that session's `git push` gets through the gate. For a fix round, pass `--task <id>` instead of `--title`:
 
 ```
 ~/.hogwarts/bin/fleet review own --repo-dir <path-to-your-checkout> --title "<what the change does>"
 ```
 
-8. To rerun the acceptance checks on their own: `~/.hogwarts/bin/fleet verify <task-id>`. Each check runs inside a Codex permission profile with no network and no office, through `codex sandbox`, which runs no model.
+9. To rerun the acceptance checks on their own: `~/.hogwarts/bin/fleet verify <task-id>`. Each check runs inside a Codex permission profile with no network and no office, through `codex sandbox`, which runs no model.
 
 Moody's reviews send the diff to OpenAI, so `fleet review own` runs only once Moody is enabled, after your organization approves Codex for its source code.

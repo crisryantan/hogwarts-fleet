@@ -315,6 +315,53 @@ def is_ancestor(git_dir: str, ancestor: str, sha: str) -> Optional[bool]:
     return False if code == 1 and shallow == "false" else None
 
 
+def merge_point(git_dir: str, sha: str, tip: str, walk_max: int) -> Optional[str]:
+    """The oldest commit on tip's first-parent line that has sha as an ancestor, read from the commits as written:
+    sha itself when it sits on that line, else the commit that brought it in. None when this checkout cannot say:
+    git failed, the checkout is shallow, sha is not in tip's history, or the line holds more than walk_max commits
+    that have sha as an ancestor."""
+    if SHA.fullmatch(sha) is None or SHA.fullmatch(tip) is None:
+        raise FleetError("a merge point needs two full commit shas")
+    code, out, _ = _run(["rev-list", "--first-parent", "-n", str(int(walk_max) + 1), tip], git_dir, None, None,
+                        None, true_history=True, whole=True)
+    line = out.split()
+    if code != 0 or not line or line[0] != tip or any(SHA.fullmatch(item) is None for item in line):
+        return None
+    if is_ancestor(git_dir, sha, tip) is not True:
+        return None
+    low, high = 0, len(line) - 1  # line[low] has sha as an ancestor; find the oldest that does
+    last = is_ancestor(git_dir, sha, line[high])
+    if last is None:
+        return None
+    if last:
+        return sha if line[high] == sha else None  # past the walk, unless the walk ended on sha itself
+    while high - low > 1:
+        middle = (low + high) // 2
+        found = is_ancestor(git_dir, sha, line[middle])
+        if found is None:
+            return None
+        low, high = (middle, high) if found else (low, middle)
+    return line[low]
+
+
+def fetch_branch(git_dir: str, branch: str) -> str:
+    """Fetch origin's branch into its remote-tracking ref with an explicit refspec, so a checkout whose own refspec
+    leaves that branch out (a single-branch clone) is never read at a stale tip, and return the fetched tip's sha."""
+    branch = check_ref(branch, "branch")
+    git(["fetch", "--no-tags", "origin", f"+refs/heads/{branch}:refs/remotes/origin/{branch}"], git_dir)
+    sha = git(["rev-parse", "--verify", "--end-of-options", f"refs/remotes/origin/{branch}^{{commit}}"],
+              git_dir).strip()
+    if SHA.fullmatch(sha) is None:
+        raise FleetError("git did not return a full commit sha for the fetched branch")
+    return sha
+
+
+def worktree_paths(git_dir: str) -> list:
+    """Every worktree path git lists for the repo whose .git folder is git_dir. A read git fails refuses."""
+    out = git(["worktree", "list", "--porcelain"], git_dir, whole=True)
+    return [line[len("worktree "):] for line in out.splitlines() if line.startswith("worktree ")]
+
+
 def is_shallow(git_dir: str) -> bool:
     """Whether this checkout says it is shallow. Only a shallow checkout can be cured with git fetch --unshallow;
     git refuses that on a full clone. False when git says it is full or cannot answer."""

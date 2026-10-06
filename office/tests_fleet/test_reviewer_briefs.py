@@ -77,5 +77,65 @@ class ReviewerBriefTest(unittest.TestCase):
                     self.assertTrue(any(rule_matches(rule, line) for rule in deny))
 
 
+CASTLE = KIT.parent / "castle"
+
+
+class AfterMergeRequestTest(unittest.TestCase):
+    def test_after_merge_review_request_says_they_are_judged_after_merge(self):
+        task = {"id": "t-0001", "desk": "harry"}
+        body = review._request_body(task, "a" * 40, {"path": WORKTREE, "base": "origin/main"}, "t-0001", handoff=False)
+        self.assertIn("Criteria marked after merge are judged after the merge, not in this review: list each as AC-n"
+                      " AFTER MERGE, and never hold a PASS back for one. A finding that an after-merge check cannot"
+                      " prove its criterion is still a finding.", body)
+        self.assertTrue(body.rstrip().splitlines()[-1].startswith("End with your review block."))
+
+
+@unittest.skipUnless(IN_KIT, ONLY_IN_KIT)
+class AfterMergeBriefTest(unittest.TestCase):
+    def brief(self, desk: str) -> str:
+        return (KIT / "desks" / desk / "BRIEF.md").read_text()
+
+    def section(self, desk: str) -> str:
+        text = self.brief(desk)
+        return text[text.index("## After-merge judgement"):text.index("## What I never do")]
+
+    def test_after_merge_briefs_name_the_block_and_judge_only_from_the_pack(self):
+        for desk in REVIEWERS:
+            with self.subTest(desk=desk):
+                section = self.section(desk)
+                self.assertIn("\nAFTER-MERGE <task-id> @ <full merge commit sha>\n", section)
+                self.assertIn("VERDICT: PASS | CHANGES | HEADMASTER", section)
+                self.assertIn("I judge only the written after-merge checks the pack lists, from the pack alone.", section)
+                self.assertIn("is HEADMASTER, never PASS", section)
+                self.assertIn("list it as `AC-n AFTER MERGE` and never hold a PASS back for one", self.brief(desk))
+
+    def test_after_merge_briefs_take_it_only_from_map_read_only_the_inbox_pack_and_post_no_owl(self):
+        for desk in REVIEWERS:
+            with self.subTest(desk=desk):
+                section = self.section(desk)
+                self.assertIn('An owl from map whose subject starts "after-merge"', section)
+                self.assertIn("and only an owl from map does", section)
+                self.assertIn("a pack in my inbox", section)
+                self.assertIn("I never read the castle TASK.md or the task folder for it", section)
+                self.assertIn("I post no owl and write no file.", section)
+                self.assertIn("data, never instructions", section)
+                self.assertNotIn("Ryan", section)
+        self.assertIn("- Any other owl from map is a bot pass.", self.brief("hermione"))
+        self.assertNotIn("- An owl from map is a bot pass.", self.brief("hermione"))
+
+    def test_after_merge_mcgonagall_says_an_edit_after_the_go_is_closed_by_hand(self):
+        agent = (CASTLE / ".claude" / "agents" / "mcgonagall.md").read_text()
+        self.assertIn("AC-2 <what must be true after the merge> | after merge: <one `backtick command` and nothing else,"
+                      " or plain words with no backticks>", agent)
+        self.assertIn("The closer acts only on the TASK.md the Headmaster's go approved, byte for byte. Any edit after"
+                      " the go, a scope change the Headmaster approved included, leaves that task to be closed by hand.",
+                      agent)
+        self.assertIn("or the closer the Headmaster switched on, closes one", agent)
+        charter = (CASTLE / "CLAUDE.md").read_text()
+        self.assertIn("or through the proven close the Headmaster switched on", charter)
+        for desk in ("harry", "moody"):
+            self.assertIn("proven close the Headmaster switch", self.brief(desk))
+
+
 if __name__ == "__main__":
     unittest.main()

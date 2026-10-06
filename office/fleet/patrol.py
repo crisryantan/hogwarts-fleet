@@ -127,8 +127,27 @@ THREADS_QUERY = """query($owner: String!, $name: String!, $number: Int!) {
     }
   }
 }"""
+# The closer's reads (fleet/closer.py): every PR from one head branch, to prove a reviewed commit landed, and the
+# checks on one merge commit.
+LANDED_QUERY = """query($owner: String!, $name: String!, $head: String!) {
+  repository(owner: $owner, name: $name) {
+    pullRequests(headRefName: $head, first: 20, states: [OPEN, CLOSED, MERGED]) {
+      totalCount
+      nodes { number state merged mergedAt createdAt closedAt headRefOid baseRefName isCrossRepository
+              headRepository { nameWithOwner } mergeCommit { oid } }
+    }
+  }
+}"""
+MERGE_CHECKS_QUERY = """query($owner: String!, $name: String!, $oid: GitObjectID!) {
+  repository(owner: $owner, name: $name) {
+    object(oid: $oid) { __typename ... on Commit { oid statusCheckRollup { contexts(first: 100) {
+      totalCount pageInfo { hasNextPage }
+      nodes { __typename ... on CheckRun { name status conclusion } ... on StatusContext { context state } }
+    } } } }
+  }
+}"""
 QUERIES = {"prs": PRS_QUERY, "asked": ASKED_QUERY, "main": MAIN_QUERY, "merged": MERGED_QUERY,
-           "threads": THREADS_QUERY}
+           "threads": THREADS_QUERY, "landed": LANDED_QUERY, "merge_checks": MERGE_CHECKS_QUERY}
 # Every variable a query may take, and the shape its value must have.
 VARIABLES = {
     "mine": re.compile(r"[A-Za-z0-9:._ -]{1,200}"),
@@ -139,6 +158,9 @@ VARIABLES = {
     "since": STAMP,
     "number": re.compile(r"[1-9][0-9]{0,9}"),
     "after": CURSOR,
+    # A branch name, passed with -f, which gh never reads as a file, and a full commit sha.
+    "head": re.compile(r"[A-Za-z0-9][A-Za-z0-9._/@+-]{0,254}"),
+    "oid": re.compile(r"[0-9a-f]{40}"),
 }
 INT_VARIABLES = ("number",)
 FAILED_CONCLUSIONS = ("FAILURE", "TIMED_OUT", "STARTUP_FAILURE", "CANCELLED")
@@ -643,11 +665,7 @@ def wake(conn, desk: str, job: str, kind: str, data: str, out_name: str, now: Op
         safefs.write_new(inbox_fd, data_name, (DATA_NOTE + "\n\n" + clean(data)).encode("utf-8"))
         owl = owlery.send(conn, config.PATROL_SENDER, desk, "fyi", f"{kind} {when}", body=body,
                           idempotency_key=dedupe_key(f"patrol:{job}:{desk}:{when}:{tag}")[:128], now=now)
-        if owl["delivered_at"] is None:
-            text = ids.clean_text(body, "body", owlery.BODY_LIMIT, keep_format=True)
-            copy = owl_post._inbox_copy(owl, text, None, owl_post.task_context(conn, None))
-            safefs.write_new(inbox_fd, f"{owl['id']}.json", copy)
-            owlery.mark_delivered(conn, owl["id"], now=now)
+        owl_post.deliver_script_owl(conn, inbox_fd, owl, body, now)
     pending = _pending()
     pending.setdefault(owl["id"], {"desk": desk, "job": job, "out": out_name, "tries": 0, "last_try": stamp(now),
                                    "marks": sorted(set(marks)), "subject": subject})

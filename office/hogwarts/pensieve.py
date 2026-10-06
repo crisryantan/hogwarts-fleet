@@ -349,6 +349,101 @@ def close_task(conn: Conn, task_id: str, reason: str, token: Optional[str] = Non
     return get_task(conn, task_id)
 
 
+PROOF_FIELDS = ("repo", "pass_sha", "merge_sha", "landed", "pr_number", "ci", "ci_checks", "command_checks",
+                "written_checks", "judge_desk", "evidence_path", "evidence_sha256")
+
+
+def _check_proof(proof: object) -> dict:
+    """Every field of a proven close's proof, checked for its shape before anything is written."""
+    if not isinstance(proof, dict) or set(proof) != set(PROOF_FIELDS):
+        raise ValidationError("a proof names exactly the fields of a proven close")
+    checked = {
+        "repo": ids.check("repo", proof["repo"]),
+        "pass_sha": ids.check("sha", proof["pass_sha"], "pass sha"),
+        "merge_sha": ids.check("sha", proof["merge_sha"], "merge sha"),
+        "landed": ids.check_enum(proof["landed"], db.CLOSURE_LANDINGS, "landed"),
+        "pr_number": ids.optional_int(proof["pr_number"], "pr number", minimum=1),
+        "ci": ids.check_enum(proof["ci"], db.CLOSURE_CI, "ci"),
+        "ci_checks": ids.check_int(proof["ci_checks"], "ci checks"),
+        "command_checks": ids.check_int(proof["command_checks"], "command checks"),
+        "written_checks": ids.check_int(proof["written_checks"], "written checks"),
+        "judge_desk": ids.optional("desk", proof["judge_desk"], "judge desk"),
+        "evidence_path": ids.check_path(proof["evidence_path"], "evidence path", ids.REVIEWS_ROOT),
+        "evidence_sha256": ids.check("sha256", proof["evidence_sha256"], "evidence sha256"),
+    }
+    if (checked["landed"] == "pr") != (checked["pr_number"] is not None):
+        raise ValidationError("a PR number goes with a close that landed by PR, and only then")
+    if (checked["ci"] == "none") != (checked["ci_checks"] == 0):
+        raise ValidationError("no CI means no checks, and green CI names its checks")
+    if (checked["written_checks"] == 0) != (checked["judge_desk"] is None):
+        raise ValidationError("a judge goes with written checks, and only then")
+    return checked
+
+
+def open_descendants(conn: Conn, task_id: str) -> list[dict]:
+    """Every queued, active or awaiting task under task_id, nearest first."""
+    return _open_descendants(conn, ids.check("task", task_id))
+
+
+def task_closure(conn: Conn, task_id: str) -> Optional[dict]:
+    """The proven close of a task, or of its parent on its child's proof, or None."""
+    return db.fetch_one(conn, "SELECT * FROM task_closures WHERE task_id = ?", (ids.check("task", task_id),))
+
+
+_INSERT_CLOSURE = (
+    "INSERT INTO task_closures(task_id, kind, via_task_id, repo, pass_sha, merge_sha, landed, pr_number, ci, ci_checks,"
+    " command_checks, written_checks, judge_desk, evidence_path, evidence_sha256, recorded_at)"
+    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+)
+
+
+def _insert_closure(conn: Conn, task_id: str, kind: str, via: Optional[str], proof: dict, ts: int) -> None:
+    conn.execute(_INSERT_CLOSURE, (task_id, kind, via, *(proof[name] for name in PROOF_FIELDS), ts))
+
+
+def close_proven(conn: Conn, task_id: str, proof: dict, summary: str, dedupe_key: str,
+                 parent_task_id: Optional[str] = None, now: Optional[int] = None) -> dict:
+    """Close a task as complete on a proof the closer gathered (fleet/closer.py), with no close token, in one
+    transaction: the task's proven closure row and its close, then, with parent_task_id, its go-registered parent's
+    closure row on the same proof and its close, then one headmaster event, so you hear of every close. The task must
+    be awaiting close with nothing open under it, and the parent open, registered by a go, with nothing open under
+    it but this task, or nothing changes: no close cascades to any other task. The store's own guards hold the
+    proof's shape and its round PASS for any writer. Nothing in the castle CLI reaches this; only the closer calls it.
+    {task, parent}."""
+    task_id = ids.check("task", task_id)
+    parent_task_id = ids.optional("task", parent_task_id, "parent task id")
+    checked = _check_proof(proof)
+    summary = ids.clean_text(summary, "summary", SUMMARY_LIMIT, single_line=True)
+    dedupe_key = ids.check("dedupe", dedupe_key, "dedupe key")
+    ts = ids.stamp(now)
+    with db.transaction(conn):
+        task = get_task(conn, task_id)
+        if task["status"] == "closed":
+            raise ConflictError("task is already closed")
+        if task["status"] != "awaiting_close":
+            raise ConflictError("only a task awaiting close is closed by a proven close")
+        if _open_descendants(conn, task_id):
+            raise ConflictError("the task has open work under it")
+        _insert_closure(conn, task_id, "proven", None, checked, ts)
+        _set_closed(conn, task_id, "complete", ts)
+        if parent_task_id is not None:
+            parent = get_task(conn, parent_task_id)
+            if task["parent_task_id"] != parent_task_id:
+                raise ConflictError("that task is not this task's parent")
+            if parent["status"] == "closed":
+                raise ConflictError("the parent task is already closed")
+            if task_spec(conn, parent_task_id) is None:
+                raise ConflictError("the parent task was not registered by a go")
+            _insert_closure(conn, parent_task_id, "parent", task_id, checked, ts)
+            if _open_descendants(conn, parent_task_id):
+                raise ConflictError("the parent task has other open work under it")
+            _set_closed(conn, parent_task_id, "complete", ts)
+        add_event(conn, task["desk"], "close.proven", "headmaster", summary, task_id=task_id,
+                  dedupe_key=dedupe_key, now=ts)
+    return {"task": get_task(conn, task_id),
+            "parent": None if parent_task_id is None else get_task(conn, parent_task_id)}
+
+
 def _cascade_reason(conn: Conn, child: dict) -> str:
     parent = get_task(conn, child["parent_task_id"])
     if child["status"] != "queued" and parent["close_reason"] == "complete":
@@ -652,10 +747,11 @@ def _keep_prefix(placeholder: str):
     return lambda match: match.group(1) + placeholder
 
 
-# Order matters: key blocks, URL credentials and tokens go before the email pattern can split them.
+# Order matters: key blocks, URL credentials and tokens go before the email pattern can split them. A key block with
+# no END line runs to the end of the word it stops in, so no fragment of a token after it is left unmasked.
 _SCRUBBERS = (
     (re.compile(
-        r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----(?:.*?-----END [A-Z0-9 ]*PRIVATE KEY-----|[A-Za-z0-9+/=\s]*)",
+        r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----(?:.*?-----END [A-Z0-9 ]*PRIVATE KEY-----|[A-Za-z0-9+/=\s]*\S*)",
         re.S,
     ), "[private_key]"),
     (re.compile(r"(?<=://)[^/\s:@]+:[^/\s]*@"), "[credentials]@"),

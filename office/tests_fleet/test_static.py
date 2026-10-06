@@ -63,6 +63,8 @@ KNOWN_FLAGS = {
     "--draft", "--repo", "--head", "--body-file",
     # Dumbledore's nightly job: the export alone, with no owl and no run
     "--export-only",
+    # the closer: the first-parent line of the fetched base, and the merged diff's stat in the judge's pack
+    "--first-parent", "--stat",
 }
 # Modules whose flag-shaped constants describe commands they read and refuse, never ones they run.
 FLAG_TABLE_MODULES = {"push_gate.py"}
@@ -237,3 +239,84 @@ class PendingTests(unittest.TestCase):
         for path in snippets:
             with self.subTest(path=path.name):
                 json.loads(path.read_text())
+
+
+def _references(tree: ast.AST, names: set) -> list:
+    """Every attribute or name in tree that is one of names, with its line."""
+    found = []
+    for node in ast.walk(tree):
+        name = node.attr if isinstance(node, ast.Attribute) else node.id if isinstance(node, ast.Name) else None
+        if name in names:
+            found.append((name, node.lineno))
+    return found
+
+
+class AutoCloseTests(unittest.TestCase):
+    STORE = ROOT / "hogwarts"
+
+    def test_only_the_closer_takes_the_proven_close(self):
+        for path in SOURCES + sorted(self.STORE.glob("*.py")):
+            if path.name in ("closer.py",) or path == self.STORE / "pensieve.py":
+                continue
+            with self.subTest(path=str(path.relative_to(ROOT))):
+                self.assertEqual(_references(ast.parse(path.read_text()), {"close_proven", "_insert_closure"}), [])
+                self.assertNotIn("task_closures", path.read_text() if path.name != "db.py" else "")
+        closer = ast.parse((FLEET / "closer.py").read_text())
+        self.assertEqual([name for name, _ in _references(closer, {"close_proven"})], ["close_proven"])
+
+    def test_opt_in_files_are_read_only_through_the_shared_reader(self):
+        names = {"AUTO_DRAFT_PR_FILE", "AUTO_CLOSE_FILE", "OPT_IN_FILES"}
+        for path in SOURCES:
+            if path.name == "config.py":
+                continue
+            tree = ast.parse(path.read_text())
+            allowed = set()
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Call) and getattr(node.func, "attr", None) == "opt_in_on":
+                    allowed.update(id(arg) for arg in node.args)
+                if isinstance(node, ast.FunctionDef) and path.name == "common.py" and node.name == "opt_in_on":
+                    allowed.update(id(inner) for inner in ast.walk(node))
+            stray = [node.lineno for node in ast.walk(tree) if isinstance(node, ast.Attribute)
+                     and node.attr in names and id(node) not in allowed]
+            with self.subTest(path=path.name):
+                self.assertEqual(stray, [])
+        for path in SOURCES:
+            text = path.read_text()
+            for literal in ('"auto-close"', '"auto-draft-pr"'):
+                with self.subTest(path=path.name, literal=literal):
+                    self.assertTrue(path.name == "config.py" or literal not in text)
+
+    def test_closer_imports_no_github_write_path(self):
+        tree = ast.parse((FLEET / "closer.py").read_text())
+        writes = {"open_draft_pr", "run_gh_pr", "push_draft_pr", "_push_exact", "draft_pr_argv", "push", "run_gh"}
+        self.assertEqual(_references(tree, writes), [])
+        imported = {alias.name for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)
+                    for alias in node.names}
+        self.assertNotIn("push", imported)
+        git_calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call) and getattr(node.func, "attr", None)
+                     == "git" and getattr(node.func.value, "id", None) == "gitops"]
+        self.assertTrue(git_calls)
+        for call in git_calls:  # the closer runs git only to read a diff for the judge's pack
+            self.assertIsInstance(call.args[0], ast.List)
+            self.assertEqual(call.args[0].elts[0].value, "diff")
+
+    def test_closer_removes_worktrees_only_through_git(self):
+        closer = ast.parse((FLEET / "closer.py").read_text())
+        worktree = ast.parse((FLEET / "worktree.py").read_text())
+        [remove_merged] = [node for node in worktree.body if isinstance(node, ast.FunctionDef)
+                           and node.name == "remove_merged"]
+        for label, tree in (("closer.py", closer), ("remove_merged", remove_merged)):
+            with self.subTest(code=label):
+                self.assertEqual(_references(tree, {"rmtree", "rmdir", "removedirs"}), [])
+                strings = [inner.value for node in ast.walk(tree) if isinstance(node, ast.Call)
+                           for inner in ast.walk(node) if isinstance(inner, ast.Constant) and isinstance(inner.value, str)]
+                self.assertFalse([value for value in strings if "prune" in value])
+        self.assertEqual(_references(remove_merged, {"unlink", "remove"}), [])
+        for node in ast.walk(closer):
+            if isinstance(node, ast.Call) and getattr(node.func, "attr", None) in ("unlink", "remove"):
+                with self.subTest(line=node.lineno):
+                    self.assertIn("dir_fd", [keyword.arg for keyword in node.keywords])
+        git_calls = [node for node in ast.walk(remove_merged) if isinstance(node, ast.Call)
+                     and getattr(node.func, "attr", None) == "git"]
+        self.assertEqual(len(git_calls), 1)
+        self.assertEqual([element.value for element in git_calls[0].args[0].elts[:3]], ["worktree", "remove", "--force"])

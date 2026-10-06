@@ -25,6 +25,10 @@ until then they wait on her pending owl and are not sent again. Nothing is ever 
 
 Last, the round sends again each patrol owl whose file the patrol has not taken yet (patrol.resend_pending).
 
+Auto-close. Before any GitHub read, on every path and whatever shadow mode says, the round calls closer.sweep, which
+starts one detached closer pass while you have switched auto-close on and none is running (fleet/closer.py). Each
+round row says what the sweep did under "closer": off, running, started, idle or failed.
+
 In shadow mode that is all. Once Ryan removes the shadow file, each for-me row is also a headmaster event,
 with a summary the script builds from the repo, the PR number and the kind of change.
 
@@ -43,7 +47,7 @@ if __name__ == "__main__" and "/Users/crisryantan/.hogwarts" not in sys.path:
 
 from hogwarts.errors import StoreError  # noqa: E402
 
-from fleet import common, config, morning, patrol, run_desk  # noqa: E402
+from fleet import closer, common, config, morning, patrol, run_desk  # noqa: E402
 from fleet.safefs import FleetError  # noqa: E402
 
 SNAPSHOT = "snapshot.json"
@@ -279,22 +283,26 @@ def run_round(conn, now: Optional[int] = None) -> dict:
     """One Map round. Returns its round row plus what it woke and sent again."""
     ts = patrol.stamp(now)
     shadow = patrol.shadow_on()
+    # Before any GitHub read, so it runs on every path, whatever shadow mode says. It never raises.
+    closing = closer.sweep(conn, now)
     try:
         login = patrol.account()
         seen = patrol.fetch_prs()
     except FleetError as exc:
         error = common.one_line(exc, 200)
-        patrol.append_row("map", ROUNDS, {"ts": ts, "ok": False, "shadow": shadow, "error": error, "model": False})
+        patrol.append_row("map", ROUNDS, {"ts": ts, "ok": False, "shadow": shadow, "error": error, "model": False,
+                                          "closer": closing})
         patrol.tell_ryan(conn, shadow, "map-failed", f"the Map could not read GitHub: {error}",
                          f"patrol:map-failed:{patrol.local_day(now)}", now)
-        return {"ok": False, "error": error}
+        return {"ok": False, "error": error, "closer": closing}
     if not seen["complete"]:
         error = "GitHub's list of open PRs could not be read to its end, so the snapshot was left as it was"
         patrol.append_row("map", ROUNDS, {"ts": ts, "ok": False, "incomplete": True, "shadow": shadow, "error": error,
-                                          "prs": len(seen["prs"]), "asked": len(seen["asked"]), "model": False})
+                                          "prs": len(seen["prs"]), "asked": len(seen["asked"]), "model": False,
+                                          "closer": closing})
         patrol.tell_ryan(conn, shadow, "map-incomplete", f"the Map read only part of your PRs: {error}",
                          f"patrol:map-incomplete:{patrol.local_day(now)}", now)
-        return {"ok": False, "incomplete": True, "error": error}
+        return {"ok": False, "incomplete": True, "error": error, "closer": closing}
     before = patrol.read_state("map", SNAPSHOT, None)
     baseline = not isinstance(before, dict) or before.get("account") != login or not isinstance(before.get("prs"), dict)
     rows = [] if baseline else changes(before, seen)
@@ -324,7 +332,8 @@ def run_round(conn, now: Optional[int] = None) -> dict:
     model = bool(woke and woke.get("launched")) or any(item.get("launched") for item in passes) or resent["launched"] \
         or bool(lineup and lineup.get("model"))
     row = {"ts": ts, "ok": True, "shadow": shadow, "baseline": baseline, "prs": len(seen["prs"]),
-           "asked": len(seen["asked"]), "changes": len(rows), "for_me": len(for_me), "model": model}
+           "asked": len(seen["asked"]), "changes": len(rows), "for_me": len(for_me), "model": model,
+           "closer": closing}
     if lineup is not None:
         row["lineup"] = "written" if lineup.get("ok") else "failed"
     patrol.append_row("map", ROUNDS, row)

@@ -5,7 +5,7 @@ This is the practical guide: which program to open, what to type, and who to ask
 - **1** place to start every time: McGonagall, in a session opened in `~/hogwarts`.
 - **7** desks, each named for its job, like "Snape - Data Analyst".
 - **0** things an agent can merge, deploy or send without you.
-- **2** words that close a task: "Mischief managed", followed by its id.
+- **2** words that close a task: "Mischief managed", followed by its id. Or switch on auto-close, and a merged task closes itself once scripts prove it.
 
 ## Start here
 
@@ -121,9 +121,9 @@ You don't need to remember which desk does what. Start every piece of work with 
 1. **Open her session.** In the Claude desktop app, open the Code tab, start a new session and pick the `hogwarts` folder in your home folder. Or in Terminal, type `cd ~/hogwarts` and then `claude`. The folder's settings make McGonagall the default.
 2. **Read her digest.** Her first message lists what's in flight, one line per desk and then the tasks that need you first, the notes waiting on you, and queued work. On a fresh install it's short.
 3. **Ask in your own words.** For example: "Add a unit test for the retry path when the cache is empty, in my web-app repo." Small questions she answers directly.
-4. **Check her ticket.** For real work she writes `tasks/<id>/TASK.md`: your words under Intent, numbered acceptance criteria with the check for each, a Spec that opens with the repo, a new branch and its base, and what's out of scope. Claude asks you before she writes it. Fix anything that's wrong. For a build, type `go <task-id>` as your whole message: that registers the task, gives Harry a fresh worktree on the new branch and starts his run once he's switched on. For any other desk she hands you one `castle task create` command to run in Terminal instead. A data question skips all of this: she hands you a prompt to run with Snape in another session.
+4. **Check her ticket.** For real work she writes `tasks/<id>/TASK.md`: your words under Intent, numbered acceptance criteria with the check for each (one labelled `after merge:` is checked after the merge instead of before it), a Spec that opens with the repo, a new branch and its base, and what's out of scope. Claude asks you before she writes it. Fix anything that's wrong. For a build, type `go <task-id>` as your whole message: that registers the task, gives Harry a fresh worktree on the new branch and starts his run once he's switched on. For any other desk she hands you one `castle task create` command to run in Terminal instead. A data question skips all of this: she hands you a prompt to run with Snape in another session.
 5. **Let it move.** A build runs on its own from here. Harry's handoff starts his review, a CHANGES verdict starts his fix round, and the loop stops at a PASS, a HEADMASTER verdict or the third round. Other work she posts to the right desk through her outbox, and Claude asks you before each post. The Owl Post delivers it. You'll see rows for anything that needs you at the start of your next message to her.
-6. **Push, merge and close.** After a PASS, push with `fleet push <task-id>`. Or switch on draft PRs once, with `echo on > ~/.hogwarts/auto-draft-pr`, and the loop pushes the reviewed commit and opens a draft PR for you; delete that file to switch it off. When a PR is green and reviewed, you merge it yourself. Then type `Mischief managed <task-id>` to her. That exact phrase is the only thing that closes a task.
+6. **Push, merge and close.** After a PASS, push with `fleet push <task-id>`. Or switch on draft PRs once, with `echo on > ~/.hogwarts/auto-draft-pr`, and the loop pushes the reviewed commit and opens a draft PR for you; delete that file to switch it off. When a PR is green and reviewed, you merge it yourself. Then type `Mischief managed <task-id>` to her. Or switch on auto-close once, with `echo on > ~/.hogwarts/auto-close`, and the closer closes a passed task for you after the merge, once scripts prove the reviewed commit landed, CI on the merge commit is green and every after-merge check holds; delete that file to switch it off. You hear about every close. Typing that phrase and the closer you switched on are the only two things that close a task.
 
 Good first prompts:
 
@@ -178,7 +178,7 @@ A desk switches on when you create its `enabled` file after reading its dry run,
 - **Model notes.** Ollivander's notes arrive with your other rows. A move to a cheaper or equal model has already happened. A costlier one waits for `castle desk model <desk> --approve`.
 - **Dumbledore's patch.** After his weeknight review a row says his patch is ready, and it changes nothing until you apply it. `castle portrait show <date>` lists each operation with its reason, its source and whether the store would take it, then prints the exact apply command with the patch's hash. Run it as printed, or with `--only` naming just the operations you accept. Archive moves are yours to make by hand.
 - **Cap warnings.** A desk at 80% of a daily cap sends one note. At the cap its next run waits for the reset or a bump, as in [Busy days and caps](#busy-days-and-caps).
-- **Wrapping up.** Merge what's ready yourself, then type `Mischief managed <task-id>` for each finished task.
+- **Wrapping up.** Merge what's ready yourself, then type `Mischief managed <task-id>` for each finished task. With auto-close on, a merged task closes itself on the next Map round once its proof is in, and a row tells you; one it can't prove waits for you, with a row saying why.
 
 ## Which model each desk runs
 
@@ -410,6 +410,8 @@ Everything `castle` prints is JSON. If you added the shortcut in one-time setup,
 | `fleet build <task-id>` | Start Harry's fix round by hand, when the review loop could not or after a review you ran |
 | `fleet review own --repo-dir <checkout> --title "<title>"` | Start a review of work from your own Claude sessions |
 | `fleet review own --repo-dir <checkout> --task <task-id>` | Review a fix round on a task from your own Claude sessions |
+| `echo on > ~/.hogwarts/auto-close` | Switch on auto-close; delete the file to switch it off |
+| `fleet close <task-id>` | Try auto-close once more on one task, in the foreground, while auto-close is on |
 | `~/.hogwarts/bin/hogwarts-spaces` | Open one herdr space per desk |
 
 ## Rules worth remembering
@@ -417,7 +419,7 @@ Everything `castle` prints is JSON. If you added the shortcut in one-time setup,
 Six things only you do.
 
 - **Merge and deploy.** No desk can merge, deploy, press a pipeline gate or change prod.
-- **Close tasks.** Only "Mischief managed <task-id>" in McGonagall's session closes one. Silence and a green build don't.
+- **Close tasks.** Only "Mischief managed <task-id>" in McGonagall's session closes one, or the closer once you switch auto-close on, and only after scripts prove the merge, CI and every after-merge check. Silence and a green build don't.
 - **Send things.** Desks draft messages. You send them.
 - **Sign in.** Desks never see a password or token. If something needs a login, it stops and tells you.
 - **Change settings.** Security, permissions, hooks and background jobs are yours to apply. The fleet only prepares the change.
@@ -440,6 +442,8 @@ Six things only you do.
 | McGonagall doesn't introduce herself | Make sure the session's folder is `~/hogwarts`. Her settings only apply there. |
 | The Tempus warning appears | Ask for a Checkpoint, then start a fresh session. She picks up from the digest. |
 | "Mischief managed" says it could not confirm | Close the task from your terminal: `castle token mint <task-id>`, then `castle task close <task-id> --reason complete --token-stdin` and paste the token. |
+| Auto-close stopped on a task | Read the files its row names next to TASK.md (`after-merge-evidence.md`, `after-merge-review-<sha>.md`). Then close it yourself with `Mischief managed <task-id>`, or fix what stopped it and run `fleet close <task-id>` to try once more. A red, a CHANGES verdict or a merge at another head stops it again. |
+| A passed task stays awaiting close after its merge | Check in turn: is `~/.hogwarts/auto-close` there holding `on`; is the Map loaded, and is it a weekday between 08:00 and 19:00; is CI on the merge commit still pending, or inside its 30 minute settle; does the PR's head match the reviewed commit; did the PR go into the base the task names; was TASK.md edited after your go; is Ollivander's stop in place. `~/.hogwarts/logs/closer.log` has one line per task for each pass. |
 | `castle` exits with code 3 | The database was busy or a rule refused the change, such as a second active task for McGonagall, who takes one at a time. Read the JSON message. |
 | `castle doctor` exits with code 5 | Something about permissions or the database looks unsafe. The JSON says what. Don't loosen permissions to make it pass. |
 

@@ -20,7 +20,16 @@
   denied, no network, nothing else. codex sandbox runs no model and spends no tokens.
   Code a desk wrote therefore never runs with Ryan's own reach, even when he starts the check.
 - Writes evidence.md next to TASK.md in the castle (with a per-commit copy), and the same text in
-  the office reviews folder, where no desk can change it.
+  the office reviews folder, where no desk can change it. Every run also keeps the exact TASK.md bytes it read in
+  the office, as reviews/<task>/task-md-<sha256>.md, and its result names that digest, so a review round can record
+  which TASK.md its verify read.
+
+After-merge checks. A criterion may say "| after merge: <check>" instead of "| check: <check>": the same command,
+written or malformed rule, but judged after the merge. verify lists each one under its own line and never runs it,
+never counts it as failed, and SUMMARY keeps its words with counts of the before-merge criteria only. The closer
+(fleet/closer.py) runs the after-merge commands through run_after_merge, in a fresh detached worktree at the merge
+commit, under the same sandbox rule (sandboxed_for). Any other label, two labels on one line, or an id used on two
+lines is a malformed criterion: it never runs, and the evidence gives the plain reason.
 """
 from __future__ import annotations
 
@@ -38,8 +47,19 @@ from hogwarts import ids, pensieve
 from fleet import common, config, gitops, run_desk, safefs, toolchain
 from fleet.safefs import FleetError
 
-AC_LINE = re.compile(r"AC-(\d{1,3})\s+(.+?)\s*\|\s*check:\s*(.+?)\s*")
+AC_LINE = re.compile(r"AC-(\d{1,3})\s+(.+?)\s*\|\s*(check|after merge):\s*(.+?)\s*")
 COMMAND = re.compile(r"`([^`\x00-\x1f]{1,1000})`")
+# A line that starts like a criterion and holds a pipe, but is not one, is a malformed criterion: never prose.
+CRITERION_START = re.compile(r"AC-(\d+)\s+(.*)")
+# A label inside a check (outside its backticks) or inside what must be true: a criterion has one label.
+SECOND_LABEL = re.compile(r"\|\s*(?:check|after[\s-]*merge)\s*:", re.IGNORECASE)
+LABEL_IN_WHAT = re.compile(r"\|\s*[A-Za-z][A-Za-z -]{0,30}:")
+BACKTICKED = re.compile(r"`[^`]*`")
+WHEN = {"check": "before", "after merge": "after"}
+UNKNOWN_LABEL = "a criterion's check is labelled check: or after merge:, and nothing else"
+TWO_LABELS = "a criterion has one label"
+# A lone line of this many base64 characters or more is masked in after-merge evidence.
+LONE_BASE64 = re.compile(r"[A-Za-z0-9+/=_-]{40,}")
 TASK_CHAIN_LIMIT = 16
 TASK_MD_MAX_BYTES = 65536
 PROFILE_NAME = "fleet-verify"
@@ -65,19 +85,54 @@ def read_task_md(holder_id: str) -> bytes:
 
 
 def parse_checks(text: str) -> list:
-    """Each acceptance criterion as {id, what, check, command, malformed}, in file order. command is set only
-    for a check that is one backtick command and nothing else. malformed is the plain reason a check that holds
-    backticks is not that, and None for a command or for an observation, which has no backticks at all."""
+    """Each acceptance criterion as {id, what, label, when, check, command, malformed}, in file order. label is
+    "check" (when "before": run or judged before the merge) or "after merge" (when "after": judged after the
+    merge, never before it). command is set only for a check that is one backtick command and nothing else.
+    malformed is the plain reason a criterion is neither a command nor plain words, and None otherwise; a
+    malformed criterion never runs. A line that starts with AC-<n> and holds a pipe but is not a criterion (an
+    unknown label, a misspelt one) is malformed too, never prose, and so is every line of an id used twice."""
     checks = []
     for line in text.splitlines():
-        match = AC_LINE.fullmatch(line.strip())
+        stripped = line.strip()
+        match = AC_LINE.fullmatch(stripped)
         if match is None:
+            start = CRITERION_START.fullmatch(stripped)
+            if start is None or "|" not in start.group(2):
+                continue
+            what, _, rest = start.group(2).partition("|")
+            checks.append({"id": f"AC-{start.group(1)}", "what": what.strip(), "label": None, "when": "before",
+                           "check": rest.strip(), "command": None, "malformed": UNKNOWN_LABEL})
             continue
-        command = COMMAND.fullmatch(match.group(3))
-        checks.append({"id": f"AC-{match.group(1)}", "what": match.group(2), "check": match.group(3),
-                       "command": None if command is None else command.group(1),
-                       "malformed": None if command is not None else malformed_reason(match.group(3))})
+        what, label, check = match.group(2), match.group(3), match.group(4)
+        command = COMMAND.fullmatch(check)
+        if SECOND_LABEL.search(BACKTICKED.sub("", check)) or LABEL_IN_WHAT.search(what):
+            command, malformed = None, TWO_LABELS
+        else:
+            malformed = None if command is not None else malformed_reason(check)
+        checks.append({"id": f"AC-{match.group(1)}", "what": what, "label": label, "when": WHEN[label],
+                       "check": check, "command": None if command is None else command.group(1),
+                       "malformed": malformed})
+    used = [check["id"] for check in checks]
+    for check in checks:
+        if used.count(check["id"]) > 1:
+            check["command"], check["malformed"] = None, f"{check['id']} is used more than once"
     return checks
+
+
+def before_merge(checks: list) -> list:
+    """The criteria verify runs or the reviewer judges before the merge."""
+    return [check for check in checks if check["when"] == "before"]
+
+
+def after_merge(checks: list) -> list:
+    """The after-merge criteria that are not malformed: judged after the merge, never run before it."""
+    return [check for check in checks if check["when"] == "after" and check["malformed"] is None]
+
+
+def sandboxed_for(task: dict) -> bool:
+    """Whether a task's checks run under the Codex sandbox: every author's but your own sessions', whose code runs
+    the way you would run it yourself. verify and run_after_merge both ask this, so the two never disagree."""
+    return task["desk"] != config.OWN_SESSION_DESK
 
 
 def malformed_reason(check: str) -> Optional[str]:
@@ -129,7 +184,24 @@ def _tail(path: str) -> tuple:
     return lines, size
 
 
-def run_check(record: dict, scratch: str, command: str, sandboxed: bool = True) -> dict:
+def _scrubbed_tail(path: str) -> tuple:
+    """The last lines of a check's output for after-merge evidence: the window read starts at a line boundary, is
+    scrubbed whole (pensieve.scrub), and only then cut to the last EVIDENCE_EXCERPT_LINES lines, so a credential
+    whose start fell before the cut is still masked. A lone line of 40 or more base64 characters is masked too."""
+    size = os.path.getsize(path)
+    start = max(0, size - config.VERIFY_OUTPUT_MAX_BYTES)
+    with open(path, "rb") as handle:
+        handle.seek(start)
+        data = handle.read()
+    if start > 0:
+        cut = data.find(b"\n")
+        data = b"" if cut < 0 else data[cut + 1:]
+    text = pensieve.scrub(data.decode("utf-8", "replace"))
+    lines = ["[base64]" if LONE_BASE64.fullmatch(line.strip()) else line for line in text.splitlines()]
+    return lines[-config.EVIDENCE_EXCERPT_LINES:], size
+
+
+def run_check(record: dict, scratch: str, command: str, sandboxed: bool = True, scrub: bool = False) -> dict:
     out_path = f"{scratch}/out-{secrets.token_hex(4)}.log"
     fd = os.open(out_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
     started = time.monotonic()
@@ -144,7 +216,7 @@ def run_check(record: dict, scratch: str, command: str, sandboxed: bool = True) 
         exit_code = -1
     finally:
         os.close(fd)
-    lines, size = _tail(out_path)
+    lines, size = _scrubbed_tail(out_path) if scrub else _tail(out_path)
     return {"exit_code": exit_code, "seconds": round(time.monotonic() - started, 1), "lines": lines,
             "output_bytes": size}
 
@@ -157,45 +229,64 @@ def _make_scratch() -> str:
     return scratch
 
 
+def _cleaned_lines(cleaned: tuple, what: str) -> list:
+    if cleaned:
+        return ([f"CLEANED {len(cleaned)} git-ignored paths before the {what}, each as git names it:"]
+                + ["    " + name for name in cleaned])
+    return ["CLEANED nothing: the worktree held no git-ignored files besides its dependency links"]
+
+
+def _ran_line(when: str, sandboxed: bool) -> str:
+    if sandboxed:
+        return f"RAN {when} under codex sandbox: worktree write, repo .git read, no network, no office"
+    return f"RAN {when} without the Codex sandbox, because Ryan's own session wrote this code; throwaway HOME and TMPDIR"
+
+
+def _label_line(check: dict) -> str:
+    """The check as TASK.md labels it. A criterion with no known label shows what followed its pipe."""
+    return check["check"] if check["label"] is None else f"{check['label']}: {check['check']}"
+
+
+def _result_lines(result: dict) -> list:
+    exit_text = "timed out" if result["exit_code"] == -1 else str(result["exit_code"])
+    lines = [f"exit: {exit_text} | {result['seconds']}s | {result['output_bytes']} bytes of output",
+             f"output, last {config.EVIDENCE_EXCERPT_LINES} lines:"]
+    return lines + (["    " + line for line in result["lines"]] or ["    (no output)"])
+
+
 def render(task_id: str, sha: str, record: dict, md_digest: str, checks: list, results: dict, now: int,
            sandboxed: bool = True, cleaned: tuple = ()) -> str:
+    """The evidence for one commit. SUMMARY counts the before-merge criteria (and every malformed one); an
+    after-merge criterion is listed with its own line and never looked up in results, since it never runs here."""
     when = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now))
-    ran = sum(1 for check in checks if check["command"] is not None)
-    passed = sum(1 for check in checks if check["command"] is not None and results[check["id"]]["exit_code"] == 0)
-    malformed = sum(1 for check in checks if check.get("malformed") is not None)
-    lines = [
-        f"EVIDENCE {task_id} @ {sha}",
-        f"TASK.md sha256 {md_digest}",
-        f"WORKTREE {record['path']}",
-    ]
-    if cleaned:
-        lines.append(f"CLEANED {len(cleaned)} git-ignored paths before the checks, each as git names it:")
-        lines += ["    " + name for name in cleaned]
-    else:
-        lines.append("CLEANED nothing: the worktree held no git-ignored files besides its dependency links")
-    lines += [
-        (f"RAN {when} under codex sandbox: worktree write, repo .git read, no network, no office" if sandboxed else
-         f"RAN {when} without the Codex sandbox, because Ryan's own session wrote this code; throwaway HOME and TMPDIR"),
-        (f"SUMMARY {passed} of {ran} commands exited 0, {malformed} malformed checks not run,"
-         f" {len(checks) - ran - malformed} observations for the reviewer"),
-        "",
-    ]
+    before = [check for check in before_merge(checks) if check["malformed"] is None]
+    commands = [check for check in before if check["command"] is not None]
+    ran = len(commands)
+    passed = sum(1 for check in commands if results[check["id"]]["exit_code"] == 0)
+    malformed = sum(1 for check in checks if check["malformed"] is not None)
+    later = after_merge(checks)
+    later_commands = sum(1 for check in later if check["command"] is not None)
+    lines = [f"EVIDENCE {task_id} @ {sha}", f"TASK.md sha256 {md_digest}", f"WORKTREE {record['path']}",
+             *_cleaned_lines(cleaned, "checks"), _ran_line(when, sandboxed),
+             (f"SUMMARY {passed} of {ran} commands exited 0, {malformed} malformed checks not run,"
+              f" {len(before) - ran} observations for the reviewer")]
+    if later:
+        lines.append(f"AFTER MERGE {later_commands} commands and {len(later) - later_commands} written checks, judged"
+                     " after merge and never run before it")
+    lines.append("")
     if not checks:
         lines.append("No acceptance criteria with a check were found in TASK.md.")
     for check in checks:
-        lines += [f"{check['id']} {check['what']}", f"check: {check['check']}"]
-        if check.get("malformed") is not None:
+        lines += [f"{check['id']} {check['what']}", _label_line(check)]
+        if check["malformed"] is not None:
             lines += [f"not run: malformed, {check['malformed']}. {MALFORMED_HINT}", ""]
-            continue
-        if check["command"] is None:
+        elif check["when"] == "after":
+            kind = "run at the merge commit" if check["command"] is not None else "judged after merge"
+            lines += [f"not run: an after-merge check, {kind}", ""]
+        elif check["command"] is None:
             lines += ["not run: an observation for the reviewer to judge", ""]
-            continue
-        result = results[check["id"]]
-        exit_text = "timed out" if result["exit_code"] == -1 else str(result["exit_code"])
-        lines += [f"exit: {exit_text} | {result['seconds']}s | {result['output_bytes']} bytes of output",
-                  f"output, last {config.EVIDENCE_EXCERPT_LINES} lines:"]
-        lines += ["    " + line for line in result["lines"]] or ["    (no output)"]
-        lines.append("")
+        else:
+            lines += [*_result_lines(results[check["id"]]), ""]
     return "\n".join(lines).rstrip("\n") + "\n"
 
 
@@ -216,6 +307,21 @@ def write_evidence(task_id: str, holder_id: str, sha: str, text: str) -> dict:
             "office": f"{config.OFFICE_ROOT}/reviews/{task_id}/evidence-{sha}.md"}
 
 
+def frozen_name(digest: str) -> str:
+    """The office copy of the TASK.md bytes whose sha256 is digest: reviews/<task>/task-md-<digest>.md."""
+    return f"task-md-{ids.check('sha256', digest)}.md"
+
+
+def keep_task_md(task_id: str, raw: bytes) -> str:
+    """Keep the exact TASK.md bytes a check run read in the office, where no desk can write, named by their sha256.
+    Written through a temp file and a rename every time, so a damaged copy heals; every reader hashes it again.
+    Returns the digest."""
+    digest = hashlib.sha256(raw).hexdigest()
+    with safefs.opened_dir(config.OFFICE_ROOT, "reviews", ids.check("task", task_id), create=True) as fd:
+        safefs.write_new(fd, frozen_name(digest), raw)
+    return digest
+
+
 def verify(conn, task_id: str, now: Optional[int] = None) -> dict:
     task = pensieve.get_task(conn, ids.check("task", task_id))
     record = gitops.find_record(_castle(task["worktree"]))
@@ -223,30 +329,120 @@ def verify(conn, task_id: str, now: Optional[int] = None) -> dict:
         raise FleetError("this task has no worktree with an office record")
     if gitops.dirty(record):
         raise FleetError("the worktree has uncommitted changes; evidence must belong to one commit")
-    cleaned = gitops.clean_ignored(record)
-    sha = gitops.rev(record)
     holder_id, _ = task_md(conn, task["id"])
     raw = read_task_md(holder_id)
+    # Kept before anything runs: a run that cannot keep it fails here, before any round could record its digest.
+    md_digest = keep_task_md(task["id"], raw)
+    cleaned = gitops.clean_ignored(record)
+    sha = gitops.rev(record)
     checks = parse_checks(raw.decode("utf-8", "replace"))
+    commands = [check for check in before_merge(checks) if check["command"] is not None]
     results = {}
-    sandboxed = task["desk"] != config.OWN_SESSION_DESK
-    if any(check["command"] is not None for check in checks):
+    sandboxed = sandboxed_for(task)
+    if commands:
         scratch = _make_scratch()
         try:
-            for check in checks:
-                if check["command"] is not None:
-                    results[check["id"]] = run_check(record, scratch, check["command"], sandboxed)
+            for check in commands:
+                results[check["id"]] = run_check(record, scratch, check["command"], sandboxed)
         finally:
             shutil.rmtree(scratch, ignore_errors=True)
     if gitops.rev(record) != sha:
         raise FleetError("HEAD moved while the checks ran; run verify again")
-    text = render(task["id"], sha, record, hashlib.sha256(raw).hexdigest(), checks, results, common.now_stamp(now),
-                  sandboxed, cleaned)
+    text = render(task["id"], sha, record, md_digest, checks, results, common.now_stamp(now), sandboxed, cleaned)
     paths = write_evidence(task["id"], holder_id, sha, text)
-    failed = [check["id"] for check in checks if check["command"] is not None and results[check["id"]]["exit_code"] != 0]
+    failed = [check["id"] for check in commands if results[check["id"]]["exit_code"] != 0]
     malformed = [check["id"] for check in checks if check["malformed"] is not None]
     return {"task_id": task["id"], "sha": sha, "checks": len(checks), "failed": failed, "malformed": malformed,
+            "after_merge": [check["id"] for check in after_merge(checks)], "task_md_sha256": md_digest,
             "left_changes": gitops.dirty(record), "evidence": paths}
+
+
+# After the merge (the closer, fleet/closer.py)
+
+AFTER_EVIDENCE_HEADER = re.compile(r"AFTER-MERGE EVIDENCE (tk_[0-9a-f]{16}) @ ([0-9a-f]{40})")
+AFTER_EXIT_LINE = re.compile(r"(AC-\d{1,3}) exit (-?\d{1,3})")
+
+
+def after_evidence_name(merge_sha: str) -> str:
+    return f"after-merge-evidence-{ids.check('sha', merge_sha)}.md"
+
+
+def render_after_merge(task_id: str, merge_sha: str, pass_sha: str, md_digest: str, record: dict, commands: list,
+                       results: dict, now: int, sandboxed: bool, cleaned: tuple) -> str:
+    """The after-merge evidence. Its head, up to the first blank line, holds only script values: the task, the merge
+    commit, the reviewed commit, the approved TASK.md digest and one exit line per command, written after any scrub,
+    since pensieve.scrub would mask a full sha. Output tails below it were scrubbed before they were cut."""
+    when = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now))
+    passed = sum(1 for check in commands if results[check["id"]]["exit_code"] == 0)
+    cleaned = tuple(pensieve.scrub(name) for name in cleaned)  # this evidence goes to the judge's pack
+    lines = [f"AFTER-MERGE EVIDENCE {task_id} @ {merge_sha}", f"PASS {pass_sha}", f"TASK.md sha256 {md_digest}",
+             f"WORKTREE {record['path']}", *_cleaned_lines(cleaned, "commands"), _ran_line(when, sandboxed),
+             f"SUMMARY {passed} of {len(commands)} after-merge commands exited 0"]
+    lines += [f"{check['id']} exit {results[check['id']]['exit_code']}" for check in commands]
+    lines.append("")
+    for check in commands:
+        lines += [f"{check['id']} {pensieve.scrub(check['what'])}", f"after merge: `{pensieve.scrub(check['command'])}`",
+                  *_result_lines(results[check["id"]]), ""]
+    return "\n".join(lines).rstrip("\n") + "\n"
+
+
+def parse_after_evidence(text: str, task_id: str, merge_sha: str, pass_sha: str, md_digest: str,
+                         command_ids: list) -> Optional[dict]:
+    """The exit code of every after-merge command from an evidence file, or None unless its head parses whole:
+    it names this task, merge commit, reviewed commit and TASK.md digest, and holds exactly one exit line for each
+    command id and no other."""
+    head = text.split("\n\n", 1)[0].splitlines()
+    if len(head) < 3 or head[0] != f"AFTER-MERGE EVIDENCE {task_id} @ {merge_sha}" or head[1] != f"PASS {pass_sha}" \
+            or head[2] != f"TASK.md sha256 {md_digest}":
+        return None
+    exits = {}
+    for line in head:
+        match = AFTER_EXIT_LINE.fullmatch(line)
+        if match is not None:
+            if match.group(1) in exits:
+                return None
+            exits[match.group(1)] = int(match.group(2))
+    if sorted(exits) != sorted(command_ids):
+        return None
+    return exits
+
+
+def run_after_merge(conn, task: dict, merged_record: dict, merge_sha: str, pass_sha: str, task_md_sha256: str,
+                    checks: list, now: Optional[int] = None) -> dict:
+    """Run each after-merge command in a fresh detached worktree at the merge commit (merged_record), under the same
+    sandbox rule as verify (sandboxed_for), and write the evidence: the office copy, one atomic rename once every
+    command has ended, then the castle copies next to TASK.md. Refuses a dirty worktree, removes every git-ignored
+    path first, and refuses when HEAD is not the merge commit before or after. {exits, failed, evidence_sha256}."""
+    commands = [check for check in after_merge(checks) if check["command"] is not None]
+    if not commands:
+        raise FleetError("there is no after-merge command to run")
+    if gitops.dirty(merged_record):
+        raise FleetError("the merged worktree has uncommitted changes")
+    cleaned = gitops.clean_ignored(merged_record)
+    if gitops.rev(merged_record) != merge_sha:
+        raise FleetError("the merged worktree is not at the merge commit")
+    sandboxed = sandboxed_for(task)
+    results = {}
+    scratch = _make_scratch()
+    try:
+        for check in commands:
+            results[check["id"]] = run_check(merged_record, scratch, check["command"], sandboxed, scrub=True)
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
+    if gitops.rev(merged_record) != merge_sha:
+        raise FleetError("HEAD moved while the after-merge commands ran")
+    text = render_after_merge(task["id"], merge_sha, pass_sha, task_md_sha256, merged_record, commands, results,
+                              common.now_stamp(now), sandboxed, cleaned)
+    data = text.encode("utf-8")
+    holder_id, _ = task_md(conn, task["id"])
+    with safefs.opened_dir(config.OFFICE_ROOT, "reviews", task["id"], create=True) as fd:
+        safefs.write_new(fd, after_evidence_name(merge_sha), data)
+    with safefs.opened_dir(config.CASTLE_ROOT, "tasks", holder_id) as fd:
+        _replace(fd, "after-merge-evidence.md", data)
+        _replace(fd, f"after-merge-evidence-{merge_sha[:12]}.md", data)
+    exits = {check["id"]: results[check["id"]]["exit_code"] for check in commands}
+    return {"exits": exits, "failed": [key for key, code in exits.items() if code != 0],
+            "evidence_sha256": hashlib.sha256(data).hexdigest()}
 
 
 def _castle(store_path: Optional[str]) -> Optional[str]:

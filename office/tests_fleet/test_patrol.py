@@ -228,6 +228,33 @@ class GuardTests(unittest.TestCase):
                 with self.assertRaises(FleetError):
                     patrol.guard(argv)
 
+    def test_closer_queries_only_read_and_take_checked_variables(self):
+        for name in ("landed", "merge_checks"):
+            text = patrol.QUERIES[name]
+            self.assertTrue(text.startswith("query("))
+            self.assertNotIn("mutation", text.lower())
+        landed = patrol.gh_argv("landed", {"owner": "acme", "name": "web-app", "head": "Feat/My.Branch@2+x"})
+        index = landed.index("head=Feat/My.Branch@2+x")
+        self.assertEqual(landed[index - 1], "-f")
+        checks = patrol.gh_argv("merge_checks", {"owner": "acme", "name": "web-app", "oid": SHA})
+        self.assertEqual(checks[checks.index(f"oid={SHA}") - 1], "-f")
+        for variables in ({"owner": "acme", "name": "web-app", "head": "-x"},
+                          {"owner": "acme", "name": "web-app", "head": "@/etc/passwd"},
+                          {"owner": "acme", "name": "web-app", "head": "a b"},
+                          {"owner": "acme", "name": "web-app", "head": "a" * 256},
+                          {"owner": "acme", "name": "web-app", "head": "x\ny"},
+                          {"owner": "acme", "name": "web-app", "head": "a;$(id)"}):
+            with self.subTest(head=variables["head"][:20]), self.assertRaises(FleetError):
+                patrol.gh_argv("landed", variables)
+        for oid in ("A" * 40, "a" * 39, "a" * 41, "HEAD", "@/etc/passwd"):
+            with self.subTest(oid=oid), self.assertRaises(FleetError):
+                patrol.gh_argv("merge_checks", {"owner": "acme", "name": "web-app", "oid": oid})
+        with self.assertRaises(FleetError):
+            patrol.guard(landed[:5] + ["-F", "head=main"])
+        with self.assertRaises(FleetError):
+            patrol.guard([config.GH_BIN, "api", "graphql", "-f",
+                          "query=" + patrol.LANDED_QUERY.replace("query(", "mutation(")])
+
     def test_a_next_page_cursor_is_checked(self):
         for name in ("prs", "asked"):
             argv = patrol.gh_argv(name, {"mine" if name == "prs" else "asked": "is:pr is:open", "after": cursor(50)})

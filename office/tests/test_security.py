@@ -19,7 +19,7 @@ from unittest import mock
 
 from hogwarts import capacity, cli, db, facts, ids, owlery, pensieve, wands
 from hogwarts.errors import IntegrityError, ValidationError
-from tests.support import DAY, NOW, REPO, SHA, TEST_TMP_ROOT, StoreCase, temp_dir
+from tests.support import DAY, NOW, REPO, SHA, TEST_TMP_ROOT, StoreCase, proof, temp_dir
 
 ROOT = Path(__file__).resolve().parents[1]
 PACKAGE = ROOT / "hogwarts"
@@ -378,6 +378,7 @@ class InputSecurityTests(StoreCase):
         "claude_ids_only": False, "blocked": (), "default_model": None, "retiring_within": DAY,
         "running_window": 3600, "branch": "fix/site", "slot": None,
         "repo_dir": "/private/tmp/checkout", "base": "origin/main", "intent_sha256": "a" * 64,
+        "proof": proof(),
     }
     OVERRIDES = {
         ("record_review", "verdict"): "CHANGES", ("record_round_verdict", "verdict"): "CHANGES",
@@ -386,6 +387,7 @@ class InputSecurityTests(StoreCase):
         ("set_worktree", "worktree"): f"{ids.WORKTREES_ROOT}/wt",
         ("add_bump", "kind"): "runs", ("add_bump", "expires_at"): NOW + DAY,
         ("apply_model", "reason"): "initial",
+        ("close_proven", "dedupe_key"): "close:proven:tk_0000000000000000",
     }
 
     def targets(self) -> list:
@@ -572,6 +574,12 @@ class ScrubTests(StoreCase):
         self.assertEqual(pensieve.scrub(f"key:\n{pem}\nafter"), "key:\n[private_key]\nafter")
         self.assertEqual(pensieve.scrub("-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEA"), "[private_key]")
 
+    def test_scrubs_a_token_after_a_key_block_with_no_end(self):
+        token = "gh" + "p_" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8"
+        scrubbed = pensieve.scrub(f"-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEA\n+token = {token}\nafter")
+        self.assertNotIn(token[4:], scrubbed)
+        self.assertEqual(scrubbed, "[private_key]\nafter")
+
     def test_scrubs_url_credentials_whole(self):
         self.assertEqual(pensieve.scrub("postgres://admin:S3cr3t!pw@db.internal:5432/app"),
                          "postgres://[credentials]@db.internal:5432/app")
@@ -662,6 +670,14 @@ class TransactionCoverageTests(unittest.TestCase):
         owlery.open_request(conn, "alpha", "beta", "child", parent_task_id=task, now=NOW)
         owlery.record_review(conn, REPO, SHA, task, "ryan", "PASS", now=NOW)
         pensieve.close_task(conn, task, "complete", owlery.mint(conn, task, "cli", now=NOW)["token"], now=NOW)
+        proven = pensieve.start_task(conn, pensieve.create_task(conn, "alpha", "proven", now=NOW)["id"], now=NOW)["id"]
+        pensieve.record_commit(conn, proven, "acme/proven", SHA, now=NOW)
+        passed = capacity.open_review_round(conn, proven, "beta", SHA, "review proven", now=NOW)
+        capacity.record_round_verdict(conn, passed["request"]["id"], "acme/proven", "PASS", now=NOW)
+        pensieve.close_task(conn, passed["task"]["id"], "superseded", now=NOW)
+        pensieve.mark_awaiting_close(conn, proven, now=NOW)
+        pensieve.close_proven(conn, proven, proof(repo="acme/proven", written_checks=0, judge_desk=None), "closed",
+                              f"close:proven:{proven}", now=NOW)
         pensieve.ack(conn, pensieve.add_event(conn, "alpha", "note", "headmaster", "s", now=NOW)["id"], now=NOW)
         pensieve.record_session(conn, "session-0001", "proj", started_at=NOW)
         pensieve.add_extract(conn, "session-0001", "user", "words", now=NOW)

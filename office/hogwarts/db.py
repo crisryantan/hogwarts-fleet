@@ -9,11 +9,12 @@ from pathlib import Path
 from typing import Iterator, Optional, Sequence, Union
 from urllib.parse import quote
 
+from . import ids
 from .errors import ConflictError, IntegrityError, NotFoundError, StoreError, ValidationError
 
 DEFAULT_DB = Path("/Users/crisryantan/.hogwarts/state/pensieve.db")
 CODE_ROOT = Path(os.path.abspath(__file__)).parent.parent
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 WAL_ATTEMPTS = 50
 BYTECODE_SUFFIXES = (".pyc", ".pyo", ".so")
 SIDECARS = ("-wal", "-shm")
@@ -61,6 +62,10 @@ RUN_SLOT_LIMIT = 8
 SPEC_PATH_MAX = 1024
 SPEC_BRANCH_MAX = 100
 SPEC_BASE_MAX = 200
+# A proven close (V10): the kinds of closure row, how the reviewed commit landed, and what CI on the merge said.
+CLOSURE_KINDS = ("proven", "parent")
+CLOSURE_LANDINGS = ("pr", "ancestry")
+CLOSURE_CI = ("green", "none")
 
 PathLike = Union[str, Path]
 
@@ -96,6 +101,9 @@ _ENUMS = {
     "model_families": _choices(MODEL_FAMILIES),
     "change_reasons": _choices(MODEL_CHANGE_REASONS),
     "trial_ends": _choices(MODEL_TRIAL_ENDS),
+    "closure_kinds": _choices(CLOSURE_KINDS),
+    "closure_landings": _choices(CLOSURE_LANDINGS),
+    "closure_ci": _choices(CLOSURE_CI),
 }
 
 
@@ -772,7 +780,94 @@ V9 = (
     ),
 )
 
-MIGRATIONS = ((1, V1), (2, V2), (3, V3), (4, V4), (5, V5), (6, V6), (7, V7), (8, V8), (9, V9))
+# Proven closes: the closer (fleet/closer.py) closes a task as complete without a close token only through a closure
+# row, written by pensieve.close_proven alone. A proven row stands for a task awaiting close whose reviewed commit a
+# round PASS from the other family holds, with the merge commit, how it landed, CI on it, the after-merge checks and
+# the office evidence that proves them. A parent row closes the go-registered McGonagall task its proven child closed
+# under, on the child's proof. Rows are never changed or deleted. The complete rule takes a closure row as a third way.
+_HEX40 = "length({col}) = 40 AND {col} NOT GLOB '*[^0-9a-f]*'"
+V10 = (
+    _table(
+        f"""CREATE TABLE IF NOT EXISTS task_closures (
+        task_id TEXT PRIMARY KEY NOT NULL REFERENCES tasks(id),
+        kind TEXT NOT NULL CHECK (kind IN {{closure_kinds}}),
+        via_task_id TEXT REFERENCES tasks(id),
+        repo TEXT NOT NULL CHECK (length(repo) BETWEEN 3 AND 201 AND repo GLOB '?*/?*'
+            AND repo NOT GLOB '*[^A-Za-z0-9._/-]*' AND repo NOT GLOB '*/*/*'),
+        pass_sha TEXT NOT NULL CHECK ({_HEX40.format(col="pass_sha")}),
+        merge_sha TEXT NOT NULL CHECK ({_HEX40.format(col="merge_sha")}),
+        landed TEXT NOT NULL CHECK (landed IN {{closure_landings}}),
+        pr_number INTEGER CHECK (pr_number IS NULL OR pr_number > 0),
+        ci TEXT NOT NULL CHECK (ci IN {{closure_ci}}),
+        ci_checks INTEGER NOT NULL CHECK (ci_checks >= 0),
+        command_checks INTEGER NOT NULL CHECK (command_checks >= 0),
+        written_checks INTEGER NOT NULL CHECK (written_checks >= 0),
+        judge_desk TEXT REFERENCES desks(name),
+        evidence_path TEXT NOT NULL CHECK (substr(evidence_path, 1, {len(ids.REVIEWS_ROOT) + 1})
+            = '{ids.REVIEWS_ROOT}/' AND evidence_path NOT GLOB '*..*' AND evidence_path NOT GLOB '*[^ -~]*'),
+        evidence_sha256 TEXT NOT NULL CHECK (length(evidence_sha256) = 64
+            AND evidence_sha256 NOT GLOB '*[^0-9a-f]*'),
+        recorded_at INTEGER NOT NULL,
+        CHECK ((kind = 'parent') = (via_task_id IS NOT NULL)),
+        CHECK ((written_checks = 0) = (judge_desk IS NULL)),
+        CHECK ((landed = 'pr') = (pr_number IS NOT NULL)),
+        CHECK ((ci = 'none') = (ci_checks = 0))
+    )"""
+    ),
+    _guard("task_closures_immutable", "BEFORE UPDATE ON task_closures", "a task closure is fixed"),
+    _guard("task_closures_no_delete", "BEFORE DELETE ON task_closures", "task closures are never deleted"),
+    _guard(
+        "task_closures_on_an_open_task",
+        "BEFORE INSERT ON task_closures WHEN NOT EXISTS (SELECT 1 FROM tasks WHERE id = NEW.task_id"
+        " AND status IN ('queued', 'active', 'awaiting_close'))",
+        "a closure is recorded on an open task",
+    ),
+    _guard(
+        "task_closures_proven_on_a_round_pass",
+        "BEFORE INSERT ON task_closures WHEN NEW.kind = 'proven' AND NOT ("
+        "EXISTS (SELECT 1 FROM tasks WHERE id = NEW.task_id AND status = 'awaiting_close')"
+        " AND EXISTS (SELECT 1 FROM task_commits WHERE repo = NEW.repo AND sha = NEW.pass_sha"
+        " AND task_id = NEW.task_id)"
+        " AND EXISTS (SELECT 1 FROM review_passes AS latest JOIN review_rounds ON review_rounds.review_id = latest.id"
+        " WHERE latest.id = (SELECT id FROM review_passes WHERE repo = NEW.repo AND sha = NEW.pass_sha"
+        " ORDER BY created_at DESC, rowid DESC LIMIT 1)"
+        " AND latest.verdict = 'PASS' AND latest.task_id = NEW.task_id AND review_rounds.task_id = NEW.task_id"
+        " AND latest.reviewer_family <> latest.author_family AND latest.reviewer_family IN " + _choices(PASS_FAMILIES)
+        + "))",
+        "a proven close needs a task awaiting close whose commit a review round passed from the other family",
+    ),
+    _guard(
+        "task_closures_judge_of_the_other_family",
+        "BEFORE INSERT ON task_closures WHEN NEW.judge_desk IS NOT NULL AND NOT EXISTS (SELECT 1 FROM desks AS judge"
+        " JOIN tasks AS judged ON judged.id = COALESCE(NEW.via_task_id, NEW.task_id)"
+        " JOIN desks AS author ON author.name = judged.desk"
+        " WHERE judge.name = NEW.judge_desk AND judge.family <> author.family AND judge.family IN "
+        + _choices(PASS_FAMILIES) + ")",
+        "an after-merge judge is from the other family",
+    ),
+    _guard(
+        "task_closures_parent_follows_its_child",
+        "BEFORE INSERT ON task_closures WHEN NEW.kind = 'parent' AND NOT ("
+        "EXISTS (SELECT 1 FROM tasks AS child JOIN task_closures AS proof ON proof.task_id = child.id"
+        " WHERE child.id = NEW.via_task_id AND child.status = 'closed' AND child.close_reason = 'complete'"
+        " AND child.parent_task_id = NEW.task_id AND proof.kind = 'proven' AND proof.repo = NEW.repo"
+        " AND proof.pass_sha = NEW.pass_sha AND proof.merge_sha = NEW.merge_sha)"
+        " AND EXISTS (SELECT 1 FROM task_specs WHERE task_id = NEW.task_id))",
+        "a parent closes only after its proven child, on the same proof, and only when a go registered it",
+    ),
+    "DROP TRIGGER IF EXISTS tasks_complete_needs_token",
+    _guard(
+        "tasks_complete_needs_token",
+        "BEFORE UPDATE ON tasks WHEN NEW.close_reason = 'complete'"
+        " AND NOT EXISTS (SELECT 1 FROM close_tokens WHERE task_id = NEW.id AND consumed_at IS NOT NULL)"
+        " AND NOT EXISTS (SELECT 1 FROM tasks AS parent"
+        " WHERE parent.id = NEW.parent_task_id AND parent.close_reason = 'complete')"
+        " AND NOT EXISTS (SELECT 1 FROM task_closures WHERE task_id = NEW.id)",
+        "complete needs a consumed close token or a parent that closed complete, or a proven close",
+    ),
+)
+
+MIGRATIONS = ((1, V1), (2, V2), (3, V3), (4, V4), (5, V5), (6, V6), (7, V7), (8, V8), (9, V9), (SCHEMA_VERSION, V10))
 
 
 def _uid() -> int:

@@ -94,3 +94,107 @@ class PureAndProseCheckTests(VerifyChecksCase):
         checks = verify.parse_checks("AC-1 a | check: `x`\nnoise\nAC-12 b | check: look at it\nAC-x c | check: `y`\n")
         self.assertEqual([(check["id"], check["command"], check["malformed"]) for check in checks],
                          [("AC-1", "x", None), ("AC-12", None, None)])
+
+
+AFTER_MD = """# {task_id} After-merge checks
+
+## Intent
+Check the after-merge checks.
+
+## Acceptance criteria
+AC-1 the readme is there | check: `test -f README.md`
+AC-2 the diff stays small | check: one file changes
+AC-3 main still builds | after merge: `touch after-ran.txt`
+AC-4 the dashboard looks right | after merge: the widget count goes up
+AC-5 it fails on purpose | after merge: `exit 1`
+
+## Out of scope
+Anything else.
+"""
+
+
+class AfterMergeCheckTests(VerifyChecksCase):
+    def test_after_merge_check_is_listed_and_never_run_before_merge(self):
+        _, result, text, worktree = self.checked(AFTER_MD)
+        self.assertFalse((worktree / "after-ran.txt").exists())
+        self.assertEqual((result["failed"], result["malformed"], result["after_merge"]), ([], [], ["AC-3", "AC-4", "AC-5"]))
+        self.assertIn("AC-3 main still builds\nafter merge: `touch after-ran.txt`\n"
+                      "not run: an after-merge check, run at the merge commit\n", text)
+        self.assertIn("AC-4 the dashboard looks right\nafter merge: the widget count goes up\n"
+                      "not run: an after-merge check, judged after merge\n", text)
+        self.assertIn("\nAFTER MERGE 2 commands and 1 written checks, judged after merge and never run before it\n", text)
+
+    def test_after_merge_command_and_words_follow_the_check_rule(self):
+        checks = verify.parse_checks("AC-1 a | after merge: `make test`\nAC-2 b | after merge: the build is green\n"
+                                     "AC-3 c | after merge: ``\n")
+        self.assertEqual([(check["id"], check["when"], check["command"], check["malformed"] is not None)
+                          for check in checks],
+                         [("AC-1", "after", "make test", False), ("AC-2", "after", None, False),
+                          ("AC-3", "after", None, True)])
+        self.assertEqual([check["id"] for check in verify.after_merge(checks)], ["AC-1", "AC-2"])
+
+    def test_after_merge_summary_line_is_unchanged_without_after_merge_checks(self):
+        _, _, text, _ = self.checked(PureAndProseCheckTests.PLAIN_MD)
+        self.assertIn("\nSUMMARY 1 of 2 commands exited 0, 0 malformed checks not run, 1 observations for the reviewer\n\n",
+                      text)
+        self.assertNotIn("AFTER MERGE", text)
+
+    def test_after_merge_mixed_check_is_malformed_and_never_runs(self):
+        text = AFTER_MD.replace("`touch after-ran.txt`", "`touch after-ran.txt` and it builds")
+        _, result, evidence, worktree = self.checked(text)
+        self.assertEqual(result["malformed"], ["AC-3"])
+        self.assertNotIn("AC-3", result["after_merge"])
+        self.assertIn("AC-3 main still builds\nafter merge: `touch after-ran.txt` and it builds\n"
+                      "not run: malformed, it holds a backtick command plus other text.", evidence)
+        self.assertFalse((worktree / "after-ran.txt").exists())
+
+    def test_unknown_check_label_is_malformed_and_never_runs(self):
+        text = AFTER_MD.replace("| after merge: `touch after-ran.txt`", "| after-merge: `touch after-ran.txt`")
+        for label in ("after-merge:", "After merge:", "chek:", "check :"):
+            with self.subTest(label=label):
+                checks = verify.parse_checks(f"AC-7 x | {label} `touch label-ran.txt`\n")
+                self.assertEqual([(check["id"], check["command"], check["malformed"]) for check in checks],
+                                 [("AC-7", None, verify.UNKNOWN_LABEL)])
+        _, result, evidence, worktree = self.checked(text)
+        self.assertEqual(result["malformed"], ["AC-3"])
+        self.assertIn("AC-3 main still builds\nafter-merge: `touch after-ran.txt`\nnot run: malformed, a criterion's check"
+                      " is labelled check: or after merge:, and nothing else.", evidence)
+        self.assertFalse((worktree / "after-ran.txt").exists())
+        self.assertEqual(verify.parse_checks("AC-1 prose with no pipe at all\n"), [])
+
+    def test_duplicate_criterion_id_is_malformed(self):
+        checks = verify.parse_checks("AC-1 a | check: `true`\nAC-2 b | check: `true`\nAC-1 c | after merge: `true`\n")
+        self.assertEqual([(check["id"], check["command"], check["malformed"]) for check in checks],
+                         [("AC-1", None, "AC-1 is used more than once"), ("AC-2", "true", None),
+                          ("AC-1", None, "AC-1 is used more than once")])
+        _, result, evidence, _ = self.checked(AFTER_MD.replace("AC-5 it fails", "AC-1 it fails"))
+        self.assertEqual(result["malformed"], ["AC-1", "AC-1"])
+        self.assertEqual(evidence.count("not run: malformed, AC-1 is used more than once."), 2)
+
+    def test_after_merge_two_labels_on_one_line_are_malformed(self):
+        for line in ("AC-1 x | check: works | after merge: metric ok",
+                     "AC-1 x | check: works | After-Merge: metric ok",
+                     "AC-1 x | after merge: `make` | check: done",
+                     "AC-1 x | after-merge: foo | check: `bar`"):
+            with self.subTest(line=line):
+                [check] = verify.parse_checks(line + "\n")
+                self.assertEqual((check["command"], check["malformed"] is not None), (None, True))
+
+    def test_after_merge_pipe_inside_a_backtick_command_is_still_a_command(self):
+        [check] = verify.parse_checks("AC-1 x | after merge: `make test | tee out | grep check: | wc -l`\n")
+        self.assertEqual((check["command"], check["malformed"], check["when"]),
+                         ("make test | tee out | grep check: | wc -l", None, "after"))
+
+    def test_after_merge_summary_counts_only_before_merge_criteria(self):
+        _, _, text, _ = self.checked(AFTER_MD)
+        self.assertIn("\nSUMMARY 1 of 1 commands exited 0, 0 malformed checks not run, 1 observations for the reviewer\n",
+                      text)
+
+    def test_after_merge_command_is_never_in_failed_or_looked_up_in_results(self):
+        _, result, _, _ = self.checked(AFTER_MD)
+        self.assertNotIn("AC-5", result["failed"])
+        checks = verify.parse_checks(AFTER_MD)
+        record = {"path": "/x"}
+        text = verify.render("tk_" + "0" * 16, "a" * 40, record, "b" * 64, checks,
+                             {"AC-1": {"exit_code": 0, "seconds": 0.1, "output_bytes": 0, "lines": []}}, 0)
+        self.assertIn("SUMMARY 1 of 1 commands exited 0", text)

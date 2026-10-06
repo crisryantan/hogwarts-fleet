@@ -77,18 +77,18 @@ None of these uses a model.
 | Script | Job |
 | --- | --- |
 | Owl Post - Message Router | Moves messages (owls) between desks and stamps each sender from the folder it came from. |
-| Marauder's Map - PR Watcher | Diffs PR and CI state every 15 minutes, weekdays 08:00 to 19:00, and wakes Ron only for a change that may need you. |
+| Marauder's Map - PR Watcher | Diffs PR and CI state every 15 minutes, weekdays 08:00 to 19:00, and wakes Ron only for a change that may need you. Each round also starts the closer while you have auto-close switched on. |
 | Gringotts - Backup | Takes a nightly local backup with credentials left out. `fleet gringotts --drill` tests a restore. |
 | Ollivander - Model Keeper | Each morning, maps every desk's role card to a model in its own family. |
 
 ### How a task moves
 
-1. You ask McGonagall. She writes a TASK.md with your words as the Intent, plus numbered acceptance criteria, each with a check, and a Spec that names the repo, a new branch and its base. You read it, ask for changes until you're happy, then type `go <task-id>` in her session.
+1. You ask McGonagall. She writes a TASK.md with your words as the Intent, plus numbered acceptance criteria, each with a check, and a Spec that names the repo, a new branch and its base. A criterion labelled `after merge:` instead of `check:` is something only true once the change is merged, and is checked after the merge. You read it, ask for changes until you're happy, then type `go <task-id>` in her session.
 2. The hook that reads your prompts checks you typed the go yourself, then registers the task, routes it to Harry, gives it a fresh git worktree from the Spec and starts Harry's run there. If it can't confirm your typing, it changes nothing and you register the task with `castle task create` instead. Work from your own Claude sessions joins at the next step, through `fleet review own`.
 3. `fleet verify` runs each acceptance check and records the command, exit code and output for that commit.
 4. `fleet review` sends Codex-written work to Hermione and Claude-written work to Moody. A pass counts only for that exact commit, and only when the reviewer's family differs from the author's. Harry's handoff starts his review by itself, and CHANGES starts his fix round, up to the round cap.
 5. You run `fleet push`, which pushes exactly the reviewed commit and prints the `gh` command for a draft PR. You open the PR yourself, unless you opt in to the review loop doing both after its PASS, as a draft only. The push gate blocks any agent's own `git push` that has no pass.
-6. The patrol (the Map, Ron and Hermione's bot pass) watches CI and review comments. You merge and deploy, then close the task by typing `Mischief managed <task-id>`.
+6. The patrol (the Map, Ron and Hermione's bot pass) watches CI and review comments. You merge and deploy, then close the task by typing `Mischief managed <task-id>`. Or switch on auto-close once, with `echo on > ~/.hogwarts/auto-close`: then the closer closes a passed task by itself once scripts prove the reviewed commit landed, CI on the merge commit is green and every after-merge check holds, and you hear about each close. Anything it can't prove stops that task and tells you once, and `fleet close <task-id>` tries it again.
 
 ### Two homes
 
@@ -142,6 +142,7 @@ The push gate is a guardrail, not a wall. It reads an agent's Bash command as te
 Two test suites cover the kit: `tests` for the store and `tests_fleet` for the fleet. Both run on the system Python, and `install.sh` runs them on every install.
 
 - The review loop is tested against temporary git repos.
+- The closer is tested against a faked GitHub and temporary git repos. It reads GitHub only through the patrol's read-only queries and writes nothing to it.
 - The patrol is tested against a faked GitHub and faked desks. It starts in shadow mode: while `~/.hogwarts/patrol/shadow` exists, the patrol and Gringotts only write files under the office, and none of their findings reach you.
 - The weeknight memory review by Dumbledore - Knowledge Manager is tested against temporary stores. He only proposes changes, and nothing applies until you run `castle portrait apply`.
 - The Codex desks' read boundary rests on Codex permission profiles, which Codex marks as beta. Rerun `scripts/codex-boundary-test.sh` after every Codex upgrade.

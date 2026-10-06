@@ -13,10 +13,12 @@ from typing import Callable, Iterator, Optional, Sequence
 from hogwarts import db, ids, pensieve
 from hogwarts.errors import StoreError
 
-from . import config
+from . import config, safefs
 from .safefs import FleetError
 
 _PRINTABLE = re.compile(r"[^\x20-\x7e]")
+# An opt-in file holds "on" and a newline, so anything longer is not one.
+OPT_IN_MAX_BYTES = 64
 
 
 def connect():
@@ -120,6 +122,21 @@ def one_line(text: object, limit: int) -> str:
     cleaned = _PRINTABLE.sub(" ", str(text)).strip()
     cleaned = re.sub(r" {2,}", " ", cleaned)
     return cleaned if len(cleaned) <= limit else cleaned[: max(limit - 3, 0)] + "..."
+
+
+def opt_in_on(name: str) -> bool:
+    """Whether you opted in to one switch: the plain file name, which must be one of config.OPT_IN_FILES, in the
+    office, your own and writable by no one else, reached with no link on the way, holds exactly "on" after
+    surrounding whitespace is stripped. It is read from nowhere else, so nothing a desk can write turns it on.
+    Missing, unreadable, a name not listed, or anything else is off."""
+    if name not in config.OPT_IN_FILES:
+        return False
+    try:
+        with safefs.opened_dir(config.OFFICE_ROOT) as fd:
+            raw = safefs.read_regular(fd, name, OPT_IN_MAX_BYTES, "an opt-in file")
+    except (FleetError, OSError):
+        return False
+    return raw.strip() == b"on"
 
 
 def scrubbed_line(text: object, limit: int) -> str:

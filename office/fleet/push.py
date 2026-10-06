@@ -30,12 +30,11 @@ from typing import Callable, Optional
 
 from hogwarts import ids, owlery, pensieve
 
-from fleet import common, config, gitops, safefs, worktree
+from fleet import common, config, gitops, worktree
 from fleet.safefs import FleetError
 
 ADDED_LINE_PREFIX = "+"
 MAX_LISTED = 20
-OPT_IN_MAX_BYTES = 64
 # What pensieve.scrub puts in place of a credential, key or email. Text any of its patterns matches this way never
 # goes out by itself. Its hex and IP address marks are left out, since commit shas and version numbers look like them.
 SENSITIVE_MARKS = ("[private_key]", "[credentials]", "[jwt]", "[token]", "[secret]", "[aws_key]", "[email]")
@@ -120,15 +119,9 @@ def _push_exact(record: dict, sha: str, branch: str) -> str:
 
 
 def auto_draft_pr_on() -> bool:
-    """Whether Ryan opted in to the automatic draft PR: the plain file config.AUTO_DRAFT_PR_FILE in the office, his
-    own and writable by no one else, reached with no link on the way, holds exactly "on". It is read from nowhere
-    else, so nothing a desk can write turns it on. Missing, unreadable or anything else is off."""
-    try:
-        with safefs.opened_dir(config.OFFICE_ROOT) as fd:
-            raw = safefs.read_regular(fd, config.AUTO_DRAFT_PR_FILE, OPT_IN_MAX_BYTES, "the draft PR opt-in")
-    except (FleetError, OSError):
-        return False
-    return raw.strip() == b"on"
+    """Whether you opted in to the automatic draft PR: the office file config.AUTO_DRAFT_PR_FILE holds exactly "on",
+    read through the one opt-in reader every switch shares (common.opt_in_on)."""
+    return common.opt_in_on(config.AUTO_DRAFT_PR_FILE)
 
 
 def sensitive_mark(text: str) -> Optional[str]:

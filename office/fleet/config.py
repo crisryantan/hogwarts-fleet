@@ -116,6 +116,32 @@ AUTO_REVIEW_LOCK_WAIT_SECONDS = 10
 #   echo on > ~/.hogwarts/auto-draft-pr
 # A file anywhere else, a link, a file someone else owns or can write, or any other text leaves it off.
 AUTO_DRAFT_PR_FILE = "auto-draft-pr"
+# Auto-close (fleet/closer.py), off by default. While this plain file in the office holds exactly "on", each Map
+# round starts the closer, which closes a passed task once scripts prove its merge, CI on the merge commit and every
+# after-merge check. Written from the terminal: echo on > ~/.hogwarts/auto-close
+AUTO_CLOSE_FILE = "auto-close"
+# Every opt-in file, each read only through common.opt_in_on. A name not listed here always reads off.
+OPT_IN_FILES = (AUTO_DRAFT_PR_FILE, AUTO_CLOSE_FILE)
+# The closer's own lock in the office locks folder: one closer at a time, and fleet close takes it too.
+CLOSER_LOCK = "closer.lock"
+# Tries an automatic pass may take per merge commit for sandboxed after-merge commands and for the judge. After-merge
+# commands that run without the Codex sandbox (your own sessions) are started at most once by an automatic pass.
+AUTO_CLOSE_MAX_TRIES = 3
+# Neither a green CI nor "no checks" counts until this long after the merge was first seen, so a check GitHub has
+# not registered yet is never read as all of CI. A red stops at once.
+AUTO_CLOSE_CI_SETTLE_SECONDS = 1800
+# A wait that can last (CI pending, open work under the task, the review loop, the judge's slots, a PR merged into
+# another base) tells you once after this long, and keeps waiting.
+AUTO_CLOSE_STALL_SECONDS = 86400
+# A read that keeps failing tells you once after this long of one unknown spell.
+AUTO_CLOSE_UNKNOWN_GRACE_SECONDS = 7200
+# The merged diff in the judge's pack is cut here, after it is scrubbed whole.
+AUTO_CLOSE_PACK_DIFF_MAX_CHARS = 200_000
+# The most first-parent commits the closer walks to find the commit that brought the reviewed commit onto its base.
+AUTO_CLOSE_WALK_MAX = 10_000
+AUTO_CLOSE_RECORD_MAX_BYTES = 8192
+# Try and clear markers per merge commit, hand runs included.
+AUTO_CLOSE_MARKER_MAX = 99
 # A failed run whose error text matches one of these hit the vendor's own usage, rate, quota or credit
 # limit, not a fleet cap. Matched without case against Claude's result text when is_error is set, and
 # against the message that ended a failed Codex run (its last turn.failed, else its last error event).
