@@ -416,7 +416,8 @@ class MapRoundTests(MapRoundCase):
 
     def test_map_round_starts_the_closer_on_a_round_that_could_not_read_github(self):
         self.awaiting()
-        result = patrol_map.run_round(self.conn, now=self.t0)  # GITHUB_ACCOUNT is still the placeholder
+        with mock.patch.object(config, "GITHUB_ACCOUNT", "<github-account>"):  # not set, as before onboarding
+            result = patrol_map.run_round(self.conn, now=self.t0)
         self.assertFalse(result["ok"])
         self.assertEqual((result["closer"], self.round_row()["closer"]), ("started", "started"))
         self.patrol_github.endless = True
