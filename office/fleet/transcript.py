@@ -201,6 +201,11 @@ def _user_text(entry: dict) -> Optional[str]:
     return "\n".join(kept) if kept else None
 
 
+def prompt_text(entry: dict) -> Optional[str]:
+    """The text a typed prompt entry holds, its parts stripped and joined by newlines, or None."""
+    return _user_text(entry)
+
+
 def _assistant_text(entry: dict) -> Optional[str]:
     content = _message(entry).get("content")
     if isinstance(content, str):

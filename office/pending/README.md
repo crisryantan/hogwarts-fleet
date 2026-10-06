@@ -71,6 +71,8 @@ McGonagall writes `tasks/<id>/TASK.md` and waits for your go. Nothing she does r
 go <tk_id>
 ```
 
+To start several drafted tasks at once, put one `go <tk_id>` per line, up to five, with nothing else in the message. Each one starts on its own, in order, so one refused never stops the others, and you get one result line per task. A bullet, backticks or any other word in the message refuses them all. A message that only mentions a go in a sentence gets nothing from the hook.
+
 The castle's UserPromptSubmit hook takes it from there, the same way it takes "Mischief managed". It checks that you typed the prompt yourself, then registers the task, routes it to Harry, gives his task its worktree and starts his run, all in that one prompt. Its Spec section must open with three lines, which say where the build goes:
 
 ```
@@ -82,15 +84,15 @@ base: origin/main
 
 `repo:` gets the same checks as `--repo-dir` below, `branch:` the same as `--branch`, and `base:` the same as `--base`. The go stores the three values and the TASK.md's sha256 with the task. The worktree is made from the stored values only, so editing TASK.md afterwards changes none of them. If TASK.md changes while the go runs, or anything refuses before the go finishes, nothing is registered, routed or made, and you can type the go again. A go for a task that's already registered changes nothing. A go or a `fleet worktree` for a branch that another one is still making in the same repo is refused at once, so run it again when that one ends. If one says the store couldn't say whether its task kept the worktree, it took nothing back: check the task with `castle task show`, and remove what it names by hand only if the task has no worktree.
 
-The hook prints what happened, or why nothing did. A go only works in McGonagall's session: in any other session, your own included, it says so and changes nothing. When it can't confirm you typed the go, it says so and changes nothing too. Register the task by hand instead:
+The hook prints what happened, or why nothing did. A go only works in McGonagall's session: in any other session, your own included, it says so and changes nothing. Claude Code writes your prompt to the session transcript only after the hook has run, so the hook usually can't see it yet. Then it says your typing is being confirmed, and one background process waits up to 20 seconds for the prompt to appear in the transcript, checks it as the hook would, and runs the go only when the transcript's text is the go the hook saw. Its result comes as a headmaster event on your next prompt, within about half a minute, and `castle task show <tk_id>` shows where it stands meanwhile. When it can't confirm you typed the go, the event says so and nothing is started. Register the task by hand instead:
 
 ```
 ~/.hogwarts/bin/castle task create --id <tk_id> --desk mcgonagall --title "<title>" --intent-path ~/hogwarts/tasks/<tk_id>/TASK.md
 ```
 
-Then tell McGonagall it's registered, so she routes it, and give Harry's task its worktree as in (g). A request for a task the store does not know is refused, and you get a headmaster event.
+Then tell McGonagall it's registered, so she routes it, and give Harry's task its worktree as in (g), then run `fleet adopt <tk_id>` so the closer can close it. A request for a task the store does not know is refused, and you get a headmaster event.
 
-"Mischief managed <task-id>" closes a task only when it is awaiting close and the hook can see that you typed the prompt yourself. If the hook says it could not confirm, close it from your terminal:
+"Mischief managed <task-id>" closes a task only when it is awaiting close and the hook can see that you typed the prompt yourself. Like a go, it is confirmed in the background when the transcript doesn't hold your prompt yet, and the result comes as a headmaster event. If the hook or the event says it could not confirm, close it from your terminal:
 
 ```
 ~/.hogwarts/bin/castle token mint <tk_id>
@@ -130,12 +132,20 @@ Every `fleet` command prints one JSON object with `"ok": true` or `"ok": false` 
 `--repo-dir` below is the main checkout of your repo: a folder inside your home folder, outside the office and the castle, with its own `.git` folder and no symlink on the way.
 
 1. McGonagall writes TASK.md and you type `go <task-id>` in her session, as in (d). The hook registers her task, routes it to Harry, gives his task its worktree on the Spec's new branch and starts his run if Harry is enabled. Then carry on at step 4. Each acceptance check is either one backtick command and nothing else, which verify runs, or plain words with no backticks, which the reviewer judges. A check that mixes a backtick command with other text is marked malformed in the evidence and never runs. A criterion labelled `| after merge:` instead of `| check:` follows the same rule but is checked after the merge: verify lists it and never runs it, and the reviewer never holds a PASS back for one. Any other label, anything shaped like a second label after the first (a pipe, a few words and a colon, outside the backticks), or one AC id on two lines is malformed.
-2. Steps 2 and 3 are the fallback, for a go the hook couldn't confirm, and for a build McGonagall routes by owl. You register her task by hand as in (d), and she posts a request to Harry. The Owl Post holds it and you get a headmaster event: a build task is waiting for its worktree.
-3. Give Harry's task a worktree on a new branch. If Harry is enabled, his run starts. Under a TASK.md a go started, it takes only the repo, branch and base the go stored:
+2. Steps 2 and 3 are the fallback, for a go that couldn't be confirmed or applied, and for a build McGonagall routes by owl. You register her task by hand as in (d), and she posts a request to Harry. The Owl Post holds it and you get a headmaster event: a build task is waiting for its worktree.
+3. Give Harry's task a worktree on a new branch. If Harry is enabled, his run starts. Under a TASK.md a go started, it takes only the repo, branch and base the go stored. You can give McGonagall's task id, the one on the TASK.md, instead of Harry's: when exactly one open build task sits under it, that one is used and the result names it, and with none or several it refuses and names them:
 
 ```
 ~/.hogwarts/bin/fleet worktree <harry-task-id> --repo-dir <path-to-your-checkout> --branch <new-branch>
 ```
+
+A build registered by hand has no go behind it, so the closer leaves it to you. Once its worktree is made from the TASK.md's Spec, adopt it so auto-close can take it:
+
+```
+~/.hogwarts/bin/fleet adopt <mcgonagall-task-id>
+```
+
+It checks that her task is queued with its TASK.md and no go spec, that exactly one open build task with a worktree sits under it, and that the TASK.md Spec's `repo:`, `branch:` and `base:` are that worktree's. It shows them with the TASK.md title and asks you to type her task id back, which is your approval, as a go is: there is no `--yes`, and it runs only in your terminal. Then it records the Spec and the TASK.md's sha256 with her task. Any later edit to that TASK.md leaves the task to be closed by hand, as after a go.
 
 If a go said Harry's run didn't start, start it with `~/.hogwarts/bin/fleet build <harry-task-id>`.
 
@@ -187,7 +197,7 @@ rm ~/.hogwarts/pr-followup
 
    Replies go out only while `gh` is signed in as the account in `GITHUB_ACCOUNT`, checked before the push, before every reply and on every answer. A reply that names a teammate whose name is also a fleet word is refused, so replies leave names out. Switching off stops routing at once and stops the next push or reply; an open follow-up is still tidied up by the next Map round, even one that cannot read GitHub (a cut-off routing undone, a closed task's follow-up ended). Such a round never routes anything. In shadow mode with the switch on, each round writes `patrol/followup/<stamp>.md`, counting the last seven days of comments as if follow-ups had been live (`FOLLOWUP_SHADOW_WINDOW_SECONDS`); it opens no live period, so going live later routes only comments written after that. `castle followup show <harry-task-id>` lists a follow-up's comments and replies. Its tables come with store version 11, so going back to an office from before it means restoring a backup.
 
-7. After the merge. While `~/.hogwarts/auto-close` holds `on`, each Map round starts the closer, which takes each task awaiting close after a round PASS: a build your go registered, or a task from your own sessions. A build registered by hand, or a PASS no round holds, stays yours to close. For each one it proves, in order:
+7. After the merge. While `~/.hogwarts/auto-close` holds `on`, each Map round starts the closer, which takes each task awaiting close after a round PASS: a build your go registered, or a task from your own sessions. A build registered by hand stays yours to close unless you ran `fleet adopt` on it (step 3), and so does a PASS no round holds. For each one it proves, in order:
 
    - that the TASK.md the passing round read is the one you approved: your go's for a build, the TASK.md `fleet review own` wrote for your own task. An edit after that, a scope change included, sends the task to a hand close;
    - that the reviewed commit landed: one merged PR from the task's branch into its base at the reviewed commit (squash and rebase merges included), or the reviewed commit on the freshly fetched base. A PR from the branch merged at any other head stops it;

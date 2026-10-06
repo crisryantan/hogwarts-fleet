@@ -176,9 +176,11 @@ class WorktreeTests(LoopCase):
         self.assertIn("not enabled", created["desk"])
 
     def test_bad_requests_are_refused_before_anything_changes(self):
-        parent, task, _, _ = self.harry_task()
+        _, task, _, _ = self.harry_task()
         other = self.home_dir / "other"
         other.mkdir()
+        # A parent id stands for its one open build task (test_worktree_parent.py); one with none is refused.
+        lone = pensieve.create_task(self.conn, "mcgonagall", "no build under it")["id"]
         cases = [
             (task["id"], str(self.repo), "harry/widget"),
             (task["id"], str(self.repo), "Fix/Widget"),
@@ -186,7 +188,7 @@ class WorktreeTests(LoopCase):
             (task["id"], str(other), "fix/widget"),
             (task["id"], str(self.castle), "fix/widget"),
             (task["id"], "/private/tmp", "fix/widget"),
-            (parent, str(self.repo), "fix/widget"),
+            (lone, str(self.repo), "fix/widget"),
         ]
         for task_id, repo_dir, branch in cases:
             with self.subTest(repo=repo_dir, branch=branch), mock.patch.object(run_desk, "spawn"), \

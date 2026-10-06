@@ -19,10 +19,14 @@ What it says (each part only when there is something to say):
    closes that one task as complete in the same run, then names every descendant task
    the close cascaded to and how each one closed. The token is never printed. Any
    other text never closes anything.
-2. The result of "go <task-id>" when the prompt is exactly that, after trimming. See
-   "The go" below. A prompt that holds a go with a task id but is not exactly one gets a
-   refusal line and starts nothing, and so does any go in a session that is not McGonagall's.
-   Any other prompt pays only for two regular expressions.
+2. The result of each go when every non-empty line of the prompt, trimmed, is exactly
+   "go <task-id>": at most config.GO_MAX_PER_PROMPT distinct ids, repeats counted once,
+   each started in order and on its own, so one refused never stops the others, with one
+   result line per id when there are several. See "The go" below. A prompt that only looks
+   like gos (each line a go once list markers, backticks, quotes and the spaces round them
+   are stripped) gets one refusal line and starts nothing, and so does a go or a go attempt
+   in a session that is not McGonagall's. Prose that only mentions a go gets nothing.
+   Any other prompt pays only for a few regular expressions.
 3. Unacked headmaster events, newest per task, cut to about 1500 characters, with a
    count of the rest. The hook never acks them. They stay until Ryan runs
    castle event ack in his terminal.
@@ -39,11 +43,27 @@ The close runs only when every check passes:
   most CLOSE_PROMPT_MAX_AGE seconds old. Text another session sends in with
   send_message arrives with origin.kind "peer", isMeta and promptSource "system".
 
+Deferred confirmation. Claude Code writes the prompt's own transcript entry only after this
+hook returns, and for a new session the transcript file too, so at hook time the entry is
+usually missing. When that is the only thing missing (no agent_id, a prompt_id, for a close
+a task awaiting close, for a go McGonagall's session, and no other check failed), the hook
+refuses nothing and starts nothing itself: it claims the prompt in the office (one claim per
+prompt id, so a retried hook never starts a second confirmer) and starts one detached
+confirmer, fleet/go_confirm.py, with its input on a pipe and nothing in its argv, then says
+the go or close is being confirmed and that its result arrives as a headmaster event within
+about half a minute. The confirmer waits up to config.GO_CONFIRM_WAIT_SECONDS for the entry,
+runs the same checks on it, takes the gos or the close from the entry's own text and refuses
+when it differs from what the hook saw, then runs the code below unchanged. Its outcome, a
+refusal with the manual steps included, is a headmaster event on McGonagall's desk. A missing
+file or a cut last line is "not yet", never a pass. When the entry is already there at hook
+time, the hook runs the go or the close itself, as below.
+
 The go starts a build from a TASK.md McGonagall drafted and Ryan approved, with no command
 in his terminal. It runs only in McGonagall's own session: when common.session_desk names any
 other desk (Ryan's own sessions, a subagent, or the hook run with --desk for another desk), a go
 gets one refusal line before anything else is read, and changes nothing. In her session it
-passes the same typed_by_ryan check as the close, before it reads anything else, and then,
+passes the same typed_by_ryan check as the close (or is deferred to the confirmer as above),
+before it reads anything else, and then,
 only for a task id the store does not know yet whose TASK.md is at
 ~/hogwarts/tasks/<task-id>/TASK.md:
 - reads TASK.md once (no link, at most 64KB) and takes its title from the first line,
@@ -80,12 +100,11 @@ and the next go refuses because the branch exists until Ryan removes them. Nothi
 carries a token, the prompt's id or the TASK.md hash. A go Ryan's typing could not confirm
 prints the manual steps instead.
 
-Unresolved question: the hook input has no documented field that says a person typed
-the prompt, and Claude Code may write the prompt's entry only after this hook runs. If
-it does, the entry is never found and every close and go is refused. A refused close prints
-the castle commands, and Ryan closes the task from his terminal; a refused go prints the
-manual steps. Headless desks run with --restricted, which ignores the castle's project
-settings, so this hook is not loaded for them.
+The hook input has no documented field that says a person typed the prompt, so the typed
+check reads the transcript entry, as above. A refused close prints the castle commands, and
+Ryan closes the task from his terminal; a refused go prints the manual steps. Headless desks
+run with --restricted, which ignores the castle's project settings, so this hook is not
+loaded for them.
 """
 from __future__ import annotations
 
@@ -108,10 +127,20 @@ from fleet.safefs import FleetError  # noqa: E402
 MISCHIEF = re.compile(r"Mischief managed (tk_[0-9a-f]{16})")
 OPEN_STATUSES = ("queued", "active", "awaiting_close")
 GO = re.compile(r"go (tk_[0-9a-f]{16})")
-# A go with a task id anywhere in a prompt that is not exactly one: it gets a refusal line and starts nothing.
-NEAR_GO = re.compile(r"(?<![A-Za-z0-9_])go\s+tk_[0-9a-f]{16}", re.IGNORECASE)
-GO_EXACT = "Go was not applied: a go is the whole prompt, exactly go <task-id>, so nothing was started."
+# A line that looks like a go once list markers, backticks, quotes and the spaces round them are gone. A prompt whose
+# every line is one, but that is not exactly gos, gets a refusal line and starts nothing. Prose that only mentions a go
+# gets nothing.
+GO_ATTEMPT_LINE = re.compile(r"go\s+tk_[0-9a-f]{16}(?:[\s,]+(?:and\s+)?tk_[0-9a-f]{16})*[.!]?", re.IGNORECASE)
+LIST_MARKER = re.compile(r"(?:[-*+\u2022]|[0-9]{1,3}[.)])\s+")
+DECORATION = re.compile("[`'\"\u2018\u2019\u201c\u201d]")
+GO_EXACT = ("Go was not applied: each go is a line of its own, exactly go <task-id>, with nothing else in the message"
+            " (no bullets, backticks or other words), so nothing was started.")
+GO_TOO_MANY = (f"Go was not applied: one message starts at most {config.GO_MAX_PER_PROMPT} gos, so nothing was"
+               " started.")
 GO_SESSION = "a go runs only in McGonagall's session, so nothing was started."
+# typed_by_ryan's reason when the only thing missing is the prompt's own transcript entry, which Claude Code writes
+# only after this hook returns. A go or a close with this reason is confirmed by fleet/go_confirm.py instead.
+NOT_YET = "this prompt is not in the transcript yet"
 # A go registers the TASK.md's task on McGonagall's desk, as castle task create does by hand, and routes it to Harry.
 TASK_DESK = "mcgonagall"
 BUILD_DESK = "harry"
@@ -140,29 +169,41 @@ def terminal_close(task_id: str) -> str:
             f"castle task close {task_id} --reason complete --token-stdin.")
 
 
-def typed_by_ryan(data: dict, now: int) -> Optional[str]:
-    """None when this prompt is Ryan's own typing in his own session, else why not."""
+def typing_entry(data: dict, now: int) -> tuple:
+    """(refusal, entry): refusal is None when this prompt is Ryan's own typing in his own session, else why not, and
+    entry is the prompt's own transcript entry once one was found. NOT_YET only when every check that can run now
+    passed and the entry, or the whole transcript file, is not there yet; a cut line is skipped, so it is not yet too,
+    never a pass."""
     if "agent_id" in data:
-        return "the prompt came from inside a subagent"
+        return "the prompt came from inside a subagent", None
     prompt_id = common.text_field(data, "prompt_id", 200)
     if prompt_id is None:
-        return "the hook input has no prompt_id"
+        return "the hook input has no prompt_id", None
     try:
         entries = transcript.tail_entries(data.get("transcript_path"))
+    except safefs.Missing:
+        return NOT_YET, None  # a new session's transcript is written after this hook returns
     except (FleetError, OSError):
-        return "the session transcript could not be read"
+        return "the session transcript could not be read", None
     entrypoints = transcript.entrypoints(entries)
-    if len(entrypoints) != 1 or not entrypoints <= set(config.CLOSE_ALLOWED_ENTRYPOINTS):
-        return "the session is not one Ryan is typing into"
+    if entrypoints and (len(entrypoints) != 1 or not entrypoints <= set(config.CLOSE_ALLOWED_ENTRYPOINTS)):
+        return "the session is not one Ryan is typing into", None
     entry = transcript.prompt_entry(entries, prompt_id)
     if entry is None:
-        return "this prompt is not in the transcript yet"
+        return NOT_YET, None
+    if not entrypoints:
+        return "the session is not one Ryan is typing into", None
     if not transcript.is_typed_prompt(entry):
-        return "this prompt did not come from Ryan's keyboard"
+        return "this prompt did not come from Ryan's keyboard", None
     stamp = transcript.timestamp(entry)
     if stamp is None or not 0 <= now - stamp <= config.CLOSE_PROMPT_MAX_AGE:
-        return "this prompt's transcript entry is not current"
-    return None
+        return "this prompt's transcript entry is not current", None
+    return None, entry
+
+
+def typed_by_ryan(data: dict, now: int) -> Optional[str]:
+    """None when this prompt is Ryan's own typing in his own session, else why not (see typing_entry)."""
+    return typing_entry(data, now)[0]
 
 
 def _open_descendants(conn, task_id: str) -> list:
@@ -178,7 +219,8 @@ def _open_descendants(conn, task_id: str) -> list:
     return found
 
 
-def close_task(conn, data: dict, task_id: str, now: int) -> list:
+def close_checked(conn, task_id: str) -> Optional[list]:
+    """The refusal lines when task_id is not a task awaiting close, else None."""
     try:
         status = pensieve.get_task(conn, task_id)["status"]
     except StoreError as exc:
@@ -186,10 +228,14 @@ def close_task(conn, data: dict, task_id: str, now: int) -> list:
     if status != "awaiting_close":
         return [f"Mischief managed was not applied to {task_id}: the task is {status}, and the hook only "
                 "closes a task that is awaiting close.", terminal_close(task_id)]
-    refusal = typed_by_ryan(data, now)
-    if refusal is not None:
-        return [f"Mischief managed was not applied to {task_id}: this hook could not confirm Ryan's own "
-                f"typing ({refusal}).", terminal_close(task_id)]
+    return None
+
+
+def close_confirmed(conn, task_id: str, now: int) -> list:
+    """Close a task awaiting close once Ryan's typing is confirmed: mint a hook token and close in the same run."""
+    refused = close_checked(conn, task_id)
+    if refused is not None:
+        return refused
     descendants = _open_descendants(conn, task_id)
     try:
         token = owlery.mint(conn, task_id, "hook", ttl_seconds=config.CLOSE_TOKEN_TTL, now=now)["token"]
@@ -205,17 +251,35 @@ def close_task(conn, data: dict, task_id: str, now: int) -> list:
     return lines
 
 
-def go_request(prompt: object) -> Optional[str]:
-    """The task id when the prompt is exactly 'go <task-id>', else None."""
+def go_requests(prompt: object) -> Optional[list]:
+    """The task ids, in order and each once, when every non-empty line of the prompt, trimmed, is exactly
+    'go <task-id>', else None."""
     if not isinstance(prompt, str):
         return None
-    match = GO.fullmatch(prompt.strip())
-    return None if match is None else match.group(1)
+    found = []
+    for line in prompt.splitlines():
+        if not line.strip():
+            continue
+        match = GO.fullmatch(line.strip())
+        if match is None:
+            return None
+        found.append(match.group(1))
+    return list(dict.fromkeys(found)) or None
 
 
-def near_go(prompt: object) -> bool:
-    """Whether a prompt that is not exactly a go still holds one, so Ryan hears it started nothing."""
-    return isinstance(prompt, str) and NEAR_GO.search(prompt) is not None
+def go_attempt(prompt: object) -> bool:
+    """Whether a prompt that is not exactly gos still looks like one: after list markers, backticks, quotes and the
+    spaces round them are stripped, every non-empty line is a go. Prose that mentions a go is not an attempt."""
+    if not isinstance(prompt, str):
+        return False
+    lines = [line for line in prompt.splitlines() if line.strip()]
+    if not lines:
+        return False
+    for line in lines:
+        bare = DECORATION.sub("", LIST_MARKER.sub("", line.strip(), count=1)).strip()
+        if GO_ATTEMPT_LINE.fullmatch(bare) is None:
+            return False
+    return True
 
 
 def terminal_go(task_id: str) -> str:
@@ -387,12 +451,9 @@ def _go(conn, task_id: str, now: int) -> tuple:
     return lines, True
 
 
-def start_build(conn, data: dict, task_id: str, now: int) -> tuple:
-    """(lines, started) for "go <task-id>": refused unless Ryan typed it, then the go above."""
-    refusal = typed_by_ryan(data, now)
-    if refusal is not None:
-        return [f"Go was not applied to {task_id}: this hook could not confirm Ryan's own typing ({refusal}).",
-                terminal_go(task_id)], False
+def run_go(conn, task_id: str, now: int) -> tuple:
+    """(lines, started) for one go whose typing is confirmed: the go above, ended by SIGTERM or SIGHUP through its
+    take-back, with every refusal said in one line."""
     try:
         with common.ended_by_signals():
             return _go(conn, task_id, now)
@@ -400,6 +461,89 @@ def start_build(conn, data: dict, task_id: str, now: int) -> tuple:
         return [f"Go was not applied to {task_id}: {common.one_line(exc, 600)}"], False
     except Exception as exc:  # noqa: BLE001 - the go has rolled back and taken back what it made; say so
         return [f"Go was not applied to {task_id}: it stopped on {type(exc).__name__}"], False
+
+
+def not_confirmed(kind: str, task_id: str, reason: str) -> list:
+    """The refusal lines for a go or a close whose typing could not be confirmed, with the manual steps."""
+    if kind == "close":
+        return [f"Mischief managed was not applied to {task_id}: this hook could not confirm Ryan's own typing"
+                f" ({reason}).", terminal_close(task_id)]
+    return [f"Go was not applied to {task_id}: this hook could not confirm Ryan's own typing ({reason}).",
+            terminal_go(task_id)]
+
+
+def _deferred(data: dict, desk: str, kind: str, task_ids: list) -> tuple:
+    """(shown, context) for a go or a close whose transcript entry is not written yet: one detached confirmer starts
+    for this prompt (fleet/go_confirm.py), and the hook says where its result will come."""
+    from fleet import go_confirm  # only a deferred request pays for this import
+
+    named = ", ".join(task_ids)
+    what = "Mischief managed" if kind == "close" else "Go"
+    try:
+        started = go_confirm.start(data, desk, kind)
+    except (FleetError, OSError) as exc:
+        reason = common.one_line(exc, 200) if isinstance(exc, FleetError) else type(exc).__name__
+        lines = []
+        for task_id in task_ids:
+            lines += not_confirmed(kind, task_id, f"its confirmation could not start: {reason}")
+        return lines, lines
+    if not started:
+        line = (f"{what} for {named} is already being confirmed for this prompt; its result arrives as a headmaster"
+                " event.")
+    else:
+        line = (f"{what} for {named}: Claude Code writes this prompt to the transcript only after this hook returns,"
+                " so your typing is being confirmed from it now. The result arrives as a headmaster event within"
+                " about half a minute.")
+    check = " ".join(f"castle task show {task_id}" for task_id in task_ids)
+    context = [line, f"Until that event comes, nothing is applied for {named}: write no castle task create command"
+                     f" and no request owl for it. Check where it stands with {check}."]
+    return [line], context
+
+
+def _close(conn, data: dict, desk: str, task_id: str, now: int) -> tuple:
+    """(shown, context) for Mischief managed <task-id>."""
+    refused = close_checked(conn, task_id)
+    if refused is not None:
+        return refused, refused
+    refusal = typed_by_ryan(data, now)
+    if refusal == NOT_YET:
+        return _deferred(data, desk, "close", [task_id])
+    if refusal is not None:
+        lines = not_confirmed("close", task_id, refusal)
+        return lines, lines
+    if _claimed(data):
+        return _deferred(data, desk, "close", [task_id])
+    lines = close_confirmed(conn, task_id, now)
+    return lines, lines
+
+
+def _claimed(data: dict) -> bool:
+    """Whether a confirmer was started for this prompt already, so the immediate path leaves it to that one."""
+    from fleet import go_confirm
+
+    return go_confirm.claimed(data)
+
+
+def _starts(conn, data: dict, desk: str, task_ids: list, now: int) -> tuple:
+    """(shown, context) for one to GO_MAX_PER_PROMPT gos in McGonagall's session. Ryan's typing is checked once
+    for the prompt; then each go runs on its own, in order, so one refused never stops the others."""
+    refusal = typed_by_ryan(data, now)
+    if refusal == NOT_YET:
+        return _deferred(data, desk, "go", task_ids)
+    if refusal is None and _claimed(data):
+        return _deferred(data, desk, "go", task_ids)
+    shown, context, any_started = [], [], False
+    for task_id in task_ids:
+        if refusal is not None:
+            lines, started = not_confirmed("go", task_id, refusal), False
+        else:
+            lines, started = run_go(conn, task_id, now)
+        if len(task_ids) > 1:
+            lines = [" ".join(lines)]
+        shown += lines
+        context += lines
+        any_started = any_started or started
+    return shown, context + ([GO_CONTEXT] if any_started else [])
 
 
 def events(conn) -> tuple:
@@ -426,23 +570,29 @@ def tempus(data: dict) -> Optional[str]:
 
 def _body(data: dict, desk: str, out, now: int) -> None:
     shown, context = [], []
+    prompt = data.get("prompt")
     conn = common.connect()
     try:
-        task_id = close_request(data.get("prompt"))
+        task_id = close_request(prompt)
         if task_id is not None:
-            closed = close_task(conn, data, task_id, now)
+            closed, said = _close(conn, data, desk, task_id, now)
             shown += closed
-            context += closed
-        go_id = go_request(data.get("prompt"))
-        if (go_id is not None or near_go(data.get("prompt"))) and common.session_desk(data, desk) != TASK_DESK:
-            elsewhere = f"Go was not applied{'' if go_id is None else ' to ' + go_id}: {GO_SESSION}"
+            context += said
+        go_ids = go_requests(prompt)
+        attempt = go_ids is None and go_attempt(prompt)
+        if (go_ids is not None or attempt) and common.session_desk(data, desk) != TASK_DESK:
+            named = "" if go_ids is None or len(go_ids) != 1 else " to " + go_ids[0]
+            elsewhere = f"Go was not applied{named}: {GO_SESSION}"
             shown.append(elsewhere)
             context.append(elsewhere)
-        elif go_id is not None:
-            started, ok = start_build(conn, data, go_id, now)
+        elif go_ids is not None and len(go_ids) > config.GO_MAX_PER_PROMPT:
+            shown.append(GO_TOO_MANY)
+            context.append(GO_TOO_MANY)
+        elif go_ids is not None:
+            started, said = _starts(conn, data, desk, go_ids, now)
             shown += started
-            context += started + ([GO_CONTEXT] if ok else [])
-        elif near_go(data.get("prompt")):
+            context += said
+        elif attempt:
             shown.append(GO_EXACT)
             context.append(GO_EXACT)
         pending, count = events(conn)

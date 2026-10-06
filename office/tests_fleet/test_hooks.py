@@ -21,6 +21,8 @@ from tests_fleet.support import (
 )
 
 SESSION = "0b6f8c1e-1111-4222-8333-944455556666"
+# Refusals where only the prompt's own transcript entry is missing, which a go confirmer takes over.
+DEFERRED = ("no entrypoint", "no transcript", "prompt not written yet")
 
 
 def remembered(conn) -> list:
@@ -296,10 +298,17 @@ class UserPromptSubmitTests(HookCase):
             ("stale entry", self.transcript(name="stale.jsonl", prompt=stale), {}),
         ):
             with self.subTest(label=label):
-                shown, _ = self.said(f"Mischief managed {target['id']}", transcript=transcript, **extra)
-                self.assertIn("was not applied", shown)
-                self.assertIn("castle token mint", shown)
+                # Each deferred prompt gets its own id, since one confirmer is claimed per prompt.
+                fields = {"prompt_id": f"5d0c9a3e-7777-4888-9999-00000000000{DEFERRED.index(label)}", **extra} \
+                    if label in DEFERRED else extra
+                shown, _ = self.said(f"Mischief managed {target['id']}", transcript=transcript, **fields)
+                if label in DEFERRED:  # only the entry is missing, so a confirmer takes it from here
+                    self.assertIn("your typing is being confirmed", shown)
+                else:
+                    self.assertIn("was not applied", shown)
+                    self.assertIn("castle token mint", shown)
                 self.assertEqual(pensieve.get_task(self.conn, target["id"])["status"], "awaiting_close")
+        self.assertEqual(self.spawned_confirms.call_count, len(DEFERRED))
         self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM close_tokens").fetchone()[0], 0)
 
     def test_mischief_managed_names_every_task_the_close_cascaded_to(self):

@@ -7,7 +7,9 @@ fleet/hooks/user_prompt_submit.py). Every check below runs for it the same way. 
 for a go the hook could not confirm or a build task McGonagall routed by owl. Ryan runs it from his terminal,
 after the Owl Post says a build task is waiting for its worktree:
   fleet worktree <task-id> --repo-dir <main checkout> --branch <name> [--base origin/main] [--no-fetch]
-It refuses rather than guesses:
+The task id may be McGonagall's own, the one her TASK.md carries: when it is not a build desk's task and exactly one
+open build-desk task sits under it, that one is used and the result says so; with none or several it refuses and
+names them (build_task). It refuses rather than guesses:
 - the task must be a queued task of a build desk (Harry) with no worktree yet, and the desk must be free
   to start it: Harry takes many tasks, but no two of his open tasks may share one TASK.md, since the
   evidence, handoff and reviews are written next to it. One worktree command per TASK.md runs at a time:
@@ -398,9 +400,7 @@ def create(conn, task_id: str, repo_dir: str, branch: str, base: str = config.DE
     branch_claim for this repo and branch, and owns that from the start: claim["record"] is set before the first git
     change, and the caller keeps the claim's with block open until its own transaction commits or it has called
     settle or take_back, whether create refused or something after it did."""
-    task = pensieve.get_task(conn, ids.check("task", task_id))
-    if task["desk"] not in config.WORKTREE_DESKS:
-        raise FleetError("only a build desk's task gets a worktree from this script")
+    task, used = build_task(conn, pensieve.get_task(conn, ids.check("task", task_id)))
     branch = gitops.check_branch(branch)
     holder = _holder(conn, task["id"])
     with holder_lock(holder):
@@ -425,8 +425,28 @@ def create(conn, task_id: str, repo_dir: str, branch: str, base: str = config.DE
                     settle(conn, made, exc)
                 raise
     started = start_locked(conn, task) if start else None
-    return {"task_id": task["id"], "worktree": record["path"], "branch": record["branch"], "base": record["base"],
+    made = {"task_id": task["id"], "worktree": record["path"], "branch": record["branch"], "base": record["base"],
             "repo": record["repo"], "desk": started}
+    return made if used is None else {**made, "used": used}
+
+
+def build_task(conn, task: dict) -> tuple:
+    """(task, used): a build desk's task as it is, with used None. For any other task, its one open child on a build
+    desk, with used saying so, so fleet worktree takes the parent id McGonagall's TASK.md carries. Zero or several
+    open build children refuse, naming them."""
+    if task["desk"] in config.WORKTREE_DESKS:
+        return task, None
+    children = [child for child in pensieve.list_tasks(conn, open_only=True)
+                if child["parent_task_id"] == task["id"] and child["desk"] in config.WORKTREE_DESKS]
+    if not children:
+        raise FleetError(f"only a build desk's task gets a worktree from this script, and {task['id']} has no open"
+                         " build task under it")
+    if len(children) > 1:
+        raise FleetError(f"only a build desk's task gets a worktree from this script, and {task['id']} has"
+                         f" {len(children)} open build tasks under it ({', '.join(child['id'] for child in children)});"
+                         " name the one to use")
+    child = children[0]
+    return child, f"used {child['desk'].capitalize()}'s task {child['id']} under {task['id']}"
 
 
 def build(conn, task_id: str, lock_fd: int) -> dict:

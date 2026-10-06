@@ -58,7 +58,9 @@ The store has none of these:
                                         owl_post.py, ollivander.py, feed.py, tools.py (the fleet command), the patrol
                                         (patrol.py, map.py, morning.py, keeper.py, scoreboard.py), gringotts.py,
                                         portrait.py (the nightly export and Dumbledore's run), portrait_patch.py (his
-                                        patches, behind castle portrait) and their helpers
+                                        patches, behind castle portrait), go_confirm.py (finishes a go or a close
+                                        the prompt hook could not confirm yet), adopt.py (fleet adopt) and their
+                                        helpers
   fleet/hooks/                          the castle's session hooks and the push gate, push_gate.py
   launchd/                              the launchd plist templates, one per background job
   pending/                              settings snippets and launchctl steps you apply yourself (see pending/README.md)

@@ -287,6 +287,18 @@ CLOSE_TOKEN_TTL = 60
 CLOSE_ALLOWED_ENTRYPOINTS = ("cli", "claude-desktop")
 # The prompt's own transcript entry must be at most this old when the hook reads it.
 CLOSE_PROMPT_MAX_AGE = 30
+# Claude Code writes a prompt's own transcript entry only after the UserPromptSubmit hook returns, so a go or a
+# Mischief managed whose entry is not there yet is confirmed by one detached process (fleet/go_confirm.py): it waits
+# at most this long for the entry, reading the transcript tail every GO_CONFIRM_POLL_SECONDS.
+GO_CONFIRM_WAIT_SECONDS = 20
+GO_CONFIRM_POLL_SECONDS = 0.25
+# The office folder that holds one claim per prompt a confirmer was started for, so no prompt is confirmed twice.
+# Claims older than GO_CONFIRM_KEEP_SECONDS are removed by later confirmers.
+GO_CONFIRM_DIR = "confirm"
+GO_CONFIRM_KEEP_SECONDS = 86400
+GO_CONFIRM_INPUT_MAX_BYTES = 16384
+# The most distinct gos one prompt may start, one "go <task-id>" per line.
+GO_MAX_PER_PROMPT = 5
 
 # The doorbell carries no text from any desk.
 DOORBELL_KIND = "owl.doorbell"

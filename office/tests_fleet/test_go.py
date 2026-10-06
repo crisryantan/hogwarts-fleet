@@ -219,11 +219,12 @@ class GoTests(GoCase):
         self.task_md()
         self.enable("harry")
         before = self.snapshot()
+        # Prose that only mentions a go gets nothing; a prompt that is all go lines, but not exactly gos, is refused.
         silent = ("hello", "go", "go ahead", "going to look at it", f"Mischief managed {TASK_ID}",
-                  "tk_0123456789abcdef looks good")
-        near = (f"Go {TASK_ID}", f"GO {TASK_ID}", f"go {TASK_ID}.", f"please go {TASK_ID}", f"go  {TASK_ID}",
-                f"go {TASK_ID}\nand also tidy the readme", f"go {TASK_ID} {OTHER_ID}", f"go {TASK_ID.upper()}",
-                f"looks good, go {TASK_ID}", f"go\t{TASK_ID}")
+                  "tk_0123456789abcdef looks good", f"please go {TASK_ID}", f"go {TASK_ID}\nand also tidy the readme",
+                  f"looks good, go {TASK_ID}")
+        near = (f"Go {TASK_ID}", f"GO {TASK_ID}", f"go {TASK_ID}.", f"go  {TASK_ID}", f"go {TASK_ID} {OTHER_ID}",
+                f"go {TASK_ID.upper()}", f"go\t{TASK_ID}")
         with mock.patch.object(run_desk, "spawn", side_effect=AssertionError("spawned")), \
                 mock.patch.object(user_prompt_submit, "_go", side_effect=AssertionError("a go ran")):
             for text in silent + near:
@@ -246,14 +247,11 @@ class GoTests(GoCase):
         cases = (
             ("print mode", self.transcript(text, entrypoint="sdk-cli", name="print.jsonl"), {}),
             ("resumed with claude -p", mixed, {}),
-            ("no transcript", str(self.transcripts / "-project" / "missing.jsonl"), {}),
             ("outside root", "/private/tmp/elsewhere.jsonl", {}),
             ("peer message", self.transcript(text, name="peer.jsonl", prompt=peer_entry(text, promptId=PROMPT_ID)), {}),
             ("meta only", self.transcript(text, name="meta.jsonl", prompt=user_entry(text, isMeta=True, **typed)), {}),
             ("system source", self.transcript(text, name="sys.jsonl",
                                               prompt=user_entry(text, promptSource="system", **typed)), {}),
-            ("prompt not written yet", self.transcript(text, name="later.jsonl", prompt=assistant_entry(
-                "msg_2", [{"type": "text", "text": "ok"}])), {}),
             ("no prompt id", self.transcript(text, name="noid.jsonl"), {"prompt_id": None}),
             ("stale entry", self.transcript(text, name="stale.jsonl", prompt=stale), {}),
         )
@@ -283,7 +281,7 @@ class GoTests(GoCase):
                 mock.patch.object(user_prompt_submit, "typed_by_ryan", side_effect=AssertionError("typing read")), \
                 mock.patch.object(user_prompt_submit, "_go", side_effect=AssertionError("a go ran")):
             for label, fields, argv in sessions:
-                for text, named in ((f"go {TASK_ID}", f" to {TASK_ID}"), (f"please go {TASK_ID}", "")):
+                for text, named in ((f"go {TASK_ID}", f" to {TASK_ID}"), (f"- `go {TASK_ID}`", "")):
                     with self.subTest(session=label, text=text):
                         shown, context, _ = self.said(text, argv=argv, **fields)
                         self.assertEqual(shown, f"Go was not applied{named}: {user_prompt_submit.GO_SESSION}")

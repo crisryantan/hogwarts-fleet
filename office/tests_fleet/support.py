@@ -174,6 +174,11 @@ class FleetCase(unittest.TestCase):
         reviews = mock.patch.object(run_desk, "spawn_review")
         self.spawned_reviews = reviews.start()
         self.addCleanup(reviews.stop)
+        # No go confirmer process starts either: a hook that defers a go or a close records its start here, and a
+        # test that wants the confirmation runs go_confirm.confirm itself.
+        confirms = mock.patch.object(run_desk, "spawn_go_confirm")
+        self.spawned_confirms = confirms.start()
+        self.addCleanup(confirms.stop)
         # A desk run empties its private folder under the per-user temp folder, so every test gets its own temp
         # folder there unless it sets one. Without this a faked Harry run empties the real hogwarts-harry folder.
         user_temp = self.tmp / "user-temp"

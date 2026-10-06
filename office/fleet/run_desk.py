@@ -1002,6 +1002,32 @@ def spawn_review(task_id: str) -> None:
     _detach("review", [ids.check("task", task_id)], "review-auto.log")
 
 
+def spawn_go_confirm(payload: bytes) -> None:
+    """Start one detached confirmer (fleet/go_confirm.py) for a go or a Mischief managed whose transcript entry was
+    not there yet, with the same wrapper line, new session, empty environment and office log as _detach. Its input
+    goes through a pipe on its stdin, never its argv, so nothing in it shows in a process listing. Like _detach, the
+    process inherits no fd but its own stdin, stdout and stderr."""
+    boot = ("import sys; sys.path.insert(0, " + json.dumps(config.OFFICE_ROOT)
+            + "); from fleet.go_confirm import main; sys.exit(main())")
+    argv = [*config.PYTHON_WRAPPER, "-c", boot]
+    with safefs.opened_dir(config.OFFICE_ROOT, "logs", create=True) as logs_fd:
+        log_fd = safefs.open_append(logs_fd, "go-confirm.log", "run log")
+        try:
+            child = subprocess.Popen(argv, cwd=config.OFFICE_ROOT, env={}, stdin=subprocess.PIPE,
+                                     stdout=log_fd, stderr=log_fd, start_new_session=True, close_fds=True)
+        finally:
+            os.close(log_fd)
+    try:
+        child.stdin.write(payload)
+    except BrokenPipeError:
+        raise FleetError("the confirmer ended before it read its input") from None
+    finally:
+        try:
+            child.stdin.close()
+        except BrokenPipeError:
+            pass
+
+
 def _detach(module: str, args: list, log_name: str, hold_fd: Optional[int] = None) -> None:
     """Start fleet.<module>'s main with args in a new session, with an empty environment, logging to the office. The
     process inherits no fd but hold_fd, a lock this process holds, which is handed over to it (safefs.hand_over)
