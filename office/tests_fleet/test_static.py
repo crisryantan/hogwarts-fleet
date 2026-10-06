@@ -65,6 +65,8 @@ KNOWN_FLAGS = {
     "--method", "--input",
     # Dumbledore's nightly job: the export alone, with no owl and no run
     "--export-only",
+    # the closer: the first-parent line of the fetched base, and the merged diff's stat in the judge's pack
+    "--first-parent", "--stat",
 }
 # Modules whose flag-shaped constants describe commands they read and refuse, never ones they run.
 FLAG_TABLE_MODULES = {"push_gate.py"}
@@ -94,11 +96,11 @@ def env_problems(source: str) -> list:
     return found
 
 
-OPT_IN_NAMES = ("auto-draft-pr", "auto-portrait", "pr-followup")
+OPT_IN_NAMES = ("auto-draft-pr", "auto-portrait", "pr-followup", "auto-close")
 # An opt-in file named as a file: the whole string, or the last part of a path. The feature's name in a message
 # ("auto-portrait applied ...") is not a file name.
 OPT_IN_FILE_SHAPE = re.compile(r"(?:^|/)(?:" + "|".join(map(re.escape, OPT_IN_NAMES)) + r")/?$")
-OPT_IN_ATTRIBUTES = {"AUTO_DRAFT_PR_FILE", "AUTO_PORTRAIT_FILE", "PR_FOLLOWUP_FILE", "OPT_IN_FILES"}
+OPT_IN_ATTRIBUTES = {"AUTO_DRAFT_PR_FILE", "AUTO_PORTRAIT_FILE", "PR_FOLLOWUP_FILE", "AUTO_CLOSE_FILE", "OPT_IN_FILES"}
 
 
 def _docstrings(tree: ast.AST) -> set:
@@ -197,13 +199,25 @@ class EnvironmentTests(unittest.TestCase):
 
 class OptInTests(unittest.TestCase):
     def test_opt_in_files_are_read_only_through_the_shared_reader(self):
-        self.assertEqual(set(config.OPT_IN_FILES),
-                         {config.AUTO_DRAFT_PR_FILE, config.AUTO_PORTRAIT_FILE, config.PR_FOLLOWUP_FILE})
+        self.assertEqual(set(config.OPT_IN_FILES), {config.AUTO_DRAFT_PR_FILE, config.AUTO_PORTRAIT_FILE,
+                                                    config.PR_FOLLOWUP_FILE, config.AUTO_CLOSE_FILE})
         self.assertEqual(len(config.OPT_IN_FILES), len(set(config.OPT_IN_FILES)))
         self.assertEqual(set(OPT_IN_NAMES), set(config.OPT_IN_FILES))
         self.assertIn(FLEET / "hooks" / "session_start.py", SOURCES)
         self.assertIn(FLEET / "portrait_auto.py", SOURCES)
         self.assertIn(FLEET / "followup.py", SOURCES)
+        self.assertIn(FLEET / "closer.py", SOURCES)
+        # One reader and one list of switches, wherever a merge may have put a second copy.
+        definitions = {(path.name, node.name if isinstance(node, ast.FunctionDef) else target.id)
+                       for path in SOURCES for node in ast.parse(path.read_text()).body
+                       for target in (node.targets if isinstance(node, ast.Assign) else [node])
+                       if (isinstance(node, ast.FunctionDef) and node.name == "opt_in_on")
+                       or (isinstance(node, ast.Assign) and isinstance(target, ast.Name)
+                           and target.id in ("OPT_IN_FILES", "OPT_IN_MAX_BYTES"))}
+        self.assertEqual(definitions, {("common.py", "opt_in_on"), ("common.py", "OPT_IN_MAX_BYTES"),
+                                       ("config.py", "OPT_IN_FILES"), ("push.py", "OPT_IN_MAX_BYTES")})
+        self.assertEqual(sum(1 for path in SOURCES for node in ast.walk(ast.parse(path.read_text()))
+                             if isinstance(node, ast.FunctionDef) and node.name == "opt_in_on"), 1)
         for path in SOURCES:
             with self.subTest(path=str(path.relative_to(ROOT))):
                 self.assertEqual(opt_in_problems(path.name, path.read_text()), [])
@@ -224,6 +238,10 @@ class OptInTests(unittest.TestCase):
             ("patrol.py", "raw = safefs.read_regular(fd, config.PR_FOLLOWUP_FILE, 64)"),
             ("followup.py", "from fleet.config import PR_FOLLOWUP_FILE"),
             ("followup.py", "on = PR_FOLLOWUP_FILE in names"),
+            ("closer.py", 'x = "auto-close"'),
+            ("closer.py", "raw = safefs.read_regular(fd, config.AUTO_CLOSE_FILE, 64)"),
+            ("closer.py", "from fleet.config import AUTO_CLOSE_FILE"),
+            ("map.py", 'path = f"{root}/auto-close"'),
         ):
             with self.subTest(snippet=snippet):
                 self.assertNotEqual(opt_in_problems(name.rsplit("/", 1)[-1], snippet), [])
@@ -233,6 +251,8 @@ class OptInTests(unittest.TestCase):
             ("portrait_auto.py", '"""Reads config.AUTO_PORTRAIT_FILE, the auto-portrait file."""'),
             ("followup.py", "on = common.opt_in_on(config.PR_FOLLOWUP_FILE)"),
             ("followup.py", 'STOP = "pr-followup is off"'),
+            ("closer.py", "return common.opt_in_on(config.AUTO_CLOSE_FILE)"),
+            ("closer.py", 'raise FleetError("auto-close is off; close it by hand")'),
             ("common.py", "def opt_in_on(name):\n    return safefs.read_regular(fd, name, 64)"),
             ("common.py", 'def other():\n    return safefs.read_regular(fd, "fixed", 64)'),
         ):
@@ -352,3 +372,62 @@ class PendingTests(unittest.TestCase):
         for path in snippets:
             with self.subTest(path=path.name):
                 json.loads(path.read_text())
+
+
+def _references(tree: ast.AST, names: set) -> list:
+    """Every attribute or name in tree that is one of names, with its line."""
+    found = []
+    for node in ast.walk(tree):
+        name = node.attr if isinstance(node, ast.Attribute) else node.id if isinstance(node, ast.Name) else None
+        if name in names:
+            found.append((name, node.lineno))
+    return found
+
+
+class AutoCloseTests(unittest.TestCase):
+    STORE = ROOT / "hogwarts"
+
+    def test_only_the_closer_takes_the_proven_close(self):
+        for path in SOURCES + sorted(self.STORE.glob("*.py")):
+            if path.name in ("closer.py",) or path == self.STORE / "pensieve.py":
+                continue
+            with self.subTest(path=str(path.relative_to(ROOT))):
+                self.assertEqual(_references(ast.parse(path.read_text()), {"close_proven", "_insert_closure"}), [])
+                self.assertNotIn("task_closures", path.read_text() if path.name != "db.py" else "")
+        closer = ast.parse((FLEET / "closer.py").read_text())
+        self.assertEqual([name for name, _ in _references(closer, {"close_proven"})], ["close_proven"])
+
+    def test_closer_imports_no_github_write_path(self):
+        tree = ast.parse((FLEET / "closer.py").read_text())
+        writes = {"open_draft_pr", "run_gh_pr", "push_draft_pr", "_push_exact", "draft_pr_argv", "push", "run_gh"}
+        self.assertEqual(_references(tree, writes), [])
+        imported = {alias.name for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)
+                    for alias in node.names}
+        self.assertNotIn("push", imported)
+        git_calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call) and getattr(node.func, "attr", None)
+                     == "git" and getattr(node.func.value, "id", None) == "gitops"]
+        self.assertTrue(git_calls)
+        for call in git_calls:  # the closer runs git only to read a diff for the judge's pack
+            self.assertIsInstance(call.args[0], ast.List)
+            self.assertEqual(call.args[0].elts[0].value, "diff")
+
+    def test_closer_removes_worktrees_only_through_git(self):
+        closer = ast.parse((FLEET / "closer.py").read_text())
+        worktree = ast.parse((FLEET / "worktree.py").read_text())
+        [remove_merged] = [node for node in worktree.body if isinstance(node, ast.FunctionDef)
+                           and node.name == "remove_merged"]
+        for label, tree in (("closer.py", closer), ("remove_merged", remove_merged)):
+            with self.subTest(code=label):
+                self.assertEqual(_references(tree, {"rmtree", "rmdir", "removedirs"}), [])
+                strings = [inner.value for node in ast.walk(tree) if isinstance(node, ast.Call)
+                           for inner in ast.walk(node) if isinstance(inner, ast.Constant) and isinstance(inner.value, str)]
+                self.assertFalse([value for value in strings if "prune" in value])
+        self.assertEqual(_references(remove_merged, {"unlink", "remove"}), [])
+        for node in ast.walk(closer):
+            if isinstance(node, ast.Call) and getattr(node.func, "attr", None) in ("unlink", "remove"):
+                with self.subTest(line=node.lineno):
+                    self.assertIn("dir_fd", [keyword.arg for keyword in node.keywords])
+        git_calls = [node for node in ast.walk(remove_merged) if isinstance(node, ast.Call)
+                     and getattr(node.func, "attr", None) == "git"]
+        self.assertEqual(len(git_calls), 1)
+        self.assertEqual([element.value for element in git_calls[0].args[0].elts[:3]], ["worktree", "remove", "--force"])

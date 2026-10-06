@@ -16,8 +16,8 @@ from unittest import mock
 from hogwarts import capacity, followups, owlery, pensieve
 from hogwarts.errors import StoreError
 
-from fleet import common, config, followup, gitops, map as patrol_map, morning, owl_post, patrol, portrait_auto, push, \
-    review, run_desk, worktree
+from fleet import closer, common, config, followup, gitops, map as patrol_map, morning, owl_post, patrol, \
+    portrait_auto, push, review, run_desk, worktree
 from fleet.safefs import FleetError
 from tests_fleet.test_auto_push import AutoPushCase, TOKEN, EMAIL
 from tests_fleet.test_patrol import FakeGitHub, iso, pr_node, thread
@@ -294,14 +294,15 @@ class SwitchTests(FollowupCase):
     def test_all_switches_read_through_one_reader(self):
         for value in (True, False):
             with self.subTest(value=value), mock.patch.object(common, "opt_in_on", return_value=value) as reader:
-                self.assertEqual((followup.switched_on(), push.auto_draft_pr_on(), portrait_auto.auto_portrait_on()),
-                                 (value, value, value))
+                self.assertEqual((followup.switched_on(), push.auto_draft_pr_on(), portrait_auto.auto_portrait_on(),
+                                  closer.auto_close_on()), (value, value, value, value))
                 self.assertEqual([call.args[0] for call in reader.call_args_list],
-                                 [config.PR_FOLLOWUP_FILE, config.AUTO_DRAFT_PR_FILE, config.AUTO_PORTRAIT_FILE])
+                                 [config.PR_FOLLOWUP_FILE, config.AUTO_DRAFT_PR_FILE, config.AUTO_PORTRAIT_FILE,
+                                  config.AUTO_CLOSE_FILE])
         self.write_file(self.office / "other-switch", "on\n")
         self.assertFalse(common.opt_in_on("other-switch"))
-        self.assertEqual(config.OPT_IN_FILES,
-                         (config.AUTO_DRAFT_PR_FILE, config.AUTO_PORTRAIT_FILE, config.PR_FOLLOWUP_FILE))
+        self.assertEqual(config.OPT_IN_FILES, (config.AUTO_DRAFT_PR_FILE, config.AUTO_PORTRAIT_FILE,
+                                               config.PR_FOLLOWUP_FILE, config.AUTO_CLOSE_FILE))
 
     def test_opt_in_off_routes_nothing_and_writes_nothing(self):
         self.switch_off()
@@ -628,6 +629,18 @@ class RoutingTests(FollowupCase):
         for line in text.splitlines():
             for marker in ("HANDOFF", "REVIEW", "VERDICT", "THREADS", "T1 |"):
                 self.assertFalse(line.startswith(marker), line)
+
+    def test_github_text_is_normalized_before_its_scrub_so_no_hidden_or_wide_credential_reaches_the_desks(self):
+        filler = TOKEN[:2] + "\u3164" + TOKEN[2:]  # a Hangul filler, which no reader sees, inside the token
+        wide = "".join(chr(ord(char) + 0xFEE0) for char in TOKEN)  # fullwidth letters, read as the token
+        self.go_live_at()
+        self.add_thread(comments=[gh_comment(501, self.t0 + 100, kind="thread", body=f"Use {filler} or {wide}.",
+                                             hunk=f"@@ -1 +1 @@\n+{wide}")])
+        self.routed()
+        text = self.threads_file()
+        self.assertEqual(text.count("[token]"), 3)
+        for leaked in (TOKEN[2:22], wide[:20], "\u3164"):
+            self.assertNotIn(leaked, text)
 
     def test_no_routing_while_the_pr_head_is_not_the_passed_commit_with_one_headmaster_event(self):
         self.go_live_at()

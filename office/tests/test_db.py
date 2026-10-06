@@ -10,9 +10,9 @@ import sys
 import unittest
 from unittest import mock
 
-from hogwarts import capacity, db, ids, owlery, pensieve
+from hogwarts import capacity, db, followups, ids, owlery, pensieve
 from hogwarts.errors import ConflictError, IntegrityError, NotFoundError, StoreError, ValidationError
-from tests.support import NOW, StoreCase, temp_dir
+from tests.support import MERGE_SHA, NOW, REPO, SHA, StoreCase, go_build, insert_closure, intent_file, proof, temp_dir
 
 PACKAGE = db.CODE_ROOT / "hogwarts"
 
@@ -857,6 +857,259 @@ class MigrationPrFollowupTests(unittest.TestCase):
         # The one way back to active is in place: no raw write reopens a passed task.
         with self.assertRaisesRegex(sqlite3.IntegrityError, "only to start a PR follow-up"):
             conn.execute("UPDATE tasks SET status = 'active' WHERE id = ?", (self.task,))
+
+
+class MigrationProvenCloseTests(unittest.TestCase):
+    """The proven-close migration, found by name, so its number can change at a merge without touching these tests."""
+
+    def migration(self) -> tuple:
+        index = next(index for index, (_, statements) in enumerate(db.MIGRATIONS) if statements is db.V_PROVEN_CLOSES)
+        return db.MIGRATIONS[:index], db.MIGRATIONS[index - 1][0]
+
+    def before_proven_closes(self):
+        """A store at the version before the migration, holding a go build that passed its round, opened at the
+        newest."""
+        earlier, version = self.migration()
+        path = temp_dir(self) / "state" / "pensieve.db"
+        with mock.patch.object(db, "MIGRATIONS", earlier), mock.patch.object(db, "SCHEMA_VERSION", version):
+            conn = db.connect(path)
+            self.registry(conn)
+            self.go = go_build(conn)
+            self.assertIsNone(conn.execute("SELECT name FROM sqlite_master WHERE name = 'task_closures'").fetchone())
+            conn.close()
+        conn = db.connect(path)
+        self.addCleanup(conn.close)
+        return conn
+
+    def fresh(self):
+        conn = db.connect(temp_dir(self) / "state" / "pensieve.db")
+        self.addCleanup(conn.close)
+        self.registry(conn)
+        self.go = go_build(conn)
+        return conn
+
+    @staticmethod
+    def registry(conn) -> None:
+        for name, family in (("alpha", "claude"), ("beta", "codex"), ("gamma", "claude"), ("delta", "codex")):
+            pensieve.add_desk(conn, name, family, now=NOW)
+        pensieve.allow_many_tasks(conn, "beta", now=NOW)
+
+    def close_raw(self, conn, task_id: str) -> None:
+        conn.execute("UPDATE tasks SET status = 'closed', close_reason = 'complete', closed_at = ? WHERE id = ?",
+                     (NOW, task_id))
+
+    @staticmethod
+    def bound_build(conn, parent: str = "tk_00000000000000a1", repo: str = REPO, sha: str = SHA) -> str:
+        """A go build as go_build makes one, with its worktree, awaiting close after a round PASS at sha, and the PR the
+        review loop opened bound to it. Needs desks alpha, beta and gamma."""
+        pensieve.create_task(conn, "gamma", "the go task", intent_path=intent_file(parent), task_id=parent, now=NOW)
+        pensieve.record_spec(conn, parent, "/private/tmp/checkout", "fix/site", "origin/main", "c" * 64, now=NOW)
+        build = owlery.open_request(conn, "gamma", "beta", "build it", parent_task_id=parent, now=NOW)["task"]["id"]
+        pensieve.start_task(conn, build, now=NOW)
+        pensieve.set_worktree(conn, build, f"{ids.WORKTREES_ROOT}/{build}")
+        pensieve.record_commit(conn, build, repo, sha, now=NOW)
+        opened = capacity.open_review_round(conn, build, "alpha", sha, "review it", now=NOW)
+        capacity.record_round_verdict(conn, opened["request"]["id"], repo, "PASS", now=NOW)
+        pensieve.close_task(conn, opened["task"]["id"], "superseded", now=NOW)
+        pensieve.mark_awaiting_close(conn, build, now=NOW)
+        followups.bind_pr(conn, build, repo, 7, "fix/site", "main", sha, f"https://github.com/{repo}/pull/7", now=NOW)
+        return build
+
+    @staticmethod
+    def passed_followup(conn, build: str, push_needed: bool, repo: str = REPO, sha: str = SHA) -> dict:
+        """A teammate follow-up of the build whose own round passed at sha: pushing, or straight to posting."""
+        item = {"label": "T1", "kind": "comment", "thread_id": None, "reply_to": "11",
+                "url": f"https://github.com/{repo}/pull/7#issuecomment-11", "quote": None}
+        row = followups.open_followup(conn, build, ids.new_id("followup"), sha, [item],
+                                      [{"kind": "comment", "comment_id": "11", "label": "T1"}], "map", "follow-up 1",
+                                      "the fix request", 5, now=NOW)
+        followups.advance(conn, row["id"], "starting", now=NOW)
+        followups.advance(conn, row["id"], "building", now=NOW)
+        tagged = capacity.open_review_round(conn, build, "alpha", sha, "follow-up review", followup_id=row["id"],
+                                            followup_max_rounds=2, now=NOW)
+        capacity.record_round_verdict(conn, tagged["request"]["id"], repo, "PASS", now=NOW)
+        pensieve.close_task(conn, tagged["task"]["id"], "superseded", now=NOW)
+        pensieve.mark_awaiting_close(conn, build, now=NOW)
+        return followups.plan_replies(conn, row["id"], sha, [{"label": "T1", "mark": "PUSHBACK", "body": "It stays."}],
+                                      push_needed, now=NOW)
+
+    def test_a_followup_opened_before_the_migration_holds_off_a_proven_close_until_it_ends(self):
+        earlier, version = self.migration()
+        path = temp_dir(self) / "state" / "pensieve.db"
+        with mock.patch.object(db, "MIGRATIONS", earlier), mock.patch.object(db, "SCHEMA_VERSION", version):
+            conn = db.connect(path)
+            self.registry(conn)
+            pensieve.add_desk(conn, "map", "script", now=NOW)
+            build = self.bound_build(conn)
+            row = self.passed_followup(conn, build, push_needed=True)
+            conn.close()
+        conn = db.connect(path)
+        self.addCleanup(conn.close)
+        self.assertEqual(db.schema_version(conn), db.SCHEMA_VERSION)
+        refused = "a task with an open PR follow-up is never closed by proof"
+        for state in ("pushing", "posting"):
+            with self.subTest(state=state):
+                if state == "posting":
+                    followups.advance(conn, row["id"], "posting", now=NOW)
+                self.assertEqual(followups.get(conn, row["id"])["state"], state)
+                with self.assertRaisesRegex(IntegrityError, refused):
+                    pensieve.close_proven(conn, build, proof(), "closed", "close:proven:x")
+                with self.assertRaisesRegex(sqlite3.IntegrityError, refused):
+                    insert_closure(conn, build)
+                self.assertEqual(pensieve.get_task(conn, build)["status"], "awaiting_close")
+                self.assertIsNone(pensieve.task_closure(conn, build))
+        followups.advance(conn, row["id"], "done", now=NOW)
+        pensieve.close_proven(conn, build, proof(), "closed", "close:proven:x")
+        self.assertEqual(pensieve.get_task(conn, build)["close_reason"], "complete")
+
+    def test_a_task_closed_by_proof_never_opens_a_followup_and_a_stopped_one_lets_the_close_through(self):
+        conn = db.connect(temp_dir(self) / "state" / "pensieve.db")
+        self.addCleanup(conn.close)
+        self.registry(conn)
+        pensieve.add_desk(conn, "map", "script", now=NOW)
+        build = self.bound_build(conn)
+        pensieve.close_proven(conn, build, proof(), "closed", "close:proven:x")
+        item = {"label": "T1", "kind": "comment", "thread_id": None, "reply_to": "11",
+                "url": f"https://github.com/{REPO}/pull/7#issuecomment-11", "quote": None}
+        with self.assertRaisesRegex(ConflictError, "awaiting close"):
+            followups.open_followup(conn, build, ids.new_id("followup"), SHA, [item],
+                                    [{"kind": "comment", "comment_id": "11", "label": "T1"}], "map", "follow-up 1",
+                                    "the fix request", 5, now=NOW)
+        self.assertEqual(followups.list_followups(conn, build), [])
+        # A follow-up that stopped has ended: it holds off no close.
+        repo, sha = "acme/other-app", "4" * 40
+        other = self.bound_build(conn, parent="tk_00000000000000b1", repo=repo, sha=sha)
+        row = self.passed_followup(conn, other, push_needed=False, repo=repo, sha=sha)
+        with self.assertRaisesRegex(IntegrityError, "never closed by proof"):
+            pensieve.close_proven(conn, other, proof(repo=repo, pass_sha=sha), "closed", "close:proven:y")
+        followups.stop(conn, row["id"], "stopped by a test", now=NOW)
+        pensieve.close_proven(conn, other, proof(repo=repo, pass_sha=sha), "closed", "close:proven:y")
+        self.assertEqual(pensieve.get_task(conn, other)["close_reason"], "complete")
+
+    def test_adds_task_closures_and_keeps_rows(self):
+        conn = self.before_proven_closes()
+        self.assertEqual(db.schema_version(conn), db.SCHEMA_VERSION)
+        self.assertEqual(db.MIGRATIONS[-1], (db.SCHEMA_VERSION, db.V_PROVEN_CLOSES))
+        self.assertEqual(pensieve.get_task(conn, self.go["build"])["status"], "awaiting_close")
+        self.assertEqual(pensieve.task_spec(conn, self.go["parent"])["intent_sha256"], "c" * 64)
+        self.assertEqual(conn.execute("SELECT COUNT(*) FROM task_closures").fetchone()[0], 0)
+        self.assertEqual(conn.execute("PRAGMA integrity_check").fetchone()[0], "ok")
+        self.assertEqual(conn.execute("PRAGMA foreign_key_check").fetchall(), [])
+        schema = conn.execute("SELECT name, sql FROM sqlite_master ORDER BY name").fetchall()
+        self.assertEqual(db.migrate(conn), db.SCHEMA_VERSION)
+        with db.transaction(conn):
+            for statement in db.pending_statements(conn, db.V_PROVEN_CLOSES):
+                conn.execute(statement)
+        self.assertEqual(conn.execute("SELECT name, sql FROM sqlite_master ORDER BY name").fetchall(), schema)
+        pensieve.close_proven(conn, self.go["build"], proof(), "closed", "close:proven:x", self.go["parent"])
+        self.assertEqual(pensieve.get_task(conn, self.go["parent"])["close_reason"], "complete")
+
+    def test_complete_needs_a_token_a_complete_parent_or_a_closure(self):
+        conn = self.fresh()
+        other = pensieve.start_task(conn, pensieve.create_task(conn, "beta", "plain")["id"])
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "complete needs a consumed close token or a parent that"
+                                                            " closed complete, or a proven close"):
+            self.close_raw(conn, other["id"])
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "or a proven close"):
+            self.close_raw(conn, self.go["build"])
+        token = owlery.mint(conn, other["id"], "cli")["token"]
+        pensieve.close_task(conn, other["id"], "complete", token)
+        insert_closure(conn, self.go["build"])
+        self.close_raw(conn, self.go["build"])
+        self.assertEqual(pensieve.get_task(conn, self.go["build"])["close_reason"], "complete")
+
+    def test_proven_closure_needs_a_round_pass_from_the_other_family_on_an_awaiting_task(self):
+        conn = self.fresh()
+        refused = "a proven close needs a task awaiting close whose commit a review round passed from the other family"
+        active = pensieve.start_task(conn, pensieve.create_task(conn, "beta", "active")["id"])
+        pensieve.record_commit(conn, active["id"], "acme/other", SHA)
+        with self.assertRaisesRegex(sqlite3.IntegrityError, refused):
+            insert_closure(conn, active["id"], repo="acme/other")
+        # A PASS written with castle review record, which no round holds, on a task awaiting close.
+        recorded = pensieve.start_task(conn, pensieve.create_task(conn, "beta", "recorded")["id"])
+        pensieve.record_commit(conn, recorded["id"], "acme/recorded", SHA)
+        owlery.open_request(conn, "beta", "alpha", "review", parent_task_id=recorded["id"])
+        owlery.record_review(conn, "acme/recorded", SHA, recorded["id"], "alpha", "PASS")
+        pensieve.mark_awaiting_close(conn, recorded["id"])
+        with self.assertRaisesRegex(sqlite3.IntegrityError, refused):
+            insert_closure(conn, recorded["id"], repo="acme/recorded")
+        # A commit the task never recorded.
+        with self.assertRaisesRegex(sqlite3.IntegrityError, refused):
+            insert_closure(conn, self.go["build"], pass_sha=MERGE_SHA)
+        # A later review of the same commit that is not a PASS.
+        owlery.record_review(conn, REPO, SHA, self.go["build"], "alpha", "CHANGES", now=NOW + 1)
+        with self.assertRaisesRegex(sqlite3.IntegrityError, refused):
+            insert_closure(conn, self.go["build"])
+
+    def test_judge_must_be_of_the_other_family(self):
+        conn = self.fresh()
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "an after-merge judge is from the other family"):
+            insert_closure(conn, self.go["build"], judge_desk="delta")
+        insert_closure(conn, self.go["build"], judge_desk="alpha")
+        self.close_raw(conn, self.go["build"])
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "an after-merge judge is from the other family"):
+            insert_closure(conn, self.go["parent"], kind="parent", via=self.go["build"], judge_desk="delta")
+        for bad in ({"written_checks": 0}, {"written_checks": 1, "judge_desk": None}, {"ci": "none"},
+                    {"landed": "ancestry"}, {"merge_sha": "X" * 40}, {"evidence_path": "/etc/close.md"}):
+            with self.subTest(bad=bad), self.assertRaises(sqlite3.IntegrityError):
+                insert_closure(conn, self.go["parent"], kind="parent", via=self.go["build"], **bad)
+
+    def test_parent_closure_follows_its_proven_child(self):
+        conn = self.fresh()
+        follows = "a parent closes only after its proven child, on the same proof, and only when a go registered it"
+        with self.assertRaisesRegex(sqlite3.IntegrityError, follows):
+            insert_closure(conn, self.go["parent"], kind="parent", via=self.go["build"])
+        insert_closure(conn, self.go["build"])
+        with self.assertRaisesRegex(sqlite3.IntegrityError, follows):  # the child is not closed yet
+            insert_closure(conn, self.go["parent"], kind="parent", via=self.go["build"])
+        self.close_raw(conn, self.go["build"])
+        with self.assertRaisesRegex(sqlite3.IntegrityError, follows):
+            insert_closure(conn, self.go["parent"], kind="parent", via=self.go["build"], merge_sha="3" * 40)
+        with self.assertRaises(sqlite3.IntegrityError):
+            insert_closure(conn, self.go["parent"], kind="parent", via=None)
+        insert_closure(conn, self.go["parent"], kind="parent", via=self.go["build"])
+        self.close_raw(conn, self.go["parent"])
+        self.assertEqual(pensieve.get_task(conn, self.go["parent"])["close_reason"], "complete")
+
+    def test_parent_closure_needs_a_go_registered_parent(self):
+        conn = self.fresh()
+        by_hand = pensieve.create_task(conn, "gamma", "registered by hand",
+                                       intent_path=intent_file("tk_00000000000000b1"), task_id="tk_00000000000000b1")
+        build = owlery.open_request(conn, "gamma", "beta", "build", parent_task_id=by_hand["id"])["task"]["id"]
+        pensieve.start_task(conn, build)
+        pensieve.record_commit(conn, build, "acme/hand", SHA)
+        opened = capacity.open_review_round(conn, build, "alpha", SHA, "review")
+        capacity.record_round_verdict(conn, opened["request"]["id"], "acme/hand", "PASS")
+        pensieve.close_task(conn, opened["task"]["id"], "superseded")
+        pensieve.mark_awaiting_close(conn, build)
+        with self.assertRaisesRegex(ConflictError, "not registered by a go"):
+            pensieve.close_proven(conn, build, proof(repo="acme/hand"), "x", "close:proven:y",
+                                  parent_task_id=by_hand["id"])
+        self.assertEqual(pensieve.get_task(conn, build)["status"], "awaiting_close")
+        insert_closure(conn, build, repo="acme/hand")
+        self.close_raw(conn, build)
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "only when a go registered it"):
+            insert_closure(conn, by_hand["id"], kind="parent", via=build, repo="acme/hand")
+
+    def test_closures_are_immutable_and_never_deleted(self):
+        conn = self.fresh()
+        pensieve.close_proven(conn, self.go["build"], proof(), "closed", "close:proven:x", self.go["parent"])
+        for column, value in (("merge_sha", "3" * 40), ("kind", "parent"), ("evidence_sha256", "e" * 64)):
+            with self.subTest(column=column), self.assertRaisesRegex(sqlite3.IntegrityError, "a task closure is fixed"):
+                conn.execute(f"UPDATE task_closures SET {column} = ? WHERE task_id = ?", (value, self.go["build"]))
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "never deleted"):
+            conn.execute("DELETE FROM task_closures WHERE task_id = ?", (self.go["build"],))
+        with self.assertRaises(sqlite3.IntegrityError):  # a closed task takes no closure, however it closed
+            insert_closure(conn, self.go["build"])
+        # The go task closed some other way after its child's proven close: no parent row lands on it.
+        other = self.fresh()
+        insert_closure(other, self.go["build"])
+        self.close_raw(other, self.go["build"])
+        other.execute("UPDATE tasks SET status = 'closed', close_reason = 'abandoned', closed_at = ? WHERE id = ?",
+                      (NOW, self.go["parent"]))
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "a closure is recorded on an open task"):
+            insert_closure(other, self.go["parent"], kind="parent", via=self.go["build"])
+        self.assertEqual(conn.execute("SELECT COUNT(*) FROM task_closures").fetchone()[0], 2)
 
 
 if __name__ == "__main__":

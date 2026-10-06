@@ -118,6 +118,21 @@ class CommandTests(CliCase):
         self.ok("desk", "add", "alpha", "--family", "claude", "--role", "builder")
         self.ok("desk", "add", "beta", "--family", "codex")
 
+    def test_cli_has_no_proven_close_path(self):
+        with open(cli.__file__, encoding="utf-8") as handle:
+            source = handle.read()
+        for name in ("close_proven", "task_closure", "task_closures", "_insert_closure"):
+            self.assertNotIn(name, source)
+        self.assertFalse([key for key in cli.HANDLERS if "proven" in key or "closure" in key])
+        task = self.ok("task", "create", "--desk", "alpha", "--title", "ship it")
+        self.ok("task", "start", task["id"])
+        self.ok("task", "await-close", task["id"])
+        self.fails(6, "TokenError", "task", "close", task["id"], "--reason", "complete")
+        for argv in (("task", "close-proven", task["id"]), ("task", "close", task["id"], "--reason", "proven")):
+            code, _, _ = self.run_cli(*argv)
+            self.assertNotEqual(code, 0)
+        self.assertEqual(self.ok("task", "show", task["id"])["status"], "awaiting_close")
+
     def test_desk_list(self):
         self.assertEqual([desk["name"] for desk in self.ok("desk", "list")], ["alpha", "beta"])
 

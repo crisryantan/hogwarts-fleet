@@ -236,6 +236,18 @@ def _inbox_copy(owl: dict, body: str, body_file: Optional[dict], context: dict) 
     return (json.dumps(copy, ensure_ascii=True, indent=2, sort_keys=True) + "\n").encode("ascii")
 
 
+def deliver_script_owl(conn, inbox_fd: int, owl: dict, body: str, now: Optional[int] = None) -> None:
+    """Deliver an owl a script sent (the patrol's wake, the closer's judge owl) as the Owl Post would: its inbox copy
+    in the recipient's inbox (inbox_fd), then marked delivered. An owl already delivered is left as it is. An owl
+    with no task carries no task_md, so the desk is pointed only at what its body names."""
+    if owl["delivered_at"] is not None:
+        return
+    text = ids.clean_text(body, "body", owlery.BODY_LIMIT, keep_format=True)
+    copy = _inbox_copy(owl, text, None, task_context(conn, owl["task_id"]))
+    safefs.write_new(inbox_fd, f"{owl['id']}.json", copy)
+    owlery.mark_delivered(conn, owl["id"], now=now)
+
+
 def _recipient_inbox(conn, recipient: str) -> int:
     try:
         pensieve.get_desk(conn, recipient)

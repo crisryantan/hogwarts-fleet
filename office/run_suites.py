@@ -50,6 +50,7 @@ KILL_WAIT_SECONDS = 10
 # Seconds each slow module took alone, measured on a serial run, so the slowest start first. Any other
 # module is estimated from its file size, which puts it after these.
 RECORDED_SECONDS = {
+    "tests_fleet/test_auto_close.py": 165,
     "tests_fleet/test_many_tasks.py": 30,
     "tests_fleet/test_many_tasks_guard.py": 29,
     "tests_fleet/test_many_tasks_lineage.py": 28,

@@ -11,6 +11,9 @@
   fleet push <task-id> [--yes]
   fleet ollivander [--dry-run]
   fleet gringotts [--drill [ARCHIVE]]
+  fleet close <task-id>
+      One auto-close try in the foreground (fleet/closer.py), only while auto-close is on: it clears a stopped task
+      once, keeps every kept result, and runs a command or judge run again only past the automatic tries.
 
 Output is one JSON object, like castle. Exit 0 on success, 1 on a refusal or error. fleet feed
 is the exception: it prints a live, read-only text feed until Ctrl+C (see fleet/feed.py).
@@ -31,7 +34,7 @@ if __name__ == "__main__" and "/Users/crisryantan/.hogwarts" not in sys.path:
 from hogwarts import ids  # noqa: E402
 from hogwarts.errors import StoreError  # noqa: E402
 
-from fleet import common, config, gitops, push, review, verify, worktree  # noqa: E402
+from fleet import closer, common, config, gitops, push, review, verify, worktree  # noqa: E402
 from fleet import gringotts, ollivander  # noqa: E402
 from fleet.safefs import FleetError  # noqa: E402
 from fleet import feed  # noqa: E402
@@ -86,6 +89,7 @@ def build_parser() -> argparse.ArgumentParser:
     pushed.add_argument("task")
     pushed.add_argument("--yes", action="store_true")
     commands.add_parser("ollivander", allow_abbrev=False).add_argument("--dry-run", action="store_true")
+    commands.add_parser("close", allow_abbrev=False).add_argument("task")
     banked = commands.add_parser("gringotts", allow_abbrev=False)
     banked.add_argument("--drill", nargs="?", const="newest", default=None, metavar="ARCHIVE")
     return parser
@@ -103,8 +107,9 @@ def run(conn, args: argparse.Namespace) -> object:
     if args.command == "worktree-remove":
         return worktree.remove(conn, args.task)
     if args.command == "verify":
-        with review.task_review_lock(args.task):  # never under a running review, whose evidence it would replace
-            return verify.verify(conn, args.task)
+        # Never under a running review, whose evidence it would replace; each check's process keeps the lock while it runs.
+        with review.task_review_lock(args.task) as lock_fd:
+            return verify.verify(conn, args.task, keep_fds=(lock_fd,))
     if args.command == "review":
         if args.target != "own":
             if any(value is not None for value in (args.repo_dir, args.title, args.intent_file, args.task)):
@@ -121,6 +126,8 @@ def run(conn, args: argparse.Namespace) -> object:
         return ollivander.run(conn, dry_run=args.dry_run)
     if args.command == "gringotts":
         return run_gringotts(args.drill)
+    if args.command == "close":
+        return closer.close_by_hand(conn, args.task)
     raise FleetError("unknown command")
 
 

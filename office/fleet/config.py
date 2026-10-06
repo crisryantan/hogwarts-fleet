@@ -129,9 +129,13 @@ AUTO_PORTRAIT_FILE = "auto-portrait"
 # Comments from people with write access go back to the build desk, the other family reviews the fix and the replies,
 # and the loop pushes the reviewed commit to the same PR and posts each reply once.
 PR_FOLLOWUP_FILE = "pr-followup"
+# Auto-close (fleet/closer.py), off by default. While this plain file in the office holds exactly "on", each Map
+# round starts the closer, which closes a passed task once scripts prove its merge, CI on the merge commit and every
+# after-merge check. Written from the terminal: echo on > ~/.hogwarts/auto-close
+AUTO_CLOSE_FILE = "auto-close"
 # Every office opt-in file. common.opt_in_on reads only these names, so a typo never reads another office file as a
 # switch, every switch is read through that one reader, and a name not listed here always reads off.
-OPT_IN_FILES = (AUTO_DRAFT_PR_FILE, AUTO_PORTRAIT_FILE, PR_FOLLOWUP_FILE)
+OPT_IN_FILES = (AUTO_DRAFT_PR_FILE, AUTO_PORTRAIT_FILE, PR_FOLLOWUP_FILE, AUTO_CLOSE_FILE)
 # Review rounds of one follow-up, apart from the task's REVIEW_ROUND_CAP, and the follow-ups one task may take.
 FOLLOWUP_ROUND_CAP = 2
 FOLLOWUP_MAX_PER_TASK = 5
@@ -163,6 +167,26 @@ FOLLOWUP_READBACK_SKEW_SECONDS = 300
 # had been live then, so a copy kept in shadow mode from the start still shows what it would route. It never opens a
 # live period: a live round routes only comments written while follow-ups are live.
 FOLLOWUP_SHADOW_WINDOW_SECONDS = 7 * 86400
+# The closer's own lock in the office locks folder: one closer at a time, and fleet close takes it too.
+CLOSER_LOCK = "closer.lock"
+# Tries an automatic pass may take per merge commit for sandboxed after-merge commands and for the judge. After-merge
+# commands that run without the Codex sandbox (your own sessions) are started at most once by an automatic pass.
+AUTO_CLOSE_MAX_TRIES = 3
+# Neither a green CI nor "no checks" counts until this long after the merge was first seen, so a check GitHub has
+# not registered yet is never read as all of CI. A red stops at once.
+AUTO_CLOSE_CI_SETTLE_SECONDS = 1800
+# A wait that can last (CI pending, open work under the task, the review loop, the judge's slots, a PR merged into
+# another base) tells you once after this long, and keeps waiting.
+AUTO_CLOSE_STALL_SECONDS = 86400
+# A read that keeps failing tells you once after this long of one unknown spell.
+AUTO_CLOSE_UNKNOWN_GRACE_SECONDS = 7200
+# The merged diff in the judge's pack is cut here, after it is scrubbed whole.
+AUTO_CLOSE_PACK_DIFF_MAX_CHARS = 200_000
+# The most first-parent commits the closer walks to find the commit that brought the reviewed commit onto its base.
+AUTO_CLOSE_WALK_MAX = 10_000
+AUTO_CLOSE_RECORD_MAX_BYTES = 8192
+# Try and clear markers per merge commit, hand runs included.
+AUTO_CLOSE_MARKER_MAX = 99
 # A failed run whose error text matches one of these hit the vendor's own usage, rate, quota or credit
 # limit, not a fleet cap. Matched without case against Claude's result text when is_error is set, and
 # against the message that ended a failed Codex run (its last turn.failed, else its last error event).

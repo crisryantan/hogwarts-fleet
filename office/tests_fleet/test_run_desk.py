@@ -15,6 +15,7 @@ from tests.support import NOW
 
 from fleet import common, config, gitops, owl_post, review, run_desk, safefs, verify
 from tests_fleet.support import FleetCase, claude_settings, fake_children
+from tests_fleet.test_review_chain import Killed
 
 REAL_POPEN = subprocess.Popen
 BYPASS_WORDS = ("dangerously", "bypass", "skip-permissions", "danger-full-access", "approve-for-me", "yolo")
@@ -470,6 +471,85 @@ class BuildRunTaskLockTests(RunDeskCase):
         [child] = children
         self.assertIsNotNone(child.poll(), "the desk process outlived the review lock it held")
         self.assertTrue(self.review_free())
+
+
+class RunEndTests(RunDeskCase):
+    """Every run keeps how its process ended in runs/<desk>/<run_id>.end, before it records anything else, so a caller
+    killed before it kept the run's result can still read how it ended (run_end)."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.enable("hermione")
+        self.owl_id, _ = self.request("hermione")
+
+    def run_id(self) -> str:
+        """The run id of the desk's latest launch."""
+        return capacity.list_launches(self.conn, "hermione")[-1]["run_id"]
+
+    def end_file(self) -> Path:
+        return self.office / "runs" / "hermione" / f"{self.run_id()}.end"
+
+    def test_a_run_keeps_its_exit_code_and_vendor_limit_before_its_usage(self):
+        for exit_code, limit in ((0, None), (3, None), (1, "claude_plan")):
+            with self.subTest(exit_code=exit_code, limit=limit), mock.patch.object(run_desk, "spawn"):
+                owl_id = self.deliver("mcgonagall", "hermione", subject=f"read this {exit_code} {limit}")
+                seen, real = [], capacity.record_launch_usage
+
+                def recorded(conn, run_id, *args, **kwargs):
+                    seen.append(json.loads(self.end_file().read_text()))
+                    return real(conn, run_id, *args, **kwargs)
+
+                with fake_children(returncode=exit_code), \
+                        mock.patch.object(run_desk, "plan_limit", return_value=limit), \
+                        mock.patch.object(capacity, "record_launch_usage", side_effect=recorded):
+                    run_desk.run(self.conn, "hermione", owl_id, now=NOW)
+                self.assertEqual(seen, [{"run_id": self.run_id(), "exit_code": exit_code, "cap_source": limit}])
+                self.assertEqual(run_desk.run_end("hermione", self.run_id()),
+                                 {"exit_code": exit_code, "cap_source": limit})
+
+    def test_a_run_killed_here_or_never_started_keeps_that_too(self):
+        def desk(argv, **kwargs):
+            raise SystemExit(128 + signal.SIGTERM)  # the signal lands while the run waits for its process
+
+        with fake_children(desk), self.assertRaises(SystemExit):
+            run_desk.run(self.conn, "hermione", self.owl_id, now=NOW)
+        self.assertEqual(json.loads(self.end_file().read_text())["exit_code"], -9)
+        for raised in (FileNotFoundError("no such binary"), SystemExit(128 + signal.SIGTERM)):
+            with self.subTest(raised=raised), mock.patch.object(run_desk, "spawn"):
+                owl_id = self.deliver("mcgonagall", "hermione", subject=f"read this {type(raised).__name__}")
+                with mock.patch.object(run_desk, "start_child", side_effect=raised), self.assertRaises(type(raised)):
+                    run_desk.run(self.conn, "hermione", owl_id, now=NOW)
+                self.assertEqual(run_desk.run_end("hermione", self.run_id()), {"exit_code": None, "cap_source": None})
+
+    def test_a_run_with_no_end_kept_reads_as_none_and_a_record_that_does_not_read_whole_is_refused(self):
+        with fake_children(), mock.patch.object(run_desk, "_keep_end", side_effect=Killed()), \
+                self.assertRaises(Killed):
+            run_desk.run(self.conn, "hermione", self.owl_id, now=NOW)
+        self.assertIsNone(run_desk.run_end("hermione", self.run_id()))
+        path = self.end_file()
+        for text in ("{", json.dumps({"run_id": "run-" + "0" * 16, "exit_code": 0, "cap_source": None}),
+                     json.dumps({"run_id": self.run_id(), "exit_code": 0, "cap_source": "plan"}),
+                     json.dumps({"run_id": self.run_id(), "exit_code": True, "cap_source": None})):
+            with self.subTest(text=text):
+                self.write_file(path, text + "\n")
+                with self.assertRaises(safefs.Unsafe):
+                    run_desk.run_end("hermione", self.run_id())
+        os.unlink(path)
+        os.symlink(self.tmp / "elsewhere", path)
+        with self.assertRaises(safefs.Unsafe):
+            run_desk.run_end("hermione", self.run_id())
+
+    def test_a_claude_run_whose_result_the_read_window_cut_is_charged_its_budget(self):
+        def desk(argv, **kwargs):
+            event = {"type": "result", "subtype": "success", "is_error": False, "result": "x" * 5000,
+                     "total_cost_usd": 0.01}
+            os.write(kwargs["stdout"], (json.dumps(event) + "\n").encode("utf-8"))
+            return subprocess.CompletedProcess(argv, 0)
+
+        with fake_children(desk), mock.patch.object(run_desk, "RUN_OUTPUT_MAX_BYTES", 1024):
+            result = run_desk.run(self.conn, "hermione", self.owl_id, now=NOW)
+        self.assertEqual((result["exit_code"], result["cost_usd"], result.get("spend_unknown")),
+                         (0, float(config.MAX_BUDGET_USD["hermione"]), True))
 
 
 class LockInheritanceTests(FleetCase):

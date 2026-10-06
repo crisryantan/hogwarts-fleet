@@ -13,7 +13,7 @@ from unittest import mock
 from hogwarts import capacity, db, followups, owlery, pensieve
 from hogwarts.errors import StoreError
 
-from fleet import config, followup, gitops, owl_post, push, review, run_desk
+from fleet import closer, config, followup, gitops, owl_post, push, review, run_desk
 from fleet.safefs import FleetError
 from tests_fleet.test_auto_push import EMAIL, KEY, TOKEN
 from tests_fleet.test_pr_followup import (ACCOUNT, NUMBER, PR_KEY, PR_LINK, SETTLE, FollowupCase, gh_comment, link)
@@ -333,6 +333,56 @@ class CloserPredicateTests(PostCase):
             followups.open_for(self.conn, self.task["id"])
         self.hand_off(row, FIXED_ROW)
         self.assertFalse(followups.open_for(self.conn, self.task["id"]))
+
+
+class CloserTests(PostCase):
+    """The auto-close closer (fleet/closer.py) beside a real follow-up, routed by a Map round and passed by its own
+    review, cut off by kills while it pushes and while it posts. test_auto_close.FollowupTests shows the closer closes
+    such a task once its follow-up ends."""
+
+    def assert_closer_skips(self, row: dict, state: str) -> None:
+        self.assertEqual((self.row(row)["state"], self.status()), (state, "awaiting_close"))
+        self.assertTrue(closer.followup_open(self.conn, self.task["id"]))
+        self.assertNotIn(self.task["id"], [task["id"] for task in closer.candidates(self.conn)])
+        with self.assertRaisesRegex(FleetError, "a follow-up is open on this task"):
+            closer.close_by_hand(self.conn, self.task["id"])
+        with mock.patch.object(followups.db, "fetch_one", side_effect=StoreError("database is locked")), \
+                self.assertRaises(StoreError):
+            closer.followup_open(self.conn, self.task["id"])  # unknown, never "none open"
+
+    @staticmethod
+    def killed_after(owner, name: str):
+        real = getattr(owner, name)
+
+        def killed(*args, **kwargs):
+            real(*args, **kwargs)
+            raise Killed(name)
+
+        return mock.patch.object(owner, name, side_effect=killed)
+
+    def test_the_closer_skips_a_task_with_an_open_followup(self):
+        spawn = mock.patch.object(run_desk, "spawn_closer")  # the Map's sweep starts no real closer pass here
+        self.spawned_closers = spawn.start()
+        self.addCleanup(spawn.stop)
+        self.write_file(self.office / config.AUTO_CLOSE_FILE, "on\n")
+        row = self.ready()
+        with self.killed_after(push, "push_followup"), self.assertRaises(Killed):
+            self.hand_off(row, FIXED_ROW)
+        self.assert_closer_skips(row, "pushing")
+        with self.killed_after(gitops, "post_reply"), self.assertRaises(Killed):
+            self.next_pass()
+            self.next_pass()
+        self.assertEqual(self.replies(row), [("T1", "FIXED", "posting")])
+        self.assert_closer_skips(row, "posting")
+        with mock.patch.object(gitops, "run_gh_write", side_effect=AssertionError("posted again")):
+            self.next_pass()
+            self.next_pass()
+        self.assertEqual(self.row(row)["state"], "done")
+        self.assertFalse(closer.followup_open(self.conn, self.task["id"]))
+        # Now only what any task needs keeps it from the closer: this build was registered by hand, not by a go.
+        self.assertEqual(closer.close_by_hand(self.conn, self.task["id"])["outcome"], "not the closer's")
+        self.assertEqual(len(self.writes), 1)
+        self.assertTrue(self.spawned_closers.called)  # the Map's rounds started the closer while it was on
 
 
 class PushTests(PostCase):

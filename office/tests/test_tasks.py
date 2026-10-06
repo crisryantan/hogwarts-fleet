@@ -6,7 +6,7 @@ import unittest
 
 from hogwarts import db, owlery, pensieve
 from hogwarts.errors import ConflictError, NotFoundError, TokenError, ValidationError
-from tests.support import NOW, REPO, SHA, StoreCase, intent_file, worktree
+from tests.support import MERGE_SHA, NOW, REPO, SHA, StoreCase, go_build, intent_file, proof, worktree
 
 TASK_ID = "tk_0123456789abcdef"
 
@@ -559,3 +559,64 @@ class WorktreeTests(StoreCase):
             pensieve.set_worktree(self.conn, task["id"], worktree())
         with self.assertRaises(NotFoundError):
             pensieve.set_worktree(self.conn, "tk_ffffffffffffffff", worktree())
+
+
+class CloseProvenTests(StoreCase):
+    def setUp(self):
+        super().setUp()
+        self.desks()
+        self.desk("gamma", "claude")
+        self.go = go_build(self.conn)
+
+    def closed(self, **kwargs) -> dict:
+        return pensieve.close_proven(self.conn, self.go["build"], proof(), "closed on its proof",
+                                     f"close:proven:{self.go['build']}", now=NOW + 60, **kwargs)
+
+    def events(self) -> list:
+        return [dict(row) for row in self.conn.execute("SELECT kind, verdict, task_id FROM events ORDER BY id")]
+
+    def test_close_proven_closes_the_build_and_its_go_parent_with_one_headmaster_event(self):
+        result = self.closed(parent_task_id=self.go["parent"])
+        for task, kind in ((result["task"], "proven"), (result["parent"], "parent")):
+            self.assertEqual((task["status"], task["close_reason"]), ("closed", "complete"))
+            closure = pensieve.task_closure(self.conn, task["id"])
+            self.assertEqual((closure["kind"], closure["merge_sha"], closure["pass_sha"]), (kind, MERGE_SHA, SHA))
+        self.assertEqual(pensieve.task_closure(self.conn, self.go["parent"])["via_task_id"], self.go["build"])
+        self.assertEqual(self.events(), [{"kind": "close.proven", "verdict": "headmaster", "task_id": self.go["build"]}])
+        with self.assertRaisesRegex(ConflictError, "already closed"):
+            self.closed()
+        self.assertEqual(len(self.events()), 1)
+
+    def test_close_proven_refuses_a_parent_with_other_open_work_and_rolls_back(self):
+        other = owlery.open_request(self.conn, "gamma", "beta", "more", parent_task_id=self.go["parent"])["task"]
+        with self.assertRaisesRegex(ConflictError, "other open work"):
+            self.closed(parent_task_id=self.go["parent"])
+        self.assertEqual(pensieve.get_task(self.conn, self.go["build"])["status"], "awaiting_close")
+        self.assertEqual(pensieve.get_task(self.conn, other["id"])["status"], "queued")
+        self.assertIsNone(pensieve.task_closure(self.conn, self.go["build"]))
+        self.assertEqual(self.events(), [])
+        result = self.closed()
+        self.assertEqual((result["task"]["status"], result["parent"]), ("closed", None))
+        self.assertEqual(pensieve.get_task(self.conn, self.go["parent"])["status"], "queued")
+        self.assertEqual(pensieve.get_task(self.conn, other["id"])["status"], "queued")
+
+    def test_close_proven_refuses_a_task_with_open_descendants(self):
+        child = pensieve.create_task(self.conn, "alpha", "a review left open", parent_task_id=self.go["build"])
+        with self.assertRaisesRegex(ConflictError, "open work under it"):
+            self.closed(parent_task_id=self.go["parent"])
+        for task_id in (self.go["build"], child["id"], self.go["parent"]):
+            self.assertNotEqual(pensieve.get_task(self.conn, task_id)["status"], "closed")
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM task_closures").fetchone()[0], 0)
+
+    def test_close_proven_refuses_a_task_not_awaiting_close(self):
+        active = self.started("beta")
+        with self.assertRaisesRegex(ConflictError, "only a task awaiting close"):
+            pensieve.close_proven(self.conn, active["id"], proof(), "nope", "close:proven:x")
+        with self.assertRaisesRegex(ConflictError, "not this task's parent"):
+            self.closed(parent_task_id=active["id"])
+        for broken in (proof(landed="pr", pr_number=None), proof(ci="none"), proof(judge_desk=None),
+                       proof(evidence_path="/etc/passwd"), proof(pass_sha="X" * 40), {**proof(), "extra": 1}):
+            with self.subTest(broken=broken), self.assertRaises(ValidationError):
+                pensieve.close_proven(self.conn, self.go["build"], broken, "nope", "close:proven:y")
+        self.assertEqual((pensieve.get_task(self.conn, self.go["build"])["status"], self.events()),
+                         ("awaiting_close", []))

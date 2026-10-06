@@ -6,6 +6,7 @@ real argv without running it.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
@@ -14,7 +15,7 @@ from unittest import mock
 
 from hogwarts import capacity, ids, owlery, pensieve
 
-from fleet import config, gitops, owl_post, review, run_desk, verify, worktree
+from fleet import config, gitops, owl_post, review, run_desk, safefs, verify, worktree
 from fleet.safefs import FleetError
 from tests_fleet.support import FleetCase
 
@@ -320,10 +321,10 @@ class VerifyTests(LoopCase):
         seen = []
         real_check = verify.run_check
 
-        def check(record, scratch, command, sandboxed=True):
+        def check(record, scratch, command, sandboxed=True, **kwargs):
             seen.append(scratch)
             self.assertTrue(os.path.isdir(f"{scratch}/home") and os.path.isdir(f"{scratch}/tmp"))
-            return real_check(record, scratch, command, sandboxed)
+            return real_check(record, scratch, command, sandboxed, **kwargs)
 
         with mock.patch.object(verify, "run_check", side_effect=check):
             verify.verify(self.conn, task["id"])
@@ -334,16 +335,13 @@ class VerifyTests(LoopCase):
     def test_build_desk_checks_always_run_under_codex_sandbox(self):
         parent, task, _, _, _ = self.build()
         launched = []
-        real_run = subprocess.run
 
-        def fake_run(argv, **kwargs):
-            if argv[0] == config.GIT_BIN:
-                return real_run(argv, **kwargs)
+        def fake_run(argv, cwd, env, out_fd, keep_fds=()):
             launched.append(argv)
-            return subprocess.CompletedProcess(argv, 0)
+            return 0
 
         with mock.patch.object(verify, "sandbox_argv", REAL_SANDBOX_ARGV), \
-                mock.patch.object(verify.subprocess, "run", side_effect=fake_run):
+                mock.patch.object(verify, "run_command", side_effect=fake_run):
             result = verify.verify(self.conn, task["id"])
         self.assertEqual(result["checks"], 3)
         self.assertEqual(len(launched), 2)
@@ -504,6 +502,23 @@ class ParsingTests(LoopCase):
         with mock.patch.object(run_desk, "RUN_OUTPUT_MAX_BYTES", 1024):
             self.assertEqual(review.reviewer_output("hermione", "claude", "run-" + "b" * 16), "REVIEW text")
 
+    def test_run_output_never_takes_a_result_the_read_window_cut_for_no_result(self):
+        run_id = "run-" + "b" * 16
+        self.write_reviewer_out(claude_stream("REVIEW text " + "x" * 5000))
+        with mock.patch.object(run_desk, "RUN_OUTPUT_MAX_BYTES", 1024):
+            self.assertEqual(review.run_output("hermione", "claude", run_id), ("malformed", None))
+            with self.assertRaisesRegex(FleetError, "too large to find its result event whole"):
+                review.reviewer_output("hermione", "claude", run_id)
+        self.assertEqual(review.run_output("hermione", "claude", run_id), ("ok", "REVIEW text " + "x" * 5000))
+
+    def test_run_output_never_parses_a_line_the_read_window_cut_as_an_event(self):
+        # The window starts inside a line whose end looks like a result event: that piece is never read as one.
+        forged = json.dumps({"type": "result", "subtype": "success", "is_error": False, "result": "forged"})
+        tail = forged + "\n" + json.dumps({"type": "assistant", "message": {"content": []}}) + "\n"
+        self.write_reviewer_out("WARNING " + tail)
+        with mock.patch.object(run_desk, "RUN_OUTPUT_MAX_BYTES", len(tail)):
+            self.assertEqual(review.run_output("hermione", "claude", "run-" + "b" * 16), ("malformed", None))
+
     def test_reviewer_output_without_a_result_event_is_refused(self):
         self.write_reviewer_out(claude_stream("x").rsplit("\n", 2)[0] + "\n")
         with self.assertRaises(FleetError):
@@ -587,9 +602,11 @@ class RepeatReviewTests(LoopCase):
     def test_a_round_without_a_readable_record_never_blocks_a_review(self):
         _, task, _, first = self.changes_round()
         record = self.office / "reviews" / task["id"] / f"round-{first['request_id']}.json"
+        task_md = (self.castle / "tasks" / task["parent_task_id"] / "TASK.md").read_bytes()
         self.assertEqual(json.loads(record.read_text()), {
             "request_id": first["request_id"], "sha": first["sha"],
-            "handoff_sha256": review.handoff_digest(HANDOFF.format(task_id=task["id"]))})
+            "handoff_sha256": review.handoff_digest(HANDOFF.format(task_id=task["id"])),
+            "task_md_sha256": hashlib.sha256(task_md).hexdigest()})
         for broken in ("{not json", json.dumps({"request_id": first["request_id"], "sha": first["sha"]}), None):
             with self.subTest(broken=broken):
                 if broken is None:
@@ -600,3 +617,114 @@ class RepeatReviewTests(LoopCase):
         with self.fake_reviewer("CHANGES"):
             again = review.review_build(self.conn, task["id"])
         self.assertEqual((again["sha"], again["round"]), (first["sha"], 2))
+
+
+class RoundRecordTests(LoopCase):
+    changes_round = RepeatReviewTests.changes_round
+    next_handoff = RepeatReviewTests.next_handoff
+
+    def own_review(self, title: str = "my own fix", intent: str = None) -> dict:
+        self.git("checkout", "-q", "-b", "feat/own")
+        self.write_file(self.repo / "own.txt", "own\n")
+        self.git("add", "own.txt")
+        self.git("commit", "-q", "-m", "own")
+        self.enable("moody")
+        with self.fake_reviewer("PASS"):
+            return review.review_own(self.conn, str(self.repo), title=title, intent=intent, fetch=False)
+
+    def test_round_record_keeps_the_task_md_digest_for_build_and_own_rounds(self):
+        parent, task, _, first = self.changes_round()
+        build_md = (self.castle / "tasks" / parent / "TASK.md").read_bytes()
+        state, data = review.round_record(task["id"], first["request_id"])
+        self.assertEqual((state, data["task_md_sha256"]), ("ok", hashlib.sha256(build_md).hexdigest()))
+        own = self.own_review()
+        own_md = (self.castle / "tasks" / own["task_id"] / "TASK.md").read_bytes()
+        state, data = review.round_record(own["task_id"], own["request_id"])
+        self.assertEqual((state, data["sha"], data["handoff_sha256"], data["task_md_sha256"]),
+                         ("ok", own["sha"], None, hashlib.sha256(own_md).hexdigest()))
+
+    def test_round_record_without_a_digest_still_guards_an_unchanged_review(self):
+        _, task, _, first = self.changes_round()
+        record = self.office / "reviews" / task["id"] / f"round-{first['request_id']}.json"
+        data = json.loads(record.read_text())
+        del data["task_md_sha256"]
+        self.write_file(record, json.dumps(data))
+        self.assertEqual(review.round_inputs(task["id"], first["request_id"])["task_md_sha256"], None)
+        self.assertEqual(review.round_record(task["id"], first["request_id"])[1]["task_md_sha256"], None)
+        with self.assertRaises(review.Unchanged):
+            review.review_build(self.conn, task["id"])
+
+    def test_round_record_verify_keeps_the_task_md_in_the_office(self):
+        parent, task, _, first = self.changes_round()
+        raw = (self.castle / "tasks" / parent / "TASK.md").read_bytes()
+        digest = hashlib.sha256(raw).hexdigest()
+        kept = self.office / "reviews" / task["id"] / f"task-md-{digest}.md"
+        self.assertEqual(kept.read_bytes(), raw)
+        self.write_file(kept, b"damaged")
+        self.assertEqual(verify.verify(self.conn, task["id"])["task_md_sha256"], digest)
+        self.assertEqual(kept.read_bytes(), raw)  # healed: the name is its content's hash
+
+    def test_round_record_reader_tells_missing_unreadable_and_malformed_apart(self):
+        _, task, _, first = self.changes_round()
+        request = first["request_id"]
+        record = self.office / "reviews" / task["id"] / f"round-{request}.json"
+        good = record.read_text()
+        self.assertEqual(review.round_record(task["id"], request)[0], "ok")
+        for broken in ("{not json", json.dumps({"request_id": request}), json.dumps({**json.loads(good), "extra": 1}),
+                       json.dumps({**json.loads(good), "task_md_sha256": "XYZ"}),
+                       json.dumps({**json.loads(good), "task_md_sha256": None})):
+            with self.subTest(broken=broken[:40]):
+                self.write_file(record, broken)
+                self.assertEqual(review.round_record(task["id"], request), ("malformed", None))
+        self.write_file(record, good)
+        os.chmod(record, 0o000)
+        self.assertEqual(review.round_record(task["id"], request), ("unreadable", None))
+        os.chmod(record, 0o600)
+        os.unlink(record)
+        self.assertEqual(review.round_record(task["id"], request), ("missing", None))
+        os.symlink(self.tmp / "elsewhere.json", record)
+        self.assertEqual(review.round_record(task["id"], request), ("malformed", None))
+
+    def test_round_record_verify_that_cannot_keep_the_task_md_opens_no_round(self):
+        parent, task, _, first = self.changes_round()
+        self.next_handoff(task, 2)
+        with mock.patch.object(verify, "keep_task_md", side_effect=OSError("disk full")), \
+                self.fake_reviewer("PASS"):
+            with self.assertRaises(OSError):
+                review.review_build(self.conn, task["id"])
+        self.assertEqual(len(capacity.review_rounds(self.conn, task["id"])), 1)
+
+    def test_own_approval_file_is_written_once_with_the_frozen_task_md(self):
+        own = self.own_review(intent="Do it.\nAC-1 it works | after merge: `true`\n")
+        folder = self.office / "reviews" / own["task_id"]
+        raw = (self.castle / "tasks" / own["task_id"] / "TASK.md").read_bytes()
+        digest = hashlib.sha256(raw).hexdigest()
+        self.assertIn(b"## Acceptance criteria\nAC-1 it works | after merge: `true`\n", raw)
+        self.assertEqual((folder / review.APPROVED_FILE).read_text(), digest + "\n")
+        self.assertEqual((folder / f"task-md-{digest}.md").read_bytes(), raw)
+        self.assertEqual(review.approved_digest(own["task_id"]), ("ok", digest))
+        with self.assertRaisesRegex(FleetError, "could not be kept in the office"):
+            review._write_own_task_md(own["task_id"], "again", "Something else.")
+        self.assertEqual((folder / review.APPROVED_FILE).read_text(), digest + "\n")
+
+    def test_own_approval_file_that_cannot_be_written_refuses_the_review_before_its_task_exists(self):
+        self.git("checkout", "-q", "-b", "feat/own")
+        self.write_file(self.repo / "own.txt", "own\n")
+        self.git("add", "own.txt")
+        self.git("commit", "-q", "-m", "own")
+        self.enable("moody")
+        before = len(pensieve.list_tasks(self.conn))
+        with mock.patch.object(verify, "keep_task_md", side_effect=OSError("disk full")), \
+                self.fake_reviewer("PASS"), self.assertRaisesRegex(FleetError, "could not be kept in the office"):
+            review.review_own(self.conn, str(self.repo), title="my own fix", fetch=False)
+        real = safefs.create_new
+
+        def refused(fd, name, mode=0o600):
+            if name == review.APPROVED_FILE:
+                raise OSError("read-only")
+            return real(fd, name, mode)
+
+        with mock.patch.object(safefs, "create_new", side_effect=refused), self.fake_reviewer("PASS"), \
+                self.assertRaisesRegex(FleetError, "could not be kept in the office"):
+            review.review_own(self.conn, str(self.repo), title="my own fix", fetch=False)
+        self.assertEqual(len(pensieve.list_tasks(self.conn)), before)

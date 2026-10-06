@@ -46,6 +46,7 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import os
+import re
 from typing import Iterator, Optional
 
 from hogwarts import db, ids, owlery, pensieve
@@ -102,8 +103,9 @@ def fetch_base(repo_dir: str, base: str) -> None:
 
 
 def add_worktree(conn, task_id: str, repo_dir: str, base: str, branch: Optional[str], fetch: bool,
-                 detach_at: Optional[str] = None, *, claim: dict) -> dict:
-    """Add ~/hogwarts/worktrees/<task-id> and write its office record. Shared with the review script.
+                 detach_at: Optional[str] = None, *, claim: dict, name: Optional[str] = None) -> dict:
+    """Add ~/hogwarts/worktrees/<name> and write its office record, name being the task id unless the caller names
+    another (the closer's merged worktree, <task-id>.merged-<12 hex>). Shared with the review script and the closer.
 
     The caller owns taking back whatever this makes: before the first git change, claim["record"] holds the record
     this will write, so take_back(claim, exc) undoes the worktree, its new branch, the links and the record, however
@@ -113,7 +115,8 @@ def add_worktree(conn, task_id: str, repo_dir: str, base: str, branch: Optional[
     repo_dir = gitops.check_repo_dir(repo_dir)
     base = gitops.check_ref(base, "base")
     common_dir = f"{repo_dir}/.git"
-    path = config.worktree_dir(task_id)
+    name = ids.check("task", task_id) if name is None else safefs.check_component(name)
+    path = config.worktree_dir(name)
     if os.path.lexists(path):
         raise FleetError("a worktree folder for this task already exists")
     slug = gitops.repo_slug(gitops.git(["config", "--get", "remote.origin.url"], common_dir))
@@ -135,9 +138,9 @@ def add_worktree(conn, task_id: str, repo_dir: str, base: str, branch: Optional[
         if detach_at is None or gitops.SHA.fullmatch(detach_at) is None:
             raise FleetError("a detached worktree needs a full commit sha")
         add = ["worktree", "add", "--detach", path, detach_at]
-    record = {"name": task_id, "task_id": task_id, "path": path, "repo_dir": repo_dir, "common_dir": common_dir,
-              "git_dir": f"{common_dir}/worktrees/{task_id}", "branch": branch, "base": base_sha, "base_ref": base, "repo": slug,
-              "links": toolchain.linkable(repo_dir)}
+    record = {"name": name, "task_id": task_id, "path": path, "repo_dir": repo_dir, "common_dir": common_dir,
+              "git_dir": f"{common_dir}/worktrees/{name}", "branch": branch, "base": base_sha, "base_ref": base,
+              "repo": slug, "links": toolchain.linkable(repo_dir)}
     claim["record"] = record  # from here the caller takes back what git makes
     if branch is not None:
         # git branch makes the branch only when it does not exist yet, so a branch it made is this command's. From a
@@ -413,6 +416,46 @@ def build(conn, task_id: str, lock_fd: int) -> dict:
     if task["desk"] not in config.WORKTREE_DESKS or task["status"] != "active" or not task["worktree"]:
         raise FleetError("only an active build task with a worktree can be started again")
     return {"task_id": task["id"], "desk": start_desk(conn, task, lock_fd)}
+
+
+MERGED_NAME = re.compile(r"(tk_[0-9a-f]{16})\.merged-([0-9a-f]{12})")
+
+
+def merged_name(task_id: str, merge_sha: str) -> str:
+    """The name of the closer's worktree for a task at a merge commit: <task-id>.merged-<first 12 of the sha>."""
+    return f"{ids.check('task', task_id)}.merged-{ids.check('sha', merge_sha)[:12]}"
+
+
+def remove_merged(build_record: dict, name: str) -> dict:
+    """Take back the closer's merged worktree name of the task whose own worktree record is build_record, whether or
+    not a killed try wrote its record: the record it expects is built from build_record and the name alone (path
+    worktrees/<name>, the same repo, .git folder and links). The name must be exactly <task-id>.merged-<12 hex> for
+    that task. When git lists the path as a worktree of that repo, git worktree remove --force takes it back (it is
+    detached and holds no branch, and its checks may leave untracked files). A folder git does not list, or a path
+    git lists whose folder is gone, is never deleted by path and git worktree prune is never run: that fails, for you
+    to look at. Then the office record goes, when there is one. {name, removed}."""
+    match = MERGED_NAME.fullmatch(name) if isinstance(name, str) else None
+    if match is None or match.group(1) != build_record["task_id"]:
+        raise FleetError("that is not a merged worktree of this task")
+    common_dir = build_record["common_dir"]
+    expected = {"name": name, "task_id": build_record["task_id"], "path": config.worktree_dir(name),
+                "repo_dir": build_record["repo_dir"], "common_dir": common_dir,
+                "git_dir": f"{common_dir}/worktrees/{name}", "links": list(build_record.get("links") or [])}
+    path = expected["path"]
+    toolchain.unlink_deps(expected)
+    listed = bool({path, os.path.realpath(path)} & set(gitops.worktree_paths(common_dir)))
+    exists = os.path.lexists(path)
+    removed = False
+    if listed and exists:
+        gitops.git(["worktree", "remove", "--force", path], common_dir)
+        removed = True
+    elif listed:
+        raise FleetError(f"git lists the merged worktree {name} but its folder is gone, so it was left for you")
+    elif exists:
+        raise FleetError(f"the merged worktree folder {name} is not one git lists, so it was left for you")
+    with contextlib.suppress(FileNotFoundError, safefs.Missing):
+        gitops.drop_record(name)
+    return {"name": name, "removed": removed}
 
 
 def remove(conn, task_id: str) -> dict:

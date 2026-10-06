@@ -67,15 +67,28 @@ The store has none of these:
   tests_fleet/                          the fleet's unittest suite
   run_suites.py                         runs both test suites fast, one process per test module
   state/pensieve.db                     the real database, created by castle init
-  logs/                                 the fleet's job and script logs, review-auto.log for the review loop
-  runs/<desk>/                          each headless run's output, which fleet feed follows
-  locks/                                lock files for run slots, launches, reviews, the review loop, the patrol and
-                                        Ollivander's updates
+  logs/                                 the fleet's job and script logs, review-auto.log for the review loop and
+                                        closer.log for auto-close, one JSON line per task each pass
+  runs/<desk>/                          each headless run's output, which fleet feed follows, and how its process
+                                        ended (<run>.end), kept as soon as it ends
+  locks/                                lock files for run slots, launches, reviews, the review loop, the patrol,
+                                        Ollivander's updates and the closer (closer.lock)
+  worktrees/<task>.json                 each worktree's office record, and <task>.merged-<12 hex>.json for the
+                                        closer's detached worktree at a merge commit, taken back once the task closes
   reviews/<task>/                       review files and verify evidence, which no desk can write, what each review
                                         round was opened for (round-<request>.json), the review loop's record of
                                         each handoff (auto-<owl>.pending, .try<n>, .done) and of what follows each
                                         verdict of its own rounds (after-<request>.json), and each PR follow-up's
-                                        threads file (followup-<id>.md), which the castle copy is written from
+                                        threads file (followup-<id>.md), which the castle copy is written from.
+                                        Every TASK.md a verify read (task-md-<sha256>.md), and for your own sessions'
+                                        tasks the digest fleet review own approved (task-md-approved). The closer's
+                                        record (close.json), its O_EXCL try and clear markers (one per after-merge
+                                        command, close-<sha>.AC-<n>.cmd-try<k>, then close-<sha>.judge-try<k> and
+                                        close-clear<k>), and per merge commit each after-merge command's result as
+                                        it ends, the after-merge evidence, the judge's pack and verdict, and the
+                                        close evidence (after-merge-results-<sha>.json,
+                                        after-merge-evidence-<sha>.md, after-merge-pack-<sha>.md,
+                                        after-merge-review-<sha>-<desk>-<run>.md, close-evidence-<sha>.md)
   auto-draft-pr                         while it holds exactly "on", the review loop pushes and opens a draft PR after
                                         its PASS (off when missing)
   auto-portrait                         while it holds exactly "on", Dumbledore's weeknight job applies the additions
@@ -84,6 +97,9 @@ The store has none of these:
   pr-followup                           while it holds exactly "on" and the patrol is out of shadow mode, teammates'
                                         review comments on PRs the loop opened go back to Harry, and the loop pushes
                                         to the same PR and posts his replies after their PASS (off when missing)
+  auto-close                            while it holds exactly "on", each Map round starts the closer, which closes a
+                                        passed task once scripts prove its merge, CI and after-merge checks, and never
+                                        one with a PR follow-up still open (off when missing)
   patrol/shadow                         while it is here, the patrol and Gringotts only write files (shadow mode)
   patrol/<job>/                         the Map's snapshot and rows, lineups, keeper's watches, scoreboards, bot passes,
                                         and in shadow mode what a follow-up would have routed (patrol/followup/)
@@ -151,13 +167,13 @@ The CLI reads two kinds of file:
 - Text is limited by field. NUL bytes are rejected. Other control characters are stripped, except newline and tab in multi-line fields. Unicode format characters (category Cf, such as zero width spaces and bidi controls) are stripped too, so they cannot hide a word from the volatility lint or the scrubber. Owl bodies are the one exception: they keep these characters, and CLI output escapes them. Titles, subjects and summaries are single line.
 - FTS5 queries are rebuilt from quoted phrase tokens, so search syntax in user text has no effect.
 - Extracts and key points are scrubbed before storage. Private key blocks, URL credentials, JWTs, `Authorization` and bearer headers, GitHub, Slack and Anthropic or OpenAI style tokens, `key=value` secrets (password, pwd, secret, token, api_key and similar), AWS key ids, emails, IP addresses and long hex strings become typed placeholders such as `[email]`.
-- Close tokens are returned once. Only their sha256 is stored. They are single use, expire, and are consumed in the same transaction as the close. A database trigger refuses `close_reason = 'complete'` unless the task has a consumed token or its parent closed as complete.
+- Close tokens are returned once. Only their sha256 is stored. They are single use, expire, and are consumed in the same transaction as the close. A database trigger refuses `close_reason = 'complete'` unless the task has a consumed token, its parent closed as complete, or it has a `task_closures` row (a proven close).
 - A review must cite the task that recorded the commit. Families are always looked up from the database. A PASS needs a reviewer from `claude`, `codex` or `human` whose family differs from the author's. A non-human reviewer also needs a review request from the author's task.
 - A fact's `lookup` is the command or URL that fetches the live value. It is stored as single line text and never executed. A lookup that the scrubber would change (a token, a password, URL credentials, an email, an IP address or a hex string of 32 or more characters) is refused, and the error names what matched. A lookup must also be either an `https` URL with no credentials and no quotes, spaces, `$`, `;`, `|`, `<`, `>`, backticks or parentheses, or a `gh` or `bk` command whose words use only letters, digits and `._/:=@,-`. So no shell syntax can be stored. Anything that later runs a lookup must still treat it as untrusted text, check that the subcommand only reads, and never pass it through a shell.
 - CLI output is `json.dumps(ensure_ascii=True)`. List views never include owl bodies.
 - Close tokens and owl bodies never travel on argv. They come from stdin only.
 
-## Schema summary (version 11)
+## Schema summary (version 12)
 
 All tables are STRICT when SQLite supports it. Timestamps are integer unix seconds.
 
@@ -193,6 +209,7 @@ All tables are STRICT when SQLite supports it. Timestamps are integer unix secon
 | `pr_followup_items` | What a follow-up asks the build desk to answer, labelled T1, T2 and on: a review thread (its id, replied to at its first comment), a review or a conversation comment, with its exact link on the PR and, for the last two, a quote taken from the comment scrubbed whole and kept only when it holds no link and passes every reply rule. Written only while the follow-up is routing, never changed. |
 | `pr_comments` | Every GitHub comment a follow-up handled, keyed by repo, kind and id, so none is routed twice. Written only with an item of a routing follow-up of the same task, never changed. |
 | `pr_replies` | Every reply, planned in the transaction that passes its follow-up on to the push or the posting, with its mark (`FIXED` or `PUSHBACK`) and exact text. A reply moves `planned`, then `posting` (only while its follow-up posts), then `posted` with its GitHub id, `failed` or `unknown`, and never back. |
+| `task_closures` | A proven close (version 12): one row per task the closer closed, with the reviewed commit, the merge commit, how it landed (`pr` with its number, or `ancestry`), CI on the merge commit (`green` with its check count, or `none`), the after-merge command and written check counts, the judge desk, and the office close evidence's path and sha256. Kind `proven` for the task itself, `parent` for the go task closed with it on the same proof. Triggers hold every writer, raw SQL included: a row lands only on an open task; a `proven` row needs a task awaiting close whose commit it recorded and whose latest review of that commit is a PASS from the other family that a review round holds, and no PR follow-up of the task still open; a judge is of the other family; a `parent` row follows its proven child closed complete on the same proof, and only on a task a go registered. Rows are never changed or deleted. Only `pensieve.close_proven` writes them, and nothing in the CLI reaches it. |
 | `model_lines` | How you filed a model name: `frontier`, `workhorse`, `fast` or `ignore`. The latest row per name wins. Immutable. |
 | `model_catalog` | The model names each family offered at Ollivander's last look, with whether the catalog listed each, the tier it was filed under then and when it retires. Each look gets the family's next look number, and the latest look is the one with the highest number, so two looks in the same second never mix. A row's look number only moves forward. `castle desk model --approve`, a pin and a trial revert check against the latest look. |
 | `desk_models` | Each Claude and Codex desk's role need, current model and effort, pin, pending pick and trial state, including how the last trial ended (`trial_end`: `passed`, `pinned`, `held`, `revert_blocked` or `reverted`). The `desks` table itself stays immutable. |
@@ -213,6 +230,7 @@ Migration 1 creates the base tables. The later ones:
 - Migration 9 adds `task_specs` and its triggers.
 - Migration 10 adds `auto_patches` and its triggers.
 - Migration 11 adds the PR follow-up tables and their triggers, `review_rounds.followup_id`, `round_allowances.followup_id`, and the triggers that let a passed task back to active only to start a follow-up.
+- Migration 12 adds `task_closures` and its triggers, one of which refuses a proven close while a PR follow-up of the task is open, and lets the complete rule take a proven close.
 
 Each column is added only while it is missing, so running a migration again changes nothing.
 
@@ -229,7 +247,7 @@ Every function takes a connection from `db.connect(path)` as its first argument.
 - `hogwarts.db`: `connect(path, create=True)`, `connect_readonly(path)`, `migrate(conn)`, `pending_statements(conn, statements)`, `schema_version(conn)`, `transaction(conn)`, `snapshot(conn)`, `doctor(path, code_root=None)`, `stray_bytecode(root)`, `DEFAULT_DB`.
 - `hogwarts.pensieve`
   - Desks: `add_desk`, `get_desk`, `list_desks` (with `many_tasks`), `allow_many_tasks(desk)`, `takes_many_tasks(desk)`, `blocking_task(desk)`.
-  - Tasks: `create_task(desk, title, intent_path=None, parent_task_id=None, request_id=None, session_id=None, worktree=None, task_id=None)`, `record_spec(task, repo_dir, branch, base, intent_sha256)`, `task_spec(task)`, `start_task`, `mark_awaiting_close(task, repo=None, sha=None)`, `record_commit`, `get_commit`, `task_commits`, `check_review_branch(branch)`, `set_review_branch(task, branch)`, `close_task`, `closed_ancestors`, `get_task`, `list_tasks(desk=None, status=None, open_only=False)`.
+  - Tasks: `create_task(desk, title, intent_path=None, parent_task_id=None, request_id=None, session_id=None, worktree=None, task_id=None)`, `record_spec(task, repo_dir, branch, base, intent_sha256)`, `task_spec(task)`, `start_task`, `mark_awaiting_close(task, repo=None, sha=None)`, `record_commit`, `get_commit`, `task_commits`, `check_review_branch(branch)`, `set_review_branch(task, branch)`, `close_task`, `close_proven(task, proof, summary, dedupe_key, parent_task_id=None)`, `task_closure(task)`, `open_descendants(task)`, `closed_ancestors`, `get_task`, `list_tasks(desk=None, status=None, open_only=False)`.
   - Auto-portrait nights: `arm_auto_patch(date, owl_id, before, before_sha256)`, `snapshot_auto_patch(date, sha256, ops_json, order_ids, held_ids, unfit_ids)`, `end_auto_patch(date, state, outcome, applied_ids=None)`, and read only `auto_patch(date)`, `open_auto_patches()` and `recent_auto_patches(limit=30)`, each row with its owl's `acked_at` as `owl_acked_at`.
   - Events: `add_event`, `drain(max_chars=1500)`, `ack(event_id)`, `events_with_key_prefix(prefix)` (read only, a plain text match on the dedupe key).
   - Memory: `record_session`, `get_session`, `add_extract`, `extracts_between(since, until, limit=2000)` (read only, with each session's desk and project), `add_keypoint`, `find(query, limit)`, `fts_query`, `fts_phrases`, `scrub(text)`.
@@ -263,6 +281,7 @@ Every function takes a connection from `db.connect(path)` as its first argument.
   - Running means a launch for the task or one of its rounds' reviewer tasks has no usage yet and started within `running_window`.
   - The latest round says where a task stands even when it does not count. One with no verdict is `in review` while its run is going. It is `review died` once none is, or once its run ended without a verdict, so the task needs its review run again.
   - `needs_allowance(task, max_rounds=3)` says whether a task's next round waits for `castle task allow-round`.
+- `close_proven` closes a task awaiting close on the closer's proof, with no token, in one transaction: its `proven` row and its close, then, with `parent_task_id`, the go task's `parent` row and its close, then one headmaster event. It refuses, changing nothing, a task with open work under it or a PR follow-up still open, a parent that is not the task's own, is closed, has no go spec or has other open work, and a proof with a field of the wrong shape. No close cascades to another task.
 - `close_task(task, "complete", token)` needs a valid close token. `abandoned` and `superseded` need none. Closing a task also closes every open descendant:
   - a started descendant closes `complete` only when its parent closed `complete`;
   - every other descendant, including any queued one, closes `superseded`.

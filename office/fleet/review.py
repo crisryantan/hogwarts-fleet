@@ -87,6 +87,12 @@ step that had not begun, nor a decision for Ryan. Otherwise what every review do
 happened, so it is never started again by itself: Ryan hears so once. A review Ryan runs with fleet review stops at
 its verdict, as it always has.
 
+Every round that runs records, before its reviewer starts, the sha256 of the TASK.md its verify read (verify keeps
+those exact bytes in the office). The closer (fleet/closer.py) acts only when that digest is the TASK.md you
+approved: your go's for a build, and for your own task the task-md-approved file fleet review own writes once, with
+O_EXCL, right after it writes TASK.md. The review request asks the reviewer to list after-merge criteria as
+AC-n AFTER MERGE and never to hold a PASS back for one.
+
 A build desk's review is refused before anything changes when it would read exactly what the task's last verdict
 judged: HEAD is that round's commit and the desk's latest handoff is the same text. Each round that runs records,
 in the office reviews folder, the commit and the sha256 of the handoff it was opened for. A round with no readable
@@ -142,6 +148,7 @@ its first round opens is closed as abandoned, unless its commit was already reco
 from __future__ import annotations
 
 import contextlib
+import errno
 import hashlib
 import json
 import os
@@ -158,6 +165,8 @@ from fleet import common, config, followup, gitops, owl_post, push, run_desk, sa
 from fleet.safefs import FleetError
 
 REVIEW_HEADER = re.compile(r"REVIEW (tk_[0-9a-f]{16}) @ ([0-9a-f]{40})")
+# The first line of an after-merge judgement (fleet/closer.py), which a pre-push review block never includes.
+AFTER_MERGE_HEADER = re.compile(r"AFTER-MERGE (tk_[0-9a-f]{16}) @ ([0-9a-f]{40})")
 VERDICT_LINE = re.compile(r"VERDICT: (PASS|CHANGES|HEADMASTER)")
 SECTION_HEADER = re.compile(r"[A-Z][A-Z -]{2,40}(?: \(.*\))?")
 COMMIT_SUBJECT_MAX = 100
@@ -180,12 +189,15 @@ class Unchanged(FleetError):
 
 
 def review_block(text: str, task_id: str, sha: str) -> tuple:
-    """(verdict, block) from the last REVIEW block, which must name this task and this sha."""
+    """(verdict, block) from the last REVIEW block, which must name this task and this sha. The block ends where an
+    after-merge block starts, so an after-merge judgement never stands in for a pre-push review."""
     lines = text.splitlines()
     starts = [index for index, line in enumerate(lines) if REVIEW_HEADER.fullmatch(line.strip())]
     if not starts:
         raise FleetError("the reviewer's output has no REVIEW block")
     block = lines[starts[-1]:]
+    block = block[:next((index for index, line in enumerate(block) if AFTER_MERGE_HEADER.fullmatch(line.strip())),
+                        len(block))]
     header = REVIEW_HEADER.fullmatch(block[0].strip())
     if (header.group(1), header.group(2)) != (task_id, sha):
         raise FleetError("the reviewer's REVIEW block names a different task or commit")
@@ -203,11 +215,52 @@ def reviewer_output(desk: str, family: str, run_id: str) -> str:
             raw = safefs.read_regular(fd, f"{run_id}-last-message.md", REVIEW_MAX_BYTES, "review output")
             return raw.decode("utf-8", "replace")
         # The tail, like run_desk: stream-json keeps every tool result, and the result event comes last.
-        raw, _ = safefs.read_range(fd, f"{run_id}.out", None, run_desk.RUN_OUTPUT_MAX_BYTES, "review output")
-    result = run_desk.claude_result(raw).get("result")
+        raw, whole = run_desk.read_run_output(fd, f"{run_id}.out", "review output")
+    found = run_desk.claude_result(raw)
+    if not found and not whole:
+        raise FleetError("the reviewer's run output is too large to find its result event whole")
+    result = found.get("result")
     if not isinstance(result, str):
         raise FleetError("the reviewer's run output has no result text")
     return result
+
+
+def run_output(desk: str, family: str, run_id: str) -> tuple:
+    """(state, text) of a reviewer run's final text, for a reader that must never take a failed read as a run that
+    said nothing: "ok" with the text; "none" when the run's output was read whole and holds no final text (Codex wrote
+    no last message, or Claude's stream has no result event); "unreadable" when the read failed and is worth a retry;
+    "malformed" when the file is not a plain file of ours or is too large, when Claude's output is larger than the
+    most run_desk reads of it and no whole result event is in what was read (run_desk.read_run_output), so its result
+    may have begun before that, or when Claude's output file, which every launch makes before its process starts, is
+    gone, which no retry mends."""
+    run_id = safefs.check_component(run_id)
+    name = f"{run_id}-last-message.md" if family == "codex" else f"{run_id}.out"
+    whole = True
+    try:
+        with safefs.opened_dir(config.OFFICE_ROOT, "runs", desk) as fd:
+            if family == "codex":
+                raw = safefs.read_regular(fd, name, REVIEW_MAX_BYTES, "review output")
+            else:
+                raw, whole = run_desk.read_run_output(fd, name, "review output")
+    except safefs.Missing:
+        return ("none" if family == "codex" and _runs_folder_there(desk) else "malformed"), None
+    except (FleetError, OSError) as exc:
+        return failed_read(exc), None
+    if family == "codex":
+        return "ok", raw.decode("utf-8", "replace")
+    found = run_desk.claude_result(raw)
+    if not found and not whole:
+        return "malformed", None
+    result = found.get("result")
+    return ("ok", result) if isinstance(result, str) else ("none", None)
+
+
+def _runs_folder_there(desk: str) -> bool:
+    try:
+        with safefs.opened_dir(config.OFFICE_ROOT, "runs", desk):
+            return True
+    except (FleetError, OSError):
+        return False
 
 
 def commit_message(handoff: str, check_words: bool = True) -> tuple:
@@ -297,32 +350,74 @@ def _round_record_name(request_id: str) -> str:
     return f"round-{ids.check('request', request_id)}.json"
 
 
-def record_round_inputs(task_id: str, request_id: str, sha: str, handoff_sha256: Optional[str]) -> None:
-    """Keep, in the office where no desk can write, the commit and the handoff a round was opened for. Written
-    whole through a temp file and a rename, so a reader sees the old file or the new one, never part of one."""
+def record_round_inputs(task_id: str, request_id: str, sha: str, handoff_sha256: Optional[str],
+                        task_md_sha256: Optional[str] = None) -> None:
+    """Keep, in the office where no desk can write, the commit, the handoff and the TASK.md digest a round was opened
+    for. Written whole through a temp file and a rename, so a reader sees the old file or the new one, never part of
+    one."""
     data = {"request_id": request_id, "sha": ids.check("sha", sha), "handoff_sha256": handoff_sha256}
+    if task_md_sha256 is not None:
+        data["task_md_sha256"] = ids.check("sha256", task_md_sha256)
     raw = (json.dumps(data, ensure_ascii=True, sort_keys=True) + "\n").encode("ascii")
     with safefs.opened_dir(config.OFFICE_ROOT, "reviews", ids.check("task", task_id), create=True) as fd:
         _replace(fd, _round_record_name(request_id), raw)
 
 
-def round_inputs(task_id: str, request_id: str) -> Optional[dict]:
-    """What a round was opened to review, {sha, handoff_sha256}, or None when its record is missing or cannot be
-    read whole. None only ever lets a review through, as it did before records were kept."""
-    try:
-        with safefs.opened_dir(config.OFFICE_ROOT, "reviews", ids.check("task", task_id)) as fd:
-            raw = safefs.read_regular(fd, _round_record_name(request_id), ROUND_RECORD_MAX_BYTES, "round record")
-        data = common.strict_json(raw)
-    except (FleetError, UnicodeDecodeError, ValueError):
-        return None
-    if not isinstance(data, dict) or set(data) != {"request_id", "sha", "handoff_sha256"} \
+ROUND_KEYS = {"request_id", "sha", "handoff_sha256"}
+
+
+def _round_data(data: object, request_id: str) -> Optional[dict]:
+    """A round record's fields when every one has its shape, else None. The TASK.md digest is optional, since
+    rounds from before it was kept have none."""
+    if not isinstance(data, dict) or not ROUND_KEYS <= set(data) <= ROUND_KEYS | {"task_md_sha256"} \
             or data["request_id"] != request_id or not isinstance(data["sha"], str) \
             or gitops.SHA.fullmatch(data["sha"]) is None:
         return None
-    digest = data["handoff_sha256"]
-    if digest is not None and (not isinstance(digest, str) or SHA256.fullmatch(digest) is None):
+    for key in ("handoff_sha256", "task_md_sha256"):
+        digest = data.get(key)
+        if digest is not None and (not isinstance(digest, str) or SHA256.fullmatch(digest) is None):
+            return None
+    if "task_md_sha256" in data and data["task_md_sha256"] is None:
         return None
-    return {"sha": data["sha"], "handoff_sha256": digest}
+    return {"sha": data["sha"], "handoff_sha256": data["handoff_sha256"], "task_md_sha256": data.get("task_md_sha256")}
+
+
+def failed_read(exc: BaseException) -> str:
+    """How a failed office read counts for a reader that must not take it as nothing: "unreadable" when the read
+    itself failed (an I/O error, a busy lock), worth a retry, or "malformed" when the file is there but is not a
+    plain file of ours (a link, a second hard link, another owner, too large), which no retry mends."""
+    if isinstance(exc, safefs.Unsafe):
+        cause = exc.__cause__
+        if isinstance(cause, OSError) and cause.errno not in (errno.ELOOP, errno.ENOTDIR):
+            return "unreadable"
+        return "malformed"
+    return "unreadable"
+
+
+def round_inputs(task_id: str, request_id: str) -> Optional[dict]:
+    """What a round was opened to review, {sha, handoff_sha256, task_md_sha256}, or None when its record is missing
+    or cannot be read whole. None only ever lets a review through, as it did before records were kept."""
+    state, data = round_record(task_id, request_id)
+    return data if state == "ok" else None
+
+
+def round_record(task_id: str, request_id: str) -> tuple:
+    """(state, data) of a round's record, for a reader that must tell a missing record from a failed read: "missing"
+    (no file), "unreadable" (the read failed, worth a retry), "malformed" (not strict JSON, or a key or value of the
+    wrong shape) or "ok" with {sha, handoff_sha256, task_md_sha256}, the digest None for a round from before it was
+    kept."""
+    try:
+        with safefs.opened_dir(config.OFFICE_ROOT, "reviews", ids.check("task", task_id)) as fd:
+            raw = safefs.read_regular(fd, _round_record_name(request_id), ROUND_RECORD_MAX_BYTES, "round record")
+    except safefs.Missing:
+        return "missing", None
+    except (FleetError, OSError) as exc:
+        return failed_read(exc), None
+    try:
+        data = _round_data(common.strict_json(raw), request_id)
+    except (UnicodeDecodeError, ValueError):
+        return "malformed", None
+    return ("malformed", None) if data is None else ("ok", data)
 
 
 def refuse_unchanged(conn, task: dict, sha: str, handoff: Optional[str]) -> None:
@@ -381,8 +476,14 @@ def _request_body(task: dict, sha: str, record: dict, holder_id: str, handoff: b
         lines.append(f"Author's handoff, context only: {config.CASTLE_ROOT}/tasks/{holder_id}/handoff.md")
     lines += list(followup_lines or [])
     lines += ["TASK.md is at the task_md path in this owl.",
+              AFTER_MERGE_REQUEST_LINE,
               f"End with your review block. Its first line is exactly: REVIEW {task['id']} @ {sha}"]
     return "\n".join(lines) + "\n"
+
+
+AFTER_MERGE_REQUEST_LINE = ("Criteria marked after merge are judged after the merge, not in this review: list each as"
+                            " AC-n AFTER MERGE, and never hold a PASS back for one. A finding that an after-merge"
+                            " check cannot prove its criterion is still a finding.")
 
 
 def _deliver(conn, owl_id: str, recipient: str, body: str) -> None:
@@ -612,7 +713,9 @@ def run_review(conn, task: dict, record: dict, sha: str, holder_id: str, handoff
         raise FleetError("this author's family has no reviewer")
     if not run_desk.is_enabled(reviewer):
         raise FleetError(f"{reviewer} is not enabled, so no review can run")
-    evidence = verify.verify(conn, task["id"])
+    # Each check's process inherits the review lock, so a check still running after this process is killed keeps
+    # every other review and verify of the task off the worktree until it ends.
+    evidence = verify.verify(conn, task["id"], keep_fds=(task_lock_fd,))
     if evidence["sha"] != sha:
         raise FleetError("HEAD moved before the review started; run the review again")
     pensieve.record_commit(conn, task["id"], record["repo"], sha)
@@ -632,9 +735,11 @@ def run_review(conn, task: dict, record: dict, sha: str, holder_id: str, handoff
             return _queued(conn, task, reviewer, sha, body, now, result, round_followup)
         opened = _open_and_deliver(conn, task, reviewer, sha, body, now, slot.index, round_followup)
         request_id, reviewer_task_id, owl_id = opened["request"]["id"], opened["task"]["id"], opened["owl"]["id"]
+        # Before the reviewer starts, for every round: a round whose record cannot be written never runs, and stays
+        # waiting. It names the TASK.md digest this round's verify read, which the closer checks against your approval.
+        record_round_inputs(task["id"], request_id, sha, None if inputs is None else inputs["handoff_sha256"],
+                            evidence["task_md_sha256"])
         if inputs is not None:
-            # Before the reviewer starts: a round whose record cannot be written never runs, and stays waiting.
-            record_round_inputs(task["id"], request_id, sha, inputs["handoff_sha256"])
             if inputs.get("handoff_owl") is not None:
                 # The review loop's own round: what follows its verdict is tracked from here (see _after_verdict).
                 owl_post.write_after(task["id"], request_id, inputs["handoff_owl"], "review")
@@ -1170,17 +1275,55 @@ def main(argv: Optional[list] = None) -> int:
         conn.close()
 
 
+APPROVED_FILE = "task-md-approved"
+APPROVED_MAX_BYTES = 128
+
+
 def _write_own_task_md(task_id: str, title: str, intent: str) -> str:
-    """TASK.md for an own-session review. Lines shaped like acceptance criteria go under that heading."""
+    """TASK.md for an own-session review. Lines shaped like acceptance criteria, before-merge or after-merge, go under
+    that heading. Your fleet review own is this TASK.md's approval: right after it is written, the exact bytes are
+    kept in the office (verify.keep_task_md) and their sha256 goes in reviews/<task>/task-md-approved, made once with
+    O_EXCL and never replaced, which the closer checks every round's TASK.md against. A failure to keep either refuses
+    the review before its task exists."""
     lines = intent.strip().splitlines()
     criteria = [line.strip() for line in lines if verify.AC_LINE.fullmatch(line.strip())]
     words = "\n".join(line for line in lines if line.strip() not in criteria).strip() or title
     checks = "\n".join(criteria) if criteria else "None given. The reviewer judges the diff against the Intent."
     text = (f"# {task_id} {title}\n\n## Intent\n{words}\n\n## Acceptance criteria\n{checks}\n\n## Spec\n"
             "A commit from one of Ryan's own Claude sessions, reviewed by the other model family.\n")
+    raw = text.encode("utf-8")
     with safefs.opened_dir(config.CASTLE_ROOT, "tasks", task_id, create=True) as fd:
-        safefs.write_new(fd, "TASK.md", text.encode("utf-8"))
+        safefs.write_new(fd, "TASK.md", raw)
+    try:
+        digest = verify.keep_task_md(task_id, raw)
+        with safefs.opened_dir(config.OFFICE_ROOT, "reviews", task_id, create=True) as fd:
+            approved = safefs.create_new(fd, APPROVED_FILE)
+            try:
+                safefs.write_all(approved, (digest + "\n").encode("ascii"))
+                os.fsync(approved)
+            finally:
+                os.close(approved)
+    except (FleetError, OSError) as exc:
+        reason = type(exc).__name__ if isinstance(exc, OSError) else common.scrubbed_line(exc, 200)
+        raise FleetError(f"the TASK.md you approved could not be kept in the office ({reason}), so no review"
+                         " started") from None
     return f"{ids.TASKS_ROOT}/{task_id}/TASK.md"
+
+
+def approved_digest(task_id: str) -> tuple:
+    """(state, digest) of the approval fleet review own wrote for your own task: "missing" (a task from before
+    approvals were kept), "unreadable" (the read failed, worth a retry), "malformed" (anything but 64 lowercase hex and
+    a newline) or "ok" with the digest."""
+    try:
+        with safefs.opened_dir(config.OFFICE_ROOT, "reviews", ids.check("task", task_id)) as fd:
+            raw = safefs.read_regular(fd, APPROVED_FILE, APPROVED_MAX_BYTES, "TASK.md approval")
+    except safefs.Missing:
+        return "missing", None
+    except (FleetError, OSError) as exc:
+        return failed_read(exc), None
+    if len(raw) != 65 or not raw.endswith(b"\n") or SHA256.fullmatch(raw[:64].decode("ascii", "replace")) is None:
+        return "malformed", None
+    return "ok", raw[:64].decode("ascii")
 
 
 def review_own(conn, repo_dir: str, title: Optional[str] = None, intent: Optional[str] = None,

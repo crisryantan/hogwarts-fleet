@@ -101,6 +101,8 @@ Paste the token from the first command into the second when it waits for stdin. 
 
 A task in a PR follow-up (step 6b of (g)) is active again until its follow-up passes, so `Mischief managed` waits; close it from your terminal as above if you are done with it, which also stops its follow-up.
 
+Closing by hand stays exactly as it is. Auto-close is the other way, off by default: while the office file `~/.hogwarts/auto-close` holds `on`, the closer closes a passed task after its merge, once scripts prove the reviewed commit landed, CI on the merge commit is green and every after-merge check holds. It closes through its own store call, which nothing in `castle` reaches, and you hear about every close. It never closes a task whose PR follow-up is still open. Step 7 of (g) has the details.
+
 Headmaster events stay in the digest and on each prompt until you ack them with `castle event ack <id>`.
 
 ## (e) Codex hooks: the push gate for your own Codex sessions
@@ -127,7 +129,7 @@ Every `fleet` command prints one JSON object with `"ok": true` or `"ok": false` 
 
 `--repo-dir` below is the main checkout of your repo: a folder inside your home folder, outside the office and the castle, with its own `.git` folder and no symlink on the way.
 
-1. McGonagall writes TASK.md and you type `go <task-id>` in her session, as in (d). The hook registers her task, routes it to Harry, gives his task its worktree on the Spec's new branch and starts his run if Harry is enabled. Then carry on at step 4. Each acceptance check is either one backtick command and nothing else, which verify runs, or plain words with no backticks, which the reviewer judges. A check that mixes a backtick command with other text is marked malformed in the evidence and never runs.
+1. McGonagall writes TASK.md and you type `go <task-id>` in her session, as in (d). The hook registers her task, routes it to Harry, gives his task its worktree on the Spec's new branch and starts his run if Harry is enabled. Then carry on at step 4. Each acceptance check is either one backtick command and nothing else, which verify runs, or plain words with no backticks, which the reviewer judges. A check that mixes a backtick command with other text is marked malformed in the evidence and never runs. A criterion labelled `| after merge:` instead of `| check:` follows the same rule but is checked after the merge: verify lists it and never runs it, and the reviewer never holds a PASS back for one. Any other label, anything shaped like a second label after the first (a pipe, a few words and a colon, outside the backticks), or one AC id on two lines is malformed.
 2. Steps 2 and 3 are the fallback, for a go the hook couldn't confirm, and for a build McGonagall routes by owl. You register her task by hand as in (d), and she posts a request to Harry. The Owl Post holds it and you get a headmaster event: a build task is waiting for its worktree.
 3. Give Harry's task a worktree on a new branch. If Harry is enabled, his run starts. Under a TASK.md a go started, it takes only the repo, branch and base the go stored:
 
@@ -172,7 +174,7 @@ rm ~/.hogwarts/auto-draft-pr
 
    - Who counts as a teammate: someone GitHub lists as `OWNER`, `MEMBER` or `COLLABORATOR` on the repo, never a bot, never the PR's author, and never an account in `FOLLOWUP_IGNORED_LOGINS`. Review thread comments, review bodies that comment or ask for changes, and conversation comments all count. A thread comment you already answered by hand in that thread doesn't.
    - What waits: a comment from before the PR was bound or written while follow-ups were not live, a PR whose newest comment is under five minutes old (so one review goes as one follow-up), a review of the task still running, and anything only you can fix (Harry or Hermione off or at their cap, a dirty worktree, gh signed in as another account, a PR whose head moved, or a PR too big to read whole), which you hear about once a day.
-   - What happens: the comments are recorded as handled, Harry's fix request is stored and his task goes back to active, in one store transaction. The GitHub text goes to `followup-<n>.md` next to TASK.md, scrubbed and quoted line by line as data, and Harry starts on that request. His handoff carries a `THREADS (<follow-up id>)` section marking every item FIXED (he changed the code) or PUSHBACK (an answer, a decline or his evidence), each with its one-line reply. Hermione reviews his fix and his replies as usual, with two rounds of her own for each follow-up, apart from the task's three.
+   - What happens: the comments are recorded as handled, Harry's fix request is stored and his task goes back to active, in one store transaction. The GitHub text goes to `followup-<n>.md` next to TASK.md, made plain (so no invisible or wide character hides a credential) and scrubbed, then quoted line by line as data, and Harry starts on that request. His handoff carries a `THREADS (<follow-up id>)` section marking every item FIXED (he changed the code) or PUSHBACK (an answer, a decline or his evidence), each with its one-line reply. Hermione reviews his fix and his replies as usual, with two rounds of her own for each follow-up, apart from the task's three.
    - On PASS: every reply is checked again (one line of plain ASCII, no em dash, no fleet word, nothing shaped like a credential, no mention, no link outside the repo, no markup such as backticks, asterisks, tildes or underscores around a word), the PR is read again, and the reviewed commit is pushed to the same branch, never forced and never as a new PR, when it is new. Then each reply goes out once with your `gh` login: in its review thread, or as a PR comment quoting the review or comment it answers. The quote is the comment's first line, scrubbed with the whole comment before it is cut, and only when that line is plain text with no link; otherwise the reply links to the comment. Before every reply the PR is read again: if it closed, its head moved, its branch changed or `gh` is signed in as someone else, no more replies go out. You get one headmaster event naming the PR, the commit and how many replies went out in your name. Any stop is one headmaster event too, naming the step and what to do next. Nothing resolves a thread, requests a review, marks the PR ready or merges.
    - After a kill: the push is read back from the remote branch and each reply from the PR, so nothing is pushed or posted twice; what may or may not have happened is told once. A reply that GitHub refused, that came back from another login or that may or may not be on the PR is recorded in the same store transaction that stops the follow-up, and no reply ever goes out after one that did not end posted.
 
@@ -183,15 +185,40 @@ echo on > ~/.hogwarts/pr-followup
 rm ~/.hogwarts/pr-followup
 ```
 
-   Replies go out only while `gh` is signed in as the account in `GITHUB_ACCOUNT`, checked before the push, before every reply and on every answer. A reply that names a teammate whose name is also a fleet word is refused, so replies leave names out. Switching off stops routing at once and stops the next push or reply; an open follow-up is still tidied up by the next Map round, even one that cannot read GitHub (a cut-off routing undone, a closed task's follow-up ended). Such a round never routes anything. In shadow mode with the switch on, each round writes `patrol/followup/<stamp>.md`, counting the last seven days of comments as if follow-ups had been live (`FOLLOWUP_SHADOW_WINDOW_SECONDS`); it opens no live period, so going live later routes only comments written after that. `castle followup show <harry-task-id>` lists a follow-up's comments and replies. The store moves to version 11 when the updated office first opens it, so going back to an older office means restoring a backup.
+   Replies go out only while `gh` is signed in as the account in `GITHUB_ACCOUNT`, checked before the push, before every reply and on every answer. A reply that names a teammate whose name is also a fleet word is refused, so replies leave names out. Switching off stops routing at once and stops the next push or reply; an open follow-up is still tidied up by the next Map round, even one that cannot read GitHub (a cut-off routing undone, a closed task's follow-up ended). Such a round never routes anything. In shadow mode with the switch on, each round writes `patrol/followup/<stamp>.md`, counting the last seven days of comments as if follow-ups had been live (`FOLLOWUP_SHADOW_WINDOW_SECONDS`); it opens no live period, so going live later routes only comments written after that. `castle followup show <harry-task-id>` lists a follow-up's comments and replies. Its tables come with store version 11, so going back to an office from before it means restoring a backup.
 
-7. For a commit from one of your own Claude sessions, Moody reviews it in a detached worktree. On PASS, that session's `git push` gets through the gate. For a fix round, pass `--task <id>` instead of `--title`:
+7. After the merge. While `~/.hogwarts/auto-close` holds `on`, each Map round starts the closer, which takes each task awaiting close after a round PASS: a build your go registered, or a task from your own sessions. A build registered by hand, or a PASS no round holds, stays yours to close. For each one it proves, in order:
+
+   - that the TASK.md the passing round read is the one you approved: your go's for a build, the TASK.md `fleet review own` wrote for your own task. An edit after that, a scope change included, sends the task to a hand close;
+   - that the reviewed commit landed: one merged PR from the task's branch into its base at the reviewed commit (squash and rebase merges included), or the reviewed commit on the freshly fetched base. A PR from the branch merged at any other head stops it;
+   - that CI on the merge commit is green, read again on every attempt, and counted only 30 minutes after the merge was first seen. A red stops it at once;
+   - that every after-merge command exits 0, run in a fresh detached worktree at the merge commit under the same sandbox rule as verify, with scrubbed evidence written next to TASK.md. Right before each command starts, the closer reads auto-close, Ollivander's stop and the update marker once more while it holds Ollivander's update lock, so switching off or a stop part way starts no later command, and each command that ended keeps its result. A command runs in its own process group, which ends with it, and holds the task's lock and Ollivander's update lock for as long as it runs, so no later pass touches its worktree and no CLI update replaces a binary under it. Each sandboxed command gets three tries; each of your own sessions' commands, which run without the sandbox, is started at most once per merge commit, and one cut short is never run again by the closer;
+   - that every written after-merge check holds, judged by the reviewer of the other family from a scrubbed pack in its own inbox, never from the castle TASK.md, with the verdict read from its own run output and decided by the script.
+
+   Then it closes the task, and McGonagall's go task with it when nothing else is open under it, and you get one headmaster event naming the PR or commit and what proved each check. Anything it can't prove stops that task with one headmaster event, and it never tries that task again by itself. A read that keeps failing tells you once after two hours, and a wait that keeps going (CI pending, open work, a busy judge, a PR merged into another base) once after a day. To try a stopped task once more, in the foreground:
+
+```
+~/.hogwarts/bin/fleet close <task-id>
+```
+
+   It keeps every result already proven, so it never runs the judge again for a merge commit with a kept verdict, and a red, a CHANGES verdict or a merge at another head stops it again. The closer never writes to GitHub: it reads it through the patrol's read-only queries. Switch it on and off from your terminal:
+
+```
+echo on > ~/.hogwarts/auto-close
+rm ~/.hogwarts/auto-close
+```
+
+   Like the draft PR opt-in, it counts only while it is a plain file you own that no one else can write, holding exactly `on`.
+
+   A task whose PR follow-up (6b) has not ended is never one of its tasks: its replies may still be on their way, so the closer skips it, `fleet close` refuses it and the store refuses the close. Once the follow-up ends, the closer takes the task like any other, which needs its newest round to be a PASS and that commit to have landed. The store adds its `task_closures` table, version 12, the first time the updated office opens it, so going back to older code means restoring a Gringotts backup.
+
+8. For a commit from one of your own Claude sessions, Moody reviews it in a detached worktree. On PASS, that session's `git push` gets through the gate. For a fix round, pass `--task <id>` instead of `--title`:
 
 ```
 ~/.hogwarts/bin/fleet review own --repo-dir <path-to-your-checkout> --title "<what the change does>"
 ```
 
-8. To rerun the acceptance checks on their own: `~/.hogwarts/bin/fleet verify <task-id>`. Each check runs inside a Codex permission profile with no network and no office, through `codex sandbox`, which runs no model.
+9. To rerun the acceptance checks on their own: `~/.hogwarts/bin/fleet verify <task-id>`. Each check runs inside a Codex permission profile with no network and no office, through `codex sandbox`, which runs no model. Each runs in its own process group, which ends with it, and holds the task's review lock while it runs, so no review starts on the worktree under a check that is still going.
 
 Moody's reviews send the diff to OpenAI, so `fleet review own` runs only once Moody is enabled, after your organization approves Codex for its source code.
 

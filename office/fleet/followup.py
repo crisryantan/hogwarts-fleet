@@ -12,7 +12,7 @@ opened for a passed build task (the store's binding, hogwarts.followups), it rea
 read-only query, picks the comments from people with write access that the store has not handled (qualify), and opens
 one follow-up: the comments are recorded as handled, the fix request owl from the Map to the build desk is stored and
 the task goes back to active, in one store transaction. The GitHub text goes to a threads file next to TASK.md,
-scrubbed whole and quoted line by line as data; the owl holds only script text. The build desk starts on that owl
+normalized and scrubbed whole and quoted line by line as data; the owl holds only script text. The build desk starts on that owl
 through worktree.build, the path a fix round uses. In shadow mode with the switch on, a round only writes what it would
 route to patrol/followup/, judging comments inside a simulated window (shadow_window) that never opens a live period.
 A round that cannot read GitHub whole still does the housekeeping (store_round), and routes nothing.
@@ -159,24 +159,29 @@ def _replace(dir_fd: int, name: str, data: bytes) -> None:
     safefs.move(dir_fd, temp, dir_fd, name)
 
 
+def _github_text(text: object) -> str:
+    """GitHub text made plain and scrubbed whole (common.untrusted_text: no invisible or wide character can hide a
+    credential from the scrub), cleaned of control characters, and scrubbed again since cleaning can join one."""
+    return pensieve.scrub(patrol.clean(common.untrusted_text(text if isinstance(text, str) else "")))
+
+
 def _quoted(text: object, limit: int) -> list:
-    """GitHub text as quoted lines: scrubbed whole of anything shaped like a credential before it is cleaned of control
-    characters, scrubbed again since cleaning can join one, then cut, then every line starts with "> "."""
-    value = pensieve.scrub(patrol.clean(pensieve.scrub(text if isinstance(text, str) else "")))[:limit]
+    """GitHub text as quoted lines: normalized and scrubbed whole before any cut (_github_text), then cut, then every
+    line starts with "> "."""
+    value = _github_text(text)[:limit]
     lines = value.splitlines() or [""]
     return [("> " + line) if line else ">" for line in lines]
 
 
 def _hunk(text: object) -> list:
-    value = pensieve.scrub(patrol.clean(pensieve.scrub(text if isinstance(text, str) else "")))[:HUNK_MAX]
+    value = _github_text(text)[:HUNK_MAX]
     return ["    " + line for line in value.splitlines()]
 
 
 def _path(text: object) -> str:
-    """A path for a heading line: scrubbed, cleaned and put on one line, so it cannot start a new heading; one that
-    still holds a backtick is left out."""
-    value = common.one_line(pensieve.scrub(patrol.clean(pensieve.scrub(text if isinstance(text, str) else ""))),
-                            PATH_MAX)
+    """A path for a heading line: normalized, scrubbed, cleaned and put on one line, so it cannot start a new heading;
+    one that still holds a backtick is left out."""
+    value = common.one_line(_github_text(text), PATH_MAX)
     return "-" if not value or "`" in value else value
 
 
