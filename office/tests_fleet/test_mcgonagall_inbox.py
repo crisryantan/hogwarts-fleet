@@ -3,6 +3,7 @@ the Owl Post delivers it, and one line on her next prompt, each with only a scru
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from unittest import mock
@@ -63,16 +64,26 @@ class AnnounceTests(InboxCase):
                 self.assertEqual(self.notified.call_args[0][0], f"{sender} on {self.task['id']}: fyi: news from {sender}")
         self.assertEqual(len(self.told()), 5)
 
-    def test_a_handoff_shows_the_line_after_its_header_scrubbed_and_nothing_else(self):
+    def test_a_handoff_shows_only_its_round_and_no_other_body_text(self):
         body = f"HANDOFF {self.task['id']} round 1\nAdded the widget check, key {SECRET}\nSECOND-LINE-MARKER\n"
-        self.send("harry", body=body, subject="handoff")  # a result needs a request; the status reads any kind
+        self.send("harry", body=body, subject=f"handoff {SECRET}")  # a result needs a request; any kind reads the same
         [event] = self.told()
-        self.assertIn("handoff: Added the widget check, key", event["summary"])
+        self.assertTrue(event["summary"].endswith(": handoff: round 1 handed off"))
         for text in (event["summary"], self.notified.call_args[0][0]):
-            self.assertNotIn(SECRET, text)
-            self.assertNotIn("SECOND-LINE-MARKER", text)
-        self.assertEqual(mcgonagall_inbox.status("result", "x", f"HANDOFF {self.task['id']} round 2"),
-                         "handoff: round 2 handed off")
+            for marker in (SECRET, "Added the widget", "SECOND-LINE-MARKER"):
+                self.assertNotIn(marker, text)
+        task = self.task["id"]
+        cases = ((f"HANDOFF {task} round 12", "handoff: round 12 handed off"),
+                 (f"HANDOFF {task} round 2 and more words", "handoff: handed off"),
+                 (f"HANDOFF {task} round \uff12", "handoff: handed off"),
+                 (f"HANDOFF {task}", "handoff: handed off"))
+        for first, said in cases:
+            with self.subTest(first=first):
+                self.assertEqual(mcgonagall_inbox.status("result", "x", first + "\nmore text"), said)
+        other = mcgonagall_inbox.status("fyi", f"done, key {SECRET}", "BODY-MARKER")
+        self.assertTrue(other.startswith("fyi: done, key "))
+        self.assertNotIn(SECRET, other)
+        self.assertNotIn("BODY-MARKER", other)
 
     def test_a_redelivery_or_an_owl_to_another_desk_tells_nothing_more(self):
         delivered = self.send("hermione")
@@ -166,3 +177,87 @@ class PromptListTests(InboxCase):
         owlery.read(self.conn, first["id"], "mcgonagall", now=NOW)
         self.prompt()
         self.assertNotIn(first["id"], [path.name for path in (self.office / mcgonagall_inbox.SEEN_DIR).iterdir()])
+
+
+class RaceAndRollbackTests(InboxCase):
+    def markers(self) -> list:
+        folder = self.office / mcgonagall_inbox.SEEN_DIR
+        return sorted(path.name for path in folder.iterdir()) if folder.exists() else []
+
+    def test_an_owl_another_hook_claimed_first_is_not_shown_twice(self):
+        self.send("ron", name="a.json", subject="first")
+        [owl] = owlery.inbox(self.conn, "mcgonagall")
+        real = mcgonagall_inbox.safefs.create_new
+
+        def other_hook_wins(fd, name, mode=0o600):
+            os.close(real(fd, name, mode))  # the other hook makes the marker between this one's look and its claim
+            return real(fd, name, mode)
+
+        with mock.patch.object(mcgonagall_inbox.safefs, "create_new", side_effect=other_hook_wins):
+            made = []
+            self.assertEqual(mcgonagall_inbox.unseen(self.conn, made), ([], 0))
+        self.assertEqual(made, [])
+        self.assertEqual(self.markers(), [owl["id"]])
+
+    def test_a_hook_that_ends_without_output_releases_its_markers(self):
+        self.send("ron", name="a.json", subject="first")
+        with mock.patch.object(user_prompt_submit, "tempus", side_effect=RuntimeError("late failure")):
+            code, out, _ = self.run_hook(user_prompt_submit, {"prompt": "hi", "agent_type": "mcgonagall",
+                                                               "transcript_path": ""})
+        self.assertEqual((code, out), (1, ""))
+        self.assertEqual(self.markers(), [])
+        broken = mock.Mock()
+        broken.write.side_effect = OSError("closed pipe")
+        with self.assertRaises(OSError):
+            user_prompt_submit._body({"prompt": "hi", "agent_type": "mcgonagall", "transcript_path": ""},
+                                     "mcgonagall", broken, NOW)
+        self.assertEqual(self.markers(), [])
+        self.assertIn("- ron fyi", self.prompt())  # still shown, once, on the next prompt that works
+
+    def test_a_marker_that_cannot_be_made_part_way_shows_nothing_and_keeps_nothing(self):
+        self.send("ron", name="a.json", subject="first")
+        self.send("ron", name="b.json", subject="second")
+        real, calls = mcgonagall_inbox.safefs.create_new, []
+
+        def second_fails(fd, name, mode=0o600):
+            calls.append(name)
+            if len(calls) == 2:
+                raise OSError("disk full")
+            return real(fd, name, mode)
+
+        with mock.patch.object(mcgonagall_inbox.safefs, "create_new", side_effect=second_fails):
+            self.assertNotIn("New owls", self.prompt())
+        self.assertEqual(self.markers(), [])
+        shown = json.loads(self.prompt())["systemMessage"]
+        self.assertIn("fyi: first", shown)
+        self.assertIn("fyi: second", shown)
+
+
+class PendingAnnouncementTests(InboxCase):
+    def test_an_event_lost_on_delivery_is_announced_once_on_a_later_pass(self):
+        real = pensieve.add_event
+
+        def refuse_hers(conn, desk, kind, *args, **kwargs):
+            if kind == mcgonagall_inbox.EVENT_KIND:
+                raise RuntimeError("store busy")
+            return real(conn, desk, kind, *args, **kwargs)
+
+        with mock.patch.object(pensieve, "add_event", side_effect=refuse_hers):
+            self.send("ron", subject="first")
+        self.assertEqual(self.told(), [])
+        self.assertEqual(self.notified.call_count, 1)
+        for _ in range(3):
+            owl_post.run_pass(self.conn, now=NOW + 60)
+        [event] = self.told()
+        self.assertTrue(event["summary"].endswith("fyi: first"))
+        self.assertEqual(self.notified.call_count, 1)  # notifications are best effort, never retried
+
+    def test_a_pass_stopped_after_the_delivery_is_made_good_and_old_owls_are_left_alone(self):
+        with mock.patch.object(mcgonagall_inbox, "announce", side_effect=SystemExit(143)), \
+                self.assertRaises(SystemExit):
+            self.send("hermione", subject="stopped")
+        self.assertIsNotNone(owlery.inbox(self.conn, "mcgonagall")[0]["delivered_at"])
+        owl_post.run_pass(self.conn, now=NOW + config.ANNOUNCE_RETRY_SECONDS + 1)
+        self.assertEqual(self.told(), [])  # older than the retry window
+        owl_post.run_pass(self.conn, now=NOW + 5)
+        self.assertEqual(len(self.told()), 1)

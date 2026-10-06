@@ -13,16 +13,20 @@ import json
 import os
 import re
 import signal
+import sqlite3
 import subprocess
+import time
 from unittest import mock
 
 from hogwarts import pensieve
 from tests.support import NOW
 
-from fleet import common, config, go_confirm, run_desk
+from fleet import common, config, go_confirm, run_desk, worktree
 from fleet.hooks import user_prompt_submit
 from tests_fleet.support import PROMPT_ID, TOKEN_SHAPE, assistant_entry, peer_entry, user_entry
-from tests_fleet.test_go import OTHER_ID, TASK_ID, GoCase
+from tests_fleet.test_go import (
+    OTHER_ID, TASK_ID, GoCase, committed_then_unreadable, then_terminated, unreadable_tasks,
+)
 
 REAL_SPAWN = run_desk.spawn_go_confirm  # before FleetCase patches it
 THIRD_ID = "tk_00000000000000aa"
@@ -362,3 +366,222 @@ class SpawnTests(ConfirmCase):
         names = sorted(path.name for path in folder.iterdir())
         key = go_confirm.claim_key(PROMPT_ID)
         self.assertEqual(names, [key, f"{key}.ran"])
+
+
+def dead_pid() -> int:
+    """A process id no process has now."""
+    pid = 999_000
+    while True:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return pid
+        except OSError:
+            pass
+        pid += 1
+
+
+class ImmediateMismatchTests(ConfirmCase):
+    """The immediate path runs only what the verified entry's own text asks for (shared with the confirmer)."""
+
+    def test_an_entry_naming_other_gos_than_the_hook_input_runs_nothing(self):
+        self.task_md()
+        self.task_md(OTHER_ID)
+        self.enable("harry")
+        before = self.snapshot()
+        cases = ((f"go {TASK_ID}", f"go {OTHER_ID}"), (f"go {TASK_ID}", f"go {TASK_ID}\ngo {OTHER_ID}"),
+                 (f"go {TASK_ID}\ngo {OTHER_ID}", f"go {OTHER_ID}\ngo {TASK_ID}"), (f"go {TASK_ID}", "hello"))
+        with mock.patch.object(user_prompt_submit, "_go", side_effect=AssertionError("a go ran")):
+            for index, (prompt, typed) in enumerate(cases):
+                with self.subTest(prompt=prompt, typed=typed):
+                    path = self.transcript(typed, name=f"mismatch-{index}.jsonl",
+                                           prompt=user_entry(typed, promptId=PROMPT_ID))
+                    shown, _, _ = self.said(prompt, transcript=path)
+                    self.assertIn(f"Go was not applied to {TASK_ID}: this hook could not confirm Ryan's own typing"
+                                  f" ({user_prompt_submit.DIFFERENT})", shown)
+        self.assert_unchanged(before)
+        self.spawned_confirms.assert_not_called()
+
+    def test_an_entry_naming_another_task_than_the_close_closes_nothing(self):
+        tasks = []
+        for title in ("one", "two"):
+            task = pensieve.create_task(self.conn, "harry", title, now=NOW)
+            pensieve.start_task(self.conn, task["id"], now=NOW)
+            tasks.append(pensieve.mark_awaiting_close(self.conn, task["id"], now=NOW))
+        typed = f"Mischief managed {tasks[1]['id']}"
+        path = self.transcript(typed, prompt=user_entry(typed, promptId=PROMPT_ID))
+        shown, _, _ = self.said(f"Mischief managed {tasks[0]['id']}", transcript=path, agent_type=None)
+        self.assertIn(user_prompt_submit.DIFFERENT, shown)
+        self.assertIn("castle token mint", shown)
+        for task in tasks:
+            self.assertEqual(pensieve.get_task(self.conn, task["id"])["status"], "awaiting_close")
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM close_tokens").fetchone()[0], 0)
+
+
+class ClaimTests(ConfirmCase):
+    def setUp(self) -> None:
+        super().setUp()
+        self.task_md()
+        self.enable("harry")
+        self.folder = self.office / config.GO_CONFIRM_DIR
+        self.key = go_confirm.claim_key(PROMPT_ID)
+
+    def files(self) -> list:
+        return sorted(path.name for path in self.folder.iterdir()) if self.folder.exists() else []
+
+    def test_a_claim_that_cannot_be_written_leaves_nothing_and_the_next_hook_claims_it(self):
+        with mock.patch.object(go_confirm.safefs, "write_all", side_effect=OSError("disk full")):
+            shown, _, _ = self.said(f"go {TASK_ID}", transcript=self.later())
+        self.assertIn("its confirmation could not start: OSError", shown)
+        self.assertEqual(self.files(), [])
+        self.spawned_confirms.assert_not_called()
+        self.deferred(f"go {TASK_ID}")
+        self.assertEqual(self.files(), [self.key])
+
+    def test_a_confirmer_that_dies_before_it_reads_its_input_is_reaped_and_its_claim_removed(self):
+        child = mock.Mock()
+        child.stdin.close.side_effect = [BrokenPipeError(), None]
+        with mock.patch.object(run_desk, "spawn_go_confirm", REAL_SPAWN), \
+                mock.patch.object(run_desk.subprocess, "Popen", return_value=child):
+            shown, _, _ = self.said(f"go {TASK_ID}", transcript=self.later())
+        self.assertIn("its confirmation could not start: the confirmer did not get its whole input", shown)
+        child.kill.assert_called_once_with()
+        child.wait.assert_called_once_with(timeout=5)
+        self.assertEqual(self.files(), [])
+
+    def test_a_signal_after_the_confirmer_has_its_input_never_removes_its_claim(self):
+        self.spawned_confirms.side_effect = lambda payload: signal.raise_signal(signal.SIGINT)
+        data = {"prompt": f"go {TASK_ID}", "prompt_id": PROMPT_ID, "transcript_path": self.later(),
+                "agent_type": "mcgonagall"}
+        with self.assertRaises(KeyboardInterrupt):
+            go_confirm.start(data, "mcgonagall", "go")
+        self.spawned_confirms.assert_called_once()
+        self.assertEqual(self.files(), [self.key])
+
+
+class InterruptedTests(ConfirmCase):
+    def setUp(self) -> None:
+        super().setUp()
+        self.task_md()
+        self.enable("harry")
+        self.folder = self.office / config.GO_CONFIRM_DIR
+        self.key = go_confirm.claim_key(PROMPT_ID)
+        self.old = int(time.time()) - config.GO_CONFIRM_WAIT_SECONDS - config.GO_CONFIRM_STALE_MARGIN_SECONDS - 5
+
+    def marker(self) -> str:
+        return (self.folder / f"{self.key}.ran").read_text().split()[0]
+
+    def pending(self, pid: int, stamp: int) -> None:
+        self.write_file(self.folder / f"{self.key}.ran", f"pending {pid} {stamp}\n")
+
+    def assert_interrupted_once(self, shown: str = None) -> None:
+        events = self.headmaster_events()
+        self.assertEqual(len(events), 1)
+        said = (f"The confirmation for {TASK_ID} was interrupted; check castle task show {TASK_ID} and type the go"
+                " again if it is not registered.")
+        self.assertEqual(events[0]["summary"], said)
+        if shown is not None:
+            self.assertIn(said, shown)
+        self.assertEqual(self.marker(), "done")
+
+    def test_a_confirmer_that_died_is_reported_by_the_next_hook_and_never_run_again(self):
+        path = self.later()
+        before = self.snapshot()
+        self.deferred(f"go {TASK_ID}", transcript=path)
+        self.pending(dead_pid(), self.old)
+        self.append(path, user_entry(f"go {TASK_ID}", promptId=PROMPT_ID))
+        with mock.patch.object(user_prompt_submit, "_go", side_effect=AssertionError("a go ran")):
+            shown, _, _ = self.said(f"go {TASK_ID}", transcript=path)
+            self.assert_interrupted_once(shown)
+            shown, _, _ = self.said(f"go {TASK_ID}", transcript=path)
+        self.assertIn(f"Go for {TASK_ID} was confirmed already for this prompt", shown)
+        self.assert_interrupted_once()
+        self.assert_unchanged(before)
+
+    def test_a_claim_no_confirmer_ever_took_is_reported_once_it_is_old(self):
+        path = self.later()
+        self.deferred(f"go {TASK_ID}", transcript=path)
+        shown, _, _ = self.said(f"go {TASK_ID}", transcript=path)
+        self.assertIn("is already being confirmed", shown)  # still young: it may yet start
+        os.utime(self.folder / self.key, (self.old, self.old))
+        with mock.patch.object(user_prompt_submit, "_go", side_effect=AssertionError("a go ran")):
+            shown, _, _ = self.said(f"go {TASK_ID}", transcript=path)
+        self.assert_interrupted_once(shown)
+
+    def test_a_live_confirmer_is_left_alone_and_a_second_one_refuses(self):
+        path = self.later()
+        _, _, payload = self.deferred(f"go {TASK_ID}", transcript=path)
+        self.pending(os.getpid(), self.old)
+        shown, _, _ = self.said(f"go {TASK_ID}", transcript=path)
+        self.assertIn("is already being confirmed", shown)
+        self.assertEqual(self.confirm(payload), ["refused: another confirmer has this prompt"])
+        self.assertEqual(self.headmaster_events(), [])
+        self.assertEqual(self.marker(), "pending")
+
+    def test_a_confirmer_finding_a_dead_ones_marker_reports_it_and_runs_nothing(self):
+        path = self.later()
+        before = self.snapshot()
+        _, _, payload = self.deferred(f"go {TASK_ID}", transcript=path)
+        self.pending(dead_pid(), self.old)
+        self.append(path, user_entry(f"go {TASK_ID}", promptId=PROMPT_ID))
+        with mock.patch.object(user_prompt_submit, "_go", side_effect=AssertionError("a go ran")):
+            self.confirm(payload)
+        self.assert_interrupted_once()
+        self.assert_unchanged(before)
+
+    def test_a_store_outage_leaves_the_marker_pending_and_a_success_marks_it_done(self):
+        path = self.later()
+        _, _, payload = self.deferred(f"go {TASK_ID}", transcript=path)
+        entry = user_entry(f"go {TASK_ID}", promptId=PROMPT_ID)
+        with mock.patch.object(go_confirm.common, "connect", side_effect=sqlite3.OperationalError("locked")):
+            lines = self.confirm(payload, self.appears(path, entry, after=1))
+        self.assertIn("the store could not be opened", lines[0])
+        self.assertEqual(self.marker(), "pending")
+        self.assertEqual(self.headmaster_events(), [])
+        # Its process has ended: the next hook reports it as interrupted, and the go is typed again by hand.
+        stamp = (self.folder / f"{self.key}.ran").read_text().split()
+        self.pending(dead_pid(), self.old)
+        shown, _, _ = self.said(f"go {TASK_ID}", transcript=path)
+        self.assertIn("was interrupted", shown)
+        self.assertEqual(stamp[0], "pending")
+
+    def test_a_confirmed_go_marks_its_prompt_done(self):
+        path = self.later()
+        _, _, payload = self.deferred(f"go {TASK_ID}", transcript=path)
+        self.confirm(payload, self.appears(path, user_entry(f"go {TASK_ID}", promptId=PROMPT_ID), after=1))
+        self.assertEqual(self.marker(), "done")
+
+
+class KilledWhileMakingTheWorktreeTests(ConfirmCase):
+    def setUp(self) -> None:
+        super().setUp()
+        self.task_md()
+        self.enable("harry")
+
+    def test_sigterm_after_git_made_the_worktree_takes_it_all_back_and_says_so(self):
+        path = self.later()
+        before = self.snapshot()
+        _, _, payload = self.deferred(f"go {TASK_ID}", transcript=path)
+        entry = user_entry(f"go {TASK_ID}", promptId=PROMPT_ID)
+        with mock.patch.object(worktree, "add_worktree", side_effect=then_terminated(worktree.add_worktree)), \
+                self.assertRaises(SystemExit), common.ended_by_signals():
+            self.confirm(payload, self.appears(path, entry, after=1))
+        self.assert_unchanged(before)
+        [event] = self.headmaster_events()
+        self.assertIn(f"Go for {TASK_ID} was stopped by a signal while it ran", event["summary"])
+        self.assertEqual((self.office / config.GO_CONFIRM_DIR / f"{go_confirm.claim_key(PROMPT_ID)}.ran")
+                         .read_text().strip(), "done")
+
+    def test_a_kill_after_the_commit_when_the_store_cannot_say_names_what_is_left(self):
+        path = self.later()
+        _, _, payload = self.deferred(f"go {TASK_ID}", transcript=path)
+        entry = user_entry(f"go {TASK_ID}", promptId=PROMPT_ID)
+        state = {}
+        with mock.patch.object(user_prompt_submit, "db", committed_then_unreadable(state)), \
+                mock.patch.object(pensieve, "get_task", side_effect=unreadable_tasks(state)):
+            self.confirm(payload, self.appears(path, entry, after=1))
+        built = self.harry_task()
+        summary = " ".join(event["summary"] for event in self.headmaster_events())
+        self.assertIn(f"the store could not say whether task {built['id']} kept its worktree, so nothing was taken"
+                      " back", summary)
+        self.assertIn(f"the record {built['id']}.json", summary)

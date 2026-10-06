@@ -292,6 +292,9 @@ CLOSE_PROMPT_MAX_AGE = 30
 # at most this long for the entry, reading the transcript tail every GO_CONFIRM_POLL_SECONDS.
 GO_CONFIRM_WAIT_SECONDS = 20
 GO_CONFIRM_POLL_SECONDS = 0.25
+# A confirmation whose process is gone with no outcome, this long past the wait window, was interrupted: the next hook
+# or confirmer for that prompt reports it, and never runs it again.
+GO_CONFIRM_STALE_MARGIN_SECONDS = 30
 # The office folder that holds one claim per prompt a confirmer was started for, so no prompt is confirmed twice.
 # Claims older than GO_CONFIRM_KEEP_SECONDS are removed by later confirmers.
 GO_CONFIRM_DIR = "confirm"
@@ -310,6 +313,8 @@ DESKTOP_NOTIFY = True
 DESKTOP_NOTIFY_TIMEOUT_SECONDS = 5
 # How many new owls in McGonagall's inbox the prompt hook lists at once, with a count of the rest.
 INBOX_NOTICE_CAP = 10
+# How far back each Owl Post pass looks for owls to McGonagall whose headmaster event was lost, to announce them.
+ANNOUNCE_RETRY_SECONDS = 86400
 
 # The doorbell carries no text from any desk.
 DOORBELL_KIND = "owl.doorbell"

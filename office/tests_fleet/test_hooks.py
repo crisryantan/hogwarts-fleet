@@ -162,7 +162,8 @@ class UserPromptSubmitTests(HookCase):
         ], name=name)
 
     def prompt(self, text: str, transcript: str = None, **fields) -> tuple:
-        path = self.transcript() if transcript is None else transcript
+        # By default the prompt's own entry holds the text typed, as the transcript would.
+        path = self.transcript(prompt=user_entry(text, promptId=PROMPT_ID)) if transcript is None else transcript
         fields = {key: value for key, value in {"prompt_id": PROMPT_ID, **fields}.items() if value is not None}
         return self.run_hook(user_prompt_submit,
                              self.hook_input("UserPromptSubmit", path, prompt=text, **fields))

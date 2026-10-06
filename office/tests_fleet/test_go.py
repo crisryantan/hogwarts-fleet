@@ -278,7 +278,7 @@ class GoTests(GoCase):
         )
         # Ryan's typing is confirmed in each, so only the session stops the go, before the typing is even read.
         with mock.patch.object(run_desk, "spawn", side_effect=AssertionError("spawned")), \
-                mock.patch.object(user_prompt_submit, "typed_by_ryan", side_effect=AssertionError("typing read")), \
+                mock.patch.object(user_prompt_submit, "typing_entry", side_effect=AssertionError("typing read")), \
                 mock.patch.object(user_prompt_submit, "_go", side_effect=AssertionError("a go ran")):
             for label, fields, argv in sessions:
                 for text, named in ((f"go {TASK_ID}", f" to {TASK_ID}"), (f"- `go {TASK_ID}`", "")):

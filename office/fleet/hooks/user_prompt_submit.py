@@ -59,13 +59,15 @@ runs the same checks on it, takes the gos or the close from the entry's own text
 when it differs from what the hook saw, then runs the code below unchanged. Its outcome, a
 refusal with the manual steps included, is a headmaster event on McGonagall's desk. A missing
 file or a cut last line is "not yet", never a pass. When the entry is already there at hook
-time, the hook runs the go or the close itself, as below.
+time, the hook runs the go or the close itself, as below. Either way, what runs is taken from
+the verified entry's own text and must equal what the hook input asks for
+(verified_requests); anything else is refused.
 
 The go starts a build from a TASK.md McGonagall drafted and Ryan approved, with no command
 in his terminal. It runs only in McGonagall's own session: when common.session_desk names any
 other desk (Ryan's own sessions, a subagent, or the hook run with --desk for another desk), a go
 gets one refusal line before anything else is read, and changes nothing. In her session it
-passes the same typed_by_ryan check as the close (or is deferred to the confirmer as above),
+passes the same typed check as the close (typing_entry) (or is deferred to the confirmer as above),
 before it reads anything else, and then,
 only for a task id the store does not know yet whose TASK.md is at
 ~/hogwarts/tasks/<task-id>/TASK.md:
@@ -141,9 +143,10 @@ GO_EXACT = ("Go was not applied: each go is a line of its own, exactly go <task-
 GO_TOO_MANY = (f"Go was not applied: one message starts at most {config.GO_MAX_PER_PROMPT} gos, so nothing was"
                " started.")
 GO_SESSION = "a go runs only in McGonagall's session, so nothing was started."
-# typed_by_ryan's reason when the only thing missing is the prompt's own transcript entry, which Claude Code writes
+# typing_entry's reason when the only thing missing is the prompt's own transcript entry, which Claude Code writes
 # only after this hook returns. A go or a close with this reason is confirmed by fleet/go_confirm.py instead.
 NOT_YET = "this prompt is not in the transcript yet"
+DIFFERENT = "the prompt in the transcript is not the one the hook saw"
 # A go registers the TASK.md's task on McGonagall's desk, as castle task create does by hand, and routes it to Harry.
 TASK_DESK = "mcgonagall"
 BUILD_DESK = "harry"
@@ -202,11 +205,6 @@ def typing_entry(data: dict, now: int) -> tuple:
     if stamp is None or not 0 <= now - stamp <= config.CLOSE_PROMPT_MAX_AGE:
         return "this prompt's transcript entry is not current", None
     return None, entry
-
-
-def typed_by_ryan(data: dict, now: int) -> Optional[str]:
-    """None when this prompt is Ryan's own typing in his own session, else why not (see typing_entry)."""
-    return typing_entry(data, now)[0]
 
 
 def _open_descendants(conn, task_id: str) -> list:
@@ -476,9 +474,29 @@ def not_confirmed(kind: str, task_id: str, reason: str) -> list:
             terminal_go(task_id)]
 
 
-def _deferred(data: dict, desk: str, kind: str, task_ids: list) -> tuple:
+def requests_in(kind: str, text: object) -> Optional[list]:
+    """The task ids a prompt's text asks for: one for an exact Mischief managed, one to GO_MAX_PER_PROMPT for gos."""
+    if kind == "close":
+        task_id = close_request(text)
+        return None if task_id is None else [task_id]
+    found = go_requests(text)
+    return found if found is not None and len(found) <= config.GO_MAX_PER_PROMPT else None
+
+
+def verified_requests(kind: str, prompt: object, entry: dict) -> tuple:
+    """(task ids, None) taken from the verified transcript entry's own text when they equal what the hook input
+    asks for, else (None, DIFFERENT). The immediate path and the confirmer both run only what this returns."""
+    expected = requests_in(kind, prompt)
+    seen = requests_in(kind, transcript.prompt_text(entry))
+    if expected is None or seen != expected:
+        return None, DIFFERENT
+    return seen, None
+
+
+def _deferred(conn, data: dict, desk: str, kind: str, task_ids: list) -> tuple:
     """(shown, context) for a go or a close whose transcript entry is not written yet: one detached confirmer starts
-    for this prompt (fleet/go_confirm.py), and the hook says where its result will come."""
+    for this prompt (fleet/go_confirm.py), and the hook says where its result will come. A prompt claimed already
+    whose confirmer was interrupted is reported as interrupted, never run again."""
     from fleet import go_confirm  # only a deferred request pays for this import
 
     named = ", ".join(task_ids)
@@ -492,7 +510,12 @@ def _deferred(data: dict, desk: str, kind: str, task_ids: list) -> tuple:
             lines += not_confirmed(kind, task_id, f"its confirmation could not start: {reason}")
         return lines, lines
     if not started:
-        line = (f"{what} for {named} is already being confirmed for this prompt; its result arrives as a headmaster"
+        interrupted = go_confirm.interrupted(conn, data, kind, task_ids)
+        if interrupted:
+            return interrupted, interrupted
+        line = (f"{what} for {named} was confirmed already for this prompt; its result is a headmaster event."
+                if go_confirm.finished(data) else
+                f"{what} for {named} is already being confirmed for this prompt; its result arrives as a headmaster"
                 " event.")
     else:
         line = (f"{what} for {named}: Claude Code writes this prompt to the transcript only after this hook returns,"
@@ -509,15 +532,17 @@ def _close(conn, data: dict, desk: str, task_id: str, now: int) -> tuple:
     refused = close_checked(conn, task_id)
     if refused is not None:
         return refused, refused
-    refusal = typed_by_ryan(data, now)
+    refusal, entry = typing_entry(data, now)
     if refusal == NOT_YET:
-        return _deferred(data, desk, "close", [task_id])
+        return _deferred(conn, data, desk, "close", [task_id])
+    if refusal is None:
+        verified, refusal = verified_requests("close", data.get("prompt"), entry)
     if refusal is not None:
         lines = not_confirmed("close", task_id, refusal)
         return lines, lines
     if _claimed(data):
-        return _deferred(data, desk, "close", [task_id])
-    lines = close_confirmed(conn, task_id, now)
+        return _deferred(conn, data, desk, "close", [task_id])
+    lines = close_confirmed(conn, verified[0], now)
     return lines, lines
 
 
@@ -530,12 +555,17 @@ def _claimed(data: dict) -> bool:
 
 def _starts(conn, data: dict, desk: str, task_ids: list, now: int) -> tuple:
     """(shown, context) for one to GO_MAX_PER_PROMPT gos in McGonagall's session. Ryan's typing is checked once
-    for the prompt; then each go runs on its own, in order, so one refused never stops the others."""
-    refusal = typed_by_ryan(data, now)
+    for the prompt, and the gos run are the ones the verified transcript entry's own text names; then each go runs on
+    its own, in order, so one refused never stops the others."""
+    refusal, entry = typing_entry(data, now)
     if refusal == NOT_YET:
-        return _deferred(data, desk, "go", task_ids)
-    if refusal is None and _claimed(data):
-        return _deferred(data, desk, "go", task_ids)
+        return _deferred(conn, data, desk, "go", task_ids)
+    if refusal is None:
+        verified, refusal = verified_requests("go", data.get("prompt"), entry)
+        if refusal is None and _claimed(data):
+            return _deferred(conn, data, desk, "go", task_ids)
+        if refusal is None:
+            task_ids = verified
     shown, context, any_started = [], [], False
     for task_id in task_ids:
         if refusal is not None:
@@ -573,6 +603,22 @@ def tempus(data: dict) -> Optional[str]:
 
 
 def _body(data: dict, desk: str, out, now: int) -> None:
+    """The hook's output, written once. Inbox owls this run marked seen are released again when it ends any way but
+    with its output written, so they are shown on the next prompt instead of never."""
+    made: list = []
+    try:
+        text = _output(data, desk, now, made)
+        if text is not None:
+            out.write(text)
+    except BaseException:
+        if made:
+            from fleet import mcgonagall_inbox
+
+            mcgonagall_inbox.release(made)
+        raise
+
+
+def _output(data: dict, desk: str, now: int, made: list) -> Optional[str]:
     shown, context = [], []
     prompt = data.get("prompt")
     conn = common.connect()
@@ -602,7 +648,7 @@ def _body(data: dict, desk: str, out, now: int) -> None:
         if common.session_desk(data, desk) == TASK_DESK:
             from fleet import mcgonagall_inbox  # only her session pays for this import
 
-            owls, _ = mcgonagall_inbox.safe_unseen(conn, now)
+            owls, _ = mcgonagall_inbox.safe_unseen(conn, made, now)
             shown += owls
             context += owls
         pending, count = events(conn)
@@ -616,12 +662,12 @@ def _body(data: dict, desk: str, out, now: int) -> None:
         shown.append(warning)
         context.append(warning)
     if not shown:
-        return
+        return None
     output = {
         "systemMessage": "\n".join(shown),
         "hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext": "\n".join(context)},
     }
-    out.write(json.dumps(output, ensure_ascii=True) + "\n")
+    return json.dumps(output, ensure_ascii=True) + "\n"
 
 
 def main(argv: Optional[list] = None, stdin=None, stdout=None, stderr=None, now: Optional[int] = None) -> int:

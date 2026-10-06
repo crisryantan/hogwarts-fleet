@@ -1019,13 +1019,19 @@ def spawn_go_confirm(payload: bytes) -> None:
             os.close(log_fd)
     try:
         child.stdin.write(payload)
-    except BrokenPipeError:
-        raise FleetError("the confirmer ended before it read its input") from None
-    finally:
+        child.stdin.flush()
+        child.stdin.close()  # a write still buffered goes out here, so a dead reader fails here too
+    except (BrokenPipeError, OSError, ValueError):
         try:
             child.stdin.close()
-        except BrokenPipeError:
+        except (OSError, ValueError):
             pass
+        try:  # the input never reached it whole, so the process is stopped and reaped
+            child.kill()
+            child.wait(timeout=5)
+        except (OSError, subprocess.SubprocessError):
+            pass
+        raise FleetError("the confirmer did not get its whole input") from None
 
 
 OSASCRIPT_BIN = "/usr/bin/osascript"

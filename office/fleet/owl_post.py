@@ -13,7 +13,8 @@ For each regular *.json file in /Users/crisryantan/hogwarts/desks/<sender>/outbo
 6. Write a delivered copy to the recipient's inbox as <owl_id>.json (mode 0600) and mark it
    delivered. The copy names the task's parent and the TASK.md path found up the task chain.
 7. An owl newly delivered to McGonagall, from any desk, also raises one headmaster event and a macOS notification
-   naming its sender, task and a scrubbed one-line status (fleet/mcgonagall_inbox.py), once the store has it.
+   naming its sender, task and a one-line status from its metadata and scrubbed subject (fleet/mcgonagall_inbox.py),
+   once the store has it. Each pass also announces any such owl whose event a stopped pass or a failed write lost.
    Ring the doorbell: a routine event for an interactive desk. A request to an enabled
    headless desk under its daily cap starts run_desk. No other owl starts a run. A desk that
    builds in a worktree (Harry) is not started until its task has one: Ryan gets a headmaster
@@ -661,6 +662,10 @@ def run_pass(conn, now: Optional[int] = None) -> dict:
             os.close(outbox_fd)
     started = tuple(entry["task_id"] for entry in summary["delivered"] if entry.get("review") == REVIEW_STARTED)
     summary["reviews"] = resume_reviews(conn, now, started)
+    try:  # an owl to McGonagall whose event a stopped pass or a failed write lost is announced now, once
+        mcgonagall_inbox.announce_pending(conn, now)
+    except (StoreError, FleetError, OSError) as exc:
+        summary["errors"].append({"desk": config.HOOK_DESK, "error": "could not announce owls: " + _reason(exc)})
     return summary
 
 
