@@ -209,8 +209,11 @@ def reviewer_output(desk: str, family: str, run_id: str) -> str:
             raw = safefs.read_regular(fd, f"{run_id}-last-message.md", REVIEW_MAX_BYTES, "review output")
             return raw.decode("utf-8", "replace")
         # The tail, like run_desk: stream-json keeps every tool result, and the result event comes last.
-        raw, _ = safefs.read_range(fd, f"{run_id}.out", None, run_desk.RUN_OUTPUT_MAX_BYTES, "review output")
-    result = run_desk.claude_result(raw).get("result")
+        raw, whole = run_desk.read_run_output(fd, f"{run_id}.out", "review output")
+    found = run_desk.claude_result(raw)
+    if not found and not whole:
+        raise FleetError("the reviewer's run output is too large to find its result event whole")
+    result = found.get("result")
     if not isinstance(result, str):
         raise FleetError("the reviewer's run output has no result text")
     return result
@@ -218,25 +221,31 @@ def reviewer_output(desk: str, family: str, run_id: str) -> str:
 
 def run_output(desk: str, family: str, run_id: str) -> tuple:
     """(state, text) of a reviewer run's final text, for a reader that must never take a failed read as a run that
-    said nothing: "ok" with the text; "none" when the run's output was read and holds no final text (Codex wrote no
-    last message, or Claude's stream has no result event); "unreadable" when the read failed and is worth a retry;
-    "malformed" when the file is not a plain file of ours or is too large, or Claude's output file, which every
-    launch makes before its process starts, is gone, which no retry mends."""
+    said nothing: "ok" with the text; "none" when the run's output was read whole and holds no final text (Codex wrote
+    no last message, or Claude's stream has no result event); "unreadable" when the read failed and is worth a retry;
+    "malformed" when the file is not a plain file of ours or is too large, when Claude's output is larger than the
+    most run_desk reads of it and no whole result event is in what was read (run_desk.read_run_output), so its result
+    may have begun before that, or when Claude's output file, which every launch makes before its process starts, is
+    gone, which no retry mends."""
     run_id = safefs.check_component(run_id)
     name = f"{run_id}-last-message.md" if family == "codex" else f"{run_id}.out"
+    whole = True
     try:
         with safefs.opened_dir(config.OFFICE_ROOT, "runs", desk) as fd:
             if family == "codex":
                 raw = safefs.read_regular(fd, name, REVIEW_MAX_BYTES, "review output")
             else:
-                raw, _ = safefs.read_range(fd, name, None, run_desk.RUN_OUTPUT_MAX_BYTES, "review output")
+                raw, whole = run_desk.read_run_output(fd, name, "review output")
     except safefs.Missing:
         return ("none" if family == "codex" and _runs_folder_there(desk) else "malformed"), None
     except (FleetError, OSError) as exc:
         return failed_read(exc), None
     if family == "codex":
         return "ok", raw.decode("utf-8", "replace")
-    result = run_desk.claude_result(raw).get("result")
+    found = run_desk.claude_result(raw)
+    if not found and not whole:
+        return "malformed", None
+    result = found.get("result")
     return ("ok", result) if isinstance(result, str) else ("none", None)
 
 

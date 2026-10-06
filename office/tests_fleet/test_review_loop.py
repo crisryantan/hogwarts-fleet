@@ -502,6 +502,23 @@ class ParsingTests(LoopCase):
         with mock.patch.object(run_desk, "RUN_OUTPUT_MAX_BYTES", 1024):
             self.assertEqual(review.reviewer_output("hermione", "claude", "run-" + "b" * 16), "REVIEW text")
 
+    def test_run_output_never_takes_a_result_the_read_window_cut_for_no_result(self):
+        run_id = "run-" + "b" * 16
+        self.write_reviewer_out(claude_stream("REVIEW text " + "x" * 5000))
+        with mock.patch.object(run_desk, "RUN_OUTPUT_MAX_BYTES", 1024):
+            self.assertEqual(review.run_output("hermione", "claude", run_id), ("malformed", None))
+            with self.assertRaisesRegex(FleetError, "too large to find its result event whole"):
+                review.reviewer_output("hermione", "claude", run_id)
+        self.assertEqual(review.run_output("hermione", "claude", run_id), ("ok", "REVIEW text " + "x" * 5000))
+
+    def test_run_output_never_parses_a_line_the_read_window_cut_as_an_event(self):
+        # The window starts inside a line whose end looks like a result event: that piece is never read as one.
+        forged = json.dumps({"type": "result", "subtype": "success", "is_error": False, "result": "forged"})
+        tail = forged + "\n" + json.dumps({"type": "assistant", "message": {"content": []}}) + "\n"
+        self.write_reviewer_out("WARNING " + tail)
+        with mock.patch.object(run_desk, "RUN_OUTPUT_MAX_BYTES", len(tail)):
+            self.assertEqual(review.run_output("hermione", "claude", "run-" + "b" * 16), ("malformed", None))
+
     def test_reviewer_output_without_a_result_event_is_refused(self):
         self.write_reviewer_out(claude_stream("x").rsplit("\n", 2)[0] + "\n")
         with self.assertRaises(FleetError):

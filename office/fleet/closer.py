@@ -51,8 +51,11 @@ close_one, for one task, under the task's review lock (the judge's process inher
    a pack in the judge's own inbox, built once per merge commit: script values, the approved TASK.md, CI, the command
    evidence and the merged diff, normalized and scrubbed whole before any cut and marked as data. auto-close and
    Ollivander's stop are read again at the judge's launch, after any wait for its slot. The verdict comes only from
-   the output of a run whose end the record kept as clean (exit 0, no cap, no vendor limit), bound to the task and
-   the merge commit, and the script decides it; an output that cannot be read keeps the run and starts no other.
+   the output of a run that ended clean (exit 0, no cap, no vendor limit), bound to the task and the merge commit,
+   and the script decides it. How the run ended is what the record kept or, after a kill before it was kept, what
+   the run's own end record says (run_desk.run_end). A run whose end no process saw is never a verdict: one whose
+   output, read whole, holds no final text left none, and its try is over; any other stays unknown with its run kept.
+   An output that cannot be read whole keeps the run too, so neither is ever followed by another judge run.
    A changed pack voids it.
 5. The close, through pensieve.close_proven alone: the task, and McGonagall's go task when nothing else is open under
    it, in one transaction with one headmaster event naming what proved each check.
@@ -1136,13 +1139,44 @@ def _keep_verdict(a: Attempt, run_id: str, decided: tuple, pack_sha: str) -> str
     return verdict
 
 
+def _recovered_outcome(a: Attempt, run_id: str) -> str:
+    """How the judge run the record names ended, when the record never kept it (a kill came after the launch and before
+    the outcome was saved): "ok" (exit 0, no vendor limit) or "failed", from the end record the run kept itself as soon
+    as its process ended (run_desk.run_end), whatever became of the closer. With no end record, a run whose launch the
+    store never counted never started, and one whose output, read whole, holds no final text left no verdict: either
+    try is over ("failed"), with nothing in it to lose. Any other run with none ended with no process left to see how,
+    with a final text that may hold a verdict: it stays unknown with its run id kept, never discarded and never read
+    as a verdict, and no other judge run starts while it does. A read that fails is unknown, and an end record or
+    output that is not a plain file of ours or does not read whole stops the task, its run id kept too."""
+    try:
+        end = run_desk.run_end(a.judge, run_id)
+    except (FleetError, OSError) as exc:
+        if review.failed_read(exc) == "unreadable":
+            raise Unknown("judge", exc) from None
+        raise Stop("judge", "the end record of the judge's run is not a plain file the closer can read whole") from None
+    if end is not None:
+        return "ok" if end["exit_code"] == 0 and end["cap_source"] is None else "failed"
+    if all(row["run_id"] != run_id for row in capacity.list_launches(a.conn, a.judge)):
+        return "failed"
+    state, _ = review.run_output(a.judge, pensieve.get_desk(a.conn, a.judge)["family"], run_id)
+    if state == "none":
+        return "failed"
+    if state == "unreadable":
+        raise Unknown("judge", "the judge's run output could not be read")
+    if state == "malformed":
+        raise Stop("judge", "the judge's run output is not a plain file the closer can read whole")
+    raise Unknown("judge", f"the judge's run {run_id} ended with no process left to see how, so it is kept and no"
+                           " other judge run starts: read its output in the office runs folder and close the task by"
+                           " hand")
+
+
 def _run_verdict(a: Attempt, judged: dict) -> Optional[tuple]:
     """The verdict of the judge run the record names, or None when that try is over with no verdict. The same rule
-    holds whether the run just ended or a later pass recovers it: only a run whose end the record kept as "ok" (exit
-    0, no cap, no vendor limit) is read, so a failed, capped or limited run, or one whose end no process saw (a kill
-    before its outcome was kept), never gives a verdict. A read of its output that fails is unknown, or a stop when no
-    retry mends it, and keeps the run id, so no other judge run starts while that run's word cannot be read; only an
-    output read whole that holds no after-merge block ends the try."""
+    holds whether the run just ended or a later pass recovers it: only a run that ended "ok" (exit 0, no cap, no vendor
+    limit), as the record kept it or the run's own end record says (_recovered_outcome), is read, so a failed, capped
+    or limited run never gives a verdict. A read of its output that fails, or that could not see all of it, is unknown,
+    or a stop when no retry mends it, and keeps the run id, so no other judge run starts while that run's word cannot
+    be read; only an output read whole that holds no after-merge block ends the try."""
     if judged["outcome"] != "ok":
         return None
     family = pensieve.get_desk(a.conn, a.judge)["family"]
@@ -1179,6 +1213,9 @@ def _judge(a: Attempt) -> None:
     record = a.record["judge"] if a.record["judge"] and a.record["judge"]["merge_sha"] == a.merge_sha else None
     if record is not None and record["run_id"] is not None:
         # That run has ended: its process held this task lock, which this attempt holds now.
+        if record["outcome"] is None:
+            record["outcome"] = _recovered_outcome(a, record["run_id"])
+            a.save()
         decided = _run_verdict(a, record)
         if decided is not None:
             return _judged(a, _keep_verdict(a, record["run_id"], decided, record["pack_sha256"]))

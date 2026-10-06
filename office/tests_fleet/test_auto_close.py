@@ -304,15 +304,15 @@ class CloseCase(LoopCase):
     # the after-merge judge, through the real run_desk.run with its process faked
 
     @contextlib.contextmanager
-    def judge_says(self, verdict: str = "PASS", lines: dict = None, exit_code: int = 0, output=None):
+    def judge_says(self, verdict: str = "PASS", lines: dict = None, exit_code: int = 0, output=None, filler: str = ""):
         """The judge's process: reads its owl from the prompt and ends with an after-merge block whose verdict line
-        is verdict and whose check lines are lines (id to word, every written check PASS by default)."""
+        is verdict and whose check lines are lines (id to word, every written check PASS by default), after filler."""
         def run(argv, **kwargs):
             match = JUDGE_HEADER.search(argv[-1])
             task_id, merge_sha = match.group(1), match.group(2)
             said = lines if lines is not None else {"AC-3": "PASS"}
             block = output if output is not None else (
-                f"I read the pack.\nAFTER-MERGE {task_id} @ {merge_sha}\n"
+                f"{filler}I read the pack.\nAFTER-MERGE {task_id} @ {merge_sha}\n"
                 + "".join(f"{key} {word} | the pack shows it\n" for key, word in said.items())
                 + f"VERDICT: {verdict}\n")
             if "--output-last-message" in argv:
@@ -910,13 +910,13 @@ class Counting:
         self.calls, self.kill_at, self.then = [], kill_at, then or {}
         self.real = verify.run_check
 
-    def __call__(self, record, scratch, command, sandboxed=True, scrub=False, keep_fds=()):
-        self.calls.append({"path": record["path"], "command": command, "sandboxed": sandboxed, "scrub": scrub,
-                           "keep_fds": keep_fds})
+    def __call__(self, record, scratch, command, sandboxed=True, keep_fds=()):
+        self.calls.append({"path": record["path"], "command": command, "sandboxed": sandboxed,
+                           "after": ".merged-" in record["path"], "keep_fds": keep_fds})
         number = len(self.calls)
         if number in self.kill_at:
             raise Killed()
-        result = self.real(record, scratch, command, sandboxed, scrub, keep_fds)
+        result = self.real(record, scratch, command, sandboxed, keep_fds)
         if number in self.then:
             self.then[number]()
         return result
@@ -931,7 +931,7 @@ class AfterMergeCommandTests(CloseCase):
         return runs
 
     def after_merges(self, ctx: dict) -> list:
-        return [call for call in self.runs.calls if call["scrub"]]
+        return [call for call in self.runs.calls if call["after"]]
 
     def test_after_merge_command_runs_in_a_fresh_detached_worktree_at_the_merge_commit(self):
         command = "AC-2 the merge commit is checked out | after merge: `git rev-parse --short=12 HEAD; git symbolic-ref -q HEAD || echo detached; ls`\n"
@@ -972,7 +972,7 @@ class AfterMergeCommandTests(CloseCase):
         self.assertEqual(self.close(own)["outcome"], "closed")
         by_path = {}
         for call in self.runs.calls:
-            by_path.setdefault(call["scrub"], []).append(call["sandboxed"])
+            by_path.setdefault(call["after"], []).append(call["sandboxed"])
         self.assertEqual(by_path[False], [True, False])  # verify before the merge: Harry sandboxed, yours not
         self.assertEqual(by_path[True], [True, False])  # after the merge: the same rule
         self.assertTrue(verify.sandboxed_for(pensieve.get_task(self.conn, build["task"])))
@@ -1008,6 +1008,18 @@ class AfterMergeCommandTests(CloseCase):
         self.assertNotIn("\u200b", evidence)
         self.assertEqual(output.count("[token]"), 2)
 
+    def test_after_merge_command_output_is_read_through_its_own_descriptor_never_a_link_in_its_place(self):
+        # The command swaps its output file, in the scratch folder it can write, for a link to a file outside its reach.
+        outside = self.write_file(self.tmp / "outside.txt", "words-from-outside-the-command-reach\n")
+        command = ("AC-2 the output is its own | after merge: `echo its own words; for f in \"$HOME\"/../out-*.log;"
+                   f" do rm -f \"$f\"; ln -s {outside} \"$f\"; done`\n")
+        ctx = self.passed_build(after=command, branch="fix/linked-output")
+        merge = self.land_pr(ctx)
+        self.assertEqual(self.close(ctx)["outcome"], "closed")
+        evidence = (self.reviews(ctx["task"]) / f"after-merge-evidence-{merge}.md").read_text()
+        self.assertIn("    its own words\n", evidence)
+        self.assertNotIn("words-from-outside", evidence)
+
     def test_after_merge_command_process_group_ends_with_it_and_keeps_its_locks(self):
         work, scratch = self.tmp / "work", self.tmp / "scratch"
         for folder in (work, scratch / "home", scratch / "tmp"):
@@ -1021,7 +1033,7 @@ class AfterMergeCommandTests(CloseCase):
                     os.kill(pid, 9)
 
         self.addCleanup(end_left)
-        result = verify.run_check(record, str(scratch), "sleep 60 & echo $!", sandboxed=False, scrub=True)
+        result = verify.run_check(record, str(scratch), "sleep 60 & echo $!", sandboxed=False)
         left.append(int(result["lines"][-1]))
         self.assertEqual(result["exit_code"], 0)
         self.assertTrue(gone(left[-1]))  # what it left behind ended with it
@@ -1043,7 +1055,7 @@ class AfterMergeCommandTests(CloseCase):
         merge = self.land_pr(ctx)
         real, seen = verify.run_check, []
 
-        def probe(record, scratch, command, sandboxed=True, scrub=False, keep_fds=()):
+        def probe(record, scratch, command, sandboxed=True, keep_fds=()):
             with safefs.opened_dir(config.OFFICE_ROOT, "locks") as locks:
                 wanted = {safefs.lstat(locks, name).st_ino
                           for name in (config.UPDATE_LOCK, run_desk.task_lock_name(ctx["task"]))}
@@ -1051,7 +1063,7 @@ class AfterMergeCommandTests(CloseCase):
             seen.append(lock_busy(config.UPDATE_LOCK))  # no CLI update can start while it runs
             # The command's process holds both itself.
             opened = " && ".join(f"test -e /dev/fd/{fd}" for fd in keep_fds)
-            return real(record, scratch, f"{opened} && {command}", sandboxed, scrub, keep_fds)
+            return real(record, scratch, f"{opened} && {command}", sandboxed, keep_fds)
 
         with mock.patch.object(verify, "run_check", side_effect=probe):
             self.assertEqual(self.close(ctx)["outcome"], "closed")
@@ -1500,31 +1512,110 @@ class ClosesTests(CloseCase):
 
 
 class KillTests(CloseCase):
-    def test_kill_during_the_judge_never_takes_a_run_whose_end_was_not_kept(self):
-        # A run whose exit code and vendor limit no process saw is never a verdict, even one that wrote a PASS: that
-        # try is over, and the next judges the same pack again.
+    def test_kill_during_the_judge_keeps_its_run_and_never_starts_a_second(self):
+        # The closer is killed before anything kept how its judge run ended, as when it dies while the judge runs on:
+        # that run is never a verdict, even one that wrote a PASS, and is never discarded either. It stays unknown with
+        # its run id kept, and no other judge run starts, by hand too.
         ctx = self.passed_build(after=WRITTEN_AC)
         merge = self.land_pr(ctx)
-
-        def killed_meanwhile(argv, **kwargs):
-            judge(argv, **kwargs).wait()
-            raise Killed()
-
-        with self.judge_says("PASS"):
-            judge = run_desk.start_child
-            with mock.patch.object(run_desk, "start_child", side_effect=killed_meanwhile):
-                with self.assertRaises(Killed):
-                    self.close(ctx)
+        with self.judge_says("PASS"), mock.patch.object(run_desk, "plan_limit", side_effect=Killed()), \
+                self.assertRaises(Killed):
+            self.close(ctx)
         first = self.record(ctx["task"])["judge"]
         self.assertEqual((first["outcome"], first["try"]), (None, 1))
         self.assertIsNotNone(first["run_id"])
         with self.judge_says("PASS") as started:
-            self.assertEqual(self.close(ctx)["outcome"], "closed")
-        self.assertEqual((started.call_count, len(self.judged)), (1, 2))
+            for manual in (False, True):
+                result = self.close(ctx, now=self.t0 + 9000, manual=manual)
+                self.assertEqual((result["outcome"], result.get("step"), started.call_count), ("unknown", "judge", 0))
+                self.assertIn("no other judge run starts", result["why"])
+        self.assertEqual(len(self.judged), 1)
+        self.assertEqual(self.record(ctx["task"])["judge"]["run_id"], first["run_id"])
         kept = [name for name in os.listdir(self.reviews(ctx["task"])) if name.startswith("after-merge-review-")]
-        self.assertEqual(len(kept), 1)
-        self.assertNotIn(first["run_id"], kept[0])
+        self.assertEqual(kept, [])
+        self.assertNotIn(f"close-{merge}.judge-try2", os.listdir(self.reviews(ctx["task"])))
+        self.assertEqual(self.status(ctx["task"]), "awaiting_close")
+
+    def test_kill_after_the_judge_ended_before_its_outcome_was_kept_reads_that_run_and_starts_no_other(self):
+        # The judge said CHANGES and ended; the closer died before it kept how. The run's own end record says it ended
+        # clean, so its CHANGES stands, and no second judge run gets the chance to say PASS.
+        ctx = self.passed_build(after=WRITTEN_AC)
+        self.land_pr(ctx)
+        real = closer.write_record
+
+        def killed(record, **kwargs):
+            if record["judge"] is not None and record["judge"]["outcome"] is not None:
+                raise Killed()
+            return real(record, **kwargs)
+
+        with self.judge_says("CHANGES", lines={"AC-3": "CHANGES"}), self.assertRaises(Killed), \
+                mock.patch.object(closer, "write_record", side_effect=killed):
+            self.close(ctx)
+        first = self.record(ctx["task"])["judge"]
+        self.assertEqual((first["run_id"] is not None, first["outcome"]), (True, None))
+        with self.judge_says("PASS") as started:
+            result = self.close(ctx)
+        self.assertEqual((result["outcome"], result.get("step"), started.call_count), ("stopped", "judge", 0))
+        self.assertEqual((len(self.judged), self.status(ctx["task"])), (1, "awaiting_close"))
+        [kept] = [name for name in os.listdir(self.reviews(ctx["task"])) if name.startswith("after-merge-review-")]
+        self.assertIn(first["run_id"], kept)
+        self.assertEqual(self.record(ctx["task"])["judge"]["outcome"], "ok")
+
+    def test_kill_during_a_judge_run_that_left_no_final_text_starts_the_next_try(self):
+        # The closer is killed before anything kept how its judge run ended, and that run, read whole, wrote no result
+        # event: it left no verdict that another run could replace, so its try is over and the next one starts.
+        ctx = self.passed_build(after=WRITTEN_AC)
+        merge = self.land_pr(ctx)
+
+        def cut_short(argv, **kwargs):
+            os.write(kwargs["stdout"], claude_stream("AFTER-MERGE").rsplit("\n", 2)[0].encode("utf-8") + b"\n")
+            return subprocess.CompletedProcess(argv, 0)
+
+        with fake_children(cut_short), mock.patch.object(run_desk, "plan_limit", side_effect=Killed()), \
+                self.assertRaises(Killed):
+            self.close(ctx)
+        self.assertEqual(self.record(ctx["task"])["judge"]["outcome"], None)
+        with self.judge_says("PASS") as started:
+            self.assertEqual(self.close(ctx)["outcome"], "closed")
+        self.assertEqual((started.call_count, len(self.judged)), (1, 1))
         self.assertIn(f"close-{merge}.judge-try2", os.listdir(self.reviews(ctx["task"])))
+
+    def test_kill_before_the_judge_launch_was_counted_starts_the_next_try(self):
+        # Killed after the run id was kept and before the launch was counted: no process started, so that try is over.
+        ctx = self.passed_build(after=WRITTEN_AC)
+        merge = self.land_pr(ctx)
+        with self.judge_says("PASS") as started, self.assertRaises(Killed), \
+                mock.patch.object(capacity, "record_launch", side_effect=Killed()):
+            self.close(ctx)
+        self.assertEqual(started.call_count, 0)
+        first = self.record(ctx["task"])["judge"]
+        self.assertEqual((first["run_id"] is not None, first["outcome"]), (True, None))
+        with self.judge_says("PASS") as started:
+            self.assertEqual(self.close(ctx)["outcome"], "closed")
+        self.assertEqual((started.call_count, len(self.judged)), (1, 1))
+        self.assertIn(f"close-{merge}.judge-try2", os.listdir(self.reviews(ctx["task"])))
+
+    def test_judge_output_too_large_to_read_its_result_whole_keeps_its_run(self):
+        # The window run_desk reads cuts through the judge's result event: that is no "no verdict", so the run is kept,
+        # no second judge run starts, and once its output can be read whole its own CHANGES stands.
+        ctx = self.passed_build(after=WRITTEN_AC)
+        self.land_pr(ctx)
+        with mock.patch.object(run_desk, "RUN_OUTPUT_MAX_BYTES", 4096), \
+                self.judge_says("CHANGES", lines={"AC-3": "CHANGES"}, filler="x" * 9000 + "\n"):
+            result = self.close(ctx)
+            first = self.record(ctx["task"])["judge"]
+            self.assertEqual((result["outcome"], result.get("step")), ("stopped", "judge"))
+            with self.judge_says("PASS") as started:
+                self.assertEqual(self.close(ctx)["outcome"], "not the closer's")
+                result = closer.close_by_hand(self.conn, ctx["task"], now=self.t0 + 9000)
+                self.assertEqual((result["outcome"], result.get("step")), ("stopped", "judge"))
+        self.assertEqual(self.record(ctx["task"])["judge"]["run_id"], first["run_id"])
+        with self.judge_says("PASS") as later:
+            result = closer.close_by_hand(self.conn, ctx["task"], now=self.t0 + 9600)
+        self.assertEqual((result["outcome"], result.get("step")), ("stopped", "judge"))
+        self.assertEqual((started.call_count, later.call_count, len(self.judged)), (0, 0, 1))
+        self.assertIn("the after-merge judge said CHANGES", self.close_events()[-1]["summary"])
+        self.assertEqual(self.status(ctx["task"]), "awaiting_close")
 
     def test_kill_after_a_failed_or_capped_judge_run_never_takes_its_verdict(self):
         for index, (exit_code, limit) in enumerate(((1, None), (0, "claude_plan"))):
@@ -1712,7 +1803,7 @@ class KillTests(CloseCase):
         name = f"{ctx['task']}.merged-{merge[:12]}"
         left = []
 
-        def still_running(record, scratch, command, sandboxed=True, scrub=False, keep_fds=()):
+        def still_running(record, scratch, command, sandboxed=True, keep_fds=()):
             # The closer is killed while its command runs on, with what its process inherited.
             left.append(subprocess.Popen(["/bin/sleep", "60"], cwd=record["path"], stdin=subprocess.DEVNULL,
                                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, pass_fds=keep_fds,

@@ -35,6 +35,10 @@ malformed criterion: it never runs, and the evidence gives the plain reason.
 Every check runs in a process group of its own that ends with it, and inherits the locks its caller holds for it
 (run_command): the task's review lock, and for the closer Ollivander's launch gate, so a check still running after
 its caller is killed keeps every other review, verify or closer pass off its worktree.
+
+A check's output, before the merge and after it, is read back only through the descriptor its file was made with
+(read_output), never by its name in the scratch folder the command can write, and is normalized and scrubbed whole
+before it is cut to the evidence's last lines.
 """
 from __future__ import annotations
 
@@ -46,6 +50,7 @@ import re
 import secrets
 import shutil
 import signal
+import stat
 import subprocess
 import time
 from typing import Callable, Optional
@@ -185,25 +190,32 @@ def child_env(scratch: str, record: Optional[dict] = None) -> dict:
             **tools["env"]}
 
 
-def _tail(path: str) -> tuple:
-    size = os.path.getsize(path)
-    with open(path, "rb") as handle:
-        handle.seek(max(0, size - config.VERIFY_OUTPUT_MAX_BYTES))
-        data = handle.read()
-    lines = data.decode("utf-8", "replace").splitlines()[-config.EVIDENCE_EXCERPT_LINES:]
-    return lines, size
+def _read_at(fd: int, offset: int, length: int) -> bytes:
+    """At most length bytes of fd from offset, whatever its file position."""
+    chunks, total = [], 0
+    while total < length:
+        chunk = os.pread(fd, min(65536, length - total), offset + total)
+        if not chunk:
+            break
+        chunks.append(chunk)
+        total += len(chunk)
+    return b"".join(chunks)
 
 
-def _scrubbed_tail(path: str) -> tuple:
-    """The last lines of a check's output for after-merge evidence: the window read starts at a line boundary, is
-    normalized and scrubbed whole (common.untrusted_text), and only then cut to the last EVIDENCE_EXCERPT_LINES lines,
-    so a credential whose start fell before the cut, or that an invisible character split, is still masked. A lone
-    line of 40 or more base64 characters is masked too."""
-    size = os.path.getsize(path)
+def read_output(fd: int) -> tuple:
+    """(lines, size) of a check's output for its evidence, before the merge and after it alike. It is read only through
+    fd, the descriptor run_check made the file with and kept, never by the file's name, since the name is in the scratch
+    folder the command can write: a link or another file put there in its place is never read. fd must still be a
+    regular file of the current user, and at most its last VERIFY_OUTPUT_MAX_BYTES are read. The window starts at a
+    line boundary, is normalized and scrubbed whole (common.untrusted_text), and only then cut to the last
+    EVIDENCE_EXCERPT_LINES lines, so a credential whose start fell before the cut, or that an invisible character split,
+    is still masked. A lone line of 40 or more base64 characters is masked too."""
+    info = os.fstat(fd)
+    if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid():
+        raise FleetError("a check's output is not the plain file verify made for it")
+    size = info.st_size
     start = max(0, size - config.VERIFY_OUTPUT_MAX_BYTES)
-    with open(path, "rb") as handle:
-        handle.seek(start)
-        data = handle.read()
+    data = _read_at(fd, start, size - start)
     if start > 0:
         cut = data.find(b"\n")
         data = b"" if cut < 0 else data[cut + 1:]
@@ -216,19 +228,23 @@ def run_command(argv: list, cwd: str, env: dict, out_fd: int, keep_fds: tuple = 
     """Run one check's process and give its exit code, or -1 once it ran past VERIFY_TIMEOUT_SECONDS. It starts in a
     session and process group of its own and inherits no fd but its output and keep_fds, the locks its caller holds
     for it (a task's review lock, Ollivander's launch gate), which it keeps held for as long as it runs, even if this
-    process is killed. Its whole group is killed once it ends, times out or this process is interrupted, so nothing it
-    started goes on in the worktree after it."""
-    with common.signals_held():  # a process that started always has its handle here, to be ended below
-        child = subprocess.Popen(argv, cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=out_fd,
-                                 stderr=subprocess.STDOUT, start_new_session=True, close_fds=True,
-                                 pass_fds=tuple(keep_fds))
+    process is killed. Its whole group is killed and reaped once it ends, times out or this process is interrupted,
+    before this returns or raises, so nothing it started goes on in the worktree after it and no caller lets go of a
+    lock while it runs. A signal that comes while it starts is held until its handle is kept, then raised inside the
+    cleanup below."""
+    child = None
     try:
+        with common.signals_held():  # a process that started always has its handle here, to be ended below
+            child = subprocess.Popen(argv, cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=out_fd,
+                                     stderr=subprocess.STDOUT, start_new_session=True, close_fds=True,
+                                     pass_fds=tuple(keep_fds))
         return child.wait(timeout=config.VERIFY_TIMEOUT_SECONDS)
     except subprocess.TimeoutExpired:
         return -1
     finally:
-        with common.signals_held():
-            _end_group(child)
+        if child is not None:
+            with common.signals_held():
+                _end_group(child)
 
 
 def _end_group(child: subprocess.Popen) -> None:
@@ -238,20 +254,21 @@ def _end_group(child: subprocess.Popen) -> None:
     child.wait()
 
 
-def run_check(record: dict, scratch: str, command: str, sandboxed: bool = True, scrub: bool = False,
-              keep_fds: tuple = ()) -> dict:
-    out_path = f"{scratch}/out-{secrets.token_hex(4)}.log"
-    fd = os.open(out_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+def run_check(record: dict, scratch: str, command: str, sandboxed: bool = True, keep_fds: tuple = ()) -> dict:
+    """Run one check and keep its result. Its output goes to a file made new in the scratch folder, opened for reading
+    and writing, and that descriptor is the only way it is read back (read_output)."""
+    fd = os.open(f"{scratch}/out-{secrets.token_hex(4)}.log",
+                 os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
     started = time.monotonic()
     try:
         argv = sandbox_argv(record, scratch, command) if sandboxed else [
             config.BASH_BIN, "--noprofile", "--norc", "-c", command]
         exit_code = run_command(argv, record["path"], child_env(scratch, record), fd, keep_fds)
+        seconds = round(time.monotonic() - started, 1)
+        lines, size = read_output(fd)
     finally:
         os.close(fd)
-    lines, size = _scrubbed_tail(out_path) if scrub else _tail(out_path)
-    return {"exit_code": exit_code, "seconds": round(time.monotonic() - started, 1), "lines": lines,
-            "output_bytes": size}
+    return {"exit_code": exit_code, "seconds": seconds, "lines": lines, "output_bytes": size}
 
 
 def _make_scratch() -> str:
@@ -369,7 +386,8 @@ def verify(conn, task_id: str, now: Optional[int] = None, keep_fds: tuple = ()) 
     raw = read_task_md(holder_id)
     # Kept before anything runs: a run that cannot keep it fails here, before any round could record its digest.
     md_digest = keep_task_md(task["id"], raw)
-    cleaned = gitops.clean_ignored(record)
+    # Names a desk chose, handed on as the after-merge evidence hands them on.
+    cleaned = tuple(common.untrusted_text(name) for name in gitops.clean_ignored(record))
     sha = gitops.rev(record)
     checks = parse_checks(raw.decode("utf-8", "replace"))
     commands = [check for check in before_merge(checks) if check["command"] is not None]
@@ -520,8 +538,7 @@ def run_after_merge(conn, task: dict, merged_record: dict, merge_sha: str, pass_
         try:
             for check in todo:
                 with (contextlib.nullcontext(()) if launch is None else launch(check)) as fds:
-                    result = run_check(merged_record, scratch, check["command"], sandboxed, scrub=True,
-                                       keep_fds=tuple(fds))
+                    result = run_check(merged_record, scratch, check["command"], sandboxed, keep_fds=tuple(fds))
                 if gitops.rev(merged_record) != merge_sha:
                     raise FleetError("HEAD moved while the after-merge commands ran")
                 results[check["id"]] = {**result, "ran_at": common.now_stamp(now), "cleaned": cleaned}

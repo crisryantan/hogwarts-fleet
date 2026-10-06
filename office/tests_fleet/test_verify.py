@@ -5,10 +5,18 @@ Runs on real git repos in temp folders, with verify's sandbox replaced by plain 
 """
 from __future__ import annotations
 
+import contextlib
+import os
+import signal
+import subprocess
+import time
 from pathlib import Path
+from unittest import mock
 
-from fleet import verify
+from fleet import common, config, safefs, verify
 from tests_fleet.test_review_loop import LoopCase
+
+TOKEN = "gh" + "p_" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8"  # shaped like a GitHub token, built so no scanner trips
 
 CHECKS_MD = """# {task_id} Mixed checks
 
@@ -218,3 +226,83 @@ class AfterMergeCheckTests(VerifyChecksCase):
         text = verify.render("tk_" + "0" * 16, "a" * 40, record, "b" * 64, checks,
                              {"AC-1": {"exit_code": 0, "seconds": 0.1, "output_bytes": 0, "lines": []}}, 0)
         self.assertIn("SUMMARY 1 of 1 commands exited 0", text)
+
+
+OUTPUT_MD = """# {{task_id}} Check output
+
+## Intent
+Check what a check's output may carry into the evidence.
+
+## Acceptance criteria
+AC-1 the readme is there | check: `{command}`
+
+## Out of scope
+Anything else.
+"""
+
+
+def group_gone(pgid: int, seconds: float = 5.0) -> bool:
+    """Whether no process is left in the process group within seconds."""
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        try:
+            os.killpg(pgid, 0)
+        except ProcessLookupError:
+            return True
+        time.sleep(0.05)
+    return False
+
+
+class CheckOutputTests(VerifyChecksCase):
+    def test_check_output_is_read_through_its_own_descriptor_never_a_link_in_its_place(self):
+        # The check swaps its output file, in the scratch folder it can write, for a link to a file outside its reach.
+        outside = self.write_file(self.tmp / "outside.txt", "words-from-outside-the-check-reach\n")
+        command = (f'echo its own words; for f in "$HOME"/../out-*.log; do rm -f "$f"; ln -s {outside} "$f"; done')
+        _, result, text, _ = self.checked(OUTPUT_MD.format(command=command))
+        self.assertEqual(result["failed"], [])
+        self.assertIn("output, last 40 lines:\n    its own words\n", text)
+        self.assertNotIn("words-from-outside", text)
+
+    def test_check_output_before_the_merge_is_normalized_and_scrubbed_before_its_cut(self):
+        # A token, the same token split by a zero-width space, and a key whose header falls before the last 40 lines.
+        command = (f"echo token {TOKEN}; printf '%s\\342\\200\\213%s\\n' {TOKEN[:2]} {TOKEN[2:]};"
+                   " echo -----BEGIN RSA PRIVATE KEY-----; for i in $(seq 10 69); do echo MIIEpAIBAAKCAQEAx${{i}}Yz9Wq; done")
+        _, result, text, _ = self.checked(OUTPUT_MD.format(command=command))
+        output = text.split("output, last 40 lines:\n", 1)[1]
+        self.assertNotIn(TOKEN, common.normalized(output))
+        self.assertNotIn("\u200b", output)
+        self.assertEqual(output.count("[token]"), 2)
+        self.assertNotIn("MIIEpAIBAAKCAQEAx", output)
+        self.assertIn("[private_key]", output)
+        self.assertLessEqual(len(output.splitlines()), config.EVIDENCE_EXCERPT_LINES)
+        office = (self.office / "reviews" / result["task_id"] / f"evidence-{result['sha']}.md").read_text()
+        self.assertEqual(office, text)
+
+    def test_a_signal_as_a_check_starts_ends_its_group_before_its_caller_lets_go_of_a_lock(self):
+        work, scratch = self.tmp / "work", self.tmp / "scratch"
+        for folder in (work, scratch / "home", scratch / "tmp"):
+            folder.mkdir(parents=True)
+        real, children = subprocess.Popen, []
+
+        def start(*args, **kwargs):
+            children.append(real(*args, **kwargs))
+            os.kill(os.getpid(), signal.SIGTERM)  # lands once the process has started, before its handle is kept
+            return children[-1]
+
+        def end_left() -> None:
+            for child in children:
+                with contextlib.suppress(ProcessLookupError, PermissionError):
+                    os.killpg(child.pid, signal.SIGKILL)
+                child.wait()
+
+        self.addCleanup(end_left)
+        with safefs.opened_dir(config.OFFICE_ROOT, "locks", create=True) as locks, \
+                safefs.held_lock(locks, "review-check.lock", blocking=False) as lock_fd:
+            with common.ended_by_signals(), mock.patch.object(subprocess, "Popen", side_effect=start), \
+                    self.assertRaises(SystemExit):
+                verify.run_check({"path": str(work), "links": []}, str(scratch), "sleep 60 & sleep 60",
+                                 sandboxed=False, keep_fds=(lock_fd,))
+            # Still inside the lock: the check's process was killed and reaped before the signal left run_check.
+            [child] = children
+            self.assertIsNotNone(child.returncode, "the check's process outlived the signal that ended its caller")
+            self.assertTrue(group_gone(child.pid))

@@ -88,6 +88,11 @@ the lock without waiting, and is refused while a review of the task holds it.
 SIGTERM or SIGHUP, sent to a real run the Owl Post started, ends it through its finally blocks: the desk's
 process is killed, a Claude run records its usage as a killed run, the locks are released, the owl stays in
 the inbox and Ryan gets the failed-run event.
+Every run keeps how its process ended, its exit code and any vendor limit, in runs/<desk>/<run_id>.end as soon as
+it knows, before it records anything else (run_end), so a caller killed before it kept the run's result (the closer's
+after-merge judge) can still read how that run ended. A run's output is read for its events from the first whole
+line in its last RUN_OUTPUT_MAX_BYTES (read_run_output), and a read that could not see all of it never counts as a
+run that wrote no result event.
 
 --dry-run prints the argv as JSON and runs nothing. A real run needs the desk to be
 enabled (a plain file named "enabled" in its office folder, made by Ryan), stays under
@@ -155,6 +160,8 @@ LOCK_WAIT_SUMMARY = ("{desk} waited {minutes} minutes for its desk lock behind i
 MCP_JOB = re.compile(r"[a-z0-9][a-z0-9-]{0,39}")
 # Usage is read from at most this much of the end of the run output: Claude's result event is its last line.
 RUN_OUTPUT_MAX_BYTES = 32 * 1024 * 1024
+# A run's end record (end_name) is one short JSON line.
+END_RECORD_MAX_BYTES = 512
 
 _TOML_KEY = r"[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*"
 _TOML_STRING = r"\"[^\"\\\x00-\x1f\x7f]*\"|'[^'\x00-\x1f\x7f]*'"
@@ -996,6 +1003,18 @@ def claude_result(raw: bytes) -> dict:
     return found
 
 
+def read_run_output(dir_fd: int, name: str, label: str = "run output") -> tuple:
+    """(raw, whole) of a run's output file, for the events in it: at most its last RUN_OUTPUT_MAX_BYTES, read from the
+    first line that starts inside them, so a line the window cut through is never parsed as an event. whole is False
+    when the file is larger than that window: an event found in raw is whole, but one missing from it may have begun
+    before the window, so a reader never takes its absence for a run that wrote none."""
+    raw, size = safefs.read_range(dir_fd, name, None, RUN_OUTPUT_MAX_BYTES + 1, label)
+    if size <= RUN_OUTPUT_MAX_BYTES and len(raw) <= RUN_OUTPUT_MAX_BYTES:
+        return raw, True
+    cut = raw.find(b"\n")
+    return (b"" if cut < 0 else raw[cut + 1:]), False
+
+
 def _claude_counts(result: dict) -> tuple:
     """Input, output and cache read tokens. modelUsage covers every model the run called, so it
     wins over usage, which counts only the main model."""
@@ -1053,13 +1072,15 @@ def killed_claude_usage(desk: str, raw: bytes) -> dict:
             "cost_usd": float(config.MAX_BUDGET_USD[desk]), "spend_unknown": True}
 
 
-def run_usage(plan: dict, output: bytes, exit_code: int) -> dict:
+def run_usage(plan: dict, output: bytes, exit_code: int, whole: bool = True) -> dict:
     """The usage a run's output reports. A Claude run killed before its result event (exit code below 0: a timeout,
-    or a signal) reports no cost, so it records killed_claude_usage instead of counting as free."""
+    or a signal) reports no cost, so it records killed_claude_usage instead of counting as free, and so does one whose
+    output could not be read whole (whole False, see read_run_output) with no result event in what was read, since
+    its cost may be in an event the read never saw."""
     if plan["family"] != "claude":
         return parse_codex_usage(output)
     usage = parse_claude_usage(output)
-    if exit_code < 0 and not claude_result(output):
+    if (exit_code < 0 or not whole) and not claude_result(output):
         return {**usage, **killed_claude_usage(plan["desk"], output)}
     return usage
 
@@ -1639,14 +1660,63 @@ def stop_child(child) -> None:
     child.wait()
 
 
-def _run_output(run_fd: int, run_id: str) -> bytes:
-    """What the desk's process wrote to its output file, or nothing when that cannot be read, so usage then
-    records as zero. The run log keeps the full output."""
+def _run_output(run_fd: int, run_id: str) -> tuple:
+    """(output, whole): what the desk's process wrote to its output file (read_run_output), or nothing and not whole
+    when that cannot be read, so a Claude run's usage is then charged as an unknown spend, never as free. The run log
+    keeps the full output."""
     try:
-        output, _ = safefs.read_range(run_fd, f"{run_id}.out", None, RUN_OUTPUT_MAX_BYTES, "run output")
+        return read_run_output(run_fd, f"{run_id}.out")
+    except (FleetError, OSError):
+        return b"", False
+
+
+def end_name(run_id: str) -> str:
+    """runs/<desk>/<run_id>.end: how the run's process ended, which the run keeps itself as soon as it knows."""
+    return f"{safefs.check_component(run_id)}.end"
+
+
+def _keep_end(run_fd: int, run_id: str, exit_code: Optional[int], cap_source: Optional[str]) -> None:
+    """Keep how a run's process ended, exit_code None when it never started, through a temp file and a rename, before
+    anything else is done with the run, so a caller killed before it kept the run's result (the closer's judge) can
+    still tell how it ended (run_end). Never raises, so it cannot hide why a run unwinds: a run whose end could not be
+    kept reads as one whose end no process saw."""
+    data = {"run_id": run_id, "exit_code": exit_code, "cap_source": cap_source}
+    with contextlib.suppress(FleetError, OSError):
+        safefs.write_new(run_fd, end_name(run_id), (json.dumps(data, sort_keys=True) + "\n").encode("ascii"))
+
+
+def run_end(desk: str, run_id: str) -> Optional[dict]:
+    """How a run's process ended, {exit_code, cap_source}, from the end record its run kept (exit_code None: its
+    process never started; below 0: killed or timed out), or None when there is none: the run has not ended, or ended
+    with no process left to see how. A read that fails raises FleetError or OSError, and a record that is there but
+    does not read whole raises safefs.Unsafe, so no reader takes either for a missing record."""
+    run_id = safefs.check_component(run_id)
+    try:
+        with safefs.opened_dir(config.OFFICE_ROOT, "runs", ids.check("desk", desk)) as fd:
+            raw = safefs.read_regular(fd, end_name(run_id), END_RECORD_MAX_BYTES, "run end record")
+    except safefs.Missing:
+        return None
+    try:
+        data = common.strict_json(raw)
+    except (UnicodeDecodeError, ValueError):
+        raise safefs.Unsafe("the run end record is not JSON") from None
+    code = data.get("exit_code") if isinstance(data, dict) else None
+    if not isinstance(data, dict) or set(data) != {"run_id", "exit_code", "cap_source"} or data["run_id"] != run_id \
+            or not (code is None or (type(code) is int and -255 <= code <= 255)) \
+            or data["cap_source"] not in (None, *PLAN_NAMES):
+        raise safefs.Unsafe("the run end record does not read whole")
+    return {"exit_code": code, "cap_source": data["cap_source"]}
+
+
+def _ended(run_fd: int, plan: dict, exit_code: int) -> tuple:
+    """(output, whole, errors, cap_source) of a run whose process has ended with exit_code."""
+    output, whole = _run_output(run_fd, plan["run_id"])
+    try:
+        errors = safefs.read_regular(run_fd, f"{plan['run_id']}.err", config.RUN_ERROR_MAX_BYTES, "run errors")
     except FleetError:
-        return b""
-    return output
+        errors = b""
+    return output, whole, errors, plan_limit(plan["family"], output, exit_code != 0, errors,
+                                             timed_out=exit_code == -1)
 
 
 def _record_interrupted(conn, plan: dict, run_fd: int, started: float, now: Optional[int]) -> bool:
@@ -1657,7 +1727,8 @@ def _record_interrupted(conn, plan: dict, run_fd: int, started: float, now: Opti
     if plan["family"] != "claude":
         return False
     try:
-        usage = run_usage(plan, _run_output(run_fd, plan["run_id"]), -1)  # -1: killed, as a timeout is
+        output, whole = _run_output(run_fd, plan["run_id"])
+        usage = run_usage(plan, output, -1, whole)  # -1: killed, as a timeout is
         capacity.record_launch_usage(conn, plan["run_id"], usage["input_tokens"], usage["output_tokens"],
                                      usage["cache_read_tokens"], usage["cost_usd"],
                                      int((time.monotonic() - started) * 1000), model=plan["model"], now=now,
@@ -1730,8 +1801,8 @@ def _record_orphan(conn, plan: dict, run_fd: int, row: dict, now: Optional[int])
     event when it wrote one, else a killed run's (killed_claude_usage). Its time is from its launch to the last
     write to its output."""
     run_id = row["run_id"]
-    output = _run_output(run_fd, run_id)
-    usage = run_usage(plan, output, -1)
+    output, whole = _run_output(run_fd, run_id)
+    usage = run_usage(plan, output, -1, whole)
     used = claude_models(output) if plan["family"] == "claude" else []
     info = safefs.lstat(run_fd, f"{run_id}.out")
     ended = row["launched_at"] if info is None else int(info.st_mtime)
@@ -1746,16 +1817,20 @@ def _launch(conn, plan: dict, now: Optional[int], keep_fds: tuple = (), own: Opt
     """Start the planned run, whose launch run() has recorded, and record what it did. The process inherits every
     fd in keep_fds. own is the run's own lock on a desk that holds spend: its file is kept from just before the
     process starts until the run's usage is recorded, so a run that unwinds without recording it leaves its lock
-    for reconcile_launches."""
+    for reconcile_launches. How the process ended is kept in the run's end record (run_end) before anything else is
+    done with it: its exit code and vendor limit once it has ended, or killed here, and no exit code when an error kept
+    it from starting at all."""
     desk, run_id = plan["desk"], plan["run_id"]
-    if plan.get("temp"):
-        fresh_temp(plan["temp"])  # here, under its slot, not in build_plan: a dry run never empties a live run's folder
     with safefs.opened_dir(config.OFFICE_ROOT, "runs", desk, create=True) as run_fd:
-        out_fd = safefs.create_new(run_fd, f"{run_id}.out")
-        err_fd = safefs.create_new(run_fd, f"{run_id}.err")
+        out_fd = err_fd = child = None
         started = time.monotonic()
-        child = None
         try:
+            if plan.get("temp"):
+                # Here, under its slot, not in build_plan: a dry run never empties a live run's folder.
+                fresh_temp(plan["temp"])
+            out_fd = safefs.create_new(run_fd, f"{run_id}.out")
+            err_fd = safefs.create_new(run_fd, f"{run_id}.err")
+            started = time.monotonic()
             if own is not None:
                 own.keep = True
             with common.signals_held():  # a process that started always has its handle here, to be killed below
@@ -1765,25 +1840,31 @@ def _launch(conn, plan: dict, now: Optional[int], keep_fds: tuple = (), own: Opt
         except BaseException:
             settled = child is None  # it never started, so it spent nothing
             if child is not None:
-                # Ended before the locks it inherited are let go, wherever the signal landed, then what it did is
-                # recorded and the unwinding goes on.
+                # Ended before the locks it inherited are let go, wherever the signal landed, and how it ended kept,
+                # then what it did is recorded and the unwinding goes on.
                 with common.signals_held():
                     stop_child(child)
+                    if child.returncode is not None:
+                        with contextlib.suppress(Exception):
+                            _keep_end(run_fd, run_id, child.returncode, _ended(run_fd, plan, child.returncode)[3])
                 settled = _record_interrupted(conn, plan, run_fd, started, now)
+            else:
+                # Whatever was raised before the process had a handle here, a refused or failed start or a signal
+                # before it, none started: start_child returns once the binary runs, and signals are held around it.
+                _keep_end(run_fd, run_id, None, None)
             if own is not None and settled:
                 own.keep = False
             raise
         finally:
-            os.close(out_fd)
-            os.close(err_fd)
+            for fd in (out_fd, err_fd):
+                if fd is not None:
+                    os.close(fd)
         duration_ms = int((time.monotonic() - started) * 1000)
-        output = _run_output(run_fd, run_id)
-        try:
-            errors = safefs.read_regular(run_fd, f"{run_id}.err", config.RUN_ERROR_MAX_BYTES, "run errors")
-        except FleetError:
-            errors = b""
+        output, whole, _, cap_source = _ended(run_fd, plan, exit_code)
+        # Kept before anything else, so a caller killed from here on can still tell how the run ended (run_end).
+        _keep_end(run_fd, run_id, exit_code, cap_source)
     claude = plan["family"] == "claude"
-    usage = run_usage(plan, output, exit_code)
+    usage = run_usage(plan, output, exit_code, whole)
     # A Claude run names its full model ids in modelUsage. One that does not (a timeout or crash) records
     # the alias it was given, and is left out of the move check on both sides.
     used = claude_models(output) if claude else [plan["model"]]
@@ -1804,7 +1885,6 @@ def _launch(conn, plan: dict, now: Optional[int], keep_fds: tuple = (), own: Opt
     if claude and wands.CLAUDE_ID.fullmatch(wands.base_alias(plan["model"])) is None:
         for full_id in full_ids(used):
             _record_resolution(conn, plan["model"], full_id, now)
-    cap_source = plan_limit(plan["family"], output, exit_code != 0, errors, timed_out=exit_code == -1)
     after_run(conn, plan, previous, real, exit_code, now, cap_source, used)
     return {"desk": desk, "run_id": run_id, "exit_code": exit_code, "timed_out": exit_code == -1,
             "cap_source": cap_source, **usage}

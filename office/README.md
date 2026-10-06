@@ -69,7 +69,8 @@ The store has none of these:
   state/pensieve.db                     the real database, created by castle init
   logs/                                 the fleet's job and script logs, review-auto.log for the review loop and
                                         closer.log for auto-close, one JSON line per task each pass
-  runs/<desk>/                          each headless run's output, which fleet feed follows
+  runs/<desk>/                          each headless run's output, which fleet feed follows, and how its process
+                                        ended (<run>.end), kept as soon as it ends
   locks/                                lock files for run slots, launches, reviews, the review loop, the patrol,
                                         Ollivander's updates and the closer (closer.lock)
   worktrees/<task>.json                 each worktree's office record, and <task>.merged-<12 hex>.json for the
