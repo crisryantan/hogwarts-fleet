@@ -33,8 +33,10 @@ first (a pipe, a few words and a colon, outside the backticks, read as it shows)
 malformed criterion: it never runs, and the evidence gives the plain reason.
 
 Every check runs in a process group of its own that ends with it, and inherits the locks its caller holds for it
-(run_command): the task's review lock, and for the closer Ollivander's launch gate, so a check still running after
-its caller is killed keeps every other review, verify or closer pass off its worktree.
+(run_command): the task's review lock and Ollivander's launch gate, so a check still running after its caller is
+killed keeps every other review, verify or closer pass off its worktree, and no CLI update starts under it. Before the
+merge and after it, each command starts only through command_gate, which reads Ollivander's stop file and update marker
+again under the gate: a stop starts no further command, and the commands that ran keep their results.
 
 A check's output, before the merge and after it, is read back only through the descriptor its file was made with
 (read_output), never by its name in the scratch folder the command can write, and is normalized and scrubbed whole
@@ -53,7 +55,7 @@ import signal
 import stat
 import subprocess
 import time
-from typing import Callable, Optional
+from typing import Callable, Iterator, Optional
 
 from hogwarts import ids, pensieve
 
@@ -254,6 +256,23 @@ def _end_group(child: subprocess.Popen) -> None:
     child.wait()
 
 
+@contextlib.contextmanager
+def command_gate(still_on: Optional[Callable[[], None]] = None) -> Iterator[int]:
+    """Entered right before one check command starts, before the merge (verify) and after it (the closer's
+    _command_launch): holds Ollivander's launch gate (his update lock, shared, as every desk run does), calls still_on,
+    the caller's own switch, which raises to start nothing, then reads his stop file and update marker once more under
+    the gate. Yields the gate's fd, which the caller hands over (safefs.hand_over) to the command's process with its
+    other locks, so no CLI update replaces a binary while the command runs, even if this process is killed.
+    run_desk.Stopped when a CLI update holds the gate or a stop is in place: no command starts."""
+    with run_desk.launch_gate() as gate_fd:
+        if still_on is not None:
+            still_on()
+        if run_desk.stop_requested():
+            raise run_desk.Stopped("Ollivander's stop file or a CLI update is in place, so no check command starts;"
+                                   " castle ollivander clear removes a stop")
+        yield gate_fd
+
+
 def run_check(record: dict, scratch: str, command: str, sandboxed: bool = True, keep_fds: tuple = ()) -> dict:
     """Run one check and keep its result. Its output goes to a file made new in the scratch folder, opened for reading
     and writing, and that descriptor is the only way it is read back (read_output)."""
@@ -305,21 +324,25 @@ def _result_lines(result: dict) -> list:
 
 
 def render(task_id: str, sha: str, record: dict, md_digest: str, checks: list, results: dict, now: int,
-           sandboxed: bool = True, cleaned: tuple = ()) -> str:
+           sandboxed: bool = True, cleaned: tuple = (), stopped: Optional[str] = None) -> str:
     """The evidence for one commit. SUMMARY counts the before-merge criteria (and every malformed one); an
-    after-merge criterion is listed with its own line and never looked up in results, since it never runs here."""
+    after-merge criterion is listed with its own line and never looked up in results, since it never runs here.
+    stopped is why the checks stopped part way (Ollivander's stop or a CLI update): the commands that ran keep their
+    results, and each one that never started says so, never counted as run."""
     when = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now))
     before = [check for check in before_merge(checks) if check["malformed"] is None]
     commands = [check for check in before if check["command"] is not None]
-    ran = len(commands)
-    passed = sum(1 for check in commands if results[check["id"]]["exit_code"] == 0)
+    ran = sum(1 for check in commands if check["id"] in results)
+    passed = sum(1 for check in commands if check["id"] in results and results[check["id"]]["exit_code"] == 0)
     malformed = sum(1 for check in checks if check["malformed"] is not None)
     later = after_merge(checks)
     later_commands = sum(1 for check in later if check["command"] is not None)
     lines = [f"EVIDENCE {task_id} @ {sha}", f"TASK.md sha256 {md_digest}", f"WORKTREE {record['path']}",
              *_cleaned_lines(cleaned, "checks"), _ran_line(when, sandboxed),
              (f"SUMMARY {passed} of {ran} commands exited 0, {malformed} malformed checks not run,"
-              f" {len(before) - ran} observations for the reviewer")]
+              f" {len(before) - len(commands)} observations for the reviewer")]
+    if stopped is not None:
+        lines.append(f"STOPPED {len(commands) - ran} commands never started: {stopped}")
     if later:
         lines.append(f"AFTER MERGE {later_commands} commands and {len(later) - later_commands} written checks, judged"
                      " after merge and never run before it")
@@ -335,6 +358,8 @@ def render(task_id: str, sha: str, record: dict, md_digest: str, checks: list, r
             lines += [f"not run: an after-merge check, {kind}", ""]
         elif check["command"] is None:
             lines += ["not run: an observation for the reviewer to judge", ""]
+        elif check["id"] not in results:
+            lines += ["not run: the checks stopped before this command started", ""]
         else:
             lines += [*_result_lines(results[check["id"]]), ""]
     return "\n".join(lines).rstrip("\n") + "\n"
@@ -375,7 +400,10 @@ def keep_task_md(task_id: str, raw: bytes) -> str:
 def verify(conn, task_id: str, now: Optional[int] = None, keep_fds: tuple = ()) -> dict:
     """Run the before-merge checks of a task's worktree and write the evidence. keep_fds is the task's review lock
     the caller holds: each check's process inherits it, so no other review or verify starts on the worktree while a
-    check is still running, even after this process is killed."""
+    check is still running, even after this process is killed. Each command starts only through command_gate, the
+    after-merge commands' own gate, and its process holds Ollivander's launch gate as well. A stop or a CLI update met
+    there starts no further command: the evidence is still written, with the results of the commands that ran, and
+    then run_desk.Stopped (a FleetError) says why, so a review opens no round on checks that never finished."""
     task = pensieve.get_task(conn, ids.check("task", task_id))
     record = gitops.find_record(_castle(task["worktree"]))
     if record is None:
@@ -392,18 +420,32 @@ def verify(conn, task_id: str, now: Optional[int] = None, keep_fds: tuple = ()) 
     checks = parse_checks(raw.decode("utf-8", "replace"))
     commands = [check for check in before_merge(checks) if check["command"] is not None]
     results = {}
+    stopped = None
     sandboxed = sandboxed_for(task)
     if commands:
         scratch = _make_scratch()
         try:
             for check in commands:
-                results[check["id"]] = run_check(record, scratch, check["command"], sandboxed, keep_fds=keep_fds)
+                with contextlib.ExitStack() as gate:
+                    try:
+                        gate_fd = gate.enter_context(command_gate())
+                    except run_desk.Stopped as exc:
+                        stopped = common.one_line(exc, 300)
+                        break
+                    safefs.hand_over(gate_fd)
+                    results[check["id"]] = run_check(record, scratch, check["command"], sandboxed,
+                                                     keep_fds=(*keep_fds, gate_fd))
         finally:
             shutil.rmtree(scratch, ignore_errors=True)
     if gitops.rev(record) != sha:
         raise FleetError("HEAD moved while the checks ran; run verify again")
-    text = render(task["id"], sha, record, md_digest, checks, results, common.now_stamp(now), sandboxed, cleaned)
+    text = render(task["id"], sha, record, md_digest, checks, results, common.now_stamp(now), sandboxed, cleaned,
+                  stopped)
     paths = write_evidence(task["id"], holder_id, sha, text)
+    if stopped is not None:
+        raise run_desk.Stopped(f"verify ran {len(results)} of {len(commands)} check commands and started no more:"
+                               f" {stopped}. The evidence of those that ran is in {paths['office']}; run it again"
+                               " once the stop is cleared")
     failed = [check["id"] for check in commands if results[check["id"]]["exit_code"] != 0]
     malformed = [check["id"] for check in checks if check["malformed"] is not None]
     return {"task_id": task["id"], "sha": sha, "checks": len(checks), "failed": failed, "malformed": malformed,

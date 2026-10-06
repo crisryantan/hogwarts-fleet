@@ -19,7 +19,7 @@ from unittest import mock
 from hogwarts import capacity, owlery, pensieve
 from tests.support import HOUR, NOW, SHA
 
-from fleet import config, keeper, map as patrol_map, morning, patrol, scoreboard
+from fleet import common, config, keeper, map as patrol_map, morning, patrol, scoreboard
 from fleet.safefs import FleetError
 from tests_fleet.support import IN_KIT, ONLY_IN_KIT, OFFICE, fake_children
 from tests_fleet.test_caps import CLAUDE_USAGE_LIMIT
@@ -34,6 +34,9 @@ RON_WORDS = ("Ron - Release Engineer, map round.\n\nOne red on web-app.\n\nOUTCO
              "routine | acme/web-app#12 | new commits | - | -\n")
 DRAFTS = "| thread | author | label | why |\n|---|---|---|---|\n| 1 | lint-bot | VALID | real typo |\n"
 DAY = 86400
+# Shaped like GitHub tokens, built so no scanner trips on this file.
+TOKEN = "gh" + "p_" + "a" * 36
+TOKEN2 = "gh" + "p_" + "b" * 36
 REAL_LINEUP_DUE = patrol_map.lineup_due  # PatrolCase fakes it; the due-time test calls the real one
 
 
@@ -695,6 +698,38 @@ class BotPassTests(PatrolCase):
         passes = self.round(NOW)["bot_passes"]
         self.assertEqual(passes, [{"skipped": "hermione is not enabled", "due": 1}])
 
+    def test_github_text_reaches_hermione_scrubbed_before_any_cut_with_shas_only_from_their_own_field(self):
+        def comment(body: str, url: str = "https://github.com/acme/web-app/pull/12#c1", oid=None, hunk: str = ""):
+            return {"author": {"__typename": "Bot", "login": "lint-bot"}, "body": body, "createdAt": iso(NOW),
+                    "url": url, "diffHunk": hunk, "originalCommit": None if oid is None else {"oid": oid}}
+
+        self.github.threads[self.key] = [
+            {"id": "T1", "isResolved": False, "isOutdated": False, "path": f"src/{TOKEN2}.py", "line": 7,
+             "comments": {"nodes": [
+                 # A token whose start falls just before the comment's cut: only a scrub before the cut masks it.
+                 comment("x" * (patrol_map.COMMENT_MAX - 20) + " " + TOKEN, oid=SHA2,
+                         hunk="@@ -1 +1 @@\n+password = hunter2hunter2"),
+                 # The same token split by a zero-width space, which cleaning alone would join again.
+                 comment(f"Fixed in {SHA2}, see {TOKEN[:2]}\u200b{TOKEN[2:]}", oid=SHA2.upper(),
+                         url="https://bob:pw@github.com/acme/web-app/pull/12#c2")]}}]
+        self.github.prs = [pr_node(created=NOW - 3000, title=f"Add retry {TOKEN}",
+                                   threads=(thread("T1", "lint-bot", person=False),))]
+        with self.desk_writes(DRAFTS):
+            [done] = self.round(NOW)["bot_passes"]
+        [data] = [name for name in os.listdir(self.inbox("hermione")) if name.startswith("patrol-bot-pass-")]
+        for text in (read_file(done["file"]), (self.inbox("hermione") / data).read_text()):
+            plain = common.normalized(text)
+            for leaked in ("ghp_", "hunter2hunter2", "bob:pw"):
+                self.assertNotIn(leaked, plain)
+            self.assertIn("Title: Add retry [token]\n", text)
+            self.assertIn(f"Head commit: {SHA}\n", text)
+            self.assertIn("Thread 1 NEW: src/[token].py:7", text)
+            self.assertIn("+password = [secret]", text)
+            self.assertIn(f"lint-bot (bot), https://github.com/acme/web-app/pull/12#c1, on commit {SHA2}:\n", text)
+            # A sha in free text stays masked; a commit field that is not 40 lowercase hex is left out.
+            self.assertIn("lint-bot (bot), -:\n> Fixed in [hex], see [token]", text)
+            self.assertEqual(text.count(SHA2), 1)
+
     def test_the_baseline_counts_open_threads_as_seen(self):
         self.github.prs = [pr_node(created=NOW - DAY, threads=(thread("T1", "lint-bot", person=False),))]
         os.unlink(self.office / "patrol" / "map" / "snapshot.json")
@@ -906,6 +941,33 @@ class KeeperTests(PatrolCase):
         keeper.watch(self.conn, now=NOW + HOUR)
         keeper.watch(self.conn, now=NOW + 2 * HOUR)
         self.assertEqual(len([event for event in self.events() if event["kind"] == "patrol.gate"]), 1)
+
+    def test_titles_check_names_and_links_are_scrubbed_in_every_file_row_and_event(self):
+        self.go_live()
+        node = pr_node(title=f"Add retry {TOKEN}", rollup="FAILURE",
+                       contexts=(check(f"build {TOKEN}"), check(f"deploy {TOKEN2}", None, "WAITING")))
+        main = commit_node(SHA2, NOW - HOUR, "FAILURE", (check("deploy-check"),))
+        self.github.main[REPO] = [main]
+        with mock.patch.object(config, "WATCHED_REPOS", (REPO,)), self.desk_writes("ok\n"):
+            self.github.prs = [pr_node()]
+            patrol_map.run_round(self.conn, now=NOW - 900)
+            self.github.prs = [node]
+            patrol_map.run_round(self.conn, now=NOW)
+            watched = keeper.watch(self.conn, now=NOW)
+        rows = self.read("map", "outcomes.jsonl")
+        texts = [rows, self.read("map", "snapshot.json"), read_file(watched["file"]),
+                 *[read_file(self.office / "patrol" / "map" / name)
+                   for name in os.listdir(self.office / "patrol" / "map") if name.startswith("round-")],
+                 *[event["summary"] for event in self.events()]]
+        self.assertGreaterEqual(len(texts), 5)
+        for text in texts:
+            self.assertNotIn("ghp_", text)
+        self.assertIn("checks red", rows)
+        self.assertIn("build [token]", rows)
+        # A commit link keeps the sha GitHub gave in the node's own oid field.
+        self.assertIn(f"https://github.com/{REPO}/commit/{SHA2}", read_file(watched["file"]))
+        main["url"] = f"https://ci:{TOKEN}@github.com/{REPO}/commit/{SHA2}"
+        self.assertEqual(patrol.main_commits(REPO, NOW - DAY)[0]["url"], "")
 
     def test_ron_marking_a_row_headmaster_is_an_event_once_live(self):
         self.go_live()

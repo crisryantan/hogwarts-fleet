@@ -168,7 +168,10 @@ def render_round(rows: list, seen: dict, ts: int, followups_text: Optional[str] 
 
 
 def fetch_threads(record: dict) -> list:
-    """The unresolved review threads of one PR, with their comments, cleaned and cut."""
+    """The unresolved review threads of one PR, with their comments. Every comment, hunk and path is normalized and
+    scrubbed whole (patrol.github_text) before it is cut, as the PR follow-up's are. A comment's commit is the sha
+    GitHub gives in its own field (originalCommit), kept only when it is exactly 40 lowercase hex, and written next to
+    the scrubbed text, since the scrub masks a full sha."""
     owner, name = record["repo"].split("/", 1)
     data = patrol.gh_query("threads", {"owner": owner, "name": name, "number": record["number"]})
     threads = []
@@ -184,11 +187,12 @@ def fetch_threads(record: dict) -> list:
                 "author": login if isinstance(login, str) and patrol.LOGIN.fullmatch(login) else "unknown",
                 "person": patrol.is_person(item.get("author")),
                 "url": patrol.safe_url(item.get("url")),
-                "body": patrol.clean(item.get("body") or "")[:COMMENT_MAX],
-                "hunk": patrol.clean(item.get("diffHunk") or "")[:HUNK_MAX],
+                "commit": patrol.sha(patrol.get(item, "originalCommit", "oid")),
+                "body": patrol.github_text(item.get("body"))[:COMMENT_MAX],
+                "hunk": patrol.github_text(item.get("diffHunk"))[:HUNK_MAX],
             })
         line = node.get("line")
-        threads.append({"id": thread_id, "path": common.one_line(patrol.clean(node.get("path") or "-"), 200),
+        threads.append({"id": thread_id, "path": common.one_line(patrol.github_text(node.get("path")), 200) or "-",
                         "line": line if type(line) is int else None, "outdated": node.get("isOutdated") is True,
                         "comments": comments})
     return threads
@@ -197,8 +201,10 @@ def fetch_threads(record: dict) -> list:
 def render_threads(key: str, record: dict, threads: list, fresh: list) -> tuple:
     """The pass's input and the ids of the threads it carries. Threads are carried whole up to THREADS_TEXT_MAX
     and the rest are left out, not cut, so they stay unseen for a later pass. Only a first thread that is too
-    big on its own is cut, so a pass always carries something."""
+    big on its own is cut, so a pass always carries something. Every piece of GitHub text in it was scrubbed before
+    any cut (fetch_threads, patrol.pr_record); the commit shas are GitHub's own fields, added after the scrub."""
     head = "".join([f"# Bot pass for {key}\n\n", f"Title: {record['title']}\n", f"Link: {record['url'] or '-'}\n",
+                    f"Head commit: {patrol.sha(record.get('head')) or '-'}\n",
                     f"Unresolved review threads: {len(threads)}, of which {len(set(fresh))} are new since the last"
                     " pass.\n"])
     parts, carried, size = [head], [], len(head)
@@ -212,7 +218,9 @@ def render_threads(key: str, record: dict, threads: list, fresh: list) -> tuple:
         for comment in thread["comments"]:
             who = comment["author"] + ("" if comment["person"] else " (bot)")
             quoted = "\n".join("> " + line for line in comment["body"].splitlines()) or "> (empty)"
-            block.append(f"\n{who}, {comment['url'] or '-'}:\n{quoted}\n")
+            commit = patrol.sha(comment.get("commit"))
+            on = f", on commit {commit}" if commit else ""
+            block.append(f"\n{who}, {comment['url'] or '-'}{on}:\n{quoted}\n")
         text = "".join(block)
         if size + len(text) > THREADS_TEXT_MAX:
             if carried:
@@ -273,7 +281,7 @@ def bot_passes(conn, seen: dict, ts: int, now: Optional[int] = None, shadow: boo
             woke = patrol.wake(conn, "hermione", "bot-pass", "bot pass", text, out, now, tag=tag, shadow=shadow,
                                marks=marks, subject=key)
         except (FleetError, StoreError) as exc:
-            woke = {"launched": False, "clean": False, "error": common.one_line(exc, 200)}
+            woke = {"launched": False, "clean": False, "error": common.scrubbed_line(exc, 200)}
         passes.append({"pr": key, "file": patrol.file_path("bot-pass", out), **woke})
     return passes
 
@@ -359,7 +367,7 @@ def run_round(conn, now: Optional[int] = None) -> dict:
         try:
             woke = patrol.wake(conn, "ron", "map", "map round", text, out, now, shadow=shadow)
         except (FleetError, StoreError) as exc:
-            woke = {"launched": False, "clean": False, "error": common.one_line(exc, 200)}
+            woke = {"launched": False, "clean": False, "error": common.scrubbed_line(exc, 200)}
     if baseline:
         seed_bot_passes(seen, ts)
         passes = []

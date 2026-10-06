@@ -873,24 +873,26 @@ def _keep_results(a: Attempt, results: dict) -> None:
         safefs.write_new(fd, verify.after_results_name(a.merge_sha), raw)
 
 
+def _still_on() -> None:
+    """Auto-close read again under Ollivander's launch gate, before an after-merge command starts."""
+    if not auto_close_on():
+        raise Off()
+
+
 @contextlib.contextmanager
 def _command_launch(a: Attempt, check: dict, limit: int) -> Iterator[tuple]:
-    """Entered right before one after-merge command starts. It holds Ollivander's launch gate (his update lock,
-    shared, as every desk run does), then reads auto-close and Ollivander's stop and update marker once more under
-    it, then takes the command's O_EXCL try marker, and yields the fds the command's process inherits for as long as
-    it or anything it started runs: the task's review lock, so no later pass takes back or reuses its worktree, and
-    the gate, so no CLI update replaces a binary under it. Both are handed over (safefs.hand_over), so neither is let
-    go of while the process lives, even when this process ends. Off, a stop or a refused gate starts nothing and
-    takes no try; every result before it is kept."""
+    """Entered right before one after-merge command starts. Through verify.command_gate, which verify's own checks
+    use too, it holds Ollivander's launch gate (his update lock, shared, as every desk run does), then reads auto-close
+    and Ollivander's stop and update marker once more under it, then takes the command's O_EXCL try marker, and yields
+    the fds the command's process inherits for as long as it or anything it started runs: the task's review lock, so
+    no later pass takes back or reuses its worktree, and the gate, so no CLI update replaces a binary under it. Both are
+    handed over (safefs.hand_over), so neither is let go of while the process lives, even when this process ends. Off,
+    a stop or a refused gate starts nothing and takes no try; every result before it is kept."""
     with contextlib.ExitStack() as gate:
         try:
-            gate_fd = gate.enter_context(run_desk.launch_gate())
+            gate_fd = gate.enter_context(verify.command_gate(_still_on))
         except run_desk.Stopped:
             raise Wait("ollivander") from None
-        if not auto_close_on():
-            raise Off()
-        if run_desk.stop_requested():
-            raise Wait("ollivander")
         if take_marker(a.task_id, _command_prefix(a.merge_sha, check["id"]), limit) is None:
             raise Stop("commands", f"every try of after-merge command {check['id']} for this merge commit is used")
         for fd in (a.lock_fd, gate_fd):

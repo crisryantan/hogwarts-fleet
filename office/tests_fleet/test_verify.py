@@ -13,8 +13,11 @@ import time
 from pathlib import Path
 from unittest import mock
 
-from fleet import common, config, safefs, verify
-from tests_fleet.test_review_loop import LoopCase
+from hogwarts import pensieve
+
+from fleet import common, config, review, run_desk, safefs, verify
+from fleet.safefs import FleetError
+from tests_fleet.test_review_loop import HANDOFF, LoopCase
 
 TOKEN = "gh" + "p_" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8"  # shaped like a GitHub token, built so no scanner trips
 
@@ -306,3 +309,100 @@ class CheckOutputTests(VerifyChecksCase):
             [child] = children
             self.assertIsNotNone(child.returncode, "the check's process outlived the signal that ended its caller")
             self.assertTrue(group_gone(child.pid))
+
+
+STOP_MD = """# {task_id} Checks and Ollivander's stop
+
+## Intent
+Check that a stop starts no further check.
+
+## Acceptance criteria
+AC-1 the first check runs | check: `touch first-ran.txt`
+AC-2 the second check runs | check: `touch second-ran.txt`
+
+## Out of scope
+Anything else.
+"""
+
+
+def update_lock_busy() -> bool:
+    """Whether some process holds Ollivander's update lock shared, so no CLI update could take it now."""
+    with safefs.opened_dir(config.OFFICE_ROOT, "locks", create=True) as fd:
+        try:
+            with safefs.held_lock(fd, config.UPDATE_LOCK, blocking=False):
+                return False
+        except safefs.Busy:
+            return True
+
+
+class OllivanderStopTests(VerifyChecksCase):
+    """Before the merge, as after it, each check command starts only through Ollivander's launch gate, reads his stop
+    file and update marker again under it, and its process holds the gate for its whole life."""
+
+    def prepared(self, text: str = STOP_MD) -> tuple:
+        parent, task, _, created, _ = self.build()
+        self.write_file(self.castle / "tasks" / parent / "TASK.md", text.format(task_id=parent))
+        return parent, task, Path(created["worktree"])
+
+    def stop_file(self) -> Path:
+        return self.office / config.STATE_DIR / config.STOP_FILE
+
+    def test_a_stop_placed_during_a_check_starts_no_later_one_and_keeps_its_result(self):
+        parent, task, worktree = self.prepared()
+        real = verify.run_check
+
+        def then_stop(*args, **kwargs):
+            result = real(*args, **kwargs)
+            self.write_file(self.stop_file(), "stopped for a new Codex\n")
+            return result
+
+        with mock.patch.object(verify, "run_check", side_effect=then_stop) as ran, \
+                self.assertRaisesRegex(run_desk.Stopped, "verify ran 1 of 2 check commands and started no more"):
+            verify.verify(self.conn, task["id"])
+        self.assertEqual(ran.call_count, 1)
+        self.assertTrue((worktree / "first-ran.txt").exists())
+        self.assertFalse((worktree / "second-ran.txt").exists())
+        text = (self.castle / "tasks" / parent / "evidence.md").read_text()
+        self.assertIn("AC-1 the first check runs\ncheck: `touch first-ran.txt`\nexit: 0", text)
+        self.assertIn("AC-2 the second check runs\ncheck: `touch second-ran.txt`\n"
+                      "not run: the checks stopped before this command started\n", text)
+        self.assertIn("\nSUMMARY 1 of 1 commands exited 0, 0 malformed checks not run, 0 observations for the reviewer\n"
+                      "STOPPED 1 commands never started: Ollivander's stop file", text)
+
+    def test_a_cli_update_holding_the_gate_starts_no_check(self):
+        _, task, worktree = self.prepared()
+        with safefs.opened_dir(config.OFFICE_ROOT, "locks", create=True) as locks, \
+                safefs.held_lock(locks, config.UPDATE_LOCK, blocking=False), \
+                mock.patch.object(verify, "run_check", side_effect=AssertionError("a check ran")), \
+                self.assertRaisesRegex(run_desk.Stopped, "verify ran 0 of 2 check commands"):
+            verify.verify(self.conn, task["id"])
+        self.assertFalse((worktree / "first-ran.txt").exists())
+
+    def test_each_check_holds_the_gate_for_its_life(self):
+        _, task, _ = self.prepared()
+        real, seen = verify.run_check, []
+
+        def probe(record, scratch, command, sandboxed=True, keep_fds=()):
+            with safefs.opened_dir(config.OFFICE_ROOT, "locks") as locks:
+                gate = safefs.lstat(locks, config.UPDATE_LOCK).st_ino
+            seen.append(gate in {os.fstat(fd).st_ino for fd in keep_fds})
+            seen.append(update_lock_busy())  # no CLI update can start while it runs
+            opened = " && ".join(f"test -e /dev/fd/{fd}" for fd in keep_fds)
+            return real(record, scratch, f"{opened} && {command}", sandboxed, keep_fds)
+
+        with mock.patch.object(verify, "run_check", side_effect=probe):
+            result = verify.verify(self.conn, task["id"])
+        self.assertEqual((seen, result["failed"]), ([True] * 4, []))
+        self.assertFalse(update_lock_busy())
+
+    def test_a_review_under_a_stop_opens_no_round_and_says_why(self):
+        _, task, worktree = self.prepared()
+        self.write_file(worktree / "widget.txt", "widget\n")
+        self.handoff(task, HANDOFF.format(task_id=task["id"]))
+        self.enable("hermione")
+        self.write_file(self.stop_file(), "stopped for a new Codex\n")
+        with mock.patch.object(run_desk, "run", side_effect=AssertionError("a reviewer ran")), \
+                self.assertRaisesRegex(FleetError, "started no more: Ollivander's stop file"):
+            review.review_build(self.conn, task["id"])
+        self.assertFalse((worktree / "first-ran.txt").exists())
+        self.assertEqual(pensieve.list_tasks(self.conn, desk="hermione"), [])

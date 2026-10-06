@@ -51,7 +51,7 @@ def watched(seen: dict, ts: int) -> tuple:
         try:
             commits = patrol.main_commits(repo, ts - MAIN_LOOKBACK_SECONDS)
         except FleetError as exc:
-            errors.append(f"{repo}: {common.one_line(exc, 150)}")
+            errors.append(f"{repo}: {common.scrubbed_line(exc, 150)}")
             continue
         newest = commits[0] if commits else None
         if newest is not None and (newest["checks"] in patrol.RED or newest["waiting"]):
@@ -111,7 +111,7 @@ def watch(conn, now: Optional[int] = None) -> dict:
             woke = patrol.wake(conn, "ron", "keeper", "keeper's watch", text, out, now, shadow=shadow,
                                marks=[signature(item) for item in fresh])
         except (FleetError, StoreError) as exc:
-            woke = {"launched": False, "clean": False, "error": common.one_line(exc, 200)}
+            woke = {"launched": False, "clean": False, "error": common.scrubbed_line(exc, 200)}
     return {"ok": True, "shadow": shadow, "file": path, "reds": len(reds), "new_reds": len(fresh),
             "gates": len(gates), "model": bool(woke and woke.get("launched")), "woke": woke, "errors": errors}
 

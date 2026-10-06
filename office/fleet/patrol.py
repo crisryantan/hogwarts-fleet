@@ -71,6 +71,8 @@ THREAD_ID = re.compile(r"[A-Za-z0-9_=-]{1,100}")
 STAMP = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z")
 # A search cursor as GitHub hands it back: base64 text, nothing else.
 CURSOR = re.compile(r"[A-Za-z0-9+/=_-]{1,200}")
+# A link as the patrol hands one on: https, then URL characters only, no space, quote, angle bracket or backtick.
+URL = re.compile(r"https://[A-Za-z0-9._~:/?#\[\]@!$&'()*+,;=%-]+")
 _CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
 HEADMASTER_ROW = re.compile(r"^[ \t]*headmaster[ \t]*\|", re.IGNORECASE | re.MULTILINE)
 
@@ -123,7 +125,7 @@ THREADS_QUERY = """query($owner: String!, $name: String!, $number: Int!) {
       number title url
       reviewThreads(first: 100) { nodes {
         id isResolved isOutdated path line
-        comments(first: 30) { nodes { author { __typename login } body createdAt url diffHunk } }
+        comments(first: 30) { nodes { author { __typename login } body createdAt url diffHunk originalCommit { oid } } }
       } }
     }
   }
@@ -227,6 +229,21 @@ def clean(text: object) -> str:
     and tab, so nothing a desk or GitHub wrote can steer the terminal."""
     value = _CONTROL.sub("", str(text))
     return "".join(char for char in value if unicodedata.category(char) != "Cf")
+
+
+def github_text(text: object) -> str:
+    """GitHub text (a comment, a diff hunk, a path) made fit to hand on whole: normalized and scrubbed of anything
+    shaped like a credential (common.untrusted_text, so no invisible or wide character hides one from the scrub),
+    cleaned of control characters, and scrubbed again, since cleaning can join one. Whoever cuts it cuts only after
+    this. A full commit sha in it is masked like any long hex run; one GitHub gives in a field of its own (sha) is
+    added after."""
+    return pensieve.scrub(clean(common.untrusted_text(text if isinstance(text, str) else "")))
+
+
+def sha(value: object) -> Optional[str]:
+    """A commit sha from one of GitHub's own fields (an oid), exactly 40 lowercase hex, or None. Only these are written
+    next to scrubbed text, never unmasked from it."""
+    return value if isinstance(value, str) and ids.PATTERNS["sha"].fullmatch(value) else None
 
 
 def cell(text: object, limit: int = 120) -> str:
@@ -436,13 +453,13 @@ def checks_of(rollup: object) -> dict:
     failing, waiting = set(), set()
     for item in nodes(rollup, "contexts"):
         if item.get("__typename") == "CheckRun":
-            name = common.one_line(clean(item.get("name") or "check"), 100)
+            name = common.scrubbed_line(item.get("name") or "check", 100)
             if item.get("conclusion") in FAILED_CONCLUSIONS:
                 failing.add(name)
             if item.get("status") == "WAITING" or item.get("conclusion") == "ACTION_REQUIRED":
                 waiting.add(name)
         elif item.get("__typename") == "StatusContext" and item.get("state") in FAILED_STATES:
-            failing.add(common.one_line(clean(item.get("context") or "status"), 100))
+            failing.add(common.scrubbed_line(item.get("context") or "status", 100))
     return {"state": state if isinstance(state, str) and state.isalpha() else "NONE",
             "failing": sorted(failing)[:20], "waiting": sorted(waiting)[:20]}
 
@@ -456,8 +473,14 @@ def repo_number(node: dict) -> Optional[tuple]:
     return repo, number
 
 
-def safe_url(value: object) -> str:
-    return value if isinstance(value, str) and value.startswith("https://") and len(value) < 300 else ""
+def safe_url(value: object, oid: Optional[str] = None) -> str:
+    """A link GitHub gave, kept only when it is one https URL of plain URL characters that the scrub leaves as it is,
+    else "": a link is never cut or masked into another. oid is the commit sha GitHub gave in its own field for the
+    same node (sha), the one long hex run such a link may hold, so it is left out of what the scrub reads."""
+    if not isinstance(value, str) or len(value) >= 300 or URL.fullmatch(value) is None:
+        return ""
+    probe = value.replace(oid, "{sha}") if sha(oid) is not None else value
+    return value if common.untrusted_text(probe) == probe else ""
 
 
 def pr_key(repo: str, number: int) -> str:
@@ -486,7 +509,7 @@ def pr_record(node: dict) -> Optional[dict]:
     head = node.get("headRefOid")
     decision = node.get("reviewDecision")
     return {
-        "repo": repo, "number": number, "title": common.one_line(clean(node.get("title") or ""), 200),
+        "repo": repo, "number": number, "title": common.scrubbed_line(node.get("title") or "", 200),
         "url": safe_url(node.get("url")), "draft": node.get("isDraft") is True,
         "created_at": parse_ts(node.get("createdAt")) or 0,
         "updated_at": parse_ts(node.get("updatedAt")) or 0,
@@ -506,7 +529,7 @@ def asked_record(node: dict) -> Optional[dict]:
         return None
     repo, number = found
     login = get(node, "author", "login")
-    return {"repo": repo, "number": number, "title": common.one_line(clean(node.get("title") or ""), 200),
+    return {"repo": repo, "number": number, "title": common.scrubbed_line(node.get("title") or "", 200),
             "url": safe_url(node.get("url")), "draft": node.get("isDraft") is True,
             "author": login if isinstance(login, str) and LOGIN.fullmatch(login) else "unknown",
             "bot": get(node, "author", "__typename") == "Bot",
@@ -626,12 +649,12 @@ def main_commits(repo: str, since: int) -> list:
     data = gh_query("main", {"owner": owner, "name": name, "since": iso(since)})
     found = []
     for node in nodes(data, "repository", "defaultBranchRef", "target", "history"):
-        sha = node.get("oid")
-        if not isinstance(sha, str) or ids.PATTERNS["sha"].fullmatch(sha) is None:
+        oid = sha(node.get("oid"))
+        if oid is None:
             continue
         checks = checks_of(node.get("statusCheckRollup"))
-        found.append({"repo": repo, "sha": sha, "at": parse_ts(node.get("committedDate")) or 0,
-                      "url": safe_url(node.get("url")), "checks": checks["state"], "failing": checks["failing"],
+        found.append({"repo": repo, "sha": oid, "at": parse_ts(node.get("committedDate")) or 0,
+                      "url": safe_url(node.get("url"), oid), "checks": checks["state"], "failing": checks["failing"],
                       "waiting": checks["waiting"]})
     return found
 

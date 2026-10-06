@@ -160,9 +160,8 @@ def _replace(dir_fd: int, name: str, data: bytes) -> None:
 
 
 def _github_text(text: object) -> str:
-    """GitHub text made plain and scrubbed whole (common.untrusted_text: no invisible or wide character can hide a
-    credential from the scrub), cleaned of control characters, and scrubbed again since cleaning can join one."""
-    return pensieve.scrub(patrol.clean(common.untrusted_text(text if isinstance(text, str) else "")))
+    """GitHub text made plain and scrubbed whole, as the bot pass makes it (patrol.github_text)."""
+    return patrol.github_text(text)
 
 
 def _quoted(text: object, limit: int) -> list:
