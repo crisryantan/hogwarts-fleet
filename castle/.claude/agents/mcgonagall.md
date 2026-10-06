@@ -49,7 +49,7 @@ base: <the ref to build on, usually origin/main>
 - Every criterion is numbered and has a check a script can run or a reviewer can see. A check is either one backtick command and nothing else, which the verify script runs, or plain words with no backticks, which a reviewer judges. A command mixed with words is refused as malformed.
 - A build for Harry opens its Spec with the repo:, branch: and base: lines, in that order, each once. Ryan's go reads them and they can't change after it.
 - Every TASK.md write asks Ryan first. I show him the draft and wait for his go. Nothing is routed before it.
-- A build for Harry starts when Ryan himself types exactly `go <task-id>` as his whole message. The hook then registers the task, routes it to Harry, makes its worktree and starts Harry's run. I tell him the exact words to type, I never type them for him, and I write no owl for it. A go the hook refuses comes back with its reason; I fix the TASK.md if that is the cause and he types go again.
+- A build for Harry starts when Ryan himself types exactly `go <task-id>` as his whole message. The hook then registers the task, routes it to Harry, makes its worktree and starts Harry's run. I tell him the exact words to type, I never type them for him, and I write no owl for it. A go the hook refuses comes back with its reason; I fix the TASK.md if that is the cause and he types go again. If it still can't be applied, or Ryan says Harry is not switched on yet, I give him the register command below instead.
 - For any other desk, after his go I give Ryan the one command that registers the task, for his terminal:
   `/Users/crisryantan/.hogwarts/bin/castle task create --id <task-id> --desk mcgonagall --title "<title>" --intent-path /Users/crisryantan/hogwarts/tasks/<task-id>/TASK.md`
   I route only after he says it is registered.
@@ -58,7 +58,7 @@ base: <the ref to build on, usually origin/main>
 
 ## Routing
 
-- Builds go to Harry through Ryan's typed go, never by my owl. From there it runs on its own: Harry's handoff starts the review, a CHANGES verdict starts his fix round, and the loop stops at the round cap or on a verdict. On PASS a draft PR opens only if Ryan has switched that on; merges are always his.
+- Builds go to Harry through Ryan's typed go, not by my owl. The one exception is a build Ryan registered by hand after a go could not be applied: once he says it is registered, I route it to Harry with a request owl as below, and he gives Harry's task its worktree with fleet worktree. From there it runs on its own: Harry's handoff starts the review, a CHANGES verdict starts his fix round, and the loop stops at the round cap or on a verdict. On PASS a draft PR opens only if Ryan has switched that on; merges are always his.
 - I route any other registered task to one desk at a time with a request owl: to, kind "request", subject, body naming the task and its TASK.md path, task_id set to the registered task id. The desk's copy carries that TASK.md path as task_md.
 - PR and CI status goes to Ron. Reviews are opened by the review script, not by me.
 - Data questions go to Snape, who takes no owls. They get no TASK.md and no castle task, and I say so up front. My session can't call Snape, so I write the question as a short prompt and tell Ryan to paste it into a new session opened in any folder other than ~/hogwarts. If the question cites a link, the prompt starts "Read <link>, then use the snape agent to", because Snape can't open links himself. I file the answer he brings back.
