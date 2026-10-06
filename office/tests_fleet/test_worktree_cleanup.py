@@ -6,6 +6,7 @@ url.<bare>.insteadOf sends every fetch to a local bare repo, so nothing reaches 
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import shutil
@@ -108,6 +109,32 @@ class CleanupCase(CloseCase):
             return real(args, *rest, **kwargs)
         return mock.patch.object(gitops, "git", side_effect=git)
 
+    def ignore(self, *patterns: str) -> None:
+        """Patterns every worktree of the repo ignores, through its info/exclude, so no worktree shows a change."""
+        info = self.repo / ".git" / "info"
+        info.mkdir(exist_ok=True)
+        with open(info / "exclude", "a") as handle:
+            handle.write("".join(f"{pattern}\n" for pattern in patterns))
+
+    def link_deps(self, ctx: dict, in_record: bool = True, target: str = None) -> Path:
+        """A node_modules link in the worktree, git-ignored, as the toolchain makes one: listed in the office record and
+        pointing at the main checkout's copy, unless in_record is False or target names somewhere else."""
+        (self.repo / "node_modules").mkdir(exist_ok=True)
+        self.write_file(self.repo / "node_modules" / "pkg.js", "shared\n")
+        self.ignore("node_modules")
+        record = gitops.find_record(str(ctx["wt"]))
+        if in_record:
+            gitops.write_record({**record, "links": ["node_modules"]})
+        link = ctx["wt"] / "node_modules"
+        os.symlink(target or f"{record['repo_dir']}/node_modules", link)
+        return link
+
+    def intent(self, task_id: str) -> Path:
+        return self.marker(task_id, "closing")
+
+    def removed_rows(self, task_id: str) -> list:
+        return [event for event in self.cleanup_events("worktree.removed") if task_id in event["summary"]]
+
     def assert_removed(self, ctx: dict, branch: str = "fix/widget") -> None:
         self.assertFalse(os.path.lexists(ctx["wt"]))
         self.assertFalse(self.listed(ctx["wt"]))
@@ -127,7 +154,10 @@ class CloserTests(CleanupCase):
         self.assertEqual(result["worktree"], {"removed": str(ctx["wt"])})
         self.assert_removed(ctx)
         [event] = self.close_events()
-        self.assertIn("Its clean worktree is removed and its branch kept.", event["summary"])
+        # The close commits before the removal, so its event says what is under way, not what is done.
+        self.assertIn("closed with it. Its clean worktree is being removed and its branch kept. Evidence:",
+                      event["summary"])
+        self.assertFalse(self.intent(ctx["task"]).exists())
         self.assertEqual(self.cleanup_events(), [])  # the close event is the word, no row of its own
         self.assertEqual(json.loads(self.marker(ctx["task"], "removed").read_text())["by"], "closer")
         self.assertIn(["worktree", "remove", str(ctx["wt"])], spy.worktree_calls())
@@ -189,6 +219,33 @@ class CloserTests(CleanupCase):
         self.assert_kept(ctx, "uncommitted changes")
         closer.run_pass(self.conn, now=self.t0 + 9000)
         self.assertEqual(len(self.cleanup_events("worktree.kept")), 1)
+
+    def test_proven_close_keeps_a_worktree_with_ignored_files_that_exist_only_here(self):
+        ctx = self.passed_build()
+        self.land_pr(ctx)
+        self.ignore(".env")
+        self.write_file(ctx["wt"] / ".env", "a local secret no commit holds\n")
+        self.assertEqual(gitops.dirty(gitops.find_record(str(ctx["wt"]))), False)  # git status counts it clean
+        result = self.close(ctx)
+        self.assertEqual(result["outcome"], "closed")
+        self.assertEqual(result["worktree"]["kept"], str(ctx["wt"]))
+        self.assertEqual((ctx["wt"] / ".env").read_text(), "a local secret no commit holds\n")
+        [event] = self.close_events()
+        self.assertIn(f"Kept worktree {ctx['wt']}: ignored files that exist only here.", event["summary"])
+        self.assertFalse(self.intent(ctx["task"]).exists())
+
+    def test_proven_close_rechecks_ignored_files_after_the_close(self):
+        ctx = self.passed_build()
+        self.land_pr(ctx)
+        self.ignore("build/")
+        (ctx["wt"] / "build").mkdir()
+        self.write_file(ctx["wt"] / "build" / "out.bin", "built here\n")
+        with mock.patch.object(worktree, "why_kept", return_value=None):  # the plan saw nothing ignored
+            result = self.close(ctx)
+        self.assertEqual(result["worktree"]["kept"], str(ctx["wt"]))
+        self.assertTrue((ctx["wt"] / "build" / "out.bin").is_file())
+        self.assert_kept(ctx, "ignored files that exist only here")
+        self.assertFalse(self.intent(ctx["task"]).exists())
 
     def test_proven_close_of_your_own_sessions_task_touches_no_worktree(self):
         ctx = self.passed_own()
@@ -320,6 +377,43 @@ class SweepTests(CleanupCase):
         self.assertNotIn(TOKEN, event["summary"])
         self.assertEqual(self.sweep(ctx, after=3 * DAYS + 9000)["removed"], 1)
         self.assert_removed(ctx)
+
+    def test_sweep_keeps_a_worktree_with_ignored_files_tells_once_and_looks_again(self):
+        self.switch_on()
+        ctx = self.closed_build()
+        self.ignore(".env", "build/")
+        for name, setup in ((".env", lambda: self.write_file(ctx["wt"] / ".env", "local only\n")),
+                            ("build", lambda: ((ctx["wt"] / "build").mkdir(),
+                                               self.write_file(ctx["wt"] / "build" / "out.bin", "built\n")))):
+            with self.subTest(ignored=name):
+                setup()
+                for offset in (0, 900):
+                    self.assertEqual(self.sweep(ctx, after=3 * DAYS + offset)["kept"], 1)
+                self.assert_kept(ctx, "ignored files that exist only here")
+                self.assertFalse(self.marker(ctx["task"], "removing").exists())
+                shutil.rmtree(ctx["wt"] / "build") if name == "build" else os.unlink(ctx["wt"] / ".env")
+        self.assertEqual(self.sweep(ctx, after=3 * DAYS + 1800)["removed"], 1)
+        self.assert_removed(ctx)
+
+    def test_sweep_takes_the_toolchains_own_dependency_link_by_the_record_never_by_its_name(self):
+        self.switch_on()
+        ctx = self.closed_build()
+        stray = self.link_deps(ctx, in_record=False)  # the right name and target, but the record lists no link
+        self.assertEqual(self.git("ls-files", "-o", "-i", "--exclude-standard", "--directory", cwd=ctx["wt"]),
+                         "node_modules")  # git ignores it, so git status counts the worktree clean
+        self.assertEqual(self.sweep(ctx)["kept"], 1)
+        self.assert_kept(ctx, "ignored files that exist only here")
+        os.unlink(stray)
+        elsewhere = self.tmp / "elsewhere-modules"
+        elsewhere.mkdir()
+        self.link_deps(ctx, target=str(elsewhere))  # in the record, but not the link the toolchain made
+        self.assertEqual(self.sweep(ctx, after=3 * DAYS + 900)["kept"], 1)
+        self.assertTrue(os.path.islink(ctx["wt"] / "node_modules") and self.listed(ctx["wt"]))
+        os.unlink(ctx["wt"] / "node_modules")
+        os.symlink(f"{gitops.find_record(str(ctx['wt']))['repo_dir']}/node_modules", ctx["wt"] / "node_modules")
+        self.assertEqual(self.sweep(ctx, after=3 * DAYS + 1800)["removed"], 1)
+        self.assert_removed(ctx)
+        self.assertEqual((self.repo / "node_modules" / "pkg.js").read_text(), "shared\n")
 
     def test_sweep_never_removes_a_worktree_in_use(self):
         self.switch_on()
@@ -495,6 +589,205 @@ class KillTests(CleanupCase):
                               if ctx["task"] in event["summary"]]), 0)  # its close event already said so
 
 
+class CloseGapTests(CleanupCase):
+    """A kill anywhere between the closer's intent and its removal marker: the next Map round finishes the removal of a
+    close that committed, and drops the intent of one that did not, with the cleanup switch on or off."""
+
+    def kill_in_the_gap(self, step: str):
+        real_close, real_record = pensieve.close_proven, closer.write_record
+
+        def close_proven(*args, **kwargs):
+            if step == "before the close commits":
+                raise Killed()
+            closed = real_close(*args, **kwargs)
+            if step == "after the close commits":
+                raise Killed()
+            return closed
+
+        def write_record(record, *args, **kwargs):
+            if step == "at its close record" and record.get("state") == "closed":
+                raise Killed()
+            return real_record(record, *args, **kwargs)
+
+        patches = [mock.patch.object(pensieve, "close_proven", side_effect=close_proven),
+                   mock.patch.object(closer, "write_record", side_effect=write_record)]
+        if step == "at housekeeping":
+            patches.append(mock.patch.object(closer, "housekeep", side_effect=Killed()))
+        if step == "before its removal marker":
+            patches.append(mock.patch.object(worktree, "remove_closed", side_effect=Killed()))
+        stack = contextlib.ExitStack()
+        for patcher in patches:
+            stack.enter_context(patcher)
+        return stack
+
+    STEPS = ("before the close commits", "after the close commits", "at its close record", "at housekeeping",
+             "before its removal marker")
+
+    def test_a_kill_anywhere_between_the_close_and_its_removal_never_leaves_the_worktree_in_silence(self):
+        for cleanup in (False, True):
+            for step in self.STEPS:
+                with self.subTest(cleanup=cleanup, step=step):
+                    self.switch_on() if cleanup else self.switch_off()
+                    branch = f"fix/{'on' if cleanup else 'off'}-{step.replace(' ', '-')}"
+                    ctx = self.passed_build(branch=branch)
+                    self.land_pr(ctx)
+                    with self.kill_in_the_gap(step), self.assertRaises(Killed):
+                        self.close(ctx)
+                    self.assertTrue(self.intent(ctx["task"]).exists())  # written before the close transaction
+                    self.assertTrue(ctx["wt"].is_dir())
+                    committed = step != "before the close commits"
+                    self.assertEqual(self.status(ctx["task"]), "closed" if committed else "awaiting_close")
+                    result = self.sweep(at=self.t0 + 9000)
+                    self.assertFalse(self.intent(ctx["task"]).exists())
+                    if committed:
+                        self.assertEqual((result["removed"], result["kept"]), (1, 0))
+                        self.assert_removed(ctx, branch)
+                        self.assertEqual(json.loads(self.marker(ctx["task"], "removed").read_text())["by"], "closer")
+                    else:  # nothing closed, so nothing is removed, and the next pass closes and removes it
+                        self.assertEqual(result["removed"], 0)
+                        self.assertTrue(ctx["wt"].is_dir() and self.listed(ctx["wt"]))
+                        self.assertEqual(self.close(ctx, now=self.t0 + 9900)["worktree"], {"removed": str(ctx["wt"])})
+                        self.assert_removed(ctx, branch)
+                    self.assertEqual(self.removed_rows(ctx["task"]), [])  # its close event is the word
+        self.assertEqual(self.cleanup_events("worktree.kept"), [])
+
+    def test_a_close_killed_before_its_removal_tells_you_once_while_auto_close_is_off(self):
+        ctx = self.passed_build()
+        self.land_pr(ctx)
+        with self.kill_in_the_gap("after the close commits"), self.assertRaises(Killed):
+            self.close(ctx)
+        self.opt_out()
+        for offset in (0, 900):
+            self.assertEqual(self.sweep(at=self.t0 + 9000 + offset)["kept"], 1)
+        self.assert_kept(ctx, "its removal was cut short and the switch that started it is off now")
+        self.assertTrue(self.intent(ctx["task"]).exists())
+        self.opt_in()
+        self.assertEqual(self.sweep(at=self.t0 + 9900)["removed"], 1)
+        self.assert_removed(ctx)
+        self.assertFalse(self.intent(ctx["task"]).exists())
+
+    def test_an_intent_is_read_against_the_close_it_names_under_the_task_lock(self):
+        ctx = self.passed_build()
+        self.land_pr(ctx)
+        with self.kill_in_the_gap("after the close commits"), self.assertRaises(Killed):
+            self.close(ctx)
+        with run_desk.task_lock(ctx["task"]):
+            self.assertEqual(self.sweep(at=self.t0 + 9000)["busy"], 1)
+        self.assertTrue(self.intent(ctx["task"]).exists() and ctx["wt"].is_dir())
+        with mock.patch.object(pensieve, "task_closure", side_effect=StoreError("store is busy")):
+            self.assertEqual(self.sweep(at=self.t0 + 9900)["kept"], 1)  # a failed read never drops the intent
+        self.assertTrue(self.intent(ctx["task"]).exists() and ctx["wt"].is_dir())
+        self.write_file(self.intent(ctx["task"]), "not json\n")
+        self.assertEqual(self.sweep(at=self.t0 + 10800)["kept"], 1)
+        self.assertTrue(self.intent(ctx["task"]).exists() and ctx["wt"].is_dir())
+        [event] = self.cleanup_events("worktree.kept")
+        self.assertIn("it could not be read", event["summary"])
+
+    def test_an_unreadable_intent_of_a_task_still_open_is_dropped_without_a_word(self):
+        ctx = self.passed_build()
+        self.land_pr(ctx)
+        with self.kill_in_the_gap("before the close commits"), self.assertRaises(Killed):
+            self.close(ctx)
+        self.write_file(self.intent(ctx["task"]), "not json\n")
+        self.assertEqual(self.sweep(at=self.t0 + 9000)["kept"], 0)
+        self.assertFalse(self.intent(ctx["task"]).exists())
+        self.assertEqual(self.cleanup_events(), [])
+        self.assertEqual(self.close(ctx, now=self.t0 + 9900)["worktree"], {"removed": str(ctx["wt"])})
+
+    def test_an_intent_whose_close_another_path_made_is_dropped_and_removes_nothing(self):
+        ctx = self.passed_build()
+        self.land_pr(ctx)
+        with self.kill_in_the_gap("before the close commits"), self.assertRaises(Killed):
+            self.close(ctx)
+        pensieve.close_task(self.conn, ctx["task"], "abandoned", now=self.t0 + 8000)  # closed by hand meanwhile
+        self.assertEqual(self.sweep(at=self.t0 + 9000)["removed"], 0)
+        self.assertFalse(self.intent(ctx["task"]).exists())
+        self.assertTrue(ctx["wt"].is_dir() and self.listed(ctx["wt"]))
+
+
+class MarkerTests(CleanupCase):
+    def kill_finish(self, kind: str):
+        """Kill the removal as its finish drops the marker named kind."""
+        real = worktree._drop_marker
+
+        def drop(task_id, dropped):
+            if dropped == kind:
+                raise Killed()
+            return real(task_id, dropped)
+        return mock.patch.object(worktree, "_drop_marker", side_effect=drop)
+
+    def test_leftover_markers_of_a_finished_removal_never_warn_and_are_settled(self):
+        self.switch_on()
+        ctx = self.closed_build()
+        with self.kill_finish("removing"), self.assertRaises(Killed):
+            self.sweep(ctx)
+        self.assertTrue(self.marker(ctx["task"], "removed").exists())
+        self.assertTrue(self.marker(ctx["task"], "removing").exists())
+        self.switch_off()  # the switch that started it is off now, and it is done anyway
+        result = self.sweep(ctx, after=3 * DAYS + 900)
+        self.assertEqual((result["kept"], result["reported"]), (0, 1))
+        self.assert_removed(ctx)
+        self.assertEqual(self.cleanup_events("worktree.kept"), [])
+        self.assertEqual(len(self.removed_rows(ctx["task"])), 1)
+
+    def test_the_already_removed_path_settles_leftover_markers(self):
+        self.switch_on()
+        ctx = self.closed_build()
+        with self.kill_finish("removing"), self.assertRaises(Killed):
+            self.sweep(ctx)
+        with self.assertRaisesRegex(FleetError, "removed already"):
+            worktree.remove(self.conn, ctx["task"])
+        self.assertFalse(self.marker(ctx["task"], "removing").exists())
+        self.switch_off()
+        self.assertEqual(self.sweep(ctx, after=3 * DAYS + 900)["kept"], 0)
+        self.assertEqual(self.cleanup_events("worktree.kept"), [])
+        self.assertEqual(len(self.removed_rows(ctx["task"])), 1)
+
+    def fail_once(self, kind: str):
+        """The first write of the marker named kind fails."""
+        real, failed = worktree._write_marker, []
+
+        def write(task_id, written, data):
+            if written == kind and not failed:
+                failed.append(written)
+                raise OSError("No space left on device")
+            return real(task_id, written, data)
+        return mock.patch.object(worktree, "_write_marker", side_effect=write)
+
+    def test_a_removal_is_told_once_whichever_finish_marker_fails_to_write(self):
+        for kind in ("removed", "unreported"):
+            with self.subTest(failing=kind):
+                self.switch_on()
+                ctx = self.closed_build(branch=f"fix/{kind}")
+                with self.fail_once(kind):
+                    self.sweep(ctx)
+                self.assertFalse(os.path.lexists(ctx["wt"]))
+                for offset in (900, 1800):
+                    self.sweep(ctx, after=3 * DAYS + offset)
+                self.assert_removed(ctx, f"fix/{kind}")
+                self.assertEqual(len(self.removed_rows(ctx["task"])), 1)
+                self.assertEqual(worktree.markers("unreported"), [])
+                removal = json.loads(self.marker(ctx["task"], "removed").read_text())
+                self.assertIsNotNone(removal["reported"])
+
+    def test_a_removal_told_before_its_removing_marker_went_is_never_told_again(self):
+        self.switch_on()
+        ctx = self.closed_build()
+        real, failed = worktree._drop_marker, []
+
+        def drop(task_id, kind):
+            if kind == "removing" and not failed:
+                failed.append(kind)
+                raise OSError("Operation not permitted")
+            return real(task_id, kind)
+        with mock.patch.object(worktree, "_drop_marker", side_effect=drop):
+            self.assertEqual(self.sweep(ctx)["reported"], 1)  # its round tells it, with removing still there
+        self.assertTrue(self.marker(ctx["task"], "removing").exists())
+        self.assertEqual(self.sweep(ctx, after=3 * DAYS + 900)["reported"], 0)
+        self.assert_removed(ctx)
+        self.assertEqual(len(self.removed_rows(ctx["task"])), 1)
+
+
 class HandTests(CleanupCase):
     def test_fleet_worktree_remove_takes_the_task_lock_and_finishes_a_cut_short_removal(self):
         self.switch_on()
@@ -520,6 +813,14 @@ class HandTests(CleanupCase):
         self.assertEqual(json.loads(self.marker(ctx["task"], "removed").read_text())["by"], "hand")
         self.switch_on()
         self.assertEqual(self.sweep(ctx)["reported"], 0)
+
+
+    def test_fleet_worktree_remove_keeps_gits_rule_for_ignored_files(self):
+        ctx = self.closed_build()
+        self.ignore(".env")
+        self.write_file(ctx["wt"] / ".env", "yours to keep or not\n")
+        self.assertEqual(worktree.remove(self.conn, ctx["task"])["state"], "removed")
+        self.assert_removed(ctx)
 
 
 class MapTests(CleanupCase, MapRoundCase):

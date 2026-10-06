@@ -41,11 +41,14 @@ Closed tasks' worktrees also go by themselves, through remove_closed, the same p
 closer removes the worktree of a build it closes on proof, in the same pass, under auto-close's switch. With the
 worktree-cleanup switch on, each Map round (sweep_closed) removes the worktree of every build task closed by any path at
 least config.WORKTREE_CLEANUP_AFTER_SECONDS ago. Either one removes a worktree only while git lists it, its folder is a
-plain folder of yours in the castle worktrees folder, it has no uncommitted changes, and its HEAD is somewhere a removal
+plain folder of yours in the castle worktrees folder, it has no uncommitted changes and no git-ignored files (the
+toolchain's own dependency links aside, each checked against the office record), and its HEAD is somewhere a removal
 cannot lose: the commit the close proved, or a commit on the base or the branch on origin after a fetch. Anything it
 cannot read keeps the worktree, and you hear once. Only git worktree remove runs, without --force: no branch is
 deleted, and git worktree prune never runs. Marker files next to the office records make a removal a kill cut short
-finish on a later round, or tell you once when it cannot.
+finish on a later round, or tell you once when it cannot: the closer's intent (<task>.closing), written before its
+close commits, then <task>.removing, <task>.removed and the sweep's <task>.unreported, which share the removal's own
+identity so no removal is told twice. Your own fleet worktree-remove keeps git's own rule, which deletes ignored files.
 
 castle task start goes through start_task for a build desk's task, which makes the same TASK.md check, so it is
 no way round it. Every other desk's task starts as the store allows.
@@ -476,13 +479,17 @@ def remove_merged(build_record: dict, name: str) -> dict:
 
 
 MARKER_MAX_BYTES = 4096
-MARKER = re.compile(r"(tk_[0-9a-f]{16})\.(removing|removed|unreported)")
+MARKER = re.compile(r"(tk_[0-9a-f]{16})\.(closing|removing|removed|unreported)")
 # Who started a removal: the closer (auto-close's switch), the sweep (the worktree-cleanup switch), you with fleet
 # worktree-remove, or nobody, for a worktree that was already gone.
 REMOVED_BY = ("closer", "sweep", "hand", "gone")
+# One removal's own identity, from its removing marker on, so its markers and its report never stand for another.
+REMOVAL = re.compile(r"[0-9a-f]{16}")
 # One Map round's batch of removals: its time and a random tag, so two rounds never share one.
 BATCH = re.compile(r"[0-9]{1,12}-[0-9a-f]{8}")
 KEPT_KIND, REMOVED_KIND = "worktree.kept", "worktree.removed"
+IGNORED_KEPT = "ignored files that exist only here"
+SWITCH_OFF_KEPT = "its removal was cut short and the switch that started it is off now"
 IDS_SHOWN = 6
 
 
@@ -499,9 +506,18 @@ def _marker(task_id: str, kind: str) -> str:
     return f"{ids.check('task', task_id)}.{kind}"
 
 
+def _is(pattern: re.Pattern, value: object) -> bool:
+    return isinstance(value, str) and pattern.fullmatch(value) is not None
+
+
+def _is_batch(value: object) -> bool:
+    return value is None or _is(BATCH, value)
+
+
 def read_marker(task_id: str, kind: str) -> Optional[dict]:
     """A removal marker in the office worktrees folder, or None when there is none. One that cannot be read whole
-    raises, so no failed read is ever taken for no marker."""
+    raises, so no failed read is ever taken for no marker. closing is the closer's intent, written before its close
+    commits; removing, removed and unreported carry the removal's own identity."""
     try:
         with safefs.opened_dir(config.OFFICE_ROOT, gitops.RECORD_DIR) as fd:
             raw = safefs.read_regular(fd, _marker(task_id, kind), MARKER_MAX_BYTES, "worktree removal marker")
@@ -512,10 +528,18 @@ def read_marker(task_id: str, kind: str) -> Optional[dict]:
     except (UnicodeDecodeError, ValueError):
         raise FleetError("a worktree removal marker is not strict JSON") from None
     if not isinstance(data, dict) or data.get("task_id") != task_id or data.get("by") not in REMOVED_BY \
-            or (kind == "removing" and (not isinstance(data.get("head"), str) or not gitops.SHA.fullmatch(data["head"]))):
+            or not isinstance(data.get("path"), str):
         raise FleetError("a worktree removal marker is malformed")
-    if kind == "unreported" and data.get("batch") is not None and not (isinstance(data["batch"], str)
-                                                                         and BATCH.fullmatch(data["batch"])):
+    if kind == "closing":
+        good = data["by"] == "closer" and all(_is(gitops.SHA, data.get(key))
+                                              for key in ("pass_sha", "merge_sha", "tip"))
+    else:
+        good = _is(REMOVAL, data.get("removal")) and {
+            "removing": lambda: _is(gitops.SHA, data.get("head")),
+            "removed": lambda: _is_batch(data.get("reported")),
+            "unreported": lambda: _is_batch(data.get("batch")),
+        }[kind]()
+    if not good:
         raise FleetError("a worktree removal marker is malformed")
     return data
 
@@ -561,13 +585,24 @@ def _present(record: dict) -> bool:
         raise Kept("its folder is not a plain folder of yours in the worktrees folder") from None
 
 
-def _check_head(record: dict, head_ok, resumed: Optional[str] = None) -> str:
-    """The worktree's HEAD once nothing in it would be lost: no uncommitted changes, and HEAD passes head_ok (None
-    skips it, for your own command), or is the HEAD a removal a kill cut short had checked already. Kept otherwise."""
+def _ignored_here(record: dict) -> bool:
+    """Whether the worktree holds git-ignored content, which no commit holds and git worktree remove deletes. The only
+    exception is each dependency link the toolchain made for it: a name the office record lists that is still exactly
+    the link to the main checkout's copy (gitops.borrowed_link), never a name alone."""
+    links = set(record.get("links") or [])
+    return any(name not in links or not gitops.borrowed_link(record, name) for name in gitops.ignored(record))
+
+
+def _check_head(record: dict, head_ok, resumed: Optional[str] = None, automatic: bool = True) -> str:
+    """The worktree's HEAD once nothing in it would be lost: no uncommitted changes, for an automatic removal no
+    ignored files either, and HEAD passes head_ok (None skips it, for your own command), or is the HEAD a removal a kill
+    cut short had checked already. Kept otherwise."""
+    cut = " (a removal was cut short part way: finish it with git worktree remove --force once nothing in it is" \
+          " yours)" if resumed is not None else ""
     if gitops.dirty(record):
-        cut = " (a removal was cut short part way: finish it with git worktree remove --force once nothing in it is" \
-              " yours)" if resumed is not None else ""
         raise Kept("uncommitted changes" + cut)
+    if automatic and _ignored_here(record):
+        raise Kept(IGNORED_KEPT + cut)
     head = gitops.rev(record)
     if head_ok is None or head == resumed:
         return head
@@ -594,14 +629,23 @@ def why_kept(record: dict, head_ok) -> Optional[str]:
     return None
 
 
-def _finished(record: dict, by: str) -> None:
-    """A removal done: an unreported marker first for the sweep's batched row, then the removed marker, then the
-    removing marker goes, so a kill at any point leaves a marker that a later round finishes from."""
-    task_id = record["task_id"]
-    if by == "sweep":
-        _write_marker(task_id, "unreported", {"by": by, "path": record["path"], "batch": None})
-    _write_marker(task_id, "removed", {"by": by, "path": record["path"]})
+def _settle_done(task_id: str, done: dict) -> None:
+    """A removal whose removed marker is written: what a kill or a failed write left after it is finished. The
+    sweep's removal gets its unreported marker unless its removed marker says it was told already, and the removing
+    marker goes, so no leftover marker ever reads as a removal still under way."""
+    if done["by"] == "sweep" and done.get("reported") is None and read_marker(task_id, "unreported") is None:
+        _write_marker(task_id, "unreported", {"by": "sweep", "path": done["path"], "removal": done["removal"],
+                                              "batch": None})
     _drop_marker(task_id, "removing")
+
+
+def _finished(record: dict, by: str, removal: str) -> None:
+    """A removal done: the removed marker first, with the removal's identity, then the sweep's unreported marker for
+    its batched row, then the removing marker goes. A kill or a failed write at any point leaves the markers a later
+    call finishes from (_settle_done), and none of them is ever written for a removal that was told already."""
+    done = {"by": by, "path": record["path"], "removal": removal, "reported": None}
+    _write_marker(record["task_id"], "removed", done)
+    _settle_done(record["task_id"], done)
 
 
 def _relink(record: dict) -> None:
@@ -616,12 +660,15 @@ def remove_closed(conn, task_id: str, by: str, head_ok=None) -> dict:
 
     The task must be closed, its record its own, its stored worktree in the castle worktrees folder. A worktree git
     lists, whose folder is there, goes only with no uncommitted changes and a HEAD that passes head_ok(record, head):
-    True to remove, False or None (unknown) to keep. head_ok None is your own command, which keeps git's own rule. A
-    removing marker is written before anything changes, and git worktree remove runs without --force, so git checks
-    once more. A marker left by a kill finishes the removal on a later call: a folder git no longer lists is done, and
-    an entry git lists whose folder is gone is removed by git worktree remove for that path alone. Without such a
-    marker, either is left for you, and nothing is ever deleted by path. Kept, or a FleetError for a failed read, says
-    what stays. {task_id, removed, branch_kept, state}: removed, gone (it was gone already) or already."""
+    True to remove, False or None (unknown) to keep. The closer and the sweep also keep one with git-ignored files,
+    the toolchain's own dependency links aside, since git worktree remove would delete them; head_ok None is your own
+    command, which keeps git's own rule. A removing marker, with the removal's own identity, is written before
+    anything changes, and git worktree remove runs without --force, so git checks once more. A marker left by a kill
+    finishes the removal on a later call: a folder git no longer lists is done, and an entry git lists whose folder is
+    gone is removed by git worktree remove for that path alone. Without such a marker, either is left for you, and
+    nothing is ever deleted by path. Kept, or a FleetError for a failed read, says what stays. {task_id, removed,
+    branch_kept, state}: removed, gone (it was gone already) or already, which first settles any marker a cut short
+    finish left."""
     if by not in REMOVED_BY[:3]:
         raise FleetError("a worktree removal must say who started it")
     task = pensieve.get_task(conn, ids.check("task", task_id))
@@ -634,14 +681,17 @@ def remove_closed(conn, task_id: str, by: str, head_ok=None) -> dict:
         raise FleetError("this task's worktree record is not the task's own worktree")
     path, common_dir = record["path"], record["common_dir"]
     result = {"task_id": task["id"], "removed": path, "branch_kept": record["branch"]}
-    if read_marker(task["id"], "removed") is not None:
+    done = read_marker(task["id"], "removed")
+    if done is not None:
+        _settle_done(task["id"], done)
         return {**result, "state": "already"}
     removing = read_marker(task["id"], "removing")
+    removal = secrets.token_hex(8) if removing is None else removing["removal"]
     listed, present = _listed(record), _present(record)
     if not listed:
         if present:
             raise Kept("its folder is not a worktree git lists, so it was left for you")
-        _finished(record, removing["by"] if removing else "gone")
+        _finished(record, removing["by"] if removing else "gone", removal)
         return {**result, "state": "removed" if removing else "gone"}
     if not present:
         if removing is None:
@@ -649,12 +699,13 @@ def remove_closed(conn, task_id: str, by: str, head_ok=None) -> dict:
         gitops.git(["worktree", "remove", path], common_dir)  # the folder is gone: git drops only this path's entry
         if _listed(record):
             raise Kept("git still lists it after its removal was finished")
-        _finished(record, removing["by"])
+        _finished(record, removing["by"], removal)
         return {**result, "state": "removed"}
-    head = _check_head(record, head_ok, resumed=None if removing is None else removing["head"])
+    head = _check_head(record, head_ok, resumed=None if removing is None else removing["head"],
+                       automatic=by != "hand")
     started_by = by if removing is None else removing["by"]
     if removing is None:
-        _write_marker(task["id"], "removing", {"by": by, "path": path, "head": head})
+        _write_marker(task["id"], "removing", {"by": by, "path": path, "head": head, "removal": removal})
     toolchain.unlink_deps(record)
     try:
         gitops.git(["worktree", "remove", path], common_dir)
@@ -672,7 +723,7 @@ def remove_closed(conn, task_id: str, by: str, head_ok=None) -> dict:
                    " remove --force once nothing in it is yours") from None
     if _listed(record) or _present(record):
         raise Kept("git said it removed the worktree, but it is still there")
-    _finished(record, started_by)
+    _finished(record, started_by, removal)
     return {**result, "state": "removed"}
 
 
@@ -689,6 +740,32 @@ def remove(conn, task_id: str) -> dict:
         raise FleetError("this task's worktree was removed already")
     return {"task_id": done["task_id"], "removed": done["removed"], "branch_kept": done["branch_kept"],
             "state": done["state"]}
+
+
+def closer_head_ok(pass_sha: str, tip: str):
+    """head_ok for the closer: HEAD is the commit its close proved, or one on the base tip it fetched."""
+    def check(record: dict, head: str) -> Optional[bool]:
+        return True if head == pass_sha else gitops.is_ancestor(record["common_dir"], head, tip)
+    return check
+
+
+def intend_removal(record: dict, pass_sha: str, merge_sha: str, tip: str) -> None:
+    """The closer's intent to remove a build's worktree once its close commits, written before the close transaction,
+    under the task's review lock. It names the close it waits for, so a later round finishes the removal when that
+    close committed and drops the intent when it did not (sweep_closed), whatever kills the closer in between."""
+    _write_marker(record["task_id"], "closing", {"by": "closer", "path": record["path"], "pass_sha": pass_sha,
+                                                 "merge_sha": merge_sha, "tip": tip})
+
+
+def drop_intent(task_id: str) -> None:
+    _drop_marker(task_id, "closing")
+
+
+def _close_committed(conn, task_id: str, intent: dict) -> bool:
+    """Whether the proven close the intent names committed. A store that cannot be read raises."""
+    closure = pensieve.task_closure(conn, task_id)
+    return closure is not None and closure["kind"] == "proven" and closure["pass_sha"] == intent["pass_sha"] \
+        and closure["merge_sha"] == intent["merge_sha"]
 
 
 def kept_summary(task_id: str, path: str, why: object) -> str:
@@ -767,58 +844,135 @@ def _count(number: int, word: str) -> str:
 
 def _report(conn, now: Optional[int]) -> int:
     """One routine row per round for the sweep's removals: each unreported marker joins this round's batch, each
-    batch is one event keyed by its round, then the markers go. A kill before the event leaves the batch for the next
-    round, and a kill after it finds the event there already, so no removal is left out or told twice."""
+    batch is one event keyed by its round, then each removed marker records the batch that told it and the markers go.
+    A kill before the event leaves the batch for the next round, a kill after it finds the event there already, and
+    an unreported marker for a removal its removed marker says was told in another batch goes untold, so no removal is
+    left out or told twice."""
     batches: dict = {}
     this_round = f"{common.now_stamp(now)}-{secrets.token_hex(4)}"
     for task_id in markers("unreported"):
         marker = read_marker(task_id, "unreported")
         if marker is None:
             continue
-        if marker.get("batch") is None:
+        done = read_marker(task_id, "removed")
+        if done is not None and done["removal"] == marker["removal"] and done["reported"] is not None \
+                and done["reported"] != marker["batch"]:
+            _drop_marker(task_id, "unreported")  # told already, in its own batch
+            continue
+        if marker["batch"] is None:
             marker = {**marker, "batch": this_round}
             _write_marker(task_id, "unreported", {key: value for key, value in marker.items() if key != "task_id"})
-        batches.setdefault(marker["batch"], []).append(task_id)
-    for batch, task_ids in sorted(batches.items()):
+        batches.setdefault(marker["batch"], []).append((task_id, marker["removal"]))
+    for batch, entries in sorted(batches.items()):
+        task_ids = [task_id for task_id, _ in entries]
         shown = task_ids[:IDS_SHOWN]
         more = f" and {len(task_ids) - len(shown)} more" if len(task_ids) > len(shown) else ""
         pensieve.add_event(conn, config.PATROL_SENDER, REMOVED_KIND, "routine",
                            f"removed {_count(len(task_ids), 'worktree')} of closed tasks: {', '.join(shown)}{more};"
                            " their branches are kept", dedupe_key=f"worktree:removed:{batch}", now=now)
-        for task_id in task_ids:
+        for task_id, removal in entries:
+            done = read_marker(task_id, "removed")
+            if done is not None and done["removal"] == removal and done["reported"] != batch:
+                _write_marker(task_id, "removed", {**{key: value for key, value in done.items() if key != "task_id"},
+                                                   "reported": batch})
             _drop_marker(task_id, "unreported")
-    return sum(len(task_ids) for task_ids in batches.values())
+    return sum(len(entries) for entries in batches.values())
+
+
+def _resume(conn, task_id: str, fetched: dict, counts: dict, now: Optional[int]) -> None:
+    """A removal a kill cut short: one whose removed marker is written is only settled, with no word, and the rest is
+    finished while the switch that started it is still on, or told once."""
+    try:
+        task = pensieve.get_task(conn, task_id)
+    except NotFoundError:
+        return  # a marker no task of the store owns: nothing here removes anything for it
+    try:
+        done = read_marker(task_id, "removed")
+        if done is not None:
+            _settle_done(task_id, done)
+            return
+        marker = read_marker(task_id, "removing")
+    except (FleetError, OSError) as exc:
+        counts["kept"] += 1
+        tell_kept(conn, task, _stored_path(task), f"its removal marker could not be read ({exc})", now)
+        return
+    if marker is None:
+        return  # finished since it was listed
+    if not _switch_for(marker["by"]):
+        counts["kept"] += 1
+        why = (f"its removal was cut short; fleet worktree-remove {task_id} finishes it" if marker["by"] == "hand"
+               else SWITCH_OFF_KEPT)
+        tell_kept(conn, task, _stored_path(task), why, now)
+        return
+    _sweep_one(conn, task, marker["by"], fetched, counts, now)
+
+
+def _reconcile_intent(conn, task_id: str, counts: dict, now: Optional[int]) -> None:
+    """The closer's intent, against the close it names, under the task's review lock, so no close in flight is read
+    half way: a task still open, or a close that never committed, drops it; a committed close whose worktree is removed
+    already drops it; one with a removal under way is left to that removal's own marker; otherwise its removal is
+    finished while auto-close is on, through remove_closed with the closer's own checks, and told once when it is kept
+    or auto-close is off. A failed read keeps the intent for a later round."""
+    try:
+        task = pensieve.get_task(conn, task_id)
+    except NotFoundError:
+        return
+    try:
+        with run_desk.task_lock(task_id):
+            # The close and its closure row commit in one transaction, so a task still open never had that close.
+            if pensieve.get_task(conn, task_id)["status"] != "closed":
+                drop_intent(task_id)
+                return
+            intent = read_marker(task_id, "closing")
+            if intent is None:
+                return
+            if not _close_committed(conn, task_id, intent):
+                drop_intent(task_id)
+                return
+            done = read_marker(task_id, "removed")
+            if done is not None:
+                _settle_done(task_id, done)
+                drop_intent(task_id)
+                return
+            if read_marker(task_id, "removing") is not None:
+                return  # _resume finishes it or tells you
+            if not _switch_for("closer"):
+                counts["kept"] += 1
+                tell_kept(conn, task, _stored_path(task), SWITCH_OFF_KEPT, now)
+                return
+            try:
+                done = remove_closed(conn, task_id, "closer", closer_head_ok(intent["pass_sha"], intent["tip"]))
+            except Kept as exc:
+                counts["kept"] += 1
+                tell_kept(conn, task, _stored_path(task), exc, now)
+                drop_intent(task_id)
+                return
+            drop_intent(task_id)
+    except safefs.Busy:
+        counts["busy"] += 1  # the closer or a run holds the task: a later round looks again
+        return
+    except (FleetError, OSError, StoreError) as exc:
+        counts["kept"] += 1
+        tell_kept(conn, task, _stored_path(task), f"it could not be read ({common.scrubbed_line(exc, 160)})", now)
+        return
+    if done["state"] == "removed":
+        counts["removed"] += 1
 
 
 def sweep_closed(conn, now: Optional[int] = None) -> dict:
-    """The Map round's worktree cleanup. Never raises. First it finishes each removal a kill cut short while the switch
-    that started it is still on, and tells you once of each it cannot. Then, while the worktree-cleanup switch is on
-    (read again before each removal), it removes the worktree of each build task closed at least
+    """The Map round's worktree cleanup. Never raises. Whatever the worktree-cleanup switch says, it first finishes
+    each removal a kill cut short while the switch that started it is still on, and tells you once of each it cannot,
+    then settles each of the closer's removal intents against the close it names. Then, while the worktree-cleanup
+    switch is on (read again before each removal), it removes the worktree of each build task closed at least
     WORKTREE_CLEANUP_AFTER_SECONDS ago, through remove_closed under the task's review lock, with HEAD on origin's base
     or branch after a fetch. Last, the round's removals are one routine row. {state, removed, kept, busy, reported}."""
     counts = {"state": "on" if cleanup_on() else "off", "removed": 0, "kept": 0, "busy": 0, "reported": 0}
     try:
         fetched: dict = {}
         for task_id in markers("removing"):
-            try:
-                task = pensieve.get_task(conn, task_id)
-            except NotFoundError:
-                continue  # a marker no task of the store owns: nothing here removes anything for it
-            try:
-                marker = read_marker(task_id, "removing")
-            except (FleetError, OSError) as exc:
-                counts["kept"] += 1
-                tell_kept(conn, task, _stored_path(task), f"its removal marker could not be read ({exc})", now)
-                continue
-            if marker is None:
-                continue  # finished since it was listed
-            if not _switch_for(marker["by"]):
-                counts["kept"] += 1
-                why = (f"its removal was cut short; fleet worktree-remove {task_id} finishes it" if marker["by"] == "hand"
-                       else "its removal was cut short and the switch that started it is off now")
-                tell_kept(conn, task, _stored_path(task), why, now)
-                continue
-            _sweep_one(conn, task, marker["by"], fetched, counts, now)
+            _resume(conn, task_id, fetched, counts, now)
+        for task_id in markers("closing"):
+            _reconcile_intent(conn, task_id, counts, now)
         if counts["state"] == "on":
             cutoff = common.now_stamp(now) - config.WORKTREE_CLEANUP_AFTER_SECONDS
             pending = set(markers("removing"))

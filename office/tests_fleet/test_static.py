@@ -51,6 +51,8 @@ KNOWN_FLAGS = {
     "--is-shallow-repository", "-e",  # read-only probes: a shallow checkout, and git cat-file -e for a commit
     "--count", "--no-replace-objects",  # git rev-list --count walks HEAD's history as its commits name it
     "-f", "-d", "-n", "--ignored",  # git clean -n/-f -d -X: ignored files only, never tracked or untracked ones
+    # git ls-files --others --ignored: a read-only list of a worktree's ignored files, before a removal
+    "--others", "--exclude-standard", "--directory", "--no-empty-directory",
     # the review, worktree, verify and push scripts and the push gate
     "--task", "--repo-dir", "--branch", "--base", "--title", "--no-fetch", "--yes", "--mode",
     "--intent-file", "--permission-profile", "--cd", "--noprofile", "--norc", "sandbox",

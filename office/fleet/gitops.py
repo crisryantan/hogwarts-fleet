@@ -563,6 +563,15 @@ def check_links(record: dict) -> None:
                              "so checks could use files no commit holds; delete it from the worktree first")
 
 
+def ignored(record: dict) -> list:
+    """Every git-ignored path in the worktree as git names it, relative to its root, the dependency links included:
+    a folder ignored whole is one entry ending in /. A read git fails refuses, and so does more than git can list
+    whole."""
+    out = git(["ls-files", "-z", "--others", "--ignored", "--exclude-standard", "--directory", "--no-empty-directory",
+               "--", "."], record["git_dir"], record["path"], whole=True)
+    return [name for name in out.split("\0") if name]
+
+
 def _clean(record: dict, mode: str) -> list:
     out = git(["clean", mode, "-d", "-X", "--", ".", *link_excludes(record)], record["git_dir"], record["path"])
     if len(out) >= OUTPUT_MAX_CHARS:

@@ -41,8 +41,9 @@ open follow-up, the store refuses a proven close of one, and a follow-up opens o
 So whichever commits first wins, and the other leaves the task alone.
 
 Worktree cleanup. Right after the closer's sweep, the round calls worktree.sweep_closed, which finishes a worktree
-removal a kill cut short and, while you have the worktree-cleanup switch on, removes the worktree of each build task
-closed long enough ago, once git shows nothing in it would be lost. Its removals are one routine row per round, and
+removal a kill cut short, settles each removal the closer meant to make once its close committed, and, while you have
+the worktree-cleanup switch on, removes the worktree of each build task closed long enough ago, once git shows nothing
+in it would be lost. Its removals are one routine row per round, and
 each round row says what it did under "worktrees".
 
 In shadow mode that is all. Once Ryan removes the shadow file, each for-me row is also a headmaster event,

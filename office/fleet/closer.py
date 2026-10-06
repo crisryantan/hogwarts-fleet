@@ -62,8 +62,11 @@ close_one, for one task, under the task's review lock (the judge's process inher
 5. The close, through pensieve.close_proven alone: the task, and McGonagall's go task when nothing else is open under
    it, in one transaction with one headmaster event naming what proved each check. Then, still under the task's review
    lock, a build's own worktree goes through worktree.remove_closed, the path fleet worktree-remove takes, when it has
-   no uncommitted changes and its HEAD is the commit the close proved or one on the base this attempt fetched. One it
-   keeps is named in the close event ("Kept worktree <path>: uncommitted changes"), and the branch always stays.
+   no uncommitted changes, no git-ignored files but the toolchain's own dependency links, and its HEAD is the commit
+   the close proved or one on the base this attempt fetched. The close event says it is being removed, or names one
+   it keeps ("Kept worktree <path>: uncommitted changes"), and the branch always stays. The intent to remove it is
+   written before the close transaction, so a kill between the close and the removal leaves it for the next Map round
+   (worktree.sweep_closed), which finishes it once that close committed or drops it when the close did not.
 
 Wait means change nothing and try again next round; a wait that can last tells you once after
 AUTO_CLOSE_STALL_SECONDS. Unknown means a read failed or was partial: try again, and tell you once after
@@ -1354,10 +1357,10 @@ def _summary(a: Attempt, parent_note: str, worktree_note: Optional[str] = None) 
     written = (f"written checks {_ids_text([check['id'] for check in a.written])} passed by {a.judge}" if a.written
                else "no written checks")
     # The worktree note and the evidence pointer are never cut: the rest is cut to fit beside them.
-    tail = (f" {worktree_note}." if worktree_note else "") + \
-        f" Evidence: close-evidence-{a.merge_sha[:12]} in the office reviews folder"
+    tail = common.one_line((f"{worktree_note}. " if worktree_note else "")
+                           + f"Evidence: close-evidence-{a.merge_sha[:12]} in the office reviews folder", SUMMARY_MAX)
     return common.one_line(f"task {a.task_id} closed as complete by auto-close: {how}; {ci}; {commands}; {written};"
-                           f" {parent_note}.", SUMMARY_MAX - len(tail)) + common.one_line(tail, SUMMARY_MAX)
+                           f" {parent_note}.", SUMMARY_MAX - len(tail) - 1) + " " + tail
 
 
 def _close(a: Attempt) -> dict:
@@ -1397,6 +1400,10 @@ def _close(a: Attempt) -> dict:
              "evidence_sha256": hashlib.sha256(text.encode("ascii")).hexdigest()}
     if not auto_close_on():  # read once more, right before the store close
         raise Off()
+    if plan is not None and plan["why"] is None:
+        # Before the close commits: a kill anywhere from here to the removal leaves this intent, which the next Map
+        # round finishes once the close committed, or drops when it did not (worktree.sweep_closed).
+        worktree.intend_removal(a.build_record, a.pass_sha, a.merge_sha, plan["tip"])
     try:
         closed = pensieve.close_proven(a.conn, a.task_id, proof, _summary(a, parent_note, plan and plan["note"]),
                                        f"close:proven:{a.task_id}", parent_task_id=parent, now=a.now_arg)
@@ -1431,30 +1438,34 @@ def _worktree_plan(a: Attempt) -> Optional[dict]:
     if a.found["kind"] != "build":
         return None
     tip = a.landed["tip"]
-
-    def head_ok(record: dict, head: str) -> Optional[bool]:
-        return True if head == a.pass_sha else gitops.is_ancestor(record["common_dir"], head, tip)
-
+    head_ok = worktree.closer_head_ok(a.pass_sha, tip)
     why = worktree.why_kept(a.build_record, head_ok)
-    note = ("Its clean worktree is removed and its branch kept" if why is None
+    note = ("Its clean worktree is being removed and its branch kept" if why is None
             else f"Kept worktree {a.build_record['path']}: {why}")
-    return {"head_ok": head_ok, "why": why, "note": note}
+    return {"head_ok": head_ok, "why": why, "note": note, "tip": tip}
 
 
 def _remove_worktree(a: Attempt, plan: dict) -> dict:
     """After the close, under the task's review lock, which this attempt holds: the build's worktree goes through
     worktree.remove_closed, which checks everything again. One the close event named as kept stays; one that fails
-    those checks now stays too, and you hear once."""
+    those checks now stays too, and you hear once. The intent written before the close goes once the removal ended
+    either way; after a failed read it stays, so the next Map round tries again."""
     path = a.build_record["path"]
     if plan["why"] is not None:
         return {"kept": path, "why": plan["why"]}
     try:
         worktree.remove_closed(a.conn, a.task_id, "closer", plan["head_ok"])
     except (FleetError, StoreError, OSError) as exc:
-        why = exc if isinstance(exc, worktree.Kept) else f"it could not be read ({common.scrubbed_line(exc, 160)})"
+        kept = isinstance(exc, worktree.Kept)
+        why = exc if kept else f"it could not be read ({common.scrubbed_line(exc, 160)})"
         with contextlib.suppress(FleetError, StoreError):
             worktree.tell_kept(a.conn, a.task, path, why, a.now_arg)
+        if kept:
+            with contextlib.suppress(FleetError, OSError):
+                worktree.drop_intent(a.task_id)
         return {"kept": path, "why": common.scrubbed_line(why, 200)}
+    with contextlib.suppress(FleetError, OSError):
+        worktree.drop_intent(a.task_id)  # left behind, the next round finds the removal done and drops it
     return {"removed": path}
 
 

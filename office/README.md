@@ -76,9 +76,11 @@ The store has none of these:
   worktrees/<task>.json                 each worktree's office record, and <task>.merged-<12 hex>.json for the
                                         closer's detached worktree at a merge commit, taken back once the task closes.
                                         The record stays once its worktree is removed. Removal markers next to it:
-                                        <task>.removing while a removal is under way (who started it and the HEAD it
-                                        checked), <task>.removed once it is done, and <task>.unreported until the
-                                        worktree cleanup's round row has named it
+                                        <task>.closing, the closer's intent written before its close commits,
+                                        <task>.removing while a removal is under way (who started it, the HEAD it
+                                        checked and the removal's own identity), <task>.removed once it is done and
+                                        the round row that told it, and <task>.unreported until the worktree
+                                        cleanup's round row has named it
   reviews/<task>/                       review files and verify evidence, which no desk can write, what each review
                                         round was opened for (round-<request>.json), the review loop's record of
                                         each handoff (auto-<owl>.pending, .try<n>, .done) and of what follows each
@@ -107,7 +109,8 @@ The store has none of these:
                                         its worktree in the same pass when nothing in it can be lost
   worktree-cleanup                      while it holds exactly "on", each Map round removes the worktree of each build
                                         task closed at least three days ago, by any path, once it has no uncommitted
-                                        changes and its HEAD is on origin's base or branch (off when missing)
+                                        changes, no git-ignored files but the fleet's own dependency links, and its
+                                        HEAD is on origin's base or branch (off when missing)
   patrol/shadow                         while it is here, the patrol and Gringotts only write files (shadow mode)
   patrol/<job>/                         the Map's snapshot and rows, lineups, keeper's watches, scoreboards, bot passes,
                                         and in shadow mode what a follow-up would have routed (patrol/followup/)
