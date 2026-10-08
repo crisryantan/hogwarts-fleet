@@ -53,6 +53,15 @@ class ReviewerBriefTest(unittest.TestCase):
                 self.assertNotIn("origin/main", brief)
                 self.assertIn("If I can't read the full diff, my verdict can't be PASS.", brief)
 
+    def test_the_briefs_read_the_review_input_and_name_the_tooling_marker_the_script_reads(self):
+        self.assertIsNotNone(review.TOOLING_LINE.fullmatch("BLOCKED-ON-TOOLING: git diff was denied"))
+        for desk in REVIEWERS:
+            with self.subTest(desk=desk):
+                brief = (KIT / "desks" / desk / "BRIEF.md").read_text()
+                self.assertIn("review input file", brief)
+                self.assertIn("`BLOCKED-ON-TOOLING: <what failed>` in place of its VERDICT line", brief)
+                self.assertIn("I never give HEADMASTER or CHANGES for a tooling failure alone.", brief)
+
     def test_hermione_may_run_the_request_diff_for_any_base(self):
         settings = json.loads((KIT / "desks" / "hermione" / "settings.json").read_text())
         allow, deny = settings["permissions"]["allow"], settings["permissions"]["deny"]

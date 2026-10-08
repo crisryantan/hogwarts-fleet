@@ -38,6 +38,8 @@ starts the desk's run if Ryan has enabled the desk.
                             and hand that lock to the run they start, which holds it until its process ends, so no
                             review starts while the desk may still be writing (see run_desk.task_lock). fleet
                             worktree starts the first run the same way.
+  fleet worktree-rebuild <task-id>  makes an open task's worktree one git reads again, keeping its files, when a
+                                    review found it dead (rebuild); no repo hook runs.
   fleet worktree-remove <task-id>   removes a closed task's worktree, under the task's review lock. It never deletes
                                     the branch, and it finishes a removal a kill cut short.
 
@@ -460,6 +462,135 @@ def build(conn, task_id: str, lock_fd: int) -> dict:
     if task["desk"] not in config.WORKTREE_DESKS or task["status"] != "active" or not task["worktree"]:
         raise FleetError("only an active build task with a worktree can be started again")
     return {"task_id": task["id"], "desk": start_desk(conn, task, lock_fd)}
+
+
+# A worktree git cannot read, and rebuilding it
+
+REBUILDING = "rebuilding"  # the office marker a rebuild of a folder whose entry is gone writes before it moves it
+ASIDE = re.compile(r"\.rebuild-[0-9a-f]{8}")
+
+
+def problem(record: dict) -> Optional[tuple]:
+    """(kind, why) when git cannot read the worktree of record, else None: "rebuilding" (a rebuild was cut short),
+    "repair" (both there, git still fails), "entry" (the folder is there, its entry in the repo's .git is gone),
+    "folder" (the folder is gone, git still lists it) or "both" (both gone). A marker that cannot be read counts as a
+    rebuild cut short, never as none."""
+    path, git_dir = record["path"], record["git_dir"]
+    try:
+        cut_short = _rebuilding(record) is not None
+    except (FleetError, OSError):
+        cut_short = True
+    if cut_short:
+        return REBUILDING, f"a rebuild of the worktree {path} was cut short, so its files may not all be in it yet"
+    folder = os.path.isdir(path) and not os.path.islink(path)
+    entry = os.path.isdir(git_dir) and not os.path.islink(git_dir)
+    if folder and entry:
+        try:
+            gitops.rev(record)
+            return None
+        except FleetError as exc:
+            return "repair", f"git cannot read the worktree {path} ({common.scrubbed_line(exc, 200)})"
+    if folder:
+        return "entry", f"the worktree {path} is there but its git entry {git_dir} is gone"
+    if entry:
+        return "folder", f"the worktree folder {path} is gone but git still lists it"
+    return "both", f"the worktree {path} and its git entry {git_dir} are both gone"
+
+
+def _rebuilding(record: dict) -> Optional[str]:
+    """The folder a rebuild cut short moved the worktree's files to, from its office marker, or None with no marker.
+    A marker that cannot be read whole, or names any other folder, raises."""
+    try:
+        with safefs.opened_dir(config.OFFICE_ROOT, gitops.RECORD_DIR) as fd:
+            raw = safefs.read_regular(fd, _marker(record["task_id"], REBUILDING), MARKER_MAX_BYTES, "rebuild marker")
+    except safefs.Missing:
+        return None
+    try:
+        data = common.strict_json(raw)
+    except (UnicodeDecodeError, ValueError):
+        raise FleetError("the worktree's rebuild marker is not strict JSON") from None
+    aside = data.get("aside") if isinstance(data, dict) else None
+    if set(data) != {"task_id", "aside"} or data["task_id"] != record["task_id"] or not isinstance(aside, str) \
+            or not aside.startswith(record["path"]) or ASIDE.fullmatch(aside[len(record["path"]):]) is None:
+        raise FleetError("the worktree's rebuild marker is malformed; look at the worktrees folder by hand")
+    return aside
+
+
+def rebuild(conn, task_id: str) -> dict:
+    """fleet worktree-rebuild: make an open task's worktree one git reads again, under the task's review lock, keeping
+    whatever its folder holds. Every git step runs through gitops, so no hook in the repo runs. A folder whose entry
+    is gone is moved aside, a new entry is made for its branch with no checkout, its .git file goes into the old
+    folder, which moves back, and the index is reset to the branch, so uncommitted work stays as it was. An office
+    marker written before the move makes every review wait, and the next rebuild finish one a kill cut short. A gone
+    folder is checked out again. A detached worktree (an own-session review's) is made at its last recorded commit."""
+    task = pensieve.get_task(conn, ids.check("task", task_id))
+    if task["status"] == "closed" or not task["worktree"]:
+        raise FleetError("only an open task with a worktree can have it rebuilt")
+    try:
+        with run_desk.task_lock(task["id"]):
+            record = gitops.find_record(castle_path(task["worktree"]))
+            if record is None:
+                raise FleetError("this task has no worktree with an office record")
+            found = problem(record)
+            if found is None:
+                raise FleetError("git reads this task's worktree; there is nothing to rebuild")
+            _rebuild(conn, task, record, found[0])
+            if problem(record) is not None:
+                raise FleetError("git still cannot read the worktree after the rebuild; look at it by hand")
+            _relink(record)
+            return {"task_id": task["id"], "worktree": record["path"], "rebuilt": found[0],
+                    "head": gitops.rev(record)}
+    except safefs.Busy:
+        raise FleetError("a run or review of this task holds its lock; run it again once it has ended") from None
+
+
+def _rebuild(conn, task: dict, record: dict, kind: str) -> None:
+    path, common_dir = record["path"], record["common_dir"]
+    if kind == "repair":
+        gitops.git(["worktree", "repair", path], common_dir)
+        return
+    if record["branch"] is not None:
+        target = [path, gitops.check_branch(record["branch"])]
+    else:
+        shas = [row["sha"] for row in pensieve.task_commits(conn, task["id"])]
+        target = ["--detach", path, shas[-1] if shas else record["base"]]
+    if kind == "folder":
+        gitops.git(["worktree", "add", "-f", *target], common_dir)
+    elif kind == "both":
+        gitops.git(["worktree", "add", *target], common_dir)
+    else:
+        aside = _rebuilding(record) if kind == REBUILDING else None
+        if aside is None:
+            aside = f"{path}.rebuild-{secrets.token_hex(4)}"
+            _write_marker(task["id"], REBUILDING, {"aside": aside})
+            os.rename(path, aside)
+        _put_back(record, aside, target)
+        _drop_marker(task["id"], REBUILDING)
+    if not os.path.isdir(record["git_dir"]):
+        raise FleetError("git named the rebuilt worktree's entry differently than its record; look at it by hand")
+
+
+def _put_back(record: dict, aside: str, target: list) -> None:
+    """Each step of moving a worktree's files back under a new entry, from wherever a kill left them, so running it
+    again finishes the rebuild: the new entry with no checkout, its .git file into the files' folder, that folder back
+    at the worktree path, and the index reset to the branch."""
+    path, git_dir = record["path"], record["git_dir"]
+    if not os.path.lexists(aside) and not os.path.isdir(git_dir):
+        os.rename(path, aside)  # a kill came between the marker and the move
+    if os.path.lexists(aside):
+        if not os.path.lexists(path) and not os.path.isdir(git_dir):
+            gitops.git(["worktree", "add", "--no-checkout", *target], record["common_dir"])
+        if os.path.lexists(path):
+            left = set(os.listdir(path))
+            if not left <= {".git"}:
+                raise FleetError(f"{path} holds files the rebuild did not put there, and the worktree's own files are"
+                                 f" in {aside}; look at both by hand")
+            if left:
+                os.replace(f"{path}/.git", f"{aside}/.git")
+            os.rmdir(path)
+        os.rename(aside, path)
+    # The new entry's index is empty: reset it to the branch, leaving every file in the folder as it was.
+    gitops.git(["reset", "--quiet"], git_dir, path)
 
 
 MERGED_NAME = re.compile(r"(tk_[0-9a-f]{16})\.merged-([0-9a-f]{12})")

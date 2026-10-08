@@ -4,10 +4,13 @@
       A McGonagall task id works too when exactly one open build task sits under it; the result names the one used.
   fleet build <task-id>
   fleet worktree-remove <task-id>
+  fleet worktree-rebuild <task-id>
+      Makes an open task's worktree one git reads again, keeping its files, when a review says git cannot read it.
   fleet verify <task-id>
   fleet review <task-id>
   fleet review own --repo-dir <checkout> --title "<what it does>" [--intent-file <file>] [--base ...] [--no-fetch]
-  fleet review own --repo-dir <checkout> --task <task-id>
+  fleet review own --repo-dir <checkout> --task <task-id> [--intent-file <file>]
+      --intent-file on a fix round rewrites the task's TASK.md, and its approval, before the round's checks read it.
   fleet feed --desk <name> | --all
   fleet push <task-id> [--yes]
   fleet ollivander [--dry-run]
@@ -76,6 +79,7 @@ def build_parser() -> argparse.ArgumentParser:
     made.add_argument("--no-fetch", action="store_true")
     commands.add_parser("build", allow_abbrev=False).add_argument("task")
     commands.add_parser("worktree-remove", allow_abbrev=False).add_argument("task")
+    commands.add_parser("worktree-rebuild", allow_abbrev=False).add_argument("task")
     commands.add_parser("verify", allow_abbrev=False).add_argument("task")
     reviewed = commands.add_parser("review", allow_abbrev=False)
     reviewed.add_argument("target", help="a build task id, or 'own' for a commit from your own session")
@@ -111,6 +115,8 @@ def run(conn, args: argparse.Namespace) -> object:
             return worktree.build(conn, args.task, lock_fd)
     if args.command == "worktree-remove":
         return worktree.remove(conn, args.task)
+    if args.command == "worktree-rebuild":
+        return worktree.rebuild(conn, args.task)
     if args.command == "verify":
         # Never under a running review, whose evidence it would replace; each check's process keeps the lock while it runs.
         with review.task_review_lock(args.task) as lock_fd:
