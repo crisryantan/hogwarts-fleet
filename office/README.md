@@ -62,7 +62,8 @@ The store has none of these:
                                         portrait.py (the nightly export and Dumbledore's run), portrait_patch.py (his
                                         patches, behind castle portrait), go_confirm.py (finishes a go or a close
                                         the prompt hook could not confirm yet), adopt.py (fleet adopt), loops.py
-                                        (fleet loops, the background jobs run from a terminal) and their helpers
+                                        (fleet loops, the background jobs run from a terminal), failover.py (the
+                                        model breaker and in-family fallback) and their helpers
   fleet/hooks/                          the castle's session hooks and the push gate, push_gate.py
   launchd/                              the launchd plist templates, one per background job; fleet loops reads them too
   loops/jobs                            only with terminal loops: the jobs fleet loops runs instead of launchd, one per line
@@ -73,6 +74,9 @@ The store has none of these:
   tests_fleet/                          the fleet's unittest suite
   run_suites.py                         runs both test suites fast, one process per test module
   state/pensieve.db                     the real database, created by castle init
+  state/model-breaker.json              each model's breaker (down after two outage, overload or rate limit failures
+                                        in a row, for 15 minutes, then one probe), fallback runs and waiting owls
+  state/model-ladders.json              Ollivander's fallbacks per headless desk and family, in pick order
   logs/                                 the fleet's job and script logs, review-auto.log for the review loop and
                                         closer.log for auto-close, one JSON line per task each pass
   runs/<desk>/                          each headless run's output, which fleet feed follows, and how its process
@@ -117,6 +121,10 @@ The store has none of these:
                                         task closed at least three days ago, by any path, once it has no uncommitted
                                         changes, no git-ignored files but the fleet's own dependency links, and its
                                         HEAD is on origin's base or branch (off when missing)
+  cross-family-failover                 while it holds exactly "on", a desk whose whole family is down may run on the
+                                        other family when it has launch settings for it and is neither a build desk
+                                        nor a reviewer; a review that would then be same-family waits (off when
+                                        missing: the desk waits)
   patrol/shadow                         while it is here, the patrol and Gringotts only write files (shadow mode)
   patrol/<job>/                         the Map's snapshot and rows, lineups, keeper's watches, scoreboards, bot passes,
                                         and in shadow mode what a follow-up would have routed (patrol/followup/)

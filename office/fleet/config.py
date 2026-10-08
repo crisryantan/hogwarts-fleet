@@ -141,10 +141,14 @@ WORKTREE_CLEANUP_FILE = "worktree-cleanup"
 # While this office file holds "on", each owl the Owl Post delivers to McGonagall is read by one headless McGonagall
 # turn, and her one-line report arrives as a desktop notification (fleet/owl_report.py).
 OWL_REPORTS_FILE = "owl-reports"
+# While this office file holds "on", a desk whose whole family is down may run on the other family, when it has launch
+# settings for it and is neither a build desk nor a reviewer; a review that would then be same-family waits
+# (fleet/failover.py). Off by default: a desk never changes family, so cross-family review holds.
+CROSS_FAMILY_FAILOVER_FILE = "cross-family-failover"
 # Every office opt-in file. common.opt_in_on reads only these names, so a typo never reads another office file as a
 # switch, every switch is read through that one reader, and a name not listed here always reads off.
 OPT_IN_FILES = (AUTO_DRAFT_PR_FILE, AUTO_PORTRAIT_FILE, PR_FOLLOWUP_FILE, AUTO_CLOSE_FILE, WORKTREE_CLEANUP_FILE,
-                OWL_REPORTS_FILE)
+                OWL_REPORTS_FILE, CROSS_FAMILY_FAILOVER_FILE)
 # Review rounds of one follow-up, apart from the task's REVIEW_ROUND_CAP, and the follow-ups one task may take.
 FOLLOWUP_ROUND_CAP = 2
 FOLLOWUP_MAX_PER_TASK = 5
@@ -432,6 +436,27 @@ UPDATE_LOCK_WAIT_SECONDS = 120
 VERSION_STOPS = ("codex",)
 VERSION_MAX_CHARS = 120
 RUN_ERROR_MAX_BYTES = 1024 * 1024
+
+# Model failover (fleet/failover.py). A failed run is classed by the HTTP status in its CLI's structured error output.
+FAILOVER_STATUS_CLASSES = {401: "auth", 403: "auth", 429: "rate_limit", 529: "overload", 500: "outage",
+                           502: "outage", 503: "outage", 504: "outage"}
+# This many outage-class failures in a row mark a model down for FAILOVER_DOWN_SECONDS, then one run probes it.
+FAILOVER_TRIP_FAILURES = 2
+FAILOVER_DOWN_SECONDS = 15 * 60
+# A run that an outage cut off is started again from its checkpoint at most this many times, each under the caps.
+FAILOVER_RETRIES = 2
+# A run that waited because every model it may run was down is started again by the Owl Post, once per wait, for at
+# most this long after it first waited.
+FAILOVER_WAIT_LIMIT_SECONDS = 4 * 3600
+FAILOVER_MAX_RESUMES = 3
+# In the office state folder: the breaker state, and Ollivander's fallback ladders. The lock is in the locks folder.
+FAILOVER_STATE_FILE = "model-breaker.json"
+FAILOVER_LADDERS_FILE = "model-ladders.json"
+FAILOVER_STATE_MAX_BYTES = 256 * 1024
+FAILOVER_LOCK = "model-breaker.lock"
+FAILOVER_LOCK_WAIT_SECONDS = 10
+# Fallback runs kept in the state, for the moved check and for a review that must follow its author's family.
+FAILOVER_RUNS_KEPT = 500
 
 # The patrol: the Marauder's Map, Ron's scheduled jobs and Hermione's bot pass (fleet/patrol.py). Each job
 # writes its files under the office patrol folder. While the plain file patrol/shadow is there, those files

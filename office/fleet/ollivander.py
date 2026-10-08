@@ -47,6 +47,9 @@ One pass:
    since the CLI default cannot be checked, so the first pass, which gives each unpinned Codex desk its
    pick, or a pin, comes before its first launch. A desk a revert pinned to no model is left alone, and
    each day's pass tells Ryan to pin one or hand it back with --role.
+   Each pass also keeps every headless desk's fallbacks in pick order, its need's and then each cheaper
+   need's, never above the line of its current model, per family (failover.write_ladders), for run_desk
+   while a model is down (see fleet/failover.py).
    A pass records the catalogs it read, plans and writes in one store transaction, so a pin, unpin or
    approval Ryan makes meanwhile lands wholly before the plan (which then sees it) or wholly after the
    new catalog look (which --approve then checks against).
@@ -75,7 +78,7 @@ if __name__ == "__main__" and "/Users/crisryantan/.hogwarts" not in sys.path:
 from hogwarts import db, pensieve, wands  # noqa: E402
 from hogwarts.errors import StoreError  # noqa: E402
 
-from fleet import common, config, run_desk, safefs  # noqa: E402
+from fleet import common, config, failover, run_desk, safefs  # noqa: E402
 from fleet.safefs import FleetError  # noqa: E402
 
 ROLE_KEYS = ("family", "need", "effort", "why")
@@ -326,24 +329,60 @@ def codex_fits(need: str, codex: dict, filed: dict, now: int) -> list:
             and file_codex(model, filed)["line"] == need]
 
 
-def pick_claude(need: str, claude: dict, filed: dict) -> Optional[dict]:
+def claude_order(need: str, claude: dict, filed: dict) -> list:
+    """The unblocked aliases of the need in pick order: Ryan's most recent filing first, then an alias known only
+    from CLAUDE_LINES."""
     fits = [alias for alias in claude_fits(need, claude, filed) if not blocked(alias, claude.get("ran_as"))]
+    return sorted(fits, key=lambda name: (filed[name]["id"] if name in filed else 0, name), reverse=True)
+
+
+def codex_order(need: str, codex: dict, filed: dict, now: int) -> list:
+    """The unblocked Codex models of the need in pick order, lowest priority first."""
+    fits = [model for model in codex_fits(need, codex, filed, now) if not blocked(model["slug"])]
+    return sorted(fits, key=lambda item: (item["priority"], item["slug"]))
+
+
+def pick_claude(need: str, claude: dict, filed: dict) -> Optional[dict]:
+    fits = claude_order(need, claude, filed)
     if not fits:
         return None
-    # Ryan's most recent filing wins; an alias known only from CLAUDE_LINES ranks below any filing.
-    alias = max(fits, key=lambda name: (filed[name]["id"] if name in filed else 0, name))
+    alias = fits[0]
     how = "as Ryan filed it" if alias in filed else "in Claude Code"
     return {"model": alias, "line": need, "levels": None,
             "reason": f"role need {need}; {alias} is the alias for the newest {need} model {how}"}
 
 
 def pick_codex(need: str, codex: dict, filed: dict, now: int) -> Optional[dict]:
-    fits = [model for model in codex_fits(need, codex, filed, now) if not blocked(model["slug"])]
+    fits = codex_order(need, codex, filed, now)
     if not fits:
         return None
-    model = min(fits, key=lambda item: (item["priority"], item["slug"]))
+    model = fits[0]
     return {"model": model["slug"], "line": need, "levels": model["levels"],
             "reason": f"role need {need}; {model['slug']} is the newest {need} model in the Codex catalog"}
+
+
+def ladders(conn, cards: dict, codex: dict, claude: dict, filed: dict, now: int) -> dict:
+    """Each headless desk's fallbacks per family for fleet/failover.py: its need's models in pick order, then each
+    cheaper need's, each at the card's effort fitted to the model. Never above the line of the model the desk is on
+    now, so a dearer pick that waits for Ryan's approval never runs as a fallback. A family whose catalog could not
+    be read is left out, so the last ladder stands."""
+    found = {}
+    for desk in config.HEADLESS_DESKS:
+        card = cards.get(desk)
+        if not isinstance(card, dict):
+            continue
+        row = wands.get_desk_model(conn, desk)
+        top = config.COST_ORDER.index(card["need"])
+        if row is not None and row["model"] is not None:
+            held = row["line"] or cost_line(row["model"], codex, filed) or config.COST_ORDER[0]
+            top = min(top, config.COST_ORDER.index(held))
+        needs = config.COST_ORDER[:top + 1][::-1]
+        found[desk] = {"claude": [{"model": alias, "effort": card["effort"], "line": need}
+                                  for need in needs for alias in claude_order(need, claude, filed)]}
+        if codex["ok"]:
+            found[desk]["codex"] = [{"model": model["slug"], "effort": fit_effort(card["effort"], model["levels"]),
+                                     "line": need} for need in needs for model in codex_order(need, codex, filed, now)]
+    return found
 
 
 # Agent files
@@ -844,6 +883,11 @@ def _pass(conn, dry_run: bool, now: int, runner: Runner) -> dict:
             claude["ran_as"] = wands.blocked_resolutions(conn, config.BLOCKED_MODEL_PREFIXES)
             plan = make_plan(conn, cards, codex, claude, now)
             carry_out(conn, plan, codex, claude, now)
+            found = ladders(conn, cards, codex, claude, wands.ryan_lines(conn), now)
+        # After the transaction, written whole. A miss keeps the last ladders, which run_desk reads only when a
+        # model is down.
+        with contextlib.suppress(FleetError, OSError):
+            failover.write_ladders(found, now)
     plan.update(dry_run=dry_run, updates=updates)
     return plan
 

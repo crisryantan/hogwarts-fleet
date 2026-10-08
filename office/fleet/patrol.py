@@ -793,7 +793,14 @@ def attempt(conn, owl_id: str, now: Optional[int] = None, shadow: bool = True) -
             hold(entry, [f"{entry['desk']} was not started: {error}"])
         return {"launched": False, "clean": False, "collected": False, "error": error}
     hold(entry, result.get("held") or [])
-    clean_run = result["exit_code"] == 0 and result["cap_source"] is None
+    if result.get("failure_class") == "auth":
+        # No resend while the CLI cannot sign in: fleet patrol-restart <owl> sends it again once it can.
+        pending = _pending()
+        if owl_id in pending:
+            pending[owl_id]["auth_stop"] = stamp(now)
+            _save_pending(pending)
+    # An exit 0 its CLI marked failed is not clean, so a file written before the failure never finishes the owl.
+    clean_run = run_desk.clean_result(result)
     outcome = {"launched": True, "clean": clean_run, "collected": False, "cost_usd": result.get("cost_usd", 0.0),
                "error": None if clean_run else "the run did not end cleanly"}
     if clean_run:
@@ -890,6 +897,12 @@ def resend_pending(conn, shadow: bool, now: Optional[int] = None) -> dict:
     ts = stamp(now)
     report: dict = {"resent": [], "given_up": [], "launched": False}
     for owl_id, entry in sorted(_pending().items()):
+        if entry.get("auth_stop"):
+            if ts - entry["last_try"] > GIVE_UP_KEEP_SECONDS:
+                pending = _pending()
+                pending.pop(owl_id, None)
+                _save_pending(pending)
+            continue  # stopped on a sign-in failure until fleet patrol-restart
         if entry.get("gave_up"):
             if ts - entry["last_try"] > GIVE_UP_KEEP_SECONDS:
                 pending = _pending()
@@ -918,6 +931,20 @@ def resend_pending(conn, shadow: bool, now: Optional[int] = None) -> dict:
         report["launched"] = report["launched"] or outcome["launched"]
         report["resent"].append({"owl_id": owl_id, "desk": entry["desk"], "job": entry["job"], **outcome})
     return report
+
+
+def restart(owl_id: str) -> dict:
+    """Send a patrol owl again that a sign-in failure stopped (fleet patrol-restart): it goes on the next Map round."""
+    owl_id = ids.check("owl", owl_id)
+    with locked():
+        pending = _pending()
+        entry = pending.get(owl_id)
+        if entry is None or not entry.get("auth_stop"):
+            raise FleetError("that is not a patrol owl stopped on a sign-in failure")
+        entry.pop("auth_stop")
+        entry["last_try"] = 0
+        _save_pending(pending)
+    return {"restarted": owl_id, "desk": entry["desk"], "job": entry["job"]}
 
 
 # Running a job

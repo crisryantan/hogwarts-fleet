@@ -361,7 +361,7 @@ def night(conn, date: str, owl_id: str, now: Optional[int] = None, progress: Opt
             if "ending" in progress:
                 _stop(conn, date, progress["ending"].attempt, WHY_PART_WAY, now)
             raise
-        if result["exit_code"] != 0 or result["cap_source"] is not None:
+        if not run_desk.clean_result(result):  # an exit 0 its CLI marked failed never validates a patch
             # A vendor limit's own event ended the night inside the run; a failed run's ends it here, in one
             # transaction, or leaves it armed for the next job when the store takes neither.
             if result["cap_source"] is None:

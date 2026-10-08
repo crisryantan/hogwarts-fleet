@@ -35,7 +35,8 @@ After the outboxes, each pass starts again the automatic review of every handoff
 not finished with, when no automatic review of its task holds that task's loop lock: one killed part way, or
 one that is waiting for its author's run to end, its reviewer to be free or another review of the task to end.
 It does the same for a task with a round whose after record is not done (write_after): a review killed after its
-verdict, whose fix round, push or PR the review loop then finishes or reports, never twice.
+verdict, whose fix round, push or PR the review loop then finishes or reports, never twice. And it starts again the run
+of each owl that waited because every model its desk may run was down, once one of them is back (failover).
 The review counts its own tries and gives up, telling Ryan, after config.AUTO_REVIEW_MAX_TRIES of them.
 
 A rerun after a crash at any step stores nothing twice. File content is only parsed
@@ -65,7 +66,7 @@ from hogwarts.errors import (  # noqa: E402
     ConflictError, IntegrityError, NotFoundError, StoreError, ValidationError,
 )
 
-from fleet import common, config, mcgonagall_inbox, owl_report, run_desk, safefs  # noqa: E402
+from fleet import common, config, failover, mcgonagall_inbox, owl_report, run_desk, safefs  # noqa: E402
 from fleet.safefs import FleetError, Missing, Unsafe  # noqa: E402
 
 REQUIRED_FIELDS = ("to", "kind", "subject")
@@ -651,7 +652,7 @@ def drain_outbox(conn, sender: str, outbox_fd: int, summary: dict, now: Optional
 
 
 def run_pass(conn, now: Optional[int] = None) -> dict:
-    summary: dict = {"delivered": [], "rejected": [], "waiting": [], "errors": [], "reviews": []}
+    summary: dict = {"delivered": [], "rejected": [], "waiting": [], "errors": [], "reviews": [], "resumed": []}
     for desk in pensieve.list_desks(conn):
         sender = desk["name"]
         if sender not in config.CASTLE_DESKS:
@@ -669,6 +670,8 @@ def run_pass(conn, now: Optional[int] = None) -> dict:
             os.close(outbox_fd)
     started = tuple(entry["task_id"] for entry in summary["delivered"] if entry.get("review") == REVIEW_STARTED)
     summary["reviews"] = resume_reviews(conn, now, started)
+    # A run that waited because every model it may run was down starts again once one is back (fleet/failover.py).
+    summary["resumed"] = failover.resume_waiting(conn, run_desk.spawn, now)
     try:  # an owl to McGonagall whose event a stopped pass or a failed write lost is announced now, once
         mcgonagall_inbox.announce_pending(conn, now)
     except (StoreError, FleetError, OSError) as exc:

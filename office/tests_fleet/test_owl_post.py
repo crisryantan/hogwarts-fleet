@@ -15,7 +15,7 @@ from fleet import config, owl_post, run_desk
 from tests_fleet.support import FleetCase
 
 FYI = {"to": "hermione", "kind": "fyi", "subject": "diff is ready", "body": "please look at tk_x"}
-EMPTY = {"delivered": [], "rejected": [], "waiting": [], "errors": [], "reviews": []}
+EMPTY = {"delivered": [], "rejected": [], "waiting": [], "errors": [], "reviews": [], "resumed": []}
 
 
 class OwlPostCase(FleetCase):

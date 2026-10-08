@@ -247,7 +247,7 @@ def nightly(conn, export_only: bool = False, now: Optional[int] = None) -> dict:
             if not export_only:
                 _report_problem(conn, exc, date, owl_id, progress.get("ending"))
             raise
-        clean = result["exit_code"] == 0 and result["cap_source"] is None
+        clean = run_desk.clean_result(result)  # an exit 0 its CLI marked failed is no clean night
         if auto is not None:
             return {"ok": clean, "ran": True, **exported, "patch_ready": auto.get("patch_ready", False), **result,
                     "auto": portrait_auto.job_view(auto), **resumed}
