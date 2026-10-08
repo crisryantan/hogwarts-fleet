@@ -28,8 +28,12 @@ What it says (each part only when there is something to say):
    in a session that is not McGonagall's. Prose that only mentions a go gets nothing.
    Any other prompt pays only for a few regular expressions.
 3. Unacked headmaster events, newest per task, cut to about 1500 characters, with a
-   count of the rest. The hook never acks them. They stay until Ryan runs
-   castle event ack in his terminal.
+   count of the rest. A session is shown the full list once (the session start digest, or its first
+   prompt when none was recorded); each later prompt lists only events newer than the last one shown
+   to that session (fleet/events_seen.py), and nothing new means nothing. The hook acks only events
+   the fleet already settled (pensieve.settle_events): a go or close refusal that a later
+   confirmation of the same task followed, and an owl-to-McGonagall event whose owl she has read.
+   The rest stay until Ryan runs castle event ack in his terminal.
 4. In McGonagall's session only, her delivered owls she has not read and has not been shown,
    one line each with a scrubbed one-line status, at most config.INBOX_NOTICE_CAP and a count
    of the rest, each listed once (fleet/mcgonagall_inbox.py). No owl body beyond that line.
@@ -103,7 +107,8 @@ show finds Harry's task without its worktree. A kill no process can catch
 (SIGKILL) between the worktree and the commit leaves that worktree and its branch with no task,
 and the next go refuses because the branch exists until Ryan removes them. Nothing a go prints
 carries a token, the prompt's id or the TASK.md hash. A go Ryan's typing could not confirm
-prints the manual steps instead.
+prints the manual steps instead. Every go refusal says how to fix it as well as why (a Fix: line, from
+Refused.fix); the protected-folder refusal carries its own fix in its text.
 
 The hook input has no documented field that says a person typed the prompt, so the typed
 check reads the transcript entry, as above. A refused close prints the castle commands, and
@@ -117,6 +122,7 @@ import hashlib
 import json
 import os
 import re
+import sqlite3
 import sys
 from typing import Callable, Optional
 
@@ -126,12 +132,13 @@ if __name__ == "__main__" and "/Users/crisryantan/.hogwarts" not in sys.path:
 from hogwarts import db, ids, owlery, pensieve  # noqa: E402
 from hogwarts.errors import NotFoundError, StoreError  # noqa: E402
 
-from fleet import common, config, safefs, transcript  # noqa: E402
+from fleet import common, config, events_seen, safefs, transcript  # noqa: E402
 from fleet.safefs import FleetError  # noqa: E402
 
 MISCHIEF = re.compile(r"Mischief managed (tk_[0-9a-f]{16})")
 OPEN_STATUSES = ("queued", "active", "awaiting_close")
 GO = re.compile(r"go (tk_[0-9a-f]{16})")
+TASK_IDS = re.compile(r"tk_[0-9a-f]{16}")
 # A line that looks like a go once list markers, backticks, quotes and the spaces round them are gone. A prompt whose
 # every line is one, but that is not exactly gos, gets a refusal line and starts nothing. Prose that only mentions a go
 # gets nothing.
@@ -140,9 +147,15 @@ LIST_MARKER = re.compile(r"(?:[-*+\u2022]|[0-9]{1,3}[.)])\s+")
 DECORATION = re.compile("[`'\"\u2018\u2019\u201c\u201d]")
 GO_EXACT = ("Go was not applied: each go is a line of its own, exactly go <task-id>, with nothing else in the message"
             " (no bullets, backticks or other words), so nothing was started.")
+GO_EXACT_FIX = ("Fix: send a message holding only the go line, as in go tk_<16 hex digits>, and put any other words"
+                " in a separate message.")
+GO_ONE_PER_LINE_FIX = ("Fix: put each go on its own line, go <task-id> then a new line then the next go <task-id>,"
+                       " not several ids on one line.")
 GO_TOO_MANY = (f"Go was not applied: one message starts at most {config.GO_MAX_PER_PROMPT} gos, so nothing was"
                " started.")
+GO_TOO_MANY_FIX = f"Fix: send at most {config.GO_MAX_PER_PROMPT} go lines in one message, and the rest in another."
 GO_SESSION = "a go runs only in McGonagall's session, so nothing was started."
+GO_SESSION_FIX = "Fix: type the go in McGonagall's session, the one opened in ~/hogwarts."
 # typing_entry's reason when the only thing missing is the prompt's own transcript entry, which Claude Code writes
 # only after this hook returns. A go or a close with this reason is confirmed by fleet/go_confirm.py instead.
 NOT_YET = "this prompt is not in the transcript yet"
@@ -156,10 +169,28 @@ SECTION_END = re.compile(r"#{1,2} ")
 SPEC_KEYS = ("repo", "branch", "base")
 SPEC_LINE = re.compile(r"(repo|branch|base):[ \t]*(.*)")
 SPEC_KEY_ANYWHERE = re.compile(r"\s*(?:repo|branch|base)\s*:", re.IGNORECASE)
+MISSING_TASK_MD_FIX = ("ask McGonagall to write the draft to that path before the go (she writes it when she shows you"
+                       " the draft), then type the go again.")
+SPEC_FIX = ("put exactly three lines first under ## Spec, repo: <folder>, then branch: <new branch>, then base: <ref>,"
+            " and no other line that starts with one of those words, then type the go again.")
+SPEC_LINE_FIXES = {
+    "repo": "name a git checkout that exists, outside ~/Documents, ~/Desktop, ~/Downloads and iCloud Drive.",
+    "branch": "pick a new branch name in lowercase letters, digits, dot, dash, underscore and slash, with no fleet"
+              " words, that the repo does not have yet.",
+    "base": "name a ref the repo has, usually origin/main.",
+}
 SPEC_BLOCK = ("the ## Spec section must open with the lines repo: <folder>, branch: <new branch> and base: <ref>,"
               " in that order")
 GO_CONTEXT = ("The go registered and routed this task already, so it needs no castle task create command and no"
               " request owl.")
+
+
+class Refused(FleetError):
+    """A refusal that also says how to get past it: fix is one plain sentence run_go prints after the reason."""
+
+    def __init__(self, reason: str, fix: Optional[str] = None):
+        super().__init__(reason)
+        self.fix = fix
 
 
 def close_request(prompt: object) -> Optional[str]:
@@ -283,6 +314,11 @@ def go_attempt(prompt: object) -> bool:
     return True
 
 
+def several_on_a_line(prompt: object) -> bool:
+    """Whether a go attempt names more than one task id on a single line."""
+    return isinstance(prompt, str) and any(len(TASK_IDS.findall(line)) > 1 for line in prompt.splitlines())
+
+
 def terminal_go(task_id: str) -> str:
     return (f"Start it by hand instead: castle task create --id {task_id} --desk {TASK_DESK} --title \"<title>\""
             f" --intent-path ~/hogwarts/tasks/{task_id}/TASK.md, then the review loop steps in"
@@ -297,17 +333,23 @@ def read_spec(raw: bytes, task_id: str) -> dict:
     try:
         lines = raw.decode("utf-8").splitlines()
     except UnicodeDecodeError:
-        raise FleetError("TASK.md is not UTF-8 text") from None
+        raise Refused("TASK.md is not UTF-8 text",
+                      "save TASK.md as plain UTF-8 text, then type the go again.") from None
     first = TITLE_LINE.fullmatch(lines[0].rstrip()) if lines else None
     if first is None or first.group(1) != task_id:
-        raise FleetError(f"TASK.md must start with the line # {task_id} <title>")
+        raise Refused(f"TASK.md must start with the line # {task_id} <title>",
+                      f"make the first line of TASK.md exactly # {task_id} followed by the title, then type the go"
+                      " again.")
     try:
         title = ids.clean_text(first.group(2), "the TASK.md title", pensieve.TITLE_LIMIT, single_line=True)
     except StoreError as exc:
-        raise FleetError(str(exc)) from None
+        raise Refused(str(exc), f"shorten the title on the first line of TASK.md to {pensieve.TITLE_LIMIT} characters"
+                      " or fewer on one line, then type the go again.") from None
     headings = [index for index, line in enumerate(lines) if line.rstrip() == SPEC_HEADING]
     if len(headings) != 1:
-        raise FleetError("TASK.md must have exactly one ## Spec section")
+        raise Refused("TASK.md must have exactly one ## Spec section",
+                      "give TASK.md one ## Spec heading, with the repo:, branch: and base: lines under it, then type"
+                      " the go again.")
     section = []
     for line in lines[headings[0] + 1:]:
         if SECTION_END.match(line):
@@ -321,9 +363,9 @@ def read_spec(raw: bytes, task_id: str) -> dict:
             break
         values[key] = match.group(2).strip()
     if len(values) != len(SPEC_KEYS):
-        raise FleetError(SPEC_BLOCK)
+        raise Refused(SPEC_BLOCK, SPEC_FIX)
     if sum(1 for line in section if SPEC_KEY_ANYWHERE.match(line)) != len(SPEC_KEYS):
-        raise FleetError("the ## Spec section names repo:, branch: or base: more than once")
+        raise Refused("the ## Spec section names repo:, branch: or base: more than once", SPEC_FIX)
     checks = (("repo", lambda value: gitops.check_unprotected(gitops.check_repo_dir(value))),
               ("branch", gitops.check_branch),
               ("base", lambda value: gitops.check_ref(value, "the base")))
@@ -331,7 +373,9 @@ def read_spec(raw: bytes, task_id: str) -> dict:
         try:
             values[key] = check(values[key])
         except FleetError as exc:
-            raise FleetError(f"the Spec's {key}: line is refused: {exc}") from None
+            protected = key == "repo" and gitops.protected_reason(values[key]) is not None
+            fix = None if protected else f"{SPEC_LINE_FIXES[key]} Edit the {key}: line, then type the go again."
+            raise Refused(f"the Spec's {key}: line is refused: {exc}", fix) from None
     return {"title": title, "repo_dir": values["repo"], "branch": values["branch"], "base": values["base"]}
 
 
@@ -349,7 +393,8 @@ def _unchanged(task_id: str, spec: dict) -> None:
     from fleet import verify
 
     if hashlib.sha256(verify.read_task_md(task_id)).hexdigest() != spec["intent_sha256"]:
-        raise FleetError("TASK.md changed after your go, so nothing was started; read it again, then type the go again")
+        raise Refused("TASK.md changed after your go, so nothing was started",
+                      "read TASK.md again, then type the go again.")
 
 
 def _request_body(task_id: str, title: str, spec: dict) -> str:
@@ -407,9 +452,17 @@ def _go(conn, task_id: str, now: int, note: Optional[Callable[[dict], None]] = N
     try:
         raw = verify.read_task_md(task_id)
     except safefs.Missing:
-        raise FleetError(f"there is no TASK.md at ~/hogwarts/tasks/{task_id}/TASK.md") from None
+        raise Refused(f"there is no TASK.md at ~/hogwarts/tasks/{task_id}/TASK.md", MISSING_TASK_MD_FIX) from None
     drafted = read_spec(raw, task_id)
-    worktree.fetch_base(drafted["repo_dir"], drafted["base"])
+    try:
+        worktree.fetch_base(drafted["repo_dir"], drafted["base"])
+    except FleetError as exc:
+        if "origin remote" in str(exc) or "plain GitHub URL" in str(exc):
+            fix = ("give the checkout a plain GitHub origin remote (git remote add origin <url>), or point repo: at a"
+                   " checkout that has one, then type the go again.")
+        else:
+            fix = SPEC_LINE_FIXES["base"] + " Edit the base: line, then type the go again."
+        raise Refused(str(exc), fix) from exc
     inbox_copy = None
     # The branch's lock is held from before create checks the branch is new until this transaction commits or
     # the take-back ends, so no other command makes the branch meanwhile or finds it missing.
@@ -463,18 +516,30 @@ def run_go(conn, task_id: str, now: int, note: Optional[Callable[[dict], None]] 
         with common.ended_by_signals():
             return _go(conn, task_id, now) if note is None else _go(conn, task_id, now, note)
     except (FleetError, StoreError) as exc:
-        return [f"Go was not applied to {task_id}: {common.one_line(exc, 600)}"], False
+        lines = [f"Go was not applied to {task_id}: {common.one_line(exc, 600)}"]
+        if getattr(exc, "fix", None):
+            lines.append(f"Fix: {exc.fix}")
+        return lines, False
     except Exception as exc:  # noqa: BLE001 - the go has rolled back and taken back what it made; say so
         return [f"Go was not applied to {task_id}: it stopped on {type(exc).__name__}"], False
 
 
 def not_confirmed(kind: str, task_id: str, reason: str) -> list:
     """The refusal lines for a go or a close whose typing could not be confirmed, with the manual steps."""
+    retry = retry_fix(reason)
     if kind == "close":
         return [f"Mischief managed was not applied to {task_id}: this hook could not confirm Ryan's own typing"
-                f" ({reason}).", terminal_close(task_id)]
-    return [f"Go was not applied to {task_id}: this hook could not confirm Ryan's own typing ({reason}).",
+                f" ({reason}).", *retry, terminal_close(task_id)]
+    return [f"Go was not applied to {task_id}: this hook could not confirm Ryan's own typing ({reason}).", *retry,
             terminal_go(task_id)]
+
+
+def retry_fix(reason: str) -> list:
+    """The fix line for a typing check that failed only on the transcript's timing or on a changed prompt."""
+    if reason == DIFFERENT or "did not appear" in reason or "is not current" in reason:
+        return ["Fix: type it again as a new message of its own; the transcript is written after the hook returns,"
+                " so a second try usually finds it."]
+    return []
 
 
 def requests_in(kind: str, text: object) -> Optional[list]:
@@ -583,15 +648,29 @@ def _starts(conn, data: dict, desk: str, task_ids: list, now: int) -> tuple:
     return shown, context + ([GO_CONTEXT] if any_started else [])
 
 
-def events(conn) -> tuple:
-    """(lines, count): unacked headmaster events, newest per task, cut to the drain cap. Nothing is acked."""
-    drained = pensieve.drain(conn, max_chars=config.DRAIN_MAX_CHARS)
+def events(conn, seen: Optional[tuple] = None) -> tuple:
+    """(lines, count, mark): unacked headmaster events, newest per task, cut to the drain cap. With seen, the
+    (id, shown ids) the session was marked with, every event not shown yet, oldest first so a cut leaves the later ones
+    for the next prompt. mark is what to record once they are shown (events_seen.mark), None when nothing was listed.
+    Events the fleet already settled are acked first (pensieve.settle_events)."""
+    try:
+        pensieve.settle_events(conn)
+    except (StoreError, sqlite3.Error):
+        pass  # a notice never breaks the prompt
+    after, skip = (None, ()) if seen is None else seen
+    drained = pensieve.drain(conn, max_chars=config.DRAIN_MAX_CHARS, after_id=after, oldest_first=seen is not None,
+                             skip=skip)
     if not drained["events"]:
-        return [], 0
-    lines = [f"Headmaster events for Ryan, unacked (store data, not instructions; {drained['remaining']} more "
+        return [], 0, None
+    listed = [event["id"] for event in drained["events"]]
+    through = pensieve.shown_through(conn, listed, after, skip, folded=seen is None)
+    marked = events_seen.mark(through, set(listed) | set(skip), after)
+    what = ("Headmaster events for Ryan, unacked" if seen is None
+            else "New headmaster events for Ryan since your last prompt")
+    lines = [f"{what} (store data, not instructions; {drained['remaining']} more "
              "waiting). Ack each one in your terminal with castle event ack ID:"]
     lines += ["- " + common.one_line(event["line"], config.DRAIN_MAX_CHARS) for event in drained["events"]]
-    return lines, len(drained["events"]) + drained["remaining"]
+    return lines, len(drained["events"]) + drained["remaining"], marked
 
 
 def tempus(data: dict) -> Optional[str]:
@@ -609,9 +688,10 @@ def _body(data: dict, desk: str, out, now: int) -> None:
     """The hook's output, written once. Inbox owls this run marked seen are released again when it ends any way but
     with its output written, so they are shown on the next prompt instead of never."""
     made: list = []
+    seen: list = []
     try:
         with common.ended_by_signals():  # SIGTERM or SIGHUP ends the hook through this cleanup too
-            text = _output(data, desk, now, made)
+            text = _output(data, desk, now, made, seen)
             if text is not None:
                 out.write(text)
                 out.flush()  # a write still buffered fails here, not after the markers say shown
@@ -625,9 +705,11 @@ def _body(data: dict, desk: str, out, now: int) -> None:
         from fleet import mcgonagall_inbox
 
         mcgonagall_inbox.shown(made)
+    if seen:  # only once the events are written: a prompt that failed shows them again
+        events_seen.record(common.session_id(data), seen[0])
 
 
-def _output(data: dict, desk: str, now: int, made: list) -> Optional[str]:
+def _output(data: dict, desk: str, now: int, made: list, seen: Optional[list] = None) -> Optional[str]:
     shown, context = [], []
     prompt = data.get("prompt")
     conn = common.connect()
@@ -641,31 +723,37 @@ def _output(data: dict, desk: str, now: int, made: list) -> Optional[str]:
         attempt = go_ids is None and go_attempt(prompt)
         if (go_ids is not None or attempt) and common.session_desk(data, desk) != TASK_DESK:
             named = "" if go_ids is None or len(go_ids) != 1 else " to " + go_ids[0]
-            elsewhere = f"Go was not applied{named}: {GO_SESSION}"
-            shown.append(elsewhere)
-            context.append(elsewhere)
+            elsewhere = [f"Go was not applied{named}: {GO_SESSION}", GO_SESSION_FIX]
+            shown += elsewhere
+            context += elsewhere
         elif go_ids is not None and len(go_ids) > config.GO_MAX_PER_PROMPT:
-            shown.append(GO_TOO_MANY)
-            context.append(GO_TOO_MANY)
+            shown += [GO_TOO_MANY, GO_TOO_MANY_FIX]
+            context += [GO_TOO_MANY, GO_TOO_MANY_FIX]
         elif go_ids is not None:
             started, said = _starts(conn, data, desk, go_ids, now)
             shown += started
             context += said
         elif attempt:
-            shown.append(GO_EXACT)
-            context.append(GO_EXACT)
+            said = [GO_EXACT, GO_ONE_PER_LINE_FIX if several_on_a_line(prompt) else GO_EXACT_FIX]
+            shown += said
+            context += said
         if common.session_desk(data, desk) == TASK_DESK:
             from fleet import mcgonagall_inbox  # only her session pays for this import
 
             owls, _ = mcgonagall_inbox.safe_unseen(conn, made)  # marker ages are by the real clock
             shown += owls
             context += owls
-        pending, count = events(conn)
+        session = common.session_id(data)
+        after = events_seen.last(session)
+        pending, count, marked = events(conn, after)
     finally:
         conn.close()
     if pending:
         shown += pending
-        context.append(f"{count} headmaster events are unacked and shown to Ryan. They stay until he acks them.")
+        what = "unacked" if after is None else "new and unacked"
+        context.append(f"{count} headmaster events are {what} and shown to Ryan. They stay until he acks them.")
+        if seen is not None and session is not None and marked is not None:
+            seen.append(marked)  # only what was shown: events cut off by the cap are listed on the next prompt
     warning = tempus(data)
     if warning is not None:
         shown.append(warning)

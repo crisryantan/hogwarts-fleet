@@ -135,8 +135,22 @@ class DeferredGoTests(ConfirmCase):
         self.assertIn(f"Go was not applied to {TASK_ID}: this hook could not confirm Ryan's own typing (this prompt's"
                       f" transcript entry did not appear within {config.GO_CONFIRM_WAIT_SECONDS} seconds).",
                       event["summary"])
+        self.assertIn("Fix: type it again as a new message of its own", event["summary"])
         self.assertIn(f"castle task create --id {TASK_ID} --desk mcgonagall", event["summary"])
         self.assertEqual(lines, [event["summary"]])
+
+    def test_a_long_reason_is_cut_but_the_fix_line_survives_the_summary_cap(self):
+        fix = "Fix: edit the base: line, then type the go again."
+        summary = go_confirm.fitted([f"Go was not applied to {TASK_ID}: " + "x" * 700, fix])
+        self.assertLessEqual(len(summary), pensieve.SUMMARY_LIMIT)
+        self.assertTrue(summary.endswith(fix))
+        self.assertIn("... Fix:", summary)
+        steps = "Start it by hand. " * 30
+        with_steps = go_confirm.fitted([f"Go was not applied to {TASK_ID}: " + "x" * 700, fix, steps])
+        self.assertLessEqual(len(with_steps), pensieve.SUMMARY_LIMIT)
+        self.assertIn(fix, with_steps)
+        short = go_confirm.fitted(["Go was not applied: short", fix])
+        self.assertEqual(short, f"Go was not applied: short {fix}")
 
     def test_a_missing_file_or_a_cut_last_line_is_not_yet_never_a_pass(self):
         self.later()  # the project folder exists; this session's file does not yet
@@ -216,7 +230,8 @@ class DeferredGoTests(ConfirmCase):
         for fields in ({"agent_type": None}, {"agent_id": "agent-1"}):
             with self.subTest(fields=fields):
                 shown, _, _ = self.said(f"go {TASK_ID}", transcript=self.later(), **fields)
-                self.assertEqual(shown, f"Go was not applied to {TASK_ID}: {user_prompt_submit.GO_SESSION}")
+                self.assertEqual(shown, f"Go was not applied to {TASK_ID}: {user_prompt_submit.GO_SESSION}\n"
+                                        f"{user_prompt_submit.GO_SESSION_FIX}")
         self.spawned_confirms.assert_not_called()
         # A claim and input forged for another session is refused by the confirmer too.
         data = {"prompt": f"go {TASK_ID}", "prompt_id": PROMPT_ID, "transcript_path": self.later(),
@@ -301,7 +316,7 @@ class ManyGosTests(ConfirmCase):
         text = "\n".join(f"go {task_id}" for task_id in ids)
         with mock.patch.object(user_prompt_submit, "_go", side_effect=AssertionError("a go ran")):
             shown, _, _ = self.said(text, transcript=self.transcript(text))
-        self.assertEqual(shown, user_prompt_submit.GO_TOO_MANY)
+        self.assertEqual(shown, f"{user_prompt_submit.GO_TOO_MANY}\n{user_prompt_submit.GO_TOO_MANY_FIX}")
 
 
 class GoNoiseTests(ConfirmCase):
@@ -317,10 +332,13 @@ class GoNoiseTests(ConfirmCase):
                     self.assertEqual(self.said(text, agent_type=None)[0], "")  # no session refusal either
             for text in decorated:
                 with self.subTest(text=text):
+                    fix = (user_prompt_submit.GO_ONE_PER_LINE_FIX if user_prompt_submit.several_on_a_line(text)
+                           else user_prompt_submit.GO_EXACT_FIX)
                     self.assertEqual(self.said(text, transcript=self.transcript(text))[0],
-                                     user_prompt_submit.GO_EXACT)
+                                     f"{user_prompt_submit.GO_EXACT}\n{fix}")
                     self.assertEqual(self.said(text, agent_type=None)[0],
-                                     f"Go was not applied: {user_prompt_submit.GO_SESSION}")
+                                     f"Go was not applied: {user_prompt_submit.GO_SESSION}\n"
+                                     f"{user_prompt_submit.GO_SESSION_FIX}")
         self.spawned_confirms.assert_not_called()
 
 

@@ -24,7 +24,7 @@ from hogwarts.errors import ConflictError, ValidationError
 from tests.support import NOW, temp_dir
 
 from fleet import config, gitops, owl_post, push, review, run_desk, verify, worktree
-from fleet.hooks import pre_compact, session_start
+from fleet.hooks import pre_compact, session_start, user_prompt_submit
 from fleet.safefs import FleetError
 from tests_fleet.support import IN_KIT, MANY_TASK_DESKS, ONLY_IN_KIT, every_slot, fake_children
 from tests_fleet.test_hooks import HookCase
@@ -907,6 +907,52 @@ class DeskTextTests(unittest.TestCase):
         done = subprocess.run(["/bin/sh", "-c", shell], capture_output=True, check=True,
                               env={"PATH": config.CHILD_PATH})
         self.assertEqual(sorted(done.stdout.decode().splitlines()), sorted(str(path) for path in real))
+
+
+    def test_mcgonagall_writes_task_md_when_she_shows_the_draft_and_the_refusal_says_so(self):
+        agent = self.text("castle", ".claude", "agents", "mcgonagall.md")
+        self.assertIn("When I show him the draft I write it to ~/hogwarts/tasks/<id>/TASK.md in the same turn", agent)
+        with self.assertRaises(user_prompt_submit.Refused) as raised:
+            user_prompt_submit.read_spec(b"", "tk_0123456789abcdef")
+        self.assertIn("TASK.md", str(raised.exception))
+        self.assertIn("write the draft to that path before the go", user_prompt_submit.MISSING_TASK_MD_FIX)
+
+    def path_block(self, user: Path, path: str) -> str:
+        """Run only install.sh's PATH section against a made-up home folder, and return what it said, then path_line."""
+        script = self.text("install.sh")
+        block = re.search(r"^USER_BIN=.*?^fi\n", script, re.DOTALL | re.MULTILINE)
+        self.assertIsNotNone(block)
+        shell = (f"HOME={shlex.quote(str(user))}\nOFFICE={shlex.quote(str(user / '.hogwarts'))}\n"
+                 f"PATH={shlex.quote(path)}\nsay() {{ printf '%s\\n' \"$*\"; }}\n{block.group(0)}\n"
+                 'printf "LINE=%s\\n" "$path_line"\n')
+        done = subprocess.run(["/bin/sh", "-c", shell], capture_output=True, check=True, env={"PATH": config.CHILD_PATH})
+        return done.stdout.decode()
+
+    def test_the_installer_links_castle_and_fleet_into_an_existing_user_bin_and_edits_no_profile(self):
+        user = temp_dir(self)
+        (user / ".local" / "bin").mkdir(parents=True)
+        (user / ".zshrc").write_text("# mine\n")
+        said = self.path_block(user, "/usr/bin:/bin")
+        for tool in ("castle", "fleet"):
+            self.assertEqual(os.readlink(user / ".local" / "bin" / tool), str(user / ".hogwarts" / "bin" / tool))
+        self.assertIn(f'LINE=export PATH="{user}/.local/bin:$PATH"', said)  # not on PATH yet: the line is printed
+        self.assertEqual((user / ".zshrc").read_text(), "# mine\n")
+        again = self.path_block(user, f"/usr/bin:/bin:{user}/.local/bin")
+        self.assertIn("already points at", again)
+        self.assertIn("LINE=\n", again)  # already on PATH: nothing to add
+
+    def test_the_installer_never_replaces_a_file_in_user_bin_and_prints_the_line_when_there_is_no_user_bin(self):
+        user = temp_dir(self)
+        (user / ".local" / "bin").mkdir(parents=True)
+        (user / ".local" / "bin" / "castle").write_text("mine\n")
+        said = self.path_block(user, "/usr/bin:/bin")
+        self.assertEqual((user / ".local" / "bin" / "castle").read_text(), "mine\n")
+        self.assertIn("castle was not linked there", said)
+        self.assertTrue((user / ".local" / "bin" / "fleet").is_symlink())
+        bare = temp_dir(self)
+        said = self.path_block(bare, "/usr/bin:/bin")
+        self.assertIn(f'LINE=export PATH="{bare}/.hogwarts/bin:$PATH"', said)
+        self.assertFalse((bare / ".local").exists())
 
 
 class SeedTests(unittest.TestCase):

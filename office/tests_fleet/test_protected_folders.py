@@ -57,6 +57,15 @@ class ProtectedFolderTests(GoCase):
             spec = user_prompt_submit.read_spec(self.task_md(spec=self.spec(repo=self.documents)), TASK_ID)
         self.assertEqual(spec["repo_dir"], str(self.documents))
 
+    def test_the_protected_folder_refusal_keeps_its_own_text_and_adds_no_second_fix(self):
+        with on("darwin"), self.assertRaises(user_prompt_submit.Refused) as raised:
+            user_prompt_submit.read_spec(self.task_md(spec=self.spec(repo=self.documents)), TASK_ID)
+        self.assertIsNone(raised.exception.fix)
+        self.assertIn("clone the repo elsewhere in your home folder", str(raised.exception))
+        with self.assertRaises(user_prompt_submit.Refused) as raised:
+            user_prompt_submit.read_spec(self.task_md(spec=self.spec(repo=self.tmp / "missing")), TASK_ID)
+        self.assertIn("outside ~/Documents", raised.exception.fix)
+
     def test_fleet_worktree_refuses_a_repo_in_a_protected_folder(self):
         self.task_md()
         pensieve.create_task(self.conn, "mcgonagall", "by hand", intent_path=ids.intent_path(TASK_ID),

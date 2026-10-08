@@ -3,7 +3,7 @@ from __future__ import annotations
 import sqlite3
 import unittest
 
-from hogwarts import pensieve
+from hogwarts import owlery, pensieve
 from hogwarts.errors import ConflictError, NotFoundError, ValidationError
 from tests.support import DAY, NOW, StoreCase
 
@@ -126,6 +126,102 @@ class EventTests(StoreCase):
             pensieve.ack(self.conn, 999)
         with self.assertRaises(ValidationError):
             pensieve.ack(self.conn, "1")
+
+    def test_drain_after_an_id_lists_only_newer_events(self):
+        old = self.event("old one")
+        new = self.event("new one", now=NOW + 1)
+        drained = pensieve.drain(self.conn, after_id=old["id"])
+        self.assertEqual([event["id"] for event in drained["events"]], [new["id"]])
+        self.assertEqual(pensieve.drain(self.conn, after_id=new["id"])["events"], [])
+
+    def test_drain_oldest_first_lists_every_event_in_id_order_and_honours_skip(self):
+        task = self.task("alpha")
+        older = self.event("older of the task", task_id=task["id"], now=NOW)
+        first = self.event("loose one", now=NOW + 1)
+        newer = self.event("newer of the task", task_id=task["id"], now=NOW + 2)
+        drained = pensieve.drain(self.conn, oldest_first=True)
+        self.assertEqual([event["id"] for event in drained["events"]], [older["id"], first["id"], newer["id"]])
+        skipped = pensieve.drain(self.conn, oldest_first=True, skip=[first["id"]])
+        self.assertEqual([event["id"] for event in skipped["events"]], [older["id"], newer["id"]])
+        cut = pensieve.drain(self.conn, max_chars=len(drained["events"][0]["line"]) + 1, oldest_first=True)
+        self.assertEqual([event["id"] for event in cut["events"]], [older["id"]])
+        self.assertEqual(cut["remaining"], 2)
+
+    def test_shown_through_counts_an_older_event_of_a_task_as_shown_only_when_folded(self):
+        task = self.task("alpha")
+        older = self.event("older of the task", task_id=task["id"], now=NOW)
+        newer = self.event("newer of the task", task_id=task["id"], now=NOW + 1)
+        self.assertEqual(pensieve.shown_through(self.conn, [newer["id"]], folded=True), newer["id"])
+        self.assertIsNone(pensieve.shown_through(self.conn, [newer["id"]]))  # unfolded: the older one was not shown
+        other = self.event("another task", now=NOW + 2)
+        self.assertIsNone(pensieve.shown_through(self.conn, [other["id"]], folded=True))  # the task's newest was cut
+        self.assertEqual(pensieve.shown_through(self.conn, [older["id"], newer["id"]]), newer["id"])
+
+    def test_shown_through_marks_only_what_was_shown(self):
+        one, two, three = (self.event(f"event {index}", now=NOW + index) for index in range(3))
+        self.assertEqual(pensieve.shown_through(self.conn, [one["id"], two["id"], three["id"]]), three["id"])
+        self.assertEqual(pensieve.shown_through(self.conn, [one["id"], two["id"]]), two["id"])
+        self.assertEqual(pensieve.shown_through(self.conn, [two["id"], three["id"]]), None)  # the first was cut
+        self.assertEqual(pensieve.shown_through(self.conn, [three["id"]], skip=[one["id"], two["id"]]), three["id"])
+        self.assertEqual(pensieve.shown_through(self.conn, [three["id"]], after_id=two["id"]), three["id"])
+        pensieve.ack_matching(self.conn)
+        self.assertIsNone(pensieve.shown_through(self.conn, []))
+
+    def test_settle_takes_a_confirmation_that_names_the_task_without_the_confirmer_key(self):
+        task = self.task("alpha")
+        refused = pensieve.add_event(self.conn, "alpha", "go.refused", "headmaster", "no TASK.md", task_id=task["id"])
+        pensieve.add_event(self.conn, "alpha", "go.confirmed", "headmaster", "started", task_id=task["id"])
+        self.assertEqual(pensieve.settle_events(self.conn)["acked"], 1)
+        self.assertNotIn(refused["id"], [event["id"] for event in pensieve.drain(self.conn)["events"]])
+
+    def test_ack_matching_acks_by_kind_by_task_or_everything(self):
+        one = self.task("alpha")
+        keep = self.event("other kind", task_id=one["id"])
+        for _ in range(2):
+            pensieve.add_event(self.conn, "alpha", "ci.red", "headmaster", "red", task_id=one["id"], now=NOW)
+        pensieve.add_event(self.conn, "alpha", "ci.red", "headmaster", "red elsewhere", now=NOW)
+        self.assertEqual(pensieve.ack_matching(self.conn, kind="ci.red", task_id=one["id"])["acked"], 2)
+        self.assertEqual(pensieve.ack_matching(self.conn, kind="ci.red")["acked"], 1)
+        self.assertEqual([event["id"] for event in pensieve.drain(self.conn)["events"]], [keep["id"]])
+        self.assertEqual(pensieve.ack_matching(self.conn, task_id=one["id"])["acked"], 1)
+        self.event("another")
+        self.assertEqual(pensieve.ack_matching(self.conn)["acked"], 1)
+        self.assertEqual(pensieve.ack_matching(self.conn)["acked"], 0)
+
+    def test_settle_acks_a_refusal_that_a_later_confirmation_followed(self):
+        task = self.task("alpha")
+        key = f"go-confirm:{task['id']}:aaaaaaaaaaaaaaaa"
+        refused = pensieve.add_event(self.conn, "alpha", "go.refused", "headmaster", "no TASK.md", dedupe_key=key)
+        other = pensieve.add_event(self.conn, "alpha", "go.refused", "headmaster", "another task",
+                                   dedupe_key="go-confirm:tk_1111111111111111:bbbbbbbbbbbbbbbb")
+        self.assertEqual(pensieve.settle_events(self.conn)["acked"], 0)
+        pensieve.add_event(self.conn, "alpha", "go.confirmed", "headmaster", "started", task_id=task["id"],
+                           dedupe_key=f"go-confirm:{task['id']}:cccccccccccccccc")
+        self.assertEqual(pensieve.settle_events(self.conn)["acked"], 1)
+        left = [event["id"] for event in pensieve.drain(self.conn)["events"]]
+        self.assertNotIn(refused["id"], left)
+        self.assertIn(other["id"], left)
+        self.assertEqual(pensieve.settle_events(self.conn)["acked"], 0)
+
+    def test_settle_does_not_ack_a_refusal_that_came_after_the_confirmation(self):
+        task = self.task("alpha")
+        pensieve.add_event(self.conn, "alpha", "close.confirmed", "headmaster", "closed", task_id=task["id"],
+                           dedupe_key=f"close-confirm:{task['id']}:aaaaaaaaaaaaaaaa")
+        late = pensieve.add_event(self.conn, "alpha", "close.refused", "headmaster", "not awaiting close",
+                                  task_id=task["id"], dedupe_key=f"close-confirm:{task['id']}:bbbbbbbbbbbbbbbb")
+        self.assertEqual(pensieve.settle_events(self.conn)["acked"], 0)
+        self.assertEqual([event["id"] for event in pensieve.drain(self.conn)["events"]][0], late["id"])
+
+    def test_settle_acks_an_owl_event_only_once_the_owl_was_read(self):
+        sent = owlery.send(self.conn, "alpha", "beta", "fyi", "status", body="b", now=NOW)
+        read = owlery.send(self.conn, "alpha", "beta", "fyi", "other status", body="b", now=NOW)
+        for owl in (sent, read):
+            pensieve.add_event(self.conn, "alpha", "owl.to-mcgonagall", "headmaster", f"owl {owl['id']}",
+                               dedupe_key=f"owl:to-mcgonagall:{owl['id']}")
+        self.assertEqual(pensieve.settle_events(self.conn)["acked"], 0)
+        owlery.read(self.conn, read["id"], "beta", now=NOW + 1)
+        self.assertEqual(pensieve.settle_events(self.conn)["acked"], 1)
+        self.assertEqual([event["summary"] for event in pensieve.drain(self.conn)["events"]], [f"owl {sent['id']}"])
 
     def test_events_are_never_deleted(self):
         self.event("x")

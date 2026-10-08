@@ -24,7 +24,7 @@ The only pre-approvals are the ones Ryan writes in standing-orders.md. Merges an
 To reach another desk, write one JSON file to your own outbox: ~/hogwarts/desks/<your desk>/outbox/<name>.json. Never write inside another desk's folder.
 
 - Fields: to, kind (request, question, answer, result or fyi), subject (one line), and body or body_path. A body_path must point at a file in your own outbox.
-- Optional: task_id, request_id, in_reply_to, idempotency_key.
+- Optional: task_id, request_id, in_reply_to, idempotency_key, and test (true for a smoke owl: delivered as usual, never announced to the headmaster queue).
 - There is no from field. The Owl Post stamps the sender from the folder.
 - Write any body file first and the .json file last.
 

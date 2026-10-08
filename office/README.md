@@ -365,7 +365,8 @@ castle task start|show TASK
 castle task await-close TASK [--repo O/N --sha SHA]
 castle task commit TASK --repo O/N --sha SHA
 castle task close TASK --reason complete|abandoned|superseded [--token-stdin]
-castle task list [--desk D] [--status S | --open]
+castle task list [--desk D] [--status S | --open | --all]
+castle task builds [--all]
 castle task board [--desk D]
 castle task allow-round TASK
 castle task rounds TASK
@@ -384,7 +385,8 @@ castle review record --repo O/N --sha SHA --task TASK --reviewer DESK --verdict 
 castle review check --repo O/N --sha SHA
 castle event add --desk D --kind K --verdict V --summary S [--task T] [--dedupe-key K]
 castle event drain [--max-chars N]
-castle event ack ID
+castle event ack ID | --all | [--kind KIND] [--task TASK]
+castle event settle
 castle pensieve session SESSION --project P [--desk D] [--model M] [--started-at N] [--ended-at N] [--first-turn-tokens N] [--total-input-tokens N]
 castle pensieve extract SESSION --role user|assistant (--text T | --text-stdin) [--seq N]
 castle pensieve keypoint (--text T | --text-stdin) [--tags a,b] [--session S]
@@ -432,7 +434,7 @@ A few commands in more detail:
 - `desk model DESK MODEL` pins a desk to a model of its own family, `--role` unpins it and `--approve` takes a pending costlier pick, once it has checked the pick still qualifies.
 - `ollivander clear` removes Ollivander's stop file.
 - `desk many-tasks` lets a desk hold many active tasks at once, for good. It refuses `mcgonagall`, `snape`, `portrait`, the human desk and the script desks.
-- `task list --open` lists queued, active and awaiting-close tasks, and refuses `--status` with it.
+- `task list` with no flag lists the open tasks as one line each, newest first. `--open` lists queued, active and awaiting-close tasks as full records, `--all` lists every task, and each refuses `--status` with it. `task builds` shows one line per build: go task, build task, branch and state.
 - `task board` prints `in_flight`.
 
 The cap numbers, the review round cap, the running window and the blocklist are the fleet's settings, kept in `fleet/config.py` next to this package.

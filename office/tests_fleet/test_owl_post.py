@@ -105,6 +105,13 @@ class RefusalTests(OwlPostCase):
         self.run_pass()
         self.assert_refused("harry", "larger than")
 
+    def test_the_test_field_must_be_true_or_false(self):
+        for index, value in enumerate(("yes", None, 1)):
+            self.write_owl("harry", f"bad{index}.json", {"to": "mcgonagall", "kind": "fyi", "subject": "s",
+                                                         "body": "b", "test": value})
+        self.assertEqual(self.run_pass()["delivered"], [])
+        self.assertEqual(len([name for name in self.rejected("harry") if name.endswith(".reason")]), 3)
+
     def test_bad_json_goes_to_rejected_with_a_reason(self):
         for name, raw in (("broken.json", b"{not json"), ("dupe.json", b'{"to": "hermione", "to": "ron"}'),
                           ("nan.json", b'{"to": "hermione", "kind": "fyi", "subject": "s", "body": NaN}'),

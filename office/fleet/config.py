@@ -286,6 +286,9 @@ INFLIGHT_CAP = 10
 DIGEST_EVENT_LINES = 8
 QUEUED_CAP = 20
 DRAIN_MAX_CHARS = 1500
+# Per session, the newest headmaster event id already shown (office folder EVENTS_SEEN_DIR); older files are removed.
+EVENTS_SEEN_DIR = "events-seen"
+EVENTS_SEEN_KEEP_SECONDS = 7 * 86400
 TEMPUS_THRESHOLD = 200_000
 EXTRACT_CAP = 4000
 SESSION_CAP = 16000

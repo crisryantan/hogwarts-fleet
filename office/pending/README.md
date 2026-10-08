@@ -67,7 +67,7 @@ Harry and Moody stay disabled until your organization approves Codex for its sou
 
 ## (d) Registering and closing a task
 
-McGonagall writes `tasks/<id>/TASK.md` and waits for your go. Nothing she does registers the task in the store. When you're happy with the draft, type exactly this, and nothing else, as your prompt in her session:
+McGonagall writes `tasks/<id>/TASK.md` when she shows you the draft, so the file is on disk before you type the go, and waits for your go. Nothing she does registers the task in the store. When you're happy with the draft, type exactly this, and nothing else, as your prompt in her session:
 
 ```
 go <tk_id>

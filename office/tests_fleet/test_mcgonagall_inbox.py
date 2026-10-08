@@ -67,6 +67,18 @@ class AnnounceTests(InboxCase):
                 self.assertEqual(self.notified.call_args[0][0], f"{sender} on {self.task['id']}: fyi: news from {sender}")
         self.assertEqual(len(self.told()), 5)
 
+    def test_a_test_owl_is_delivered_but_never_reaches_the_headmaster_queue(self):
+        for name, flag in (("smoke.json", True), ("real.json", False)):
+            self.write_owl("harry", name, {"to": "mcgonagall", "kind": "fyi", "subject": name, "body": "b",
+                                           "task_id": self.task["id"], "test": flag})
+        owl_post.run_pass(self.conn, now=NOW)
+        self.assertEqual(sorted(owl["subject"] for owl in owlery.inbox(self.conn, "mcgonagall")),
+                         ["real.json", "smoke.json"])
+        self.assertEqual([event["summary"].rsplit(": ", 1)[-1] for event in self.told()], ["real.json"])
+        self.assertEqual(self.notified.call_count, 1)
+        self.assertEqual(os.listdir(config.OFFICE_ROOT + "/announce-pending") if os.path.isdir(
+            config.OFFICE_ROOT + "/announce-pending") else [], [])
+
     def test_a_handoff_shows_only_its_round_and_no_other_body_text(self):
         body = f"HANDOFF {self.task['id']} round 1\nAdded the widget check, key {SECRET}\nSECOND-LINE-MARKER\n"
         self.send("harry", body=body, subject=f"handoff {SECRET}")  # a result needs a request; any kind reads the same

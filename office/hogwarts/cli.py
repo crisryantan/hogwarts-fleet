@@ -13,7 +13,7 @@ import sys
 from pathlib import Path
 from typing import Callable, Optional, Sequence
 
-from . import capacity, db, facts, followups, ids, owlery, pensieve, wands
+from . import capacity, db, facts, followups, ids, owlery, pensieve, views, wands
 from .errors import ConflictError, IntegrityError, NotFoundError, StoreError, ValidationError
 
 _WHOLE = re.compile(r"[0-9]{1,18}")
@@ -191,6 +191,16 @@ def _request_show(conn: sqlite3.Connection, args: argparse.Namespace) -> dict:
     return {**owlery.get_request(conn, args.request), "owls": owlery.request_owls(conn, args.request)}
 
 
+def _event_ack(conn: sqlite3.Connection, args: argparse.Namespace) -> dict:
+    """Ack one event by id, or every unacked headmaster event with --all, of --kind, or of --task."""
+    picked = [args.event is not None, args.all, args.kind is not None or args.task is not None]
+    if sum(picked) != 1:
+        raise ValidationError("name one event id, or --all, or --kind and/or --task")
+    if args.event is not None:
+        return pensieve.ack(conn, args.event)
+    return pensieve.ack_matching(conn, None if args.all else args.kind, None if args.all else args.task)
+
+
 def _fact_decay(conn: sqlite3.Connection, args: argparse.Namespace) -> dict:
     return pensieve.archive_stale(conn) if args.archive else {"stale": pensieve.decay(conn)}
 
@@ -272,6 +282,13 @@ def _task_board(conn: sqlite3.Connection, args: argparse.Namespace) -> dict:
                               caps.FOLLOWUP_ROUND_CAP)
 
 
+def _task_list(conn: sqlite3.Connection, args: argparse.Namespace) -> object:
+    """The open tasks as one line each, newest first, unless --all, --open or --status asks for the full records."""
+    if args.all or args.open or args.status:
+        return pensieve.list_tasks(conn, args.desk, args.status, args.open)
+    return views.task_lines(conn, _clock(), _fleet_caps(), args.desk)
+
+
 def _task_start(conn: sqlite3.Connection, args: argparse.Namespace) -> dict:
     """Start a queued task. A build desk's task gets the TASK.md check that fleet worktree makes before it starts
     one (kept in fleet/worktree.py next to this package), so this command is no way round it. Every other desk's
@@ -325,10 +342,11 @@ HANDLERS: dict[str, Callable] = {
     "task worktree": lambda c, a: pensieve.set_worktree(c, a.task, a.path),
     "task close": lambda c, a: pensieve.close_task(c, a.task, a.reason, _token(a)),
     "task show": lambda c, a: pensieve.get_task(c, a.task),
-    "task list": lambda c, a: pensieve.list_tasks(c, a.desk, a.status, a.open),
+    "task list": lambda c, a: _task_list(c, a),
+    "task builds": lambda c, a: views.build_lines(c, _clock(), _fleet_caps(), a.all, None if a.all else views.LIST_CAP),
     "task board": _task_board,
     "task allow-round": lambda c, a: capacity.allow_round(c, a.task, _clock()),
-    "task rounds": lambda c, a: capacity.review_rounds(c, a.task),
+    "task rounds": lambda c, a: views.rounds_with_branch(c, a.task, _fleet_caps()),
     "followup list": lambda c, a: followups.list_followups(c, a.task),
     "followup show": lambda c, a: followups.show(c, a.task),
     "token mint": lambda c, a: owlery.mint(c, a.task, "cli", a.ttl),
@@ -350,7 +368,8 @@ HANDLERS: dict[str, Callable] = {
     "review check": _review_check,
     "event add": lambda c, a: pensieve.add_event(c, a.desk, a.kind, a.verdict, a.summary, a.task, a.dedupe_key),
     "event drain": lambda c, a: pensieve.drain(c, a.max_chars),
-    "event ack": lambda c, a: pensieve.ack(c, a.event),
+    "event ack": lambda c, a: _event_ack(c, a),
+    "event settle": lambda c, a: pensieve.settle_events(c),
     "pensieve session": lambda c, a: pensieve.record_session(
         c, a.session, a.project, a.desk, a.model, a.started_at, a.ended_at, a.first_turn_tokens,
         a.total_input_tokens),
@@ -481,9 +500,12 @@ def _task_parsers(commands: argparse._SubParsersAction) -> None:
     listing = _sub(group, "list", "task list")
     listing.add_argument("--desk")
     which = listing.add_mutually_exclusive_group()
-    which.add_argument("--status")
-    which.add_argument("--open", action="store_true", help="queued, active or awaiting close")
+    which.add_argument("--status", help="full records of one status")
+    which.add_argument("--open", action="store_true", help="full records of queued, active or awaiting close tasks")
+    which.add_argument("--all", action="store_true", help="full records of every task, oldest first")
     _sub(group, "board", "task board").add_argument("--desk")
+    builds = _sub(group, "builds", "task builds")
+    builds.add_argument("--all", action="store_true", help="every build, closed ones too, with no cap")
 
 
 def _followup_parsers(commands: argparse._SubParsersAction) -> None:
@@ -563,7 +585,12 @@ def _event_parsers(commands: argparse._SubParsersAction) -> None:
     add.add_argument("--task")
     add.add_argument("--dedupe-key")
     _sub(group, "drain", "event drain").add_argument("--max-chars", type=_whole, default=1500)
-    _sub(group, "ack", "event ack").add_argument("event", type=_whole)
+    ack = _sub(group, "ack", "event ack")
+    ack.add_argument("event", type=_whole, nargs="?", help="one event id")
+    ack.add_argument("--all", action="store_true", help="every unacked headmaster event")
+    ack.add_argument("--kind", help="every unacked event of this kind, such as review.ready-for-push")
+    ack.add_argument("--task", help="every unacked event of this task")
+    _sub(group, "settle", "event settle")
 
 
 def _pensieve_parsers(commands: argparse._SubParsersAction) -> None:

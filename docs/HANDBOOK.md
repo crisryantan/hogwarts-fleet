@@ -367,18 +367,21 @@ herdr keeps several terminal sessions in one window and keeps them running after
 
 ## Cheat sheet
 
-Everything `castle` prints is JSON. If you added the shortcut in one-time setup, type `castle` instead of the full path.
+Everything `castle` prints is JSON. The installer links `castle` and `fleet` into `~/.local/bin` when that folder exists, or prints the one line to add to your shell profile; either way you can type `castle` instead of the full path.
 
 **castle**
 
 | Type | To |
 | --- | --- |
-| `castle task list` | See every task and its status |
-| `castle task list --desk harry` | See one desk's tasks |
-| `castle task list --open` | See every task that is queued, active or awaiting close |
+| `castle task list` | See what is open, one line per task, newest first: task id, desk, title, state and who it waits on |
+| `castle task list --desk harry` | The same, for one desk |
+| `castle task list --all` | See every task and its status, as full records |
+| `castle task list --open` | See every task that is queued, active or awaiting close, as full records |
+| `castle task builds` | See one line per open build: go task, build task, branch and state (`--all` adds closed ones) |
 | `castle task board` | See each desk's tasks in flight: round, verdict, and whether a run is going |
 | `castle event drain` | See what needs you |
 | `castle event ack <id>` | Clear a row once you've dealt with it |
+| `castle event ack --all` | Clear every row. `--kind <kind>` clears every row of one kind, `--task <task-id>` every row of one task |
 | `castle request list --open` | See requests between desks still in flight |
 | `castle audit` | Find stuck requests and unanswered owls |
 | `castle fact current` | See what the fleet currently believes |
