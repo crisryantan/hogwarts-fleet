@@ -371,9 +371,12 @@ OWL_REPORT_ROOT = "/Users/crisryantan/Library/Caches/hogwarts-owl-report"
 OWL_REPORT_MAX_TURNS = 15
 OWL_REPORT_MAX_TRIES = 3
 OWL_REPORT_NOTIFY_TRIES = 3
-# The orchestrator's headless turns run under the owl-report settings and model (run_desk.owl_report_argv), one item a
-# turn in its own folder under ORCHESTRATOR_ROOT, at most ORCHESTRATOR_MAX_TURNS a run. Wakes are counted in the office
+# The orchestrator's headless turns run under the owl-report settings (run_desk.owl_report_argv) with their own model and
+# budget, since picking the next step is a judgement call: one item a turn in its own folder under ORCHESTRATOR_ROOT, at
+# most ORCHESTRATOR_MAX_TURNS a run. Wakes are counted in the office
 # before each turn starts, so a killed turn counts: at most this many per task, ever, and per cap day.
+ORCHESTRATOR_MODEL = "sonnet"
+ORCHESTRATOR_MAX_BUDGET_USD = "0.50"
 ORCHESTRATOR_LOCK = "orchestrator.lock"
 ORCHESTRATOR_ROOT = "/Users/crisryantan/Library/Caches/hogwarts-orchestrator"
 ORCHESTRATOR_MAX_TURNS = 10

@@ -740,7 +740,7 @@ def _next(conn, fd: int, lock_fd: int, now: Optional[int]) -> Optional[str]:
         _finish(fd, name, item, f"skipped: {common.one_line(exc, 200)}", now)
         return "skipped"
     try:
-        argv = run_desk.owl_report_argv(BRIEF, PROMPT)
+        argv = run_desk.owl_report_argv(BRIEF, PROMPT, config.ORCHESTRATOR_MODEL, config.ORCHESTRATOR_MAX_BUDGET_USD)
     except (FleetError, OSError) as exc:
         _event(conn, "orchestrator.failed", "headmaster", "the orchestrator turn cannot start, since its settings"
                f" file is refused ({common.one_line(exc, 200)}); items wait until it is in place", None,
@@ -749,7 +749,7 @@ def _next(conn, fd: int, lock_fd: int, now: Optional[int]) -> Optional[str]:
     with contextlib.ExitStack() as gate:
         try:
             gate_fd = gate.enter_context(run_desk.launch_gate())
-            run_desk.check_report_launch(conn)  # under the gate, so no stop or update comes in between
+            run_desk.check_report_launch(conn, config.ORCHESTRATOR_MODEL)  # under the gate, so no stop or update comes in between
         except run_desk.Blocked:
             _finish(fd, name, item, "blocked: the model is blocked here", now)
             return "stop: blocked"

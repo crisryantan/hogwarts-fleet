@@ -417,6 +417,10 @@ class TurnTests(OrchestratorCase):
         self.assertFalse(any("git push" in part or "CI is red" in part for part in run["argv"]))
         self.assertIn("--restricted", run["argv"])
         self.assertIn(f"{config.office_desk_dir('mcgonagall')}/{config.OWL_REPORT_SETTINGS_FILE}", run["argv"])
+        # Her turn runs on its own model and budget, not the owl report's.
+        argv = run["argv"]
+        self.assertEqual(argv[argv.index("--model") + 1], config.ORCHESTRATOR_MODEL)
+        self.assertEqual(argv[argv.index("--max-budget-usd") + 1], config.ORCHESTRATOR_MAX_BUDGET_USD)
         legal = [entry["action"] for entry in run["context"]["legal_actions"]]
         self.assertEqual(legal, ["none", "ask_snape", "notify_owner"])
         notify = self.events_of("orchestrator.notify")

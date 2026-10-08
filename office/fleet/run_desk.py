@@ -1082,19 +1082,19 @@ def notifications_on() -> bool:
     return sys.platform == "darwin" and bool(config.DESKTOP_NOTIFY)
 
 
-def owl_report_argv(brief: str, prompt: str) -> list:
+def owl_report_argv(brief: str, prompt: str, model: str = None, budget: str = None) -> list:
     """argv for one headless McGonagall owl-report turn on the one owl in its working folder: claude -p --restricted
     (file tools confined to the working folder) under the report-only settings file, no MCP, only Read, Grep and Glob,
     the fixed brief and the fixed prompt, and JSON output so a failure is told apart from a report. The settings file
-    is checked first (check_report_settings)."""
+    is checked first (check_report_settings). model and budget default to the owl report's own."""
     desk = config.HOOK_DESK
     check_report_settings(_read_office(desk, config.OWL_REPORT_SETTINGS_FILE, config.SETTINGS_MAX_BYTES,
                                        "owl report settings"))
     return [config.CLAUDE_BIN, "-p", "--restricted", "--settings",
             f"{config.office_desk_dir(desk)}/{config.OWL_REPORT_SETTINGS_FILE}", "--strict-mcp-config",
-            "--tools", config.OWL_REPORT_TOOLS, "--permission-mode", "dontAsk", "--model", config.OWL_REPORT_MODEL,
+            "--tools", config.OWL_REPORT_TOOLS, "--permission-mode", "dontAsk", "--model", model or config.OWL_REPORT_MODEL,
             "--append-system-prompt", brief, "--output-format", "json",
-            "--max-budget-usd", config.OWL_REPORT_MAX_BUDGET_USD, prompt]
+            "--max-budget-usd", budget or config.OWL_REPORT_MAX_BUDGET_USD, prompt]
 
 
 # The exact shape the report-only settings must have. Anything broader is refused.
@@ -1143,14 +1143,15 @@ AUTH_MESSAGES = ("Invalid API key", "Not logged in", "OAuth token has expired", 
                  "Please run /login", "Invalid bearer token")
 
 
-def check_report_launch(conn) -> None:
+def check_report_launch(conn, model: str = None) -> None:
     """The gates every headless launch passes, for the owl-report turn: no Ollivander stop or CLI update in place
     (Stopped), and its model not blocked here, by name or by any full id the alias is known to have run as
-    (Blocked)."""
+    (Blocked). model defaults to the owl report's own."""
     _check_stop()
-    model = blocked_model({"model": config.OWL_REPORT_MODEL, "family": "claude"}, conn)
-    if model is not None:
-        raise Blocked(f"the owl report model {config.OWL_REPORT_MODEL} is blocked here ({model}), so no turn runs")
+    name = model or config.OWL_REPORT_MODEL
+    blocked = blocked_model({"model": name, "family": "claude"}, conn)
+    if blocked is not None:
+        raise Blocked(f"the headless turn model {name} is blocked here ({blocked}), so no turn runs")
 
 
 def report_turn_command(pid: int) -> str:
