@@ -691,6 +691,23 @@ class TransactionCoverageTests(unittest.TestCase):
         pensieve.mark_awaiting_close(conn, proven, now=NOW)
         pensieve.close_proven(conn, proven, proof(repo="acme/proven", written_checks=0, judge_desk=None), "closed",
                               f"close:proven:{proven}", now=NOW)
+        went = pensieve.create_task(conn, "alpha", "go", intent_path=ids.intent_path("tk_00000000000000ab"),
+                                    task_id="tk_00000000000000ab", now=NOW)["id"]
+        pensieve.record_spec(conn, went, "/private/tmp/checkout", "fix/other", "origin/main", "a" * 64, now=NOW)
+        built = pensieve.start_task(conn, pensieve.create_task(conn, "alpha", "built", parent_task_id=went,
+                                                               now=NOW)["id"], now=NOW)["id"]
+        pensieve.record_commit(conn, built, "acme/built", SHA, now=NOW)
+        judged = capacity.open_review_round(conn, built, "beta", SHA, "review built", now=NOW)
+        capacity.record_round_verdict(conn, judged["request"]["id"], "acme/built", "PASS", now=NOW)
+        pensieve.close_task(conn, judged["task"]["id"], "superseded", now=NOW)
+        pensieve.mark_awaiting_close(conn, built, now=NOW)
+        pensieve.close_proven(conn, built, proof(repo="acme/built", written_checks=0, judge_desk=None), "closed",
+                              f"close:proven:{built}", now=NOW)
+        pensieve.close_parent_proven(conn, went, "moved on", now=NOW)
+        settled = pensieve.start_task(conn, pensieve.create_task(conn, "alpha", "settled", now=NOW)["id"],
+                                      now=NOW)["id"]
+        pensieve.mark_awaiting_close(conn, settled, now=NOW)
+        pensieve.close_settled(conn, settled, owlery.mint(conn, settled, "hook", now=NOW)["token"], now=NOW)
         pensieve.ack(conn, pensieve.add_event(conn, "alpha", "note", "headmaster", "s", now=NOW)["id"], now=NOW)
         pensieve.add_event(conn, "alpha", "note", "headmaster", "t", now=NOW)
         pensieve.ack_matching(conn, kind="note", now=NOW)

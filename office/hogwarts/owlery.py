@@ -187,6 +187,19 @@ def inbox(conn: Conn, recipient: str, include_acked: bool = False) -> list[dict]
     return [_as_meta(row) for row in rows]
 
 
+def open_questions(conn: Conn, task_id: str) -> list[dict]:
+    """The question owls about task_id that no answer replies to and their recipient has not acked, oldest first."""
+    task_id = pensieve.get_task(conn, ids.check("task", task_id))["id"]
+    rows = db.fetch_all(
+        conn,
+        _SELECT_META + " WHERE task_id = ? AND kind = 'question' AND acked_at IS NULL AND NOT EXISTS"
+                       " (SELECT 1 FROM owls AS answer WHERE answer.kind = 'answer' AND answer.in_reply_to = owls.id)"
+                       " ORDER BY created_at, rowid",
+        (task_id,),
+    )
+    return [_as_meta(row) for row in rows]
+
+
 def request_owls(conn: Conn, request_id: str) -> list[dict]:
     request = _require_request(conn, ids.check("request", request_id))
     rows = db.fetch_all(conn, _SELECT_META + " WHERE request_id = ? ORDER BY created_at, rowid", (request["id"],))

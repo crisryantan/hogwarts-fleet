@@ -796,6 +796,25 @@ class ClosesTests(CloseCase):
         [event] = self.close_events()
         self.assertIn(f"its go task {ctx['parent']} stays open, since 1 other open tasks are under it", event["summary"])
 
+    def test_closes_the_build_alone_while_its_go_task_has_a_question_open_or_its_lock_is_held(self):
+        ctx = self.passed_build()
+        asked = owlery.send(self.conn, "harry", "mcgonagall", "question", "which base?", task_id=ctx["parent"])
+        self.land_pr(ctx)
+        result = self.close(ctx)
+        self.assertEqual((result["outcome"], result["parent"]), ("closed", None))
+        self.assertEqual(self.status(ctx["parent"]), "queued")
+        [event] = self.close_events()
+        self.assertIn(f"its go task {ctx['parent']} stays open, since harry asked a question on it", event["summary"])
+        # Once the question is acked it moves on at the end of a pass, unless its lock is held then.
+        owlery.read(self.conn, asked["id"], "mcgonagall")
+        owlery.ack(self.conn, asked["id"], "mcgonagall")
+        with run_desk.task_lock(ctx["parent"]):
+            closer.run_pass(self.conn, now=self.t0 + 9000)
+        self.assertEqual(self.status(ctx["parent"]), "queued")
+        closer.run_pass(self.conn, now=self.t0 + 9000)
+        self.assertEqual(self.status(ctx["parent"]), "closed")
+        self.assertEqual(pensieve.task_closure(self.conn, ctx["parent"])["via_task_id"], ctx["task"])
+
     def test_closes_an_own_session_task_alone(self):
         ctx = self.passed_own(after=COMMAND_AC)
         self.github.prs = [self.pr(ctx, number=11, merge=self.merge_commit(ctx["sha"]))]

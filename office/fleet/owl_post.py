@@ -39,7 +39,8 @@ not finished with, when no automatic review of its task holds that task's loop l
 one that is waiting for its author's run to end, its reviewer to be free or another review of the task to end.
 It does the same for a task with a round whose after record is not done (write_after): a review killed after its
 verdict, whose fix round, push or PR the review loop then finishes or reports, never twice. And it starts again the run
-of each owl that waited because every model its desk may run was down, once one of them is back (failover).
+of each owl that waited because every model its desk may run was down, once one of them is back (failover), and the
+automatic review of a handoff whose reviewer waited so, which until then it does not start again.
 The review counts its own tries and gives up, telling Ryan, after config.AUTO_REVIEW_MAX_TRIES of them.
 
 A rerun after a crash at any step stores nothing twice. File content is only parsed
@@ -517,18 +518,21 @@ def _start_review(conn, owl: dict, newly_delivered: bool, now: Optional[int]) ->
 def resume_reviews(conn, now: Optional[int] = None, started: tuple = ()) -> list:
     """Start again the automatic review of each open build task that has a handoff the review loop took and is not
     finished with, or a round whose after record is not done (what follows its verdict, cut off by a kill), when no
-    automatic review of that task holds its loop lock. started names the tasks whose review this pass has just
-    started, which may not hold their lock yet."""
+    automatic review of that task holds its loop lock, and its review is not waiting for its reviewer's models
+    (failover.review_waiting). started names the tasks whose review this pass has just started, which may not hold
+    their lock yet."""
     resumed = []
     for desk in config.WORKTREE_DESKS:
         for task in pensieve.list_tasks(conn, desk=desk, open_only=True):
             if task["id"] in started:
                 continue
             try:
-                keys = unfinished_handoffs(task["id"]) + [record["request_id"]
-                                                          for record in unfinished_afters(task["id"])]
+                afters = [record["request_id"] for record in unfinished_afters(task["id"])]
+                keys = unfinished_handoffs(task["id"]) + afters
                 if not keys or auto_review_running(task["id"]):
                     continue
+                if not afters and failover.review_waiting(task["id"], now):
+                    continue  # its reviewer's models are all down: started again once one is back (resume_waiting)
                 resumed.append({"task_id": task["id"],
                                 "review": _spawn_review(conn, desk, task["id"], min(keys), now)})
             except (FleetError, StoreError, OSError) as exc:
@@ -689,7 +693,7 @@ def run_pass(conn, now: Optional[int] = None) -> dict:
     started = tuple(entry["task_id"] for entry in summary["delivered"] if entry.get("review") == REVIEW_STARTED)
     summary["reviews"] = resume_reviews(conn, now, started)
     # A run that waited because every model it may run was down starts again once one is back (fleet/failover.py).
-    summary["resumed"] = failover.resume_waiting(conn, run_desk.spawn, now)
+    summary["resumed"] = failover.resume_waiting(conn, run_desk.spawn, now, spawn_review=run_desk.spawn_review)
     try:  # an owl to McGonagall whose event a stopped pass or a failed write lost is announced now, once
         mcgonagall_inbox.announce_pending(conn, now)
     except (StoreError, FleetError, OSError) as exc:

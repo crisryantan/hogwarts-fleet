@@ -488,6 +488,36 @@ def close_task(conn: Conn, task_id: str, reason: str, token: Optional[str] = Non
     return get_task(conn, task_id)
 
 
+def close_settled(conn: Conn, task_id: str, token: Optional[str], now: Optional[int] = None) -> dict:
+    """Close a task awaiting close as complete with its close token, as close_task does, but only while nothing is
+    open under it and no question owl about it waits for an answer, checked in the close's own transaction, so neither
+    can arrive between a caller's look and the close: Mischief managed everything's close of each task."""
+    from . import owlery
+
+    task_id = ids.check("task", task_id)
+    ts = ids.stamp(now)
+    with db.transaction(conn):
+        task = get_task(conn, task_id)
+        if task["status"] != "awaiting_close":
+            raise ConflictError("only a task awaiting close is closed this way")
+        if _open_descendants(conn, task_id):
+            raise ConflictError("the task has open work under it")
+        if _open_question(conn, task_id):
+            raise ConflictError("a question about the task waits for an answer")
+        if token is None:
+            raise TokenError("closing as complete needs a close token")
+        owlery.consume(conn, task_id, token, now=ts)
+        _set_closed(conn, task_id, "complete", ts)
+    return get_task(conn, task_id)
+
+
+def _open_question(conn: Conn, task_id: str) -> bool:
+    """Whether a question owl about the task has no answer and its recipient has not acked it."""
+    return db.fetch_one(conn, "SELECT 1 AS found FROM owls WHERE task_id = ? AND kind = 'question' AND acked_at IS NULL"
+                              " AND NOT EXISTS (SELECT 1 FROM owls AS answer WHERE answer.kind = 'answer'"
+                              " AND answer.in_reply_to = owls.id) LIMIT 1", (task_id,)) is not None
+
+
 PROOF_FIELDS = ("repo", "pass_sha", "merge_sha", "landed", "pr_number", "ci", "ci_checks", "command_checks",
                 "written_checks", "judge_desk", "evidence_path", "evidence_sha256")
 
@@ -576,11 +606,47 @@ def close_proven(conn: Conn, task_id: str, proof: dict, summary: str, dedupe_key
             _insert_closure(conn, parent_task_id, "parent", task_id, checked, ts)
             if _open_descendants(conn, parent_task_id):
                 raise ConflictError("the parent task has other open work under it")
+            if _open_question(conn, parent_task_id):
+                raise ConflictError("a question about the parent task waits for an answer")
             _set_closed(conn, parent_task_id, "complete", ts)
         add_event(conn, task["desk"], "close.proven", "headmaster", summary, task_id=task_id,
                   dedupe_key=dedupe_key, now=ts)
     return {"task": get_task(conn, task_id),
             "parent": None if parent_task_id is None else get_task(conn, parent_task_id)}
+
+
+def close_parent_proven(conn: Conn, task_id: str, summary: str, now: Optional[int] = None) -> dict:
+    """Close a go-registered task once its last build has closed, on the proof of a build under it that the closer
+    closed proven, in one transaction: its parent closure row via that build, its close as complete, and one headmaster
+    event. The task must be open, registered by a go, with nothing open under it and a build closed complete by a
+    proven close, or nothing changes. Only the closer calls this, as it calls close_proven. {task, via}."""
+    task_id = ids.check("task", task_id)
+    summary = ids.clean_text(summary, "summary", SUMMARY_LIMIT, single_line=True)
+    ts = ids.stamp(now)
+    with db.transaction(conn):
+        task = get_task(conn, task_id)
+        if task["status"] == "closed":
+            raise ConflictError("task is already closed")
+        if task_spec(conn, task_id) is None:
+            raise ConflictError("the task was not registered by a go")
+        if _open_descendants(conn, task_id):
+            raise ConflictError("the task has open work under it")
+        if _open_question(conn, task_id):
+            raise ConflictError("a question about the task waits for an answer")
+        proof = db.fetch_one(
+            conn,
+            "SELECT proof.* FROM task_closures AS proof JOIN tasks AS child ON child.id = proof.task_id"
+            " WHERE child.parent_task_id = ? AND child.status = 'closed' AND child.close_reason = 'complete'"
+            " AND proof.kind = 'proven' ORDER BY proof.recorded_at DESC, proof.rowid DESC LIMIT 1",
+            (task_id,),
+        )
+        if proof is None:
+            raise ConflictError("no build under the task was closed by a proven close")
+        _insert_closure(conn, task_id, "parent", proof["task_id"], {name: proof[name] for name in PROOF_FIELDS}, ts)
+        _set_closed(conn, task_id, "complete", ts)
+        add_event(conn, task["desk"], "close.proven", "headmaster", summary, task_id=task_id,
+                  dedupe_key=f"close:parent:{task_id}", now=ts)
+    return {"task": get_task(conn, task_id), "via": proof["task_id"]}
 
 
 def _cascade_reason(conn: Conn, child: dict) -> str:

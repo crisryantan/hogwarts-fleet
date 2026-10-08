@@ -54,7 +54,9 @@ rounds at once, and a run of Harry on the task holds the same lock until it ends
 review entry point runs beside it; a manual review also refuses while a launch of his on the task has recorded no
 usage yet. What it cannot do yet (the author's run
 still going, the reviewer's run slots all busy, another review of the task running) it leaves to the Owl Post's
-next pass, for at most AUTO_REVIEW_WAIT_LIMIT_SECONDS. Each try it starts work on is counted, so a review killed
+next pass, for at most AUTO_REVIEW_WAIT_LIMIT_SECONDS. When every model the reviewer may run is down (failover.py),
+the handoff waits too, and the Owl Post starts the review again only once one of them is back, at most
+FAILOVER_MAX_RESUMES times (_models_down). Each try it starts work on is counted, so a review killed
 part way is started again at most AUTO_REVIEW_MAX_TRIES times in all. Any other ending, a verdict, a refusal or an
 error, finishes the handoff for good, and every ending that needs Ryan raises one headmaster event. After a verdict:
 - CHANGES starts Harry's fix round through the same path as fleet build, unless the task has used its
@@ -143,7 +145,9 @@ of it. A fix commit then goes on its open task with --task, and its rounds and i
 whatever branch it was made on: the same branch, a branch made off a capped one with the old one kept, a renamed
 branch, or a second clone. Only work that builds on no open task's commits starts a new task with its own count,
 which is how one checkout carries several PRs in flight; a branch stacked on an open task's commits goes on that
-task or waits until it passes, since a task awaiting close blocks nothing. An active task whose branch the
+task or waits until it passes, since a task awaiting close blocks nothing. Nor does an active task whose review is
+finished (review_finished: its newest verdict PASS or HEADMASTER, no round waiting or running, its review lock
+free); one in review, or waiting for its fix after CHANGES, still does. An active task whose branch the
 checkout no longer has (renamed or deleted), or that names none, also refuses a new task, since its work may be
 this same work under a new name. --task <id> moves the task to the branch now out when HEAD builds on its commits
 or its own branch is gone; it never moves a task onto a branch another task follows, and never takes on work
@@ -174,7 +178,7 @@ from typing import Callable, Iterator, Optional
 from hogwarts import capacity, followups, ids, owlery, pensieve
 from hogwarts.errors import ConflictError, StoreError
 
-from fleet import common, config, followup, gitops, owl_post, push, run_desk, safefs, verify, worktree
+from fleet import common, config, failover, followup, gitops, owl_post, push, run_desk, safefs, verify, worktree
 from fleet.safefs import FleetError
 
 REVIEW_HEADER = re.compile(r"REVIEW (tk_[0-9a-f]{16}) @ ([0-9a-f]{40})")
@@ -1064,6 +1068,10 @@ def _auto_review(conn, task_id: str, now: Optional[int]) -> dict:
             return _auto_wait(conn, task, newest, "its teammate follow-up is still starting", now)
         except Unchanged as exc:
             return _auto_finish(conn, task, newest_id, str(exc), "routine", now)
+        except failover.ModelsDown as exc:
+            # Before the generic ending: an outage is a wait, never a finished handoff.
+            owl_post.give_back_try(task_id, newest_id, tried)
+            return _models_down(conn, task, newest, reviewer, exc, now)
         except WorktreeGone as exc:
             owl_post.give_back_try(task_id, newest_id, tried)
             return _auto_blocked(conn, task, newest, exc, now)
@@ -1266,6 +1274,34 @@ def _auto_wait(conn, task: dict, owl: dict, why: str, now: Optional[int], kind: 
             "outcome": f"waiting: {why}; the Owl Post tries again on its next pass"}
 
 
+def _models_down(conn, task: dict, owl: dict, reviewer: str, down: failover.ModelsDown, now: Optional[int]) -> dict:
+    """Every model the reviewer may run is down (run_desk told the owner once, as failover.wait). The handoff stays
+    pending, the round this try opened ends with no verdict, and the wait is kept, so the Owl Post starts the review
+    again once one of those models is back (failover.resume_waiting), at most FAILOVER_MAX_RESUMES times, within
+    AUTO_REVIEW_WAIT_LIMIT_SECONDS. A refusal with no model to wait for (a review that would not be cross-family) ends
+    the handoff as any other refusal does."""
+    task_id = task["id"]
+    if not down.models:
+        return _auto_finish(conn, task, owl["id"], f"the automatic review stopped: {common.scrubbed_line(down, 300)};"
+                            f" fleet review {task_id} runs it", "headmaster", now)
+    rounds = {row["request_id"]: row for row in capacity.review_rounds(conn, task_id)}
+    for record in owl_post.unfinished_afters(task_id):
+        row = rounds.get(record["request_id"])
+        if record["owl_id"] == owl["id"] and record["state"] == "review" and row is not None \
+                and not row["has_verdict"]:
+            owl_post.write_after(task_id, record["request_id"], owl["id"], "done")  # nothing follows that round
+    if common.now_stamp(now) - owl["created_at"] >= config.AUTO_REVIEW_WAIT_LIMIT_SECONDS:
+        return _auto_wait(conn, task, owl, f"every model {reviewer} may run is down", now)  # past its deadline: ends
+    waited = failover.review_wait(task_id, owl["id"])
+    if waited is not None and waited["resumes"] >= config.FAILOVER_MAX_RESUMES:
+        return _auto_finish(conn, task, owl["id"], f"the automatic review stopped: every model {reviewer} may run was"
+                            f" still down after it was started again {waited['resumes']} times; fleet review"
+                            f" {task_id} runs it once one is back", "headmaster", now)
+    failover.note_waiting(reviewer, owl["id"], down, now, task_id=task_id, posted=owl["created_at"])
+    return _auto_wait(conn, task, owl, f"every model {reviewer} may run is down, so it starts again once one is back",
+                      now)
+
+
 def _worktree_gone(task: dict) -> Optional[WorktreeGone]:
     """The fleet's own check of a build task's worktree before a try is taken, or None when git reads it or there is
     no record to check (the review itself then says why)."""
@@ -1312,7 +1348,19 @@ def _reviewer_busy(conn, reviewer: str, now: Optional[int]) -> bool:
     busy to another review; run_review still decides for itself."""
     since = common.now_stamp(now) - config.RUNNING_WINDOW_SECONDS
     going = [row for row in capacity.open_launches(conn, reviewer) if row["launched_at"] > since]
-    return len(going) >= run_desk.run_slots(reviewer) or pensieve.blocking_task(conn, reviewer) is not None
+    return len(going) >= run_desk.run_slots(reviewer) or _blocking(conn, reviewer) is not None
+
+
+def _blocking(conn, reviewer: str) -> Optional[dict]:
+    """The reviewer's active task that keeps a single-task reviewer busy, or None. A review-round task whose verdict is
+    recorded is finished work, not a review in flight: the next review that holds its slot closes it
+    (_recover_stranded), so it never holds the next review back on its own."""
+    task = pensieve.blocking_task(conn, reviewer)
+    if task is None or task["request_id"] is None:
+        return task
+    row = next((row for row in capacity.stranded_rounds(conn, reviewer)
+                if row["reviewer_task_id"] == task["id"]), None)
+    return None if row is not None and row["has_verdict"] else task
 
 
 def _after_verdict(conn, task: dict, result: dict, lock_fd: int, now: Optional[int],
@@ -1676,10 +1724,33 @@ def _own_branch(common_dir: str) -> str:
         raise FleetError(f"your checkout's branch cannot name a review: {exc}") from None
 
 
+TERMINAL_VERDICTS = ("PASS", "HEADMASTER")
+
+
+def review_finished(conn, task: dict) -> bool:
+    """Whether an active own task's review is over: its newest round with a verdict recorded PASS or HEADMASTER, no
+    round of it waits for or runs its reviewer, and no review or run of it holds its review lock. A finished one no
+    longer stops the next review of your own sessions; one in review, or waiting for a fix after CHANGES, still does."""
+    rows = capacity.review_rounds(conn, task["id"])
+    judged = [row for row in rows if row["has_verdict"]]
+    if not judged or judged[-1]["verdict"] not in TERMINAL_VERDICTS:
+        return False
+    if any(not row["has_verdict"] and (row["waiting"] or row["counts"]) for row in rows):
+        return False
+    try:
+        with run_desk.task_lock(task["id"]):
+            return True
+    except safefs.Busy:
+        return False
+
+
 def _own_tasks_on(conn, repo_dir: str) -> list:
-    """The active own-session tasks whose worktree is for this checkout, matched as a folder."""
+    """The active own-session tasks whose worktree is for this checkout, matched as a folder, whose review is not
+    finished (review_finished)."""
     found = []
     for task in pensieve.list_tasks(conn, desk=OWN_DESK, status="active"):
+        if review_finished(conn, task):
+            continue
         record = None if task["worktree"] is None else gitops.find_record(worktree.castle_path(task["worktree"]))
         if record is not None and gitops.same_checkout(record["repo_dir"], repo_dir):
             found.append(task)
@@ -1798,11 +1869,12 @@ def _check_new_own(conn, repo_dir: str, common_dir: str, repo: str, sha: str, br
 
 
 def _lineage_owner(conn, common_dir: str, repo: str, sha: str, skip: Optional[str] = None) -> tuple:
-    """(task, commit, known) for an active own task of this repository, other than skip, that sha builds on,
-    or (None, None, True). A task it surely builds on comes before one a shallow checkout cannot rule out."""
+    """(task, commit, known) for an active own task of this repository, other than skip and other than one whose
+    review is finished (review_finished), that sha builds on, or (None, None, True). A task it surely builds on comes
+    before one a shallow checkout cannot rule out."""
     unsure = (None, None, True)
     for other in pensieve.list_tasks(conn, desk=OWN_DESK, status="active"):
-        if other["id"] == skip:
+        if other["id"] == skip or review_finished(conn, other):
             continue
         recorded, known = _built_on(conn, common_dir, other, repo, sha)
         if recorded is not None and known:

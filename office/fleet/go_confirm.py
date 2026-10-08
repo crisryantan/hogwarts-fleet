@@ -1,4 +1,5 @@
-"""The go confirmer: finish a go or a Mischief managed whose transcript entry Claude Code had not written yet.
+"""The go confirmer: finish a go, a Mischief managed or a Mischief managed everything whose transcript entry Claude
+Code had not written yet.
 
 Claude Code writes a prompt's own transcript entry only after the UserPromptSubmit hook returns, so at hook time the
 hook cannot see that Ryan typed the prompt. When that entry is the only thing missing (no agent_id, a prompt_id, and
@@ -19,9 +20,11 @@ module as one detached process (run_desk.spawn_go_confirm), with its input on a 
   CLOSE_PROMPT_MAX_AGE seconds old);
 - it takes the gos or the close from the entry's own text, never from its input, and refuses when they differ from
   what the hook saw. So the most a forged call could do is replay what Ryan typed in the last half minute;
-- it runs each go through user_prompt_submit.run_go, the hook's own code, or the close through close_confirmed;
+- it runs each go through user_prompt_submit.run_go, the hook's own code, the close through close_confirmed, or the
+  bulk close through bulk_close.close_everything, which closes each task through that same close;
 - it reports each outcome as one headmaster event on McGonagall's desk, so it shows on the next prompt, and writes
-  the same line to logs/go-confirm.log. Neither carries the prompt id, a token or the TASK.md hash.
+  the same line to logs/go-confirm.log. A bulk close reports one close event per task it closed or refused as soon as that
+  task is done, each refusal with its Fix line, then its head line. Neither carries the prompt id, a token or the TASK.md hash.
 SIGTERM or SIGHUP ends a go through its take-back, as in the hook, and the event says the confirmer was stopped.
 """
 from __future__ import annotations
@@ -41,7 +44,7 @@ from fleet import common, config, markers, run_desk, safefs, transcript
 from fleet.hooks import user_prompt_submit as hook
 from fleet.safefs import FleetError
 
-KINDS = ("go", "close")
+KINDS = ("go", "close", "bulk")
 INPUT_FIELDS = ("prompt", "prompt_id", "transcript_path", "session_id", "agent_type")
 CLAIM_NAME = re.compile(r"[0-9a-f]{32}")
 TASK_ID = re.compile(r"tk_[0-9a-f]{16}")
@@ -132,7 +135,7 @@ def _plain_list(value: object, kind: str) -> list:
     if kind == "made":
         return [item for item in value if isinstance(item, dict)
                 and all(isinstance(item.get(field), str) for field in ("task_id", "repo_dir", "branch", "worktree"))]
-    return [item for item in value if isinstance(item, str) and TASK_ID.fullmatch(item)]
+    return [item for item in value if isinstance(item, str) and (TASK_ID.fullmatch(item) or item == hook.BULK_KEY)]
 
 
 def _what(fd: int, key: str) -> tuple:
@@ -144,6 +147,9 @@ def _what(fd: int, key: str) -> tuple:
 
 
 def interrupted_lines(kind: str, task_id: str, made: list = ()) -> list:
+    if kind == "bulk":
+        return [f"The confirmation of {hook.BULK_PHRASE} was interrupted, so some tasks may be closed and others not;"
+                f" check castle task list --open and type {hook.BULK_PHRASE} again."]
     if kind == "close":
         return [f"The confirmation of Mischief managed for {task_id} was interrupted; check castle task show {task_id}"
                 " and type Mischief managed again if it is not closed."]
@@ -278,6 +284,7 @@ def _report(conn, kind: str, task_id: str, key: str, lines: list, ok: bool) -> t
     """Record one outcome as a headmaster event on McGonagall's desk, once per prompt and task. Returns (its line,
     whether the event is in the store)."""
     summary = fitted(lines)
+    kind = "close" if kind == "bulk" else kind  # a bulk close's events are close events, settled like any other
     if conn is None:
         return f"{summary} (its headmaster event could not be written: no store)", False
     try:
@@ -353,6 +360,19 @@ def _confirmed(data: dict, conn, key: str, clock: Callable[[], float], sleep: Ca
                 done.append(task_id)
                 continue
             running = task_id
+            if kind == "bulk":
+                from fleet import bulk_close  # only a bulk close pays for this import
+
+                def recorded(result: dict) -> None:
+                    # Each task's outcome is its own event as soon as that task is done, before the next close.
+                    line, kept = _report(conn, "close", result["task_id"], key, result["lines"], result["closed"])
+                    out.append(line)
+                    written.append(kept)
+
+                results = bulk_close.close_everything(conn, int(clock()), on_result=recorded)
+                report(task_id, [bulk_close.head(results)], True)
+                done.append(task_id)
+                continue
             if kind == "close":
                 lines = hook.close_confirmed(conn, task_id, int(clock()))
                 ok = lines[0].startswith("Mischief managed:")
@@ -361,11 +381,14 @@ def _confirmed(data: dict, conn, key: str, clock: Callable[[], float], sleep: Ca
             report(task_id, lines, ok)
             done.append(task_id)
     except SystemExit:
-        what = "Mischief managed" if kind == "close" else "Go"
+        what = {"close": "Mischief managed", "bulk": hook.BULK_PHRASE}.get(kind, "Go")
         for task_id in expected:
             if task_id in done:
                 continue
-            if task_id == running:
+            if kind == "bulk":
+                said = (f"{what} was stopped by a signal; the tasks it closed before that stay closed, so check castle"
+                        " task list --open before you type it again.")
+            elif task_id == running:
                 said = (f"{what} for {task_id} was stopped by a signal while it ran; whatever it made before its"
                         f" commit was taken back, so check castle task show {task_id} before you type it again.")
             else:

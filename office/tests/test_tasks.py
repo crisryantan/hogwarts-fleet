@@ -620,3 +620,59 @@ class CloseProvenTests(StoreCase):
                 pensieve.close_proven(self.conn, self.go["build"], broken, "nope", "close:proven:y")
         self.assertEqual((pensieve.get_task(self.conn, self.go["build"])["status"], self.events()),
                          ("awaiting_close", []))
+
+
+class CloseParentProvenTests(StoreCase):
+    """A go task moves on once its last build has closed, only on a build under it the closer closed proven."""
+
+    def setUp(self):
+        super().setUp()
+        self.desks()
+        self.desk("gamma", "claude")
+        self.go = go_build(self.conn)
+        self.other = owlery.open_request(self.conn, "gamma", "beta", "more", parent_task_id=self.go["parent"],
+                                         now=NOW)["task"]["id"]
+
+    def moved_on(self) -> dict:
+        return pensieve.close_parent_proven(self.conn, self.go["parent"], "moved on", now=NOW + 60)
+
+    def test_it_waits_for_the_last_build_then_closes_on_the_proven_ones_proof(self):
+        with self.assertRaisesRegex(ConflictError, "open work under it"):
+            self.moved_on()
+        pensieve.close_proven(self.conn, self.go["build"], proof(), "closed", f"close:proven:{self.go['build']}",
+                              now=NOW + 60)
+        with self.assertRaisesRegex(ConflictError, "open work under it"):
+            self.moved_on()
+        pensieve.close_task(self.conn, self.other, "abandoned", now=NOW + 60)
+        result = self.moved_on()
+        self.assertEqual((result["task"]["status"], result["task"]["close_reason"], result["via"]),
+                         ("closed", "complete", self.go["build"]))
+        closure = pensieve.task_closure(self.conn, self.go["parent"])
+        self.assertEqual((closure["kind"], closure["via_task_id"], closure["merge_sha"]),
+                         ("parent", self.go["build"], MERGE_SHA))
+        with self.assertRaisesRegex(ConflictError, "already closed"):
+            self.moved_on()
+
+    def test_no_proven_build_or_no_go_changes_nothing(self):
+        pensieve.close_task(self.conn, self.other, "abandoned", now=NOW + 60)
+        pensieve.close_task(self.conn, self.go["build"], "abandoned", now=NOW + 60)
+        with self.assertRaisesRegex(ConflictError, "no build under the task was closed by a proven close"):
+            self.moved_on()
+        plain = pensieve.create_task(self.conn, "gamma", "not a go", now=NOW)["id"]
+        with self.assertRaisesRegex(ConflictError, "not registered by a go"):
+            pensieve.close_parent_proven(self.conn, plain, "moved on", now=NOW)
+        self.assertEqual(pensieve.get_task(self.conn, self.go["parent"])["status"], "queued")
+        self.assertIsNone(pensieve.task_closure(self.conn, self.go["parent"]))
+
+
+class OpenQuestionTests(StoreCase):
+    def test_a_question_is_open_until_it_is_answered_or_acked(self):
+        self.desks()
+        task = self.started("alpha")["id"]
+        asked = owlery.send(self.conn, "beta", "alpha", "question", "which?", task_id=task, now=NOW)["id"]
+        other = owlery.send(self.conn, "beta", "alpha", "question", "and?", task_id=task, now=NOW + 1)["id"]
+        self.assertEqual([owl["id"] for owl in owlery.open_questions(self.conn, task)], [asked, other])
+        owlery.send(self.conn, "alpha", "beta", "answer", "this", in_reply_to=asked, task_id=task, now=NOW + 2)
+        owlery.read(self.conn, other, "alpha", now=NOW + 3)
+        owlery.ack(self.conn, other, "alpha", now=NOW + 3)
+        self.assertEqual(owlery.open_questions(self.conn, task), [])

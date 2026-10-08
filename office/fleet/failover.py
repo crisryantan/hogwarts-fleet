@@ -19,7 +19,8 @@ family, the names of its need and then of each cheaper need in his own pick orde
 (FAILOVER_LADDERS_FILE). At launch no fallback dearer than the model the desk is approved on now is taken (_cap). A desk
 falls back only in its own family, since the cross-family review depends on it. When every model of its family is down,
 the desk waits: no run starts, its owl stays in its inbox, the owner hears once, and the Owl Post starts the run again
-once one of those models is up or half-open (resume_waiting). Only while the owner's cross-family-failover switch is on
+once one of those models is up or half-open (resume_waiting). An automatic review whose reviewer desk waits so keeps
+its handoff pending, and the Owl Post starts that review again the same way (note_waiting with task_id). Only while the owner's cross-family-failover switch is on
 (common.opt_in_on) may a desk whose own family is all down run on the other family, and only a desk with launch settings
 for it whose runs no review reads (can_flip): the review loop and the closer pick a reviewer and read its run by the
 desk's registered family, so a build desk or a reviewer never flips. A review round whose author's latest run on the
@@ -454,25 +455,60 @@ def fallback_runs() -> set:
     return {item["run"] for item in read_state()["runs"] if isinstance(item, dict) and isinstance(item.get("run"), str)}
 
 
-def note_waiting(desk: str, owl_id: str, down: ModelsDown, now: Optional[int] = None) -> None:
+def _review_key(task_id: str, owl_id: str) -> str:
+    return f"review:{task_id}:{owl_id}"
+
+
+def note_waiting(desk: str, owl_id: str, down: ModelsDown, now: Optional[int] = None,
+                 task_id: Optional[str] = None, posted: Optional[int] = None) -> None:
     """Keep an owl whose run waits for a model, for resume_waiting. An owl that waited before keeps its first wait,
-    which bounds how long it is started again. Never raises."""
+    which bounds how long it is started again. With task_id, the owl is a build task's handoff, posted at posted, whose
+    automatic review waits for its reviewer desk's models (review.auto_review), and resume_waiting starts that review
+    again, not a run; its wait ends at the review loop's own deadline, AUTO_REVIEW_WAIT_LIMIT_SECONDS after posted.
+    Never raises."""
+    key = owl_id if task_id is None else _review_key(task_id, owl_id)
     with contextlib.suppress(FleetError, OSError):
         with held_state() as state:
-            prior = state["waiting"].get(owl_id)
+            prior = state["waiting"].get(key)
             prior = prior if isinstance(prior, dict) else {}
             first, resumes = prior.get("first"), prior.get("resumes")
-            state["waiting"][owl_id] = {"desk": desk, "models": [list(pair) for pair in down.models],
-                                        "first": first if type(first) is int else common.now_stamp(now),
-                                        "resumed": None, "resumes": resumes if type(resumes) is int else 0}
+            item = {"desk": desk, "models": [list(pair) for pair in down.models],
+                    "first": first if type(first) is int else common.now_stamp(now),
+                    "resumed": None, "resumes": resumes if type(resumes) is int else 0}
+            if task_id is not None:
+                item.update(task=task_id, owl=owl_id, posted=posted if type(posted) is int else item["first"])
+            state["waiting"][key] = item
 
 
-def resume_waiting(conn, spawn: Callable[[str, str], None], now: Optional[int] = None) -> list:
+def review_wait(task_id: str, owl_id: str) -> Optional[dict]:
+    """The wait kept for a handoff's automatic review (note_waiting with task_id), or None."""
+    item = read_state()["waiting"].get(_review_key(task_id, owl_id))
+    return item if isinstance(item, dict) and type(item.get("resumes")) is int else None
+
+
+def review_waiting(task_id: str, now: Optional[int] = None) -> bool:
+    """Whether an automatic review of the task waits for its reviewer's models, resume_waiting has not started it
+    again since, and its handoff's deadline has not passed, so the Owl Post leaves it alone until one of those
+    changes. Past the deadline the review is started again, and its own wait limit finishes it for the owner."""
+    ts = common.now_stamp(now)
+    return any(isinstance(item, dict) and item.get("task") == task_id and item.get("resumed") is None
+               and not _past_deadline(item, ts) for item in read_state()["waiting"].values())
+
+
+def _past_deadline(item: dict, now: int) -> bool:
+    posted = item.get("posted")
+    return type(posted) is not int or now - posted >= config.AUTO_REVIEW_WAIT_LIMIT_SECONDS
+
+
+def resume_waiting(conn, spawn: Callable[[str, str], None], now: Optional[int] = None,
+                   spawn_review: Optional[Callable[[str], None]] = None) -> list:
     """Start the run of each waiting owl once a model it waited for is up or half-open. The entry stays, marked resumed,
     so no pass starts it again while its run may still go (see _due), and a run that finds them down again waits again;
     at most FAILOVER_MAX_RESUMES starts in all. An owl acked or answered since is dropped, and one still waiting
-    FAILOVER_WAIT_LIMIT_SECONDS after its first wait is dropped once the owner's event is in. Also tells the owner of
-    any down or up a breaker update left untold. Returns the owls started."""
+    FAILOVER_WAIT_LIMIT_SECONDS after its first wait is dropped once the owner's event is in. A waiting review is
+    started again through spawn_review(task_id), once per wait, under the same cap; it is dropped once its handoff is
+    finished, and past the wait limit with no event, since the review's own wait limit tells the owner. Also tells the
+    owner of any down or up a breaker update left untold. Returns the owls started."""
     ts = common.now_stamp(now)
     ready = []
     seen = read_state()
@@ -484,18 +520,23 @@ def resume_waiting(conn, spawn: Callable[[str, str], None], now: Optional[int] =
             for owl_id, item in list(state["waiting"].items()):
                 if not isinstance(item, dict) or not _still_waiting(conn, owl_id, item, ts):
                     state["waiting"].pop(owl_id)
+                elif "task" in item and spawn_review is None:
+                    continue  # a waiting review is started only by a caller that can start reviews
                 elif _due(item, ts) and any(not is_down(state, family, name, ts) for family, name in item["models"]):
                     item["resumed"], item["resumes"] = ts, item["resumes"] + 1
-                    ready.append((item["desk"], owl_id))
+                    ready.append((item["desk"], owl_id, item.get("task"), item.get("owl", owl_id)))
     except (FleetError, OSError, StoreError):
         return []
     started, failed = [], []
-    for desk, owl_id in ready:
+    for desk, key, task_id, owl_id in ready:
         try:
-            spawn(desk, owl_id)
+            if task_id is None:
+                spawn(desk, owl_id)
+            else:
+                spawn_review(task_id)
             started.append(owl_id)
         except (FleetError, OSError):
-            failed.append(owl_id)
+            failed.append(key)
     if failed:
         # Not started: waiting again, so the next pass tries it. A launch refused later tells the owner itself.
         with contextlib.suppress(FleetError, OSError), held_state() as state:
@@ -509,8 +550,11 @@ def resume_waiting(conn, spawn: Callable[[str, str], None], now: Optional[int] =
 def _due(item: dict, now: int) -> bool:
     """Whether a waiting owl may be started now: never started for this wait, or started so long ago that its run
     must have ended without reaching its model (a crash before the start, a launch refused), and fewer than
-    FAILOVER_MAX_RESUMES times in all."""
+    FAILOVER_MAX_RESUMES times in all. A review is started once per wait: once started, the Owl Post's own resume of
+    unfinished reviews takes it, and only a new wait (note_waiting) makes it due again."""
     resumed = item.get("resumed")
+    if "task" in item:
+        return item["resumes"] < config.FAILOVER_MAX_RESUMES and resumed is None
     return (item["resumes"] < config.FAILOVER_MAX_RESUMES
             and (resumed is None or (type(resumed) is int and now - resumed >= config.RUNNING_WINDOW_SECONDS)))
 
@@ -522,6 +566,18 @@ def _still_waiting(conn, owl_id: str, item: dict, now: int) -> bool:
             or not all(isinstance(pair, list) and len(pair) == 2 for pair in models) \
             or type(item.get("resumes")) is not int:
         return False  # nothing to wait for: the owner was told and sends it again
+    if "task" in item:
+        from fleet import owl_post  # owl_post imports this module
+
+        task_id, handoff = item.get("task"), item.get("owl")
+        if not isinstance(task_id, str) or not isinstance(handoff, str):
+            return False  # not one this file can name
+        try:
+            if handoff not in owl_post.unfinished_handoffs(task_id):
+                return False  # its review ended
+        except (FleetError, OSError):
+            return True  # read again on the next pass
+        return not _past_deadline(item, now)
     if not any(owl["id"] == owl_id for owl in owlery.inbox(conn, desk)):
         return False
     if now - first < config.FAILOVER_WAIT_LIMIT_SECONDS:

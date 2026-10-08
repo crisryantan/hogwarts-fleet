@@ -61,7 +61,8 @@ The store has none of these:
                                         (patrol.py, map.py, morning.py, keeper.py, scoreboard.py), gringotts.py,
                                         portrait.py (the nightly export and Dumbledore's run), portrait_patch.py (his
                                         patches, behind castle portrait), go_confirm.py (finishes a go or a close
-                                        the prompt hook could not confirm yet), adopt.py (fleet adopt), loops.py
+                                        the prompt hook could not confirm yet), bulk_close.py (Mischief managed
+                                        everything), adopt.py (fleet adopt), loops.py
                                         (fleet loops, the background jobs run from a terminal), failover.py (the
                                         model breaker and in-family fallback) and their helpers
   fleet/hooks/                          the castle's session hooks and the push gate, push_gate.py

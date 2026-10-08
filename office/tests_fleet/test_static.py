@@ -409,10 +409,13 @@ class AutoCloseTests(unittest.TestCase):
             if path.name in ("closer.py",) or path == self.STORE / "pensieve.py":
                 continue
             with self.subTest(path=str(path.relative_to(ROOT))):
-                self.assertEqual(_references(ast.parse(path.read_text()), {"close_proven", "_insert_closure"}), [])
+                self.assertEqual(_references(ast.parse(path.read_text()),
+                                             {"close_proven", "close_parent_proven", "_insert_closure"}), [])
                 self.assertNotIn("task_closures", path.read_text() if path.name != "db.py" else "")
         closer = ast.parse((FLEET / "closer.py").read_text())
         self.assertEqual([name for name, _ in _references(closer, {"close_proven"})], ["close_proven"])
+        # A go task moves on only on a build's proof, and only the closer closes it so.
+        self.assertEqual([name for name, _ in _references(closer, {"close_parent_proven"})], ["close_parent_proven"])
 
     def test_closer_imports_no_github_write_path(self):
         tree = ast.parse((FLEET / "closer.py").read_text())
