@@ -20,7 +20,7 @@ from unittest import mock
 from hogwarts import capacity, db, ids, pensieve
 from tests.support import NOW, temp_dir
 
-from fleet import config, mcgonagall_inbox, run_desk
+from fleet import config, mcgonagall_inbox, phone, run_desk
 
 REGISTRY = (
     ("mcgonagall", "claude", "McGonagall - Chief of Staff", "opus"),
@@ -184,6 +184,11 @@ class FleetCase(unittest.TestCase):
         announced = mock.patch.object(mcgonagall_inbox, "announce")
         self.announced = announced.start()
         self.addCleanup(announced.stop)
+        # No loud event is pinged by the Owl Post's pass, so tests that count notifications see only their own;
+        # test_phone.py runs the real one.
+        pings = mock.patch.object(phone, "deliver", return_value=[])
+        self.phoned = pings.start()
+        self.addCleanup(pings.stop)
         # No desktop notification is ever shown: a test that wants one reads this mock's calls.
         notices = mock.patch.object(run_desk, "notify_desktop", return_value=True)
         self.notified = notices.start()

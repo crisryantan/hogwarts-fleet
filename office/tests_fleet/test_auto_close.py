@@ -366,7 +366,8 @@ class OptInTests(CloseCase):
         self.assertTrue(common.opt_in_on(config.AUTO_CLOSE_FILE))
         self.assertEqual(config.OPT_IN_FILES, (config.AUTO_DRAFT_PR_FILE, config.AUTO_PORTRAIT_FILE,
                                                config.PR_FOLLOWUP_FILE, config.AUTO_CLOSE_FILE,
-                                               config.WORKTREE_CLEANUP_FILE, config.OWL_REPORTS_FILE))
+                                               config.WORKTREE_CLEANUP_FILE, config.OWL_REPORTS_FILE,
+                                               config.ORCHESTRATOR_FILE))
 
 
 class MapRoundCase(CloseCase):

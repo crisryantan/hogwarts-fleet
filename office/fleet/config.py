@@ -141,10 +141,14 @@ WORKTREE_CLEANUP_FILE = "worktree-cleanup"
 # While this office file holds "on", each owl the Owl Post delivers to McGonagall is read by one headless McGonagall
 # turn, and her one-line report arrives as a desktop notification (fleet/owl_report.py).
 OWL_REPORTS_FILE = "owl-reports"
+# While this office file holds "on", each item that lands for McGonagall (an owl to her desk, a build's review verdict)
+# wakes one headless McGonagall turn that picks the next step as one typed action, which a script checks and runs
+# (fleet/orchestrator.py). Off by default: echo on > ~/.hogwarts/auto-orchestrate
+ORCHESTRATOR_FILE = "auto-orchestrate"
 # Every office opt-in file. common.opt_in_on reads only these names, so a typo never reads another office file as a
 # switch, every switch is read through that one reader, and a name not listed here always reads off.
 OPT_IN_FILES = (AUTO_DRAFT_PR_FILE, AUTO_PORTRAIT_FILE, PR_FOLLOWUP_FILE, AUTO_CLOSE_FILE, WORKTREE_CLEANUP_FILE,
-                OWL_REPORTS_FILE)
+                OWL_REPORTS_FILE, ORCHESTRATOR_FILE)
 # Review rounds of one follow-up, apart from the task's REVIEW_ROUND_CAP, and the follow-ups one task may take.
 FOLLOWUP_ROUND_CAP = 2
 FOLLOWUP_MAX_PER_TASK = 5
@@ -332,6 +336,30 @@ OWL_REPORT_ROOT = "/Users/crisryantan/Library/Caches/hogwarts-owl-report"
 OWL_REPORT_MAX_TURNS = 15
 OWL_REPORT_MAX_TRIES = 3
 OWL_REPORT_NOTIFY_TRIES = 3
+# The orchestrator's headless turns run under the owl-report settings and model (run_desk.owl_report_argv), one item a
+# turn in its own folder under ORCHESTRATOR_ROOT, at most ORCHESTRATOR_MAX_TURNS a run. Wakes are counted in the office
+# before each turn starts, so a killed turn counts: at most this many per task, ever, and per cap day.
+ORCHESTRATOR_LOCK = "orchestrator.lock"
+ORCHESTRATOR_ROOT = "/Users/crisryantan/Library/Caches/hogwarts-orchestrator"
+ORCHESTRATOR_MAX_TURNS = 10
+ORCHESTRATOR_WAKES_PER_TASK = 6
+ORCHESTRATOR_WAKES_PER_DAY = 30
+# An owl or a verdict wakes her only when it was stored within this long, and after the switch was first seen on.
+ORCHESTRATOR_LAND_WINDOW_SECONDS = 7 * 86400
+# Finished item records are kept this long, so the same item never wakes her twice.
+ORCHESTRATOR_KEEP_SECONDS = 14 * 86400
+# How much of an owl's body her context file carries, after it is scrubbed.
+ORCHESTRATOR_BODY_MAX = 4000
+# Phone delivery (fleet/phone.py): the loud headmaster events go to Ryan off the machine, one ping each. The primary
+# transport is a command set only in the private overlay: an absolute argv, never holding a secret, that reads one JSON
+# payload on stdin and exits 0 once delivered. None, or a failure, falls back to the macOS notification.
+PHONE_COMMAND = None
+PHONE_COMMAND_TIMEOUT_SECONDS = 20
+PHONE_MAX_PER_PASS = 5
+PHONE_KINDS = ("push.draft-pr", "push.auto-failed", "go.refused", "review.headmaster", "review.loop-stopped",
+               "review.round-cap", "review.ready-for-push", "review.auto", "review.unpublished", "review.interrupted",
+               "review.fix-round", "orchestrator.notify", "orchestrator.cap", "orchestrator.rejected",
+               "orchestrator.ask-snape", "orchestrator.auth", "orchestrator.failed", "orchestrator.interrupted")
 # How many new owls in McGonagall's inbox the prompt hook lists at once, with a count of the rest.
 INBOX_NOTICE_CAP = 10
 # A seen marker a prompt hook left pending this long, or whose hook process is gone, is taken over by the next hook.
