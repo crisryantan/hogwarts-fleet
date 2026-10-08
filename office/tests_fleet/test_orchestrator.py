@@ -12,6 +12,7 @@ import stat
 from unittest import mock
 
 from hogwarts import capacity, db, ids, owlery, pensieve
+from hogwarts.errors import StoreError
 from tests.support import NOW
 
 from fleet import config, markers, orchestrator, owl_post, push, review, run_desk, safefs, worktree
@@ -308,6 +309,21 @@ class DraftPrTests(OrchestratorCase):
             orchestrator.check_legal(self.conn, self.action)
         with self.assertRaisesRegex(orchestrator.Invalid, "no recorded PASS"):
             orchestrator.execute(self.conn, self.action, "owl_" + "0" * 16)
+        self.assertEqual(self.pushed, [])
+
+    def test_a_round_blocked_on_tooling_is_never_read_as_a_pass(self):
+        self.handoff()
+        pensieve.record_commit(self.conn, self.task["id"], REPO, SHA, now=self.tick())
+        opened = capacity.open_review_round(self.conn, self.task["id"], "hermione", SHA, "review it",
+                                            idempotency_key=f"round-{self.tick()}", now=self.clock)
+        request_id = opened["request"]["id"]
+        with self.assertRaises(review.ToolingBlocked):  # the marker stands over a VERDICT line in the same block
+            review.review_block(f"REVIEW {self.task['id']} @ {SHA}\nVERDICT: PASS\nBLOCKED-ON-TOOLING: no diff\n",
+                                self.task["id"], SHA)
+        with self.assertRaises(StoreError):  # and the store holds no such verdict
+            capacity.record_round_verdict(self.conn, request_id, REPO, "BLOCKED-ON-TOOLING", now=self.tick())
+        with self.assertRaisesRegex(orchestrator.Invalid, "no recorded PASS"):
+            orchestrator.check_legal(self.conn, self.action)
         self.assertEqual(self.pushed, [])
 
     def test_a_pass_for_another_commit_than_head_opens_nothing(self):

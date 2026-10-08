@@ -10,7 +10,8 @@
   fleet review <task-id>
   fleet review own --repo-dir <checkout> --title "<what it does>" [--intent-file <file>] [--base ...] [--no-fetch]
   fleet review own --repo-dir <checkout> --task <task-id> [--intent-file <file>]
-      --intent-file on a fix round rewrites the task's TASK.md, and its approval, before the round's checks read it.
+      --intent-file on a fix round rewrites the task's TASK.md, and its approval, once you type the task id back
+      in your own terminal (no --yes), before the round's checks read it.
   fleet feed --desk <name> | --all
   fleet push <task-id> [--yes]
   fleet ollivander [--dry-run]
@@ -137,7 +138,7 @@ def run(conn, args: argparse.Namespace) -> object:
             raise FleetError("review own needs --repo-dir and either --title for a new review or --task for a fix round")
         intent = None if args.intent_file is None else read_intent(args.intent_file)
         return review.review_own(conn, args.repo_dir, title=args.title, intent=intent, task_id=args.task,
-                                 base=args.base, fetch=not args.no_fetch)
+                                 base=args.base, fetch=not args.no_fetch, confirm=review.ask_owner_terminal)
     if args.command == "push":
         return push.push(conn, args.task, confirm=None if args.yes else push.ask_terminal)
     if args.command == "ollivander":

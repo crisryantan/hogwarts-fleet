@@ -394,7 +394,10 @@ PHONE_MAX_PER_PASS = 5
 PHONE_KINDS = ("push.draft-pr", "push.auto-failed", "go.refused", "review.headmaster", "review.loop-stopped",
                "review.round-cap", "review.ready-for-push", "review.auto", "review.unpublished", "review.interrupted",
                "review.fix-round", "orchestrator.notify", "orchestrator.cap", "orchestrator.rejected",
-               "orchestrator.ask-snape", "orchestrator.auth", "orchestrator.failed", "orchestrator.interrupted")
+               "orchestrator.ask-snape", "orchestrator.auth", "orchestrator.failed", "orchestrator.interrupted",
+               # Each needs Ryan: a review no reviewer could judge (only once its tries or wait are spent, or its
+               # worktree needs rebuilding), a model family down or a run waiting on it, and a CLI that cannot sign in.
+               "review.blocked-on-tooling", "failover.down", "failover.wait", "failover.wait-ended", "failover.auth")
 # How many new owls in McGonagall's inbox the prompt hook lists at once, with a count of the rest.
 INBOX_NOTICE_CAP = 10
 # A seen marker a prompt hook left pending this long, or whose hook process is gone, is taken over by the next hook.

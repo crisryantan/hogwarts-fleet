@@ -320,7 +320,8 @@ class OwnIntentTests(ToolingMixin, LoopCase):
             first = review.review_own(self.conn, str(self.repo), title="my own fix", intent="Do it.", fetch=False)
             self.commit("second try")
             second = review.review_own(self.conn, str(self.repo), task_id=first["task_id"],
-                                       intent="Do it better.\nAC-1 it works | check: `true`\n", fetch=False)
+                                       intent="Do it better.\nAC-1 it works | check: `true`\n", fetch=False,
+                                       confirm=lambda prompt: first["task_id"] + "\n")
         task_md = (self.castle / "tasks" / first["task_id"] / "TASK.md").read_bytes()
         self.assertIn(b"Do it better.", task_md)
         digest = hashlib.sha256(task_md).hexdigest()
@@ -330,6 +331,38 @@ class OwnIntentTests(ToolingMixin, LoopCase):
                          task_md)
         self.assertIn("TASK.md changed since round 1", bodies[1])
         self.assertIn("AC-1", (self.castle / "tasks" / first["task_id"] / "evidence.md").read_text())
+
+    def test_an_intent_file_on_a_fix_round_changes_nothing_unless_the_task_id_is_typed_back(self):
+        self.commit("first try")
+        with self.reviewer("VERDICT: CHANGES"):
+            first = review.review_own(self.conn, str(self.repo), title="my own fix", intent="Do it.", fetch=False)
+        task_md = self.castle / "tasks" / first["task_id"] / "TASK.md"
+        before = (task_md.read_bytes(), review.approved_digest(first["task_id"]))
+        rounds = len(capacity.review_rounds(self.conn, first["task_id"]))
+        self.commit("second try")
+        asked = []
+
+        def wrong(prompt: str) -> str:
+            asked.append(prompt)
+            return "tk_0000000000000000\n"
+
+        not_a_terminal = mock.patch.object(review.sys.stdin, "isatty", return_value=False)
+        with mock.patch.object(run_desk, "run", side_effect=AssertionError("a reviewer ran")):
+            for confirm in (None, wrong, review.ask_owner_terminal):
+                with self.subTest(confirm=confirm), not_a_terminal, self.assertRaises(review.FleetError):
+                    review.review_own(self.conn, str(self.repo), task_id=first["task_id"], intent="Do something else.",
+                                      fetch=False, confirm=confirm)
+        self.assertEqual(len(asked), 1)
+        self.assertIn(first["task_id"], asked[0])
+        self.assertEqual((task_md.read_bytes(), review.approved_digest(first["task_id"])), before)
+        self.assertEqual(len(capacity.review_rounds(self.conn, first["task_id"])), rounds)
+
+    def test_the_fleet_command_asks_on_the_terminal_for_review_own(self):
+        args = tools.build_parser().parse_args(["review", "own", "--repo-dir", str(self.repo), "--task",
+                                                "tk_0000000000000000"])
+        with mock.patch.object(review, "review_own", return_value={}) as called:
+            tools.run(self.conn, args)
+        self.assertIs(called.call_args.kwargs["confirm"], review.ask_owner_terminal)
 
     def test_a_fix_round_without_an_intent_file_keeps_task_md_and_its_approval(self):
         self.commit("first try")

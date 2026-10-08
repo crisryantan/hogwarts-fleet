@@ -204,6 +204,20 @@ class HardeningTests(PhoneCase):
         with safefs.opened_dir(config.OFFICE_ROOT, phone.PHONE_DIR) as fd:
             self.assertEqual(markers.read(fd, phone.WATERMARK)["id"], "seven")
 
+    def test_tooling_blocks_outages_and_sign_in_failures_are_loud(self):
+        for kind in ("review.blocked-on-tooling", "failover.down", "failover.wait", "failover.wait-ended",
+                     "failover.auth"):
+            self.assertIn(kind, config.PHONE_KINDS)
+        self.assertNotIn("failover.up", config.PHONE_KINDS)
+
+    def test_a_loud_event_settled_before_the_pass_still_pings_once(self):
+        refused = self.event("go.refused")
+        self.event("go.confirmed", verdict="routine")
+        self.assertEqual(pensieve.settle_events(self.conn, now=NOW + 100)["acked"], 1)
+        self.assertEqual(self.deliver(), ["sent"])
+        self.assertEqual(self.marker(refused)["state"], "sent")
+        self.assertEqual(self.deliver(), [])
+
     def test_reviews_that_need_ryan_are_loud(self):
         for kind in ("review.auto", "review.unpublished", "review.interrupted", "review.fix-round", "push.draft-pr",
                      "go.refused", "orchestrator.notify", "orchestrator.cap", "orchestrator.ask-snape"):

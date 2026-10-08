@@ -101,7 +101,8 @@ those exact bytes in the office). The closer (fleet/closer.py) acts only when th
 approved: your go's for a build, and for your own task the task-md-approved file fleet review own writes once, with
 O_EXCL, right after it writes TASK.md. TASK.md is read again for every round, so a changed intent reaches the next
 round: its request names the digest and says when it changed since the round before, and the round record keeps it.
-fleet review own --task with --intent-file writes the new TASK.md, and since you ran it, moves the approval to it.
+fleet review own --task with --intent-file writes the new TASK.md and moves the approval to it only once you type
+the task id back with a terminal on stdin and stdout (ask_owner_terminal, as fleet adopt asks); there is no --yes.
 The review request asks the reviewer to list after-merge criteria as
 AC-n AFTER MERGE and never to hold a PASS back for one.
 
@@ -168,7 +169,7 @@ import re
 import secrets
 import sys
 import time
-from typing import Iterator, Optional
+from typing import Callable, Iterator, Optional
 
 from hogwarts import capacity, followups, ids, owlery, pensieve
 from hogwarts.errors import ConflictError, StoreError
@@ -1494,11 +1495,36 @@ def _own_task_md(task_id: str, title: str, intent: str) -> bytes:
     return text.encode("utf-8")
 
 
+def ask_owner_terminal(prompt: str) -> str:
+    """Ask on Ryan's terminal, as fleet adopt does. Refused when stdin or stdout is not one, so no pipe, script or
+    agent session's tool call can answer."""
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        raise FleetError("--intent-file on a fix round replaces the TASK.md you approved, and asks you to type the"
+                         " task id back, so it runs only in your own terminal; nothing was changed")
+    sys.stdout.write(prompt)
+    sys.stdout.flush()
+    return sys.stdin.readline()
+
+
+def _confirm_new_intent(task: dict, confirm: Optional[Callable[[str], str]]) -> None:
+    """Ryan's typed task id is the approval of the new intent, as fleet review own --title was of the first. There is
+    no --yes: with no confirm, or any other answer, nothing changes."""
+    if confirm is None:
+        raise FleetError("--intent-file on a fix round replaces the TASK.md you approved, so it needs you to type the"
+                         " task id back in your own terminal; nothing was changed")
+    answer = confirm(f"Replace the approved TASK.md of task {task['id']} ({common.one_line(task['title'], 120)}) with"
+                     " the intent in your --intent-file. This is your approval of it.\n"
+                     "Type the task id to approve it, or anything else to stop: ")
+    if not isinstance(answer, str) or answer.strip() != task["id"]:
+        raise FleetError("the typed id did not match, so TASK.md and its approval were left as they were")
+
+
 def _rewrite_own_task_md(task: dict, intent: str) -> None:
     """fleet review own --task with --intent-file: the task's TASK.md takes the new intent before this round's verify
-    reads it, and, since you ran it from your terminal, the approval moves to it. Its bytes are kept in the office
-    before either changes, and each file is replaced whole, so the approval never names bytes the office lacks, and a
-    PASS of a round that read the older TASK.md no longer matches the approval: the closer stops it."""
+    reads it, and, since you typed its id back in your terminal (_confirm_new_intent), the approval moves to it. Its
+    bytes are kept in the office before either changes, and each file is replaced whole, so the approval never names
+    bytes the office lacks, and a PASS of a round that read the older TASK.md no longer matches the approval: the
+    closer stops it."""
     raw = _own_task_md(task["id"], task["title"], intent)
     try:
         digest = verify.keep_task_md(task["id"], raw)
@@ -1529,13 +1555,15 @@ def approved_digest(task_id: str) -> tuple:
 
 
 def review_own(conn, repo_dir: str, title: Optional[str] = None, intent: Optional[str] = None,
-               task_id: Optional[str] = None, base: str = config.DEFAULT_BASE, fetch: bool = True) -> dict:
+               task_id: Optional[str] = None, base: str = config.DEFAULT_BASE, fetch: bool = True,
+               confirm: Optional[Callable[[str], str]] = None) -> dict:
     """A commit from one of Ryan's own Claude sessions, reviewed by Moody in a detached worktree. It runs in the
     foreground, so a checkout in a macOS privacy-protected folder is not refused, but the result warns that the
-    closer, a background job, cannot auto-close its task."""
+    closer, a background job, cannot auto-close its task. A fix round with a new intent replaces the task's approval,
+    so it runs only once Ryan types the task id back through confirm (ask_owner_terminal)."""
     target = ids.new_id("task") if task_id is None else ids.check("task", task_id)
     with task_review_lock(target) as lock_fd:
-        result = _review_own(conn, repo_dir, title, intent, task_id, target, base, fetch, lock_fd)
+        result = _review_own(conn, repo_dir, title, intent, task_id, target, base, fetch, lock_fd, confirm)
     protected = gitops.protected_folder(repo_dir) if isinstance(repo_dir, str) else None
     if protected is None or not isinstance(result, dict):
         return result
@@ -1545,7 +1573,8 @@ def review_own(conn, repo_dir: str, title: Optional[str] = None, intent: Optiona
 
 
 def _review_own(conn, repo_dir: str, title: Optional[str], intent: Optional[str], task_id: Optional[str],
-                target: str, base: str, fetch: bool, lock_fd: int) -> dict:
+                target: str, base: str, fetch: bool, lock_fd: int,
+                confirm: Optional[Callable[[str], str]] = None) -> dict:
     reviewer = config.REVIEWER_FOR_FAMILY["claude"]
     if not run_desk.is_enabled(reviewer):
         raise FleetError(f"{reviewer} is not enabled, so no review can run")
@@ -1589,6 +1618,8 @@ def _review_own(conn, repo_dir: str, title: Optional[str], intent: Optional[str]
     task = pensieve.get_task(conn, target)
     if task["desk"] != OWN_DESK or task["status"] != "active":
         raise FleetError("--task must be an active task of your own sessions")
+    if intent is not None:
+        _confirm_new_intent(task, confirm)  # before anything changes: a refusal leaves the task as it was
     record = gitops.find_record(worktree.castle_path(task["worktree"]))
     if record is None or not gitops.same_checkout(record["repo_dir"], repo_dir):
         raise FleetError("that task's worktree is for a different checkout")
