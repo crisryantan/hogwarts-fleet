@@ -95,6 +95,8 @@ command -v git jq gh rg shellcheck claude codex
 
    It never touches `~/.claude/settings.json`, `~/.codex` or launchd.
 
+   If your repos live in `~/Documents`, run `./install.sh --terminal-loops` instead, so the background jobs will run from a terminal window rather than launchd. [Terminal loops](#terminal-loops) explains the choice.
+
 **You're done when** the installer ends with lines like these, and then lists the placeholder files for stage 2:
 
 ```
@@ -176,6 +178,40 @@ If it printed a note that `CLAUDE_BIN` or `CODEX_BIN` was not found, fix that no
   cd ~/.hogwarts && /usr/bin/env -i /usr/bin/python3 -I -B -X pycache_prefix=/var/empty -m unittest discover -s tests_fleet -t .
   ```
 
+## Terminal loops
+
+The fleet's background jobs (the Owl Post, the Map, which starts the closer, and the patrol, Dumbledore's, Gringotts' and Ollivander's jobs) run under launchd by default. macOS keeps launchd jobs out of `~/Documents`, `~/Desktop`, `~/Downloads` and iCloud Drive, so on a repo cloned there git fails for them and every automatic review fails. If your repos live in `~/Documents`, run the jobs from a terminal window instead. Each job then starts from that window and gets its folder access.
+
+Choose before you switch any job on, or move later:
+
+- On a fresh install: `./install.sh --terminal-loops`. It makes `~/.hogwarts/loops/jobs`, the list of jobs a terminal runs.
+- On an install whose jobs already run under launchd: `sh scripts/loops-setup.sh` from your clone. It adds every `com.hogwarts` job in `~/Library/LaunchAgents` to that list, then unloads and removes each plist, so no job runs twice.
+
+Without either, nothing changes: the jobs run under launchd as before.
+
+While the list is there, `scripts/owlpost-setup.sh`, `scripts/patrol-setup.sh` and `scripts/portrait-setup.sh` add their jobs to it and load nothing into launchd. For Ollivander in 5.5, add his name instead of loading his plist: `echo ollivander >> ~/.hogwarts/loops/jobs`.
+
+Start the loops and leave them running, either way:
+
+- **In a herdr pane.** Open a pane and run `~/.hogwarts/bin/fleet loops`. It prints one line each time a job starts or ends.
+- **As a Terminal login item.** In System Settings, go to General, then Login Items, press + under "Open at Login" and pick `~/.hogwarts/bin/fleet-loops.command` (press Cmd+Shift+. in the picker to see the hidden folder). At each login Terminal opens a window that runs `fleet loops`.
+
+The app the loops run in, Terminal or the one herdr runs in, needs access to your Documents folder. macOS asks the first time one of its jobs opens a repo there. To answer it while you're watching, run `ls ~/Documents` once in that window first, or allow it under System Settings, Privacy & Security, Files and Folders.
+
+Don't give `/usr/bin/python3` Full Disk Access instead. It's the system Python every script on the Mac can run, so the grant would open all your files to any Python script, not only the fleet's.
+
+How the loops behave:
+
+- They run each job named in the list on the schedule in its `~/.hogwarts/launchd/` plist, with the same command, logs and switches. `~/.hogwarts/bin/fleet loops --dry-run` shows each job's schedule and starts nothing. The loops' own lines also go to `~/.hogwarts/logs/loops.log`.
+- Only one `fleet loops` runs at a time. Ctrl+C, or closing the window, stops it and each job it's running. A job keeps running only while the window is open: a slot missed while the Mac slept runs once when it wakes, as under launchd, but slots missed while the window was closed don't.
+- A job that fails is logged and waits a little longer after each failure in a row, up to ten minutes. The Owl Post is tried again then, and a calendar job waits for its next slot. One job failing never stops another.
+- A job whose plist is still in `~/Library/LaunchAgents` is skipped, with one line saying so, so launchd and the loops never both run it.
+- `fleet loops` reads the list when it starts. After a setup script adds a job, stop it and start it again.
+
+To go back to launchd, stop the loops, delete `~/.hogwarts/loops/jobs` and run each setup script again.
+
+The go, `fleet worktree` and `fleet adopt` still refuse a repo in `~/Documents` for now. That changes once a real automatic review, one the Owl Post started under `fleet loops`, has passed on a repo there. Then setting `PROTECTED_DIRS_OK_UNDER_TERMINAL_LOOPS = True` in `~/.hogwarts/fleet/config.py` lets such a repo through, but only while `fleet loops` is running the Owl Post and the Map.
+
 ## Stage 3: Apply the pending settings yourself
 
 Two changes touch your own Claude settings and start a background job. The kit only prepares them. You apply each one yourself, in this order. The full notes are in `~/.hogwarts/pending/README.md`.
@@ -225,11 +261,13 @@ sh scripts/owlpost-setup.sh
 
 If a step prints FAILED, the lines above it say why. The same steps by hand, with a test and the undo, are in `~/.hogwarts/pending/b-owlpost-launchctl.txt`.
 
+With [terminal loops](#terminal-loops), steps 4 and 5 add `owlpost` to `~/.hogwarts/loops/jobs` instead of loading a launchd job. If `fleet loops` isn't running it yet, the script says so and stops there: start it, or stop and start it, then run the script again for the test owl.
+
 **You're done when** all of these hold:
 
 - The last line says all six steps passed.
 - `~/hogwarts/desks/mcgonagall/outbox/.sent/` holds the test owl renamed to `owl_<id>-hello.json`, and `~/hogwarts/desks/hermione/inbox/` holds the delivered copy as `owl_<id>.json`.
-- `launchctl print gui/$(id -u)/com.hogwarts.owlpost | head -5` shows the job.
+- `launchctl print gui/$(id -u)/com.hogwarts.owlpost | head -5` shows the job, or with terminal loops, `fleet loops` printed `owlpost: started` for the test owl.
 
 ### Leave for later
 
@@ -336,7 +374,7 @@ An agent's push goes out only with a pass from the other model family for that e
 Prove the cheap jobs are right before they can interrupt you.
 
 - What it is: the Marauder's Map, which diffs your PR and CI state each round. Ron's jobs: the morning lineup, the keeper's watch and the weekly scoreboard. Hermione's bot pass, which triages review threads on your PRs and only ever writes reply drafts. Gringotts, which takes a nightly local backup.
-- To switch it on: run `sh scripts/patrol-setup.sh` from your clone of the kit. It checks gh, runs one Map round, a backup and a restore drill, enables Ron and loads the map, morning, keeper, scoreboard and gringotts plists. While `~/.hogwarts/patrol/shadow` exists, which it does from install, they write to files only and send you no rows or owls. Leave it there for at least three days.
+- To switch it on: run `sh scripts/patrol-setup.sh` from your clone of the kit. It checks gh, runs one Map round, a backup and a restore drill, enables Ron and loads the map, morning, keeper, scoreboard and gringotts plists. While `~/.hogwarts/patrol/shadow` exists, which it does from install, they write to files only and send you no rows or owls. Leave it there for at least three days. With [terminal loops](#terminal-loops) it adds the five jobs to `~/.hogwarts/loops/jobs` instead of loading their plists; restart `fleet loops` afterwards.
 
 **You're done when** the morning lineup has matched `gh` three days running, a spot check of 50 of Ron's verdicts finds nothing urgent marked routine, and at least 75% of Map rounds cost zero tokens. Then delete `~/.hogwarts/patrol/shadow` to let their rows and owls reach you.
 
@@ -355,7 +393,7 @@ Prove the cheap jobs are right before they can interrupt you.
 Dumbledore reviews the fleet's memory each weeknight and proposes changes. You approve every one at first.
 
 - What it is: a nightly export of the day's extracts and fact candidates into Dumbledore's inbox, his proposals-only run on it at 22:30 on weekdays, and `castle portrait` to read and apply his patches.
-- To switch it on: run `sh scripts/portrait-setup.sh` yourself. It reads Dumbledore's dry run, exports today once by hand, enables his desk and loads his job, printing OK or FAILED after each step. His chat stays off until you give him a read-only MCP job ([CUSTOMISE.md](CUSTOMISE.md#change-budgets-and-limits)). Each morning after a run, `castle portrait show <date>` lists his patch and prints the exact `castle portrait apply <date> --sha256 <hash>` command. Add `--only <ids>` to apply just the operations you accept.
+- To switch it on: run `sh scripts/portrait-setup.sh` yourself. It reads Dumbledore's dry run, exports today once by hand, enables his desk and loads his job, printing OK or FAILED after each step. With [terminal loops](#terminal-loops) it adds his job to `~/.hogwarts/loops/jobs` instead; restart `fleet loops` afterwards. His chat stays off until you give him a read-only MCP job ([CUSTOMISE.md](CUSTOMISE.md#change-budgets-and-limits)). Each morning after a run, `castle portrait show <date>` lists his patch and prints the exact `castle portrait apply <date> --sha256 <hash>` command. Add `--only <ids>` to apply just the operations you accept.
 - After your two reviewed patches, you may switch on auto-portrait with `echo on > ~/.hogwarts/auto-portrait`. It applies only his additions (new facts and memory notes) the night he writes them; everything that retires, edits or moves memory still waits for you, and so does an addition the store refused. Each night with a patch ends in one row for you: what applied, what waits and the exact command for the rest, or why the night stopped. If the nightly job is killed, the next weeknight job finishes that night without reading his file again: cut off before his patch was stored, it tells you once (or not at all when his run's own row already did) and you apply by hand with `castle portrait show <date>`; cut off after, it applies the stored additions, and nothing applies twice. `rm ~/.hogwarts/auto-portrait` switches it off. The rules are in `~/.hogwarts/pending/README.md`.
 - If you installed RTK, run `rtk discover --all --since 30` to see what it would save on your own sessions. Don't add its hook yet.
 
@@ -391,6 +429,8 @@ Ollivander - Model Keeper keeps each desk on the model its job needs, and never 
    chmod 644 ~/Library/LaunchAgents/com.hogwarts.ollivander.plist
    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.hogwarts.ollivander.plist
    ```
+
+   With [terminal loops](#terminal-loops), skip the copy and the load: run `echo ollivander >> ~/.hogwarts/loops/jobs`, then restart `fleet loops`.
 
 5. Run his first pass by hand, so you don't wait for 06:00. Each headless desk's first pick applies by itself. Later moves to a cheaper or equal tier apply with a note, and a costlier one waits for you. McGonagall and Snape get a note telling you the one line to change in their agent files.
 

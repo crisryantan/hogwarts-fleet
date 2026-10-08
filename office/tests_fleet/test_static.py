@@ -76,9 +76,9 @@ KNOWN_FLAGS = {
 FLAG_TABLE_MODULES = {"push_gate.py"}
 # Modules allowed to start processes, and the only module each may use for it.
 # ollivander.py reads the CLI catalogs and help, and runs the CLI updates and their checks. patrol.py runs gh
-# api graphql with its fixed read-only queries.
+# api graphql with its fixed read-only queries. loops.py starts the launchd/ jobs from a terminal (fleet loops).
 PROCESS_MODULES_ALLOWED = {"run_desk.py": {"subprocess"}, "gitops.py": {"subprocess"}, "verify.py": {"subprocess"},
-                           "ollivander.py": {"subprocess"}, "patrol.py": {"subprocess"}}
+                           "ollivander.py": {"subprocess"}, "patrol.py": {"subprocess"}, "loops.py": {"subprocess"}}
 PLISTS = ("owlpost", "map", "morning", "keeper", "scoreboard", "portrait", "gringotts", "ollivander")
 REAL_OFFICE = "/Users/crisryantan/.hogwarts"
 REAL_CASTLE = "/Users/crisryantan/hogwarts"

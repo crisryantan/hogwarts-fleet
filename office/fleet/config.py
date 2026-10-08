@@ -312,6 +312,34 @@ GO_MAX_PER_PROMPT = 5
 PROTECTED_HOME_DIRS = ("Documents", "Desktop", "Downloads", "Library/Mobile Documents")
 # Where the refusal suggests cloning such a repo instead, under your home folder.
 SUGGESTED_REPOS_DIR = "fleet-repos"
+# The seam that lifts the refusal above once the loops run in a terminal (fleet/loops.py): with this True, a repo in
+# one of those folders is allowed while a live fleet loops runs every job in TERMINAL_LOOPS_REPO_JOBS. Off until a real
+# automatic review of a ~/Documents repo has passed under fleet loops.
+PROTECTED_DIRS_OK_UNDER_TERMINAL_LOOPS = False
+TERMINAL_LOOPS_REPO_JOBS = ("owlpost", "map")
+
+# fleet loops (fleet/loops.py): the background jobs run from a terminal you start, instead of launchd, so they get the
+# terminal's folder access. The office folder loops/ holds the job list you choose (one launchd/ job name per line;
+# while it is there the setup scripts add to it instead of loading launchd), the marker a live supervisor writes and
+# the supervisor's lock. Each job keeps its plist's schedule and logs.
+LOOPS_DIR = "loops"
+LOOPS_JOBS_FILE = "jobs"
+LOOPS_RUNNING_FILE = "running.json"
+LOOPS_LOCK = "loops.lock"
+LOOPS_LOG = "loops.log"
+# How often the supervisor checks its clocks and WatchPaths, and how long a job has to stop after SIGTERM (launchd's
+# default ExitTimeOut) before SIGKILL.
+LOOPS_TICK_SECONDS = 1.0
+LOOPS_STOP_GRACE_SECONDS = 20
+# launchd's default ThrottleInterval: the least time between two starts of one job, unless its plist sets one.
+LOOPS_THROTTLE_SECONDS = 10
+# After a failed run the job waits this long before it may start again, doubled for each failure in a row up to the
+# cap. A job with StartInterval, WatchPaths or KeepAlive is retried then; a calendar job waits for its next slot.
+LOOPS_BACKOFF_FIRST_SECONDS = 30
+LOOPS_BACKOFF_MAX_SECONDS = 600
+# Calendar slots missed while the Mac slept run once on wake, as under launchd. The whole gap is looked at, up to a
+# year back, which holds every slot an entry can name except 29 February.
+LOOPS_CATCH_UP_SECONDS = 366 * 86400
 # A desktop notification for each owl delivered to McGonagall's inbox (macOS only). False turns it off.
 DESKTOP_NOTIFY = True
 DESKTOP_NOTIFY_TIMEOUT_SECONDS = 5
@@ -460,6 +488,10 @@ def runs_dir() -> str:
 
 def logs_dir() -> str:
     return f"{OFFICE_ROOT}/logs"
+
+
+def launch_agents_dir() -> str:
+    return f"{USER_HOME_DIR}/Library/LaunchAgents"
 
 
 def worktree_dir(name: str) -> str:

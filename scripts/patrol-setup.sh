@@ -11,7 +11,9 @@
 #
 # It prints OK or FAILED after each step and stops at the first failure.
 # Steps that already passed are safe to run again. Shadow mode stays on until
-# you delete ~/.hogwarts/patrol/shadow yourself.
+# you delete ~/.hogwarts/patrol/shadow yourself. With terminal loops chosen
+# (~/.hogwarts/loops/jobs is there) step 9 adds the five jobs to that list
+# instead and loads nothing into launchd.
 set -u
 
 ok() { printf '   OK      %s\n' "$1"; }
@@ -36,6 +38,7 @@ SHADOW="$OFFICE/patrol/shadow"
 AGENTS="$HOME/Library/LaunchAgents"
 DOMAIN="gui/$(id -u)"
 JOBS="map morning keeper scoreboard gringotts"
+LOOPS_LIST="$OFFICE/loops/jobs"
 
 # Run one fleet module through the same cleared-environment line launchd uses.
 run_module() {
@@ -119,26 +122,43 @@ else
 	note "Hermione is off, so the Map skips the bot pass until the review stage switches her on"
 fi
 
-echo "Step 9 of 9: checking and loading the five jobs"
-mkdir -p "$AGENTS" || fail "could not create $AGENTS"
-for job in $JOBS; do
-	label="com.hogwarts.$job"
-	template="$OFFICE/launchd/$label.plist"
-	target="$AGENTS/$label.plist"
-	plutil -lint "$template" >/dev/null 2>&1 || fail "$template did not pass plutil -lint"
-	if ! cp "$template" "$target" || ! chmod 644 "$target"; then fail "could not copy $label into $AGENTS"; fi
-	if launchctl print "$DOMAIN/$label" >/dev/null 2>&1; then
-		ok "$label was already loaded"
-	else
-		launchctl bootstrap "$DOMAIN" "$target" 2>&1 | sed 's/^/           /'
-		if launchctl print "$DOMAIN/$label" >/dev/null 2>&1; then ok "loaded $label"; else fail "launchd did not accept $label"; fi
-	fi
-done
+if [ -f "$LOOPS_LIST" ]; then
+	echo "Step 9 of 9: checking the five jobs and adding them to the terminal loops"
+	for job in $JOBS; do
+		label="com.hogwarts.$job"
+		template="$OFFICE/launchd/$label.plist"
+		plutil -lint "$template" >/dev/null 2>&1 || fail "$template did not pass plutil -lint"
+		[ ! -e "$AGENTS/$label.plist" ] || fail "launchd also has $label. Run sh scripts/loops-setup.sh to move it to the terminal loops"
+		grep -qx "$job" "$LOOPS_LIST" || printf '%s\n' "$job" >>"$LOOPS_LIST" || fail "could not add $job to $LOOPS_LIST"
+		ok "$job is in $LOOPS_LIST"
+	done
+	note "fleet loops reads the list when it starts: start it, or stop and start it, with $OFFICE/bin/fleet loops"
+else
+	echo "Step 9 of 9: checking and loading the five jobs"
+	mkdir -p "$AGENTS" || fail "could not create $AGENTS"
+	for job in $JOBS; do
+		label="com.hogwarts.$job"
+		template="$OFFICE/launchd/$label.plist"
+		target="$AGENTS/$label.plist"
+		plutil -lint "$template" >/dev/null 2>&1 || fail "$template did not pass plutil -lint"
+		if ! cp "$template" "$target" || ! chmod 644 "$target"; then fail "could not copy $label into $AGENTS"; fi
+		if launchctl print "$DOMAIN/$label" >/dev/null 2>&1; then
+			ok "$label was already loaded"
+		else
+			launchctl bootstrap "$DOMAIN" "$target" 2>&1 | sed 's/^/           /'
+			if launchctl print "$DOMAIN/$label" >/dev/null 2>&1; then ok "loaded $label"; else fail "launchd did not accept $label"; fi
+		fi
+	done
+fi
 
 echo ""
 echo "All nine steps passed. The patrol runs in shadow mode: it writes files under"
 echo "$OFFICE/patrol and $OFFICE/backups, and nothing else."
 echo "Compare $OFFICE/patrol/lineup/<date>.md with gh each morning. After three"
 echo "weekdays that match, go live with:  rm $SHADOW"
-echo "To switch the jobs off:  for job in $JOBS; do launchctl bootout $DOMAIN/com.hogwarts.\$job; rm $AGENTS/com.hogwarts.\$job.plist; done"
+if [ -f "$LOOPS_LIST" ]; then
+	echo "To switch the jobs off: remove their lines from $LOOPS_LIST, then restart fleet loops."
+else
+	echo "To switch the jobs off:  for job in $JOBS; do launchctl bootout $DOMAIN/com.hogwarts.\$job; rm $AGENTS/com.hogwarts.\$job.plist; done"
+fi
 echo "To switch Ron off:  rm $OFFICE/desks/ron/enabled"

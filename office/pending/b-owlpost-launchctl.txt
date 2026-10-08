@@ -1,4 +1,6 @@
 # Install and load the Owl Post launchd job. Run these yourself, one at a time.
+# With terminal loops (~/.hogwarts/loops/jobs is there) skip this file: run
+# scripts/owlpost-setup.sh, which adds owlpost to that list and loads nothing here.
 
 # 1. The castle outboxes must exist first, because launchd watches them.
 ls -ld /Users/crisryantan/hogwarts/desks/*/outbox

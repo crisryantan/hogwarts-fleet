@@ -33,7 +33,7 @@ from typing import Optional
 from hogwarts import ids, pensieve
 from hogwarts.errors import ValidationError
 
-from fleet import common, config, safefs
+from fleet import common, config, loops, safefs
 from fleet.safefs import FleetError
 
 RECORD_DIR = "worktrees"
@@ -119,7 +119,8 @@ def protected_folder(path: str) -> Optional[str]:
 
 def protected_reason(path: str) -> Optional[str]:
     name = protected_folder(path)
-    if name is None:
+    # The seam for terminal loops (loops.protected_dirs_ok): off until config.PROTECTED_DIRS_OK_UNDER_TERMINAL_LOOPS.
+    if name is None or loops.protected_dirs_ok():
         return None
     repo = os.path.basename(path.rstrip("/")) or "repo"
     return (f"the repo folder is inside ~/{name}, which macOS keeps from the fleet's background jobs (the Owl Post, the"

@@ -7,7 +7,7 @@
 #
 # Exit codes: 0 when nothing is left for you, 1 when your settings still mention
 # the fleet (or a step failed), 2 when it stopped at a worktree with uncommitted
-# changes.
+# changes or at a fleet loops that is still running.
 
 set -eu
 umask 077
@@ -59,6 +59,16 @@ UID_NOW=$(id -u)
 NEEDS_YOU=0
 BLOCKED=0
 
+# The fleet loops lock of the office in $1 (locks/loops.lock), taken on fd 9 and kept until fd 9 closes, so no fleet
+# loops starts from that office meanwhile. It fails while a running fleet loops holds it.
+hold_loops_lock() {
+	[ -d "$1" ] || return 0
+	mkdir -p "$1/locks" && chmod 700 "$1/locks" || return 1
+	[ ! -L "$1/locks/loops.lock" ] || return 1
+	exec 9>>"$1/locks/loops.lock" || return 1
+	/usr/bin/python3 -I -B -c 'import fcntl; fcntl.flock(9, fcntl.LOCK_EX | fcntl.LOCK_NB)' 2>/dev/null
+}
+
 # Print a command, and run it only with --yes.
 act() {
 	if [ "$YES" = 1 ]; then
@@ -79,6 +89,20 @@ fi
 
 say ""
 say "1. Background jobs (com.hogwarts.*)"
+# fleet loops runs the jobs from a terminal window instead; it has to stop first, from that window. With --yes its lock
+# is held from here to the end, so none starts while the office goes. A dry run only checks, in a subshell.
+if [ "$YES" = 1 ]; then
+	loops_free() { hold_loops_lock "$OFFICE"; }
+else
+	loops_free() { [ ! -f "$OFFICE/locks/loops.lock" ] || (hold_loops_lock "$OFFICE"); }
+fi
+if [ -d "$OFFICE" ] && ! loops_free; then
+	say "  fleet loops is running. Press Ctrl+C in its window and wait for \"fleet loops: stopped\"."
+	if [ "$YES" = 1 ]; then
+		say "Stopped before changing anything. Run ./uninstall.sh --yes again once fleet loops has stopped."
+		exit 2
+	fi
+fi
 jobs_seen=""
 for plist in "$LAUNCH_AGENTS"/com.hogwarts.*.plist; do
 	[ -e "$plist" ] || continue

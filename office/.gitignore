@@ -5,3 +5,4 @@ locks/
 backups/
 patrol/*
 !patrol/shadow
+loops/running.json

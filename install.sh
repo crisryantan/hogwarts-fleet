@@ -8,6 +8,10 @@
 #
 # It never touches ~/.claude/settings.json, ~/.codex or launchd. Those steps are
 # yours, and ~/.hogwarts/pending/README.md walks through them.
+#
+# --terminal-loops chooses where the background jobs will run before any is
+# switched on: in a terminal you start (fleet loops) instead of launchd. Without
+# it nothing changes and the setup scripts load launchd jobs, as before.
 
 set -eu
 umask 077
@@ -21,20 +25,29 @@ die() { printf 'install.sh: %s\n' "$*" >&2; exit 1; }
 
 usage() {
 	cat <<'EOF'
-Usage: ./install.sh [--force]
+Usage: ./install.sh [--force] [--terminal-loops]
 
 Installs the fleet into ~/.hogwarts (the office) and ~/hogwarts (the castle).
 
 Without --force it changes nothing when either folder already exists.
 With --force it first moves each existing folder aside to
-<folder>.pre-install-<YYYYMMDD-HHMMSS>, then installs fresh.
+<folder>.pre-install-<YYYYMMDD-HHMMSS>, then installs fresh. A terminal-loops
+choice in the old office is carried over.
+
+With --terminal-loops the background jobs you switch on later run from a
+terminal window (~/.hogwarts/bin/fleet loops) instead of launchd, so they can
+work on repos in ~/Documents. The setup scripts then add each job to
+~/.hogwarts/loops/jobs and load no launchd job. docs/ONBOARDING.md explains
+the choice. Without it they run under launchd.
 EOF
 }
 
 FORCE=0
+TERMINAL_LOOPS=0
 for arg in "$@"; do
 	case $arg in
 	--force) FORCE=1 ;;
+	--terminal-loops) TERMINAL_LOOPS=1 ;;
 	-h | --help)
 		usage
 		exit 0
@@ -91,19 +104,39 @@ done
 
 # --- Refuse or move aside an existing install -------------------------------
 
+# The fleet loops lock of the office in $1 (locks/loops.lock), taken on fd 9 and kept until fd 9 closes, so no fleet
+# loops starts from that office meanwhile. It fails while a running fleet loops holds it.
+hold_loops_lock() {
+	[ -d "$1" ] || return 0
+	mkdir -p "$1/locks" && chmod 700 "$1/locks" || return 1
+	[ ! -L "$1/locks/loops.lock" ] || return 1
+	exec 9>>"$1/locks/loops.lock" || return 1
+	/usr/bin/python3 -I -B -c 'import fcntl; fcntl.flock(9, fcntl.LOCK_EX | fcntl.LOCK_NB)' 2>/dev/null
+}
+
 for dir in "$OFFICE" "$CASTLE"; do
 	if [ -e "$dir" ] || [ -L "$dir" ]; then
 		[ "$FORCE" = 1 ] || die "$dir already exists, so nothing was changed. To reinstall, run ./install.sh --force. It moves the existing folder to $dir.pre-install-<timestamp> first."
 	fi
 done
+# A fleet loops still running from the old office would keep its jobs going beside a new one, so it stops first, and
+# none starts from the old office until it has moved aside.
+if [ "$FORCE" = 1 ] && [ -d "$OFFICE" ] && [ ! -L "$OFFICE" ]; then
+	hold_loops_lock "$OFFICE" || die "fleet loops is running from $OFFICE, so nothing was changed. Press Ctrl+C in its window, wait for \"fleet loops: stopped\", then run this again."
+fi
+OLD_LOOPS=""
 for dir in "$OFFICE" "$CASTLE"; do
 	if [ -e "$dir" ] || [ -L "$dir" ]; then
 		backup="$dir.pre-install-$STAMP"
 		[ ! -e "$backup" ] || die "$backup already exists. Wait a second and run again."
 		mv "$dir" "$backup"
 		say "Moved the existing $dir to $backup"
+		if [ "$dir" = "$OFFICE" ] && [ -f "$backup/loops/jobs" ] && [ ! -L "$backup/loops/jobs" ]; then
+			OLD_LOOPS="$backup/loops/jobs"
+		fi
 	fi
 done
+exec 9>&-
 for plist in "$HOME"/Library/LaunchAgents/com.hogwarts.*.plist; do
 	[ -e "$plist" ] || continue
 	say "Note: $plist is already in place. It still points at the paths it was loaded with."
@@ -170,7 +203,22 @@ fi
 
 find "$OFFICE" "$CASTLE" -type d -exec chmod 700 {} +
 find "$OFFICE" "$CASTLE" -type f -exec chmod 600 {} +
-chmod 700 "$OFFICE/bin/castle" "$OFFICE/bin/fleet" "$OFFICE/bin/hogwarts-spaces"
+chmod 700 "$OFFICE/bin/castle" "$OFFICE/bin/fleet" "$OFFICE/bin/hogwarts-spaces" "$OFFICE/bin/fleet-loops.command"
+
+# --- Where the background jobs run ------------------------------------------
+
+# The office file loops/jobs means terminal loops: the setup scripts add their jobs to it and load no launchd job.
+if [ -n "$OLD_LOOPS" ]; then
+	mkdir -m 700 "$OFFICE/loops"
+	cp "$OLD_LOOPS" "$OFFICE/loops/jobs"
+	chmod 600 "$OFFICE/loops/jobs"
+	say "Kept terminal loops from the old office: $OFFICE/loops/jobs names $(grep -cE '^[a-z]' "$OFFICE/loops/jobs" || true) job(s)."
+elif [ "$TERMINAL_LOOPS" = 1 ]; then
+	mkdir -m 700 "$OFFICE/loops"
+	printf '# Background jobs fleet loops runs, one launchd/ job name per line. The setup scripts add to it.\n' >"$OFFICE/loops/jobs"
+	chmod 600 "$OFFICE/loops/jobs"
+	say "Chose terminal loops: background jobs will run from ~/.hogwarts/bin/fleet loops, not launchd."
+fi
 
 # --- Snape's agent file, only if missing ------------------------------------
 
@@ -258,4 +306,7 @@ say ""
 say "Installed. Next steps:"
 say "  1. docs/ONBOARDING.md stage 2: sign in and fill in the placeholders."
 say "  2. Read $OFFICE/pending/README.md and apply those settings yourself (stage 3)."
+if [ -f "$OFFICE/loops/jobs" ]; then
+	say "  3. The background jobs run in a terminal: docs/ONBOARDING.md, \"Terminal loops\"."
+fi
 say "This script did not touch ~/.claude/settings.json, ~/.codex or launchd."
