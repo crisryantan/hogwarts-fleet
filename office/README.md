@@ -64,7 +64,9 @@ The store has none of these:
                                         the prompt hook could not confirm yet), bulk_close.py (Mischief managed
                                         everything), adopt.py (fleet adopt), loops.py
                                         (fleet loops, the background jobs run from a terminal), failover.py (the
-                                        model breaker and in-family fallback) and their helpers
+                                        model breaker and in-family fallback), orchestrator.py (McGonagall's typed
+                                        next step), owl_report.py (her one-line owl reports), phone.py (loud events to
+                                        the phone) and their helpers
   fleet/hooks/                          the castle's session hooks and the push gate, push_gate.py
   launchd/                              the launchd plist templates, one per background job; fleet loops reads them too
   loops/jobs                            only with terminal loops: the jobs fleet loops runs instead of launchd, one per line
@@ -126,6 +128,11 @@ The store has none of these:
                                         other family when it has launch settings for it and is neither a build desk
                                         nor a reviewer; a review that would then be same-family waits (off when
                                         missing: the desk waits)
+  owl-reports                           while it holds exactly "on", a read-only headless McGonagall turn writes a
+                                        one-line report on each owl another desk sends her (off when missing)
+  auto-orchestrate                      while it holds exactly "on", an owl to McGonagall or a build's review verdict
+                                        wakes one turn that picks the next step as one typed action a script checks,
+                                        at most 6 wakes per task and 30 a day (off when missing)
   patrol/shadow                         while it is here, the patrol and Gringotts only write files (shadow mode)
   patrol/<job>/                         the Map's snapshot and rows, lineups, keeper's watches, scoreboards, bot passes,
                                         and in shadow mode what a follow-up would have routed (patrol/followup/)
