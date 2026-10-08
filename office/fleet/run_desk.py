@@ -97,6 +97,13 @@ after-merge judge) can still read how that run ended. A run's output is read for
 line in its last RUN_OUTPUT_MAX_BYTES (read_run_output), and a read that could not see all of it never counts as a
 run that wrote no result event.
 
+When the desk's model is down (fleet/failover.py's breaker), the run goes on the next model Ollivander would pick
+for its role in the same family, or waits with one owner event when the whole family is down; a review round whose
+author's run used the reviewer's family waits too. The launch row records the model that ran, and a
+run whose CLI said an outage, overload or rate limit cut it off counts toward its model's breaker, never toward a
+trial, and is started again from its checkpoint by main, at most FAILOVER_RETRIES times. An auth failure tells the
+owner and never fails over.
+
 --dry-run prints the argv as JSON and runs nothing. A real run needs the desk to be
 enabled (a plain file named "enabled" in its office folder, made by Ryan), stays under
 the desk's daily run and spend caps plus any bump Ryan made today, and holds a run slot of the
@@ -144,7 +151,7 @@ if __name__ == "__main__" and "/Users/crisryantan/.hogwarts" not in sys.path:
 from hogwarts import capacity, db, followups, ids, owlery, pensieve, wands  # noqa: E402
 from hogwarts.errors import ConflictError, NotFoundError, StoreError  # noqa: E402
 
-from fleet import common, config, gitops, safefs, toolchain  # noqa: E402
+from fleet import common, config, failover, gitops, safefs, toolchain  # noqa: E402
 from fleet.safefs import FleetError  # noqa: E402
 
 FORBIDDEN_PARTS = (
@@ -684,17 +691,22 @@ def guard(argv: list) -> None:
         raise FleetError("the binary must be an absolute path")
 
 
-def build_plan(conn, desk: str, owl_id: Optional[str] = None, mcp_job: Optional[str] = None, slot: int = 0) -> dict:
+def build_plan(conn, desk: str, owl_id: Optional[str] = None, mcp_job: Optional[str] = None, slot: int = 0,
+               pick: Optional[dict] = None) -> dict:
     """The run's plan: its command, folder, environment and model. slot is the run slot it will hold, which picks
-    a Codex desk's work and temp folders; a dry run plans for slot 0."""
+    a Codex desk's work and temp folders; a dry run plans for slot 0. pick is failover.choose's model, which
+    replaces the desk's own, in the family it names."""
     desk = ids.check("desk", desk)
     if desk not in config.HEADLESS_DESKS:
         raise FleetError("run_desk only launches headless desks")
     check_slot(slot)
-    family = "claude" if desk in config.HEADLESS_CLAUDE else "codex"
+    own = "claude" if desk in config.HEADLESS_CLAUDE else "codex"
     row = pensieve.get_desk(conn, desk)
-    if row["family"] != family:
+    if row["family"] != own:
         raise FleetError("the registry family does not match this desk's launcher")
+    family = own if pick is None else pick["family"]
+    if not failover.can_launch(desk, family):
+        raise FleetError(f"{desk} has no {family} launch settings")
     owl = None
     if owl_id is not None:
         owl_id = ids.check("owl", owl_id)
@@ -711,8 +723,10 @@ def build_plan(conn, desk: str, owl_id: Optional[str] = None, mcp_job: Optional[
     run_id = "run-" + secrets.token_hex(8)
     temp = None
     choice = desk_choice(conn, desk)
+    if pick is not None:
+        choice = {"model": wands.check_name(pick["model"]), "effort": pick["effort"], "change_id": choice["change_id"]}
     if family == "claude":
-        default_model = row.get("model")
+        default_model = row.get("model") if family == own else None
         row = {**row, "model": choice["model"] or default_model}
         argv, cwd, model = _claude_argv(desk, row, brief, prompt, mcp_job, choice["effort"])
         env = child_env()
@@ -723,7 +737,8 @@ def build_plan(conn, desk: str, owl_id: Optional[str] = None, mcp_job: Optional[
         env = child_env(tools["path"], tools["env"])
         temp = tools["temp"]
     guard(argv)
-    return {"desk": desk, "family": family, "owl_id": owl_id, "run_id": run_id, "model": model,
+    return {"desk": desk, "family": family, "desk_family": own, "failover_from": None if pick is None else pick["from"],
+            "owl_id": owl_id, "run_id": run_id, "model": model,
             "effort": choice["effort"] if choice["model"] or family == "claude" else None,
             "change_id": choice["change_id"], "default_model": default_model, "cwd": cwd, "argv": argv, "env": env,
             "temp": temp, "slot": slot, "task_id": None if task is None else task["id"],
@@ -1500,16 +1515,36 @@ def full_ids(names: list) -> list:
     return found
 
 
+def clean_result(result: dict) -> bool:
+    """A run that ended cleanly: exit 0, no vendor limit, and no failure its CLI's structured output named (an exit 0
+    can still carry one). Only such a run's files and patches are taken."""
+    return result["exit_code"] == 0 and result["cap_source"] is None and result.get("failure_class") is None
+
+
+def _previous_model(conn, desk: str, claude: bool) -> Optional[str]:
+    """The model the desk's latest run on its own model recorded (wands.last_run_model), fallback runs left out."""
+    skip = failover.fallback_runs()
+    if not skip:
+        return wands.last_run_model(conn, desk, claude_ids_only=claude)
+    only = " AND model GLOB 'claude-*'" if claude else ""
+    for row in db.fetch_all(conn, f"SELECT model, run_id FROM metrics WHERE desk = ?{only} ORDER BY id DESC LIMIT ?",
+                            (desk, len(skip) + 1)):
+        if row["run_id"] not in skip:
+            return row["model"]
+    return None
+
+
 def after_run(conn, plan: dict, previous: Optional[str], real: Optional[str], exit_code: int,
               now: Optional[int], cap_source: Optional[str] = None, used: Optional[list] = None,
-              on_told: Optional[OnTold] = None) -> None:
+              on_told: Optional[OnTold] = None, trial: bool = True) -> None:
     """Tell Ryan when the real model moved, and count the run toward the trial after a switch.
 
     real is None when the run did not say which model worked (a Claude run with no modelUsage), and then
     no move is reported. used is every model the run named, checked against the blocklist; real alone
     when not given. A run plan_limit labelled with a cap_source stopped at a vendor limit and never
-    counts toward a trial. on_told commits with the note of a run that called a blocked model, as
-    rundesk.blocked-ran (see tell_ending). Never raises, so it cannot hide the run's own result.
+    counts toward a trial, nor does one with trial False (a fallback run, or one failover classed). on_told
+    commits with the note of a run that called a blocked model, as rundesk.blocked-ran (see tell_ending).
+    Never raises, so it cannot hide the run's own result.
     """
     desk = plan["desk"]
     try:
@@ -1519,8 +1554,8 @@ def after_run(conn, plan: dict, previous: Optional[str], real: Optional[str], ex
                                f"{display} moved from {previous} to {real}",
                                dedupe_key=f"ollivander:moved:{desk}:{plan['run_id']}", now=now)
         _report_blocked_run(conn, plan, display, used if used is not None else [real] if real else [], now, on_told)
-        if cap_source is not None:
-            return  # a vendor limit stopped it
+        if cap_source is not None or not trial:
+            return  # a vendor limit stopped it, or it ran on another model
         outcome = wands.record_outcome(conn, desk, exit_code == 0, plan.get("change_id"), now,
                                        blocked=config.BLOCKED_MODEL_PREFIXES, default_model=plan.get("default_model"),
                                        retiring_within=config.RETIRING_SOON_SECONDS)
@@ -1837,6 +1872,22 @@ def _refuse_blocked(conn, plan: dict, now: Optional[int], on_told: Optional[OnTo
     raise Blocked(f"{desk} was not started: its model {named} is blocked here")
 
 
+def _failover_plan(conn, plan: dict, mcp_job: Optional[str], slot: int, now: Optional[int], claim: bool,
+                   notes: Optional[list] = None, on_told: Optional[OnTold] = None) -> dict:
+    """The plan again on failover.choose's model when the desk's own is down, else the plan as it was. While nothing
+    it may run is up, or a review round would not be cross-family, the run waits (failover.ModelsDown) and the owner
+    hears once per outage: failover.wait, which on_told commits with (see tell_ending). In the patrol's shadow mode
+    (notes) no event is written: the refusal's own reason is the ModelsDown error, as a cap's is Capped."""
+    try:
+        pick = failover.choose(conn, plan, now, claim=claim)
+    except failover.ModelsDown as exc:
+        if notes is None:
+            tell_ending(conn, "failover.wait", on_told, lambda: pensieve.add_event(
+                conn, plan["desk"], "failover.wait", "headmaster", str(exc), dedupe_key=exc.key, now=now))
+        raise
+    return plan if pick is None else build_plan(conn, plan["desk"], plan["owl_id"], mcp_job, slot, pick=pick)
+
+
 def _refuse_review_round(plan: dict, lock_held: Optional[Slot]) -> None:
     """Refuse an owl of a review round unless the review that opened the round runs it, holding the run slot the
     round recorded. Only the review script passes a slot it holds for a round (lock_held; the nightly portrait job
@@ -1911,6 +1962,7 @@ def run(conn, desk: str, owl_id: str, mcp_job: Optional[str] = None, now: Option
     early = build_plan(conn, desk, owl_id, mcp_job)
     _refuse_review_round(early, lock_held)
     _refuse_closed(early)
+    early = _failover_plan(conn, early, mcp_job, 0, now, False, notes, on_told)
     _refuse_blocked(conn, early, now, on_told)
     with contextlib.ExitStack() as held:
         # First in the lock order: no review of a build desk's task runs from here until this run's process ends.
@@ -1929,6 +1981,8 @@ def run(conn, desk: str, owl_id: str, mcp_job: Optional[str] = None, now: Option
                 raise Capped(cap)
             plan = build_plan(conn, desk, owl_id, mcp_job, slot.index)
             _refuse_closed(plan)
+            # Chosen last, so a half-open model is claimed as the probe only by a launch that goes ahead.
+            plan = _failover_plan(conn, plan, mcp_job, slot.index, now, True, notes, on_told)
             _refuse_blocked(conn, plan, now, on_told)
             if plan["cwd"] == work_dir(plan["desk"], slot.index):
                 with safefs.opened_dir(config.CASTLE_ROOT, "desks", plan["desk"],
@@ -1949,12 +2003,21 @@ def run(conn, desk: str, owl_id: str, mcp_job: Optional[str] = None, now: Option
             # Counted from here, before the process starts: a run killed or interrupted below still uses a run.
             # The launch lock ends here, so the next run of the desk reads the caps with this launch in them.
             capacity.record_launch(conn, desk, plan["run_id"], plan["model"], task_id=plan.get("task_id"), now=now)
-        result = _launch(conn, plan, now, keep_fds, own, on_told)
+            if plan["failover_from"] is not None:
+                failover.note_run(plan["run_id"], desk, plan["family"], plan["failover_from"])
+        result = _launch(conn, plan, now, keep_fds, own, on_told, shadow)
+    if result["failure_class"] == "auth":
+        summary, key = failover.auth_note(plan["desk"], plan["family"], now)
+        if notes is not None:
+            notes.append(summary)
+        else:
+            tell_ending(conn, "failover.auth", on_told, lambda: pensieve.add_event(
+                conn, plan["desk"], "failover.auth", "headmaster", summary, dedupe_key=key, now=now))
     warn_near_cap(conn, plan["desk"], now, notes)
     if result["cap_source"] is not None:
         report_plan_limit(conn, plan["desk"], result["cap_source"], run_id=result["run_id"], now=now, held=notes,
                           on_told=on_told)
-    elif result["exit_code"] == 0:
+    elif result["exit_code"] == 0 and result["failure_class"] is None:
         _ack_owl(conn, plan["desk"], plan["owl_id"], now)
     if notes is not None:
         result["held"] = notes
@@ -2145,7 +2208,7 @@ def _record_orphan(conn, plan: dict, run_fd: int, row: dict, now: Optional[int])
 
 
 def _launch(conn, plan: dict, now: Optional[int], keep_fds: tuple = (), own: Optional[RunLock] = None,
-            on_told: Optional[OnTold] = None) -> dict:
+            on_told: Optional[OnTold] = None, shadow: bool = False) -> dict:
     """Start the planned run, whose launch run() has recorded, and record what it did. The process inherits every
     fd in keep_fds. own is the run's own lock on a desk that holds spend: its file is kept from just before the
     process starts until the run's usage is recorded, so a run that unwinds without recording it leaves its lock
@@ -2205,7 +2268,9 @@ def _launch(conn, plan: dict, now: Optional[int], keep_fds: tuple = (), own: Opt
         real = parsed if parsed is not None and wands.CLAUDE_ID.fullmatch(parsed) else None
     else:
         real = plan["model"]
-    previous = wands.last_run_model(conn, desk, claude_ids_only=claude)
+    # A fallback run is no move, and neither is coming back from one.
+    fallback = plan.get("failover_from") is not None
+    previous = None if fallback else _previous_model(conn, desk, claude)
     capacity.record_launch_usage(conn, run_id, usage["input_tokens"], usage["output_tokens"],
                                  usage["cache_read_tokens"], usage["cost_usd"], duration_ms,
                                  model=parsed or plan["model"], now=now,
@@ -2217,9 +2282,16 @@ def _launch(conn, plan: dict, now: Optional[int], keep_fds: tuple = (), own: Opt
     if claude and wands.CLAUDE_ID.fullmatch(wands.base_alias(plan["model"])) is None:
         for full_id in full_ids(used):
             _record_resolution(conn, plan["model"], full_id, now)
-    after_run(conn, plan, previous, real, exit_code, now, cap_source, used, on_told=on_told)
+    failure = failover.classify(plan["family"], output, exit_code, claude_result(output) if claude else None)
+    failover.record(conn, plan["family"], plan["model"], failure,
+                    failover.clean(plan["family"], output, exit_code, whole, claude_result(output) if claude else None),
+                    now, tell=not shadow)
+    # A fallback run, or one its CLI said the vendor cut off, says nothing about the desk's own model's trial.
+    after_run(conn, plan, previous, real, exit_code, now, cap_source, used, on_told=on_told,
+              trial=not fallback and failure is None)
     found = {"desk": desk, "run_id": run_id, "exit_code": exit_code, "timed_out": exit_code == -1,
-             "cap_source": cap_source, **usage}
+             "cap_source": cap_source, "model": plan["model"], "family": plan["family"],
+             "failover_from": plan.get("failover_from"), "failure_class": failure, **usage}
     blocked = _blocked_used(used)
     if blocked is not None:
         # after_run told Ryan, unless the store or the blocklist refused it; a caller that acts on the output can
@@ -2258,7 +2330,13 @@ def main(argv: Optional[list] = None) -> int:
         # mid-step: the desk's process is killed and the locks are released as the run unwinds.
         with common.ended_by_signals():
             result = run(conn, args.desk, args.owl, args.mcp_job, task_lock_fd=args.task_lock_fd)
-        clean = result["exit_code"] == 0 and result["cap_source"] is None
+            # A run an outage cut off goes again from its checkpoint (its pad or handoff), on whatever model the
+            # breaker now gives it, at most FAILOVER_RETRIES times, each one a launch under the daily caps.
+            for _ in range(config.FAILOVER_RETRIES):
+                if not failover.retryable(result):
+                    break
+                result = run(conn, args.desk, args.owl, args.mcp_job, task_lock_fd=args.task_lock_fd)
+        clean = clean_result(result)
         sys.stdout.write(json.dumps({"ok": clean, **result}, ensure_ascii=True) + "\n")
         if not clean and result["cap_source"] is None:
             report_failure(conn, args.desk, args.owl)
@@ -2267,6 +2345,8 @@ def main(argv: Optional[list] = None) -> int:
         sys.stderr.write(json.dumps({"ok": False, "error": common.one_line(exc, 200)}, ensure_ascii=True) + "\n")
         if not args.dry_run and isinstance(exc, safefs.Busy):
             report_lock_wait(conn, args.desk, args.owl)
+        elif not args.dry_run and isinstance(exc, failover.ModelsDown):
+            failover.note_waiting(args.desk, args.owl, exc)  # the Owl Post starts it again once a model is back
         elif not args.dry_run and not isinstance(exc, (Capped, Stopped, Blocked, TaskClosed, ReviewOwl)):
             report_failure(conn, args.desk, args.owl)
         return 1

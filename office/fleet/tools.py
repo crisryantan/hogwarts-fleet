@@ -18,6 +18,8 @@
   fleet close <task-id>
       One auto-close try in the foreground (fleet/closer.py), only while auto-close is on: it clears a stopped task
       once, keeps every kept result, and runs a command or judge run again only past the automatic tries.
+  fleet patrol-restart <owl-id>
+      Sends a patrol owl again that its desk's CLI could not sign in for, once you have signed it in.
 
 Output is one JSON object, like castle. Exit 0 on success, 1 on a refusal or error. fleet feed
 is the exception: it prints a live, read-only text feed until Ctrl+C (see fleet/feed.py).
@@ -39,7 +41,7 @@ from hogwarts import ids  # noqa: E402
 from hogwarts.errors import StoreError  # noqa: E402
 
 from fleet import adopt, closer, common, config, gitops, push, review, verify, worktree  # noqa: E402
-from fleet import gringotts, ollivander  # noqa: E402
+from fleet import gringotts, ollivander, patrol  # noqa: E402
 from fleet.safefs import FleetError  # noqa: E402
 from fleet import feed  # noqa: E402
 
@@ -94,6 +96,7 @@ def build_parser() -> argparse.ArgumentParser:
     pushed.add_argument("--yes", action="store_true")
     commands.add_parser("ollivander", allow_abbrev=False).add_argument("--dry-run", action="store_true")
     commands.add_parser("close", allow_abbrev=False).add_argument("task")
+    commands.add_parser("patrol-restart", allow_abbrev=False).add_argument("owl")
     commands.add_parser("adopt", allow_abbrev=False).add_argument("task")
     banked = commands.add_parser("gringotts", allow_abbrev=False)
     banked.add_argument("--drill", nargs="?", const="newest", default=None, metavar="ARCHIVE")
@@ -133,6 +136,8 @@ def run(conn, args: argparse.Namespace) -> object:
         return run_gringotts(args.drill)
     if args.command == "close":
         return closer.close_by_hand(conn, args.task)
+    if args.command == "patrol-restart":
+        return patrol.restart(args.owl)
     if args.command == "adopt":
         return adopt.adopt(conn, args.task, confirm=adopt.ask_terminal)
     raise FleetError("unknown command")
