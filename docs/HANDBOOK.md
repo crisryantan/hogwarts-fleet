@@ -182,8 +182,10 @@ Where each piece stands once onboarding stage 4 passes, and what switches it on.
 | Auto-close | Installed, off | `echo on > ~/.hogwarts/auto-close`. Map rounds start the closer, in shadow mode too, so it needs the patrol loaded (5.2). `rm ~/.hogwarts/auto-close` switches it off. |
 | Worktree cleanup | Installed, off | `echo on > ~/.hogwarts/worktree-cleanup`. Map rounds run it, in shadow mode too, so it needs the patrol loaded (5.2). `rm ~/.hogwarts/worktree-cleanup` switches it off. |
 | Owl reports: McGonagall's one-line report on each new owl, as a notification | Installed, off | Copy the kit's `office/desks/mcgonagall/owl-report-settings.json` to `~/.hogwarts/desks/mcgonagall/`, then `echo on > ~/.hogwarts/owl-reports`. It needs the Owl Post loaded and `claude` signed in. `rm ~/.hogwarts/owl-reports` switches it off, and the plain notification comes back. `~/.hogwarts/pending/README.md` (d) has the details. |
+| Orchestrator: McGonagall picks the next step after an owl or a verdict, as one typed action a script checks | Installed, off | With owl reports' settings file in place, `echo on > ~/.hogwarts/auto-orchestrate`. Her only actions are a fix round, the next review, a data question for Snape (it comes to you), a draft PR after a recorded PASS while `auto-draft-pr` is on, and a one-line note to you. At most 6 wakes per task and 30 a day. `rm ~/.hogwarts/auto-orchestrate` switches it off. |
+| Phone pings for loud events (PR opened, a review that needs you, a refused go, her notes and caps) | Installed, on | A macOS notification by default. Your private overlay can set `PHONE_COMMAND` in `fleet/config.py` to an absolute command that reads one JSON payload on stdin and exits 0 once it delivered it; a failure falls back to the notification. |
 
-A desk switches on when you create its `enabled` file after reading its dry run, one desk at a time. Draft PRs, follow-ups, auto-portrait, auto-close, the worktree cleanup and owl reports are each on only while their file in the office is a plain file you own that no one else can write, holding exactly `on`. Nothing switches itself on.
+A desk switches on when you create its `enabled` file after reading its dry run, one desk at a time. Draft PRs, follow-ups, auto-portrait, auto-close, the worktree cleanup, owl reports and the orchestrator are each on only while their file in the office is a plain file you own that no one else can write, holding exactly `on`. Nothing switches itself on.
 
 ## Daily rhythm
 
@@ -456,6 +458,7 @@ Everything `castle` prints is JSON. The installer links `castle` and `fleet` int
 | `echo on > ~/.hogwarts/auto-close` | Close a merged task once scripts prove it |
 | `echo on > ~/.hogwarts/worktree-cleanup` | Remove the worktree of a build task closed three days ago, once nothing in it can be lost |
 | `echo on > ~/.hogwarts/owl-reports` | Get McGonagall's one-line report on each new owl to her as a notification |
+| `echo on > ~/.hogwarts/auto-orchestrate` | Let McGonagall pick the next step after an owl or a verdict, as one checked typed action |
 | `rm ~/.hogwarts/<file>` | Switch that one off again |
 
 ## Rules worth remembering
@@ -504,7 +507,7 @@ Everything the fleet installs lives in two folders, a few background jobs and on
 Switch the automations off first. A review or closer pass that is already running is a process of its own, so stopping the background jobs doesn't end it, but with the files gone no draft PR, follow-up push or reply, proven close, worktree removal or memory addition starts after its next check.
 
 ```
-rm -f ~/.hogwarts/auto-draft-pr ~/.hogwarts/pr-followup ~/.hogwarts/auto-close ~/.hogwarts/worktree-cleanup ~/.hogwarts/auto-portrait ~/.hogwarts/owl-reports
+rm -f ~/.hogwarts/auto-draft-pr ~/.hogwarts/pr-followup ~/.hogwarts/auto-close ~/.hogwarts/worktree-cleanup ~/.hogwarts/auto-portrait ~/.hogwarts/owl-reports ~/.hogwarts/auto-orchestrate
 ```
 
 From your clone of the repo, run `./uninstall.sh` to see every step it would take. It changes nothing. Then run `./uninstall.sh --yes` to do it. It stops the background jobs, archives both folders to `~/hogwarts-fleet-archive-<timestamp>.tar.gz` before it removes them, and never edits your Claude or Codex settings. If your settings still mention the fleet, it shows the lines and the backup to restore. [UNINSTALL.md](UNINSTALL.md) has the same steps by hand, and how to restore from the archive.

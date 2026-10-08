@@ -77,8 +77,10 @@ FLAG_TABLE_MODULES = {"push_gate.py"}
 # Modules allowed to start processes, and the only module each may use for it.
 # ollivander.py reads the CLI catalogs and help, and runs the CLI updates and their checks. patrol.py runs gh
 # api graphql with its fixed read-only queries. loops.py starts the launchd/ jobs from a terminal (fleet loops).
+# phone.py runs the overlay's phone command, one fixed argv with the payload on stdin.
 PROCESS_MODULES_ALLOWED = {"run_desk.py": {"subprocess"}, "gitops.py": {"subprocess"}, "verify.py": {"subprocess"},
-                           "ollivander.py": {"subprocess"}, "patrol.py": {"subprocess"}, "loops.py": {"subprocess"}}
+                           "ollivander.py": {"subprocess"}, "patrol.py": {"subprocess"}, "loops.py": {"subprocess"},
+                           "phone.py": {"subprocess"}}
 PLISTS = ("owlpost", "map", "morning", "keeper", "scoreboard", "portrait", "gringotts", "ollivander")
 REAL_OFFICE = "/Users/crisryantan/.hogwarts"
 REAL_CASTLE = "/Users/crisryantan/hogwarts"
@@ -101,12 +103,13 @@ def env_problems(source: str) -> list:
 
 
 OPT_IN_NAMES = ("auto-draft-pr", "auto-portrait", "pr-followup", "auto-close", "worktree-cleanup", "owl-reports",
-                "cross-family-failover")
+                "cross-family-failover", "auto-orchestrate")
 # An opt-in file named as a file: the whole string, or the last part of a path. The feature's name in a message
 # ("auto-portrait applied ...") is not a file name.
 OPT_IN_FILE_SHAPE = re.compile(r"(?:^|/)(?:" + "|".join(map(re.escape, OPT_IN_NAMES)) + r")/?$")
 OPT_IN_ATTRIBUTES = {"AUTO_DRAFT_PR_FILE", "AUTO_PORTRAIT_FILE", "PR_FOLLOWUP_FILE", "AUTO_CLOSE_FILE",
-                     "WORKTREE_CLEANUP_FILE", "OWL_REPORTS_FILE", "CROSS_FAMILY_FAILOVER_FILE", "OPT_IN_FILES"}
+                     "WORKTREE_CLEANUP_FILE", "OWL_REPORTS_FILE", "CROSS_FAMILY_FAILOVER_FILE", "ORCHESTRATOR_FILE",
+                     "OPT_IN_FILES"}
 
 
 def _docstrings(tree: ast.AST) -> set:
@@ -208,7 +211,7 @@ class OptInTests(unittest.TestCase):
         self.assertEqual(set(config.OPT_IN_FILES), {config.AUTO_DRAFT_PR_FILE, config.AUTO_PORTRAIT_FILE,
                                                     config.PR_FOLLOWUP_FILE, config.AUTO_CLOSE_FILE,
                                                     config.WORKTREE_CLEANUP_FILE, config.OWL_REPORTS_FILE,
-                                                    config.CROSS_FAMILY_FAILOVER_FILE})
+                                                    config.CROSS_FAMILY_FAILOVER_FILE, config.ORCHESTRATOR_FILE})
         self.assertEqual(len(config.OPT_IN_FILES), len(set(config.OPT_IN_FILES)))
         self.assertEqual(set(OPT_IN_NAMES), set(config.OPT_IN_FILES))
         self.assertIn(FLEET / "hooks" / "session_start.py", SOURCES)

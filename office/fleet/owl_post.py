@@ -28,7 +28,10 @@ For each regular *.json file in /Users/crisryantan/hogwarts/desks/<sender>/outbo
    outbox folder, so an owl from any other desk never starts a review, and the owl's task must be its
    request's task and the desk's own. A handoff that starts nothing says why in the pass's output, and the
    first delivery of it also leaves a routine event.
-9. Move the file, and any body file, into outbox/.sent/. A refused file goes to
+9. With the orchestrator switched on, the end of each pass lands each new owl to McGonagall and each new build verdict
+   as one item for her headless turn and starts that run (fleet/orchestrator.py). Each pass then pings the loud
+   headmaster events written since the last one to Ryan's phone, or this Mac (fleet/phone.py).
+10. Move the file, and any body file, into outbox/.sent/. A refused file goes to
    outbox/.rejected/ with a .reason file, and Ryan gets a headmaster event.
 
 After the outboxes, each pass starts again the automatic review of every handoff the review loop took and has
@@ -694,6 +697,19 @@ def run_pass(conn, now: Optional[int] = None) -> dict:
         go_confirm.sweep(conn)
     except (StoreError, FleetError, OSError) as exc:
         summary["errors"].append({"desk": config.HOOK_DESK, "error": "could not sweep confirmations: " + _reason(exc)})
+    try:  # the orchestrator: one headless McGonagall run for what landed for her, while its switch is on
+        from fleet import orchestrator
+
+        orchestrator.kick(conn, now)
+    except (StoreError, FleetError, OSError) as exc:
+        summary["errors"].append({"desk": config.HOOK_DESK,
+                                  "error": "could not start the orchestrator: " + _reason(exc)})
+    try:  # the loud headmaster events, one ping each, to Ryan's phone or else this Mac
+        from fleet import phone
+
+        phone.deliver(conn)
+    except (StoreError, FleetError, OSError) as exc:
+        summary["errors"].append({"desk": config.HOOK_DESK, "error": "could not deliver to the phone: " + _reason(exc)})
     return summary
 
 
