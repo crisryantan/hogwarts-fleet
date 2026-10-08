@@ -46,7 +46,7 @@ KNOWN_FLAGS = {
     "--verbose", "--all",
     # git, run only through gitops with the hardening flags
     "--git-dir", "--work-tree", "--verify", "--end-of-options", "--get", "--porcelain", "--no-verify",
-    "--no-ext-diff", "--no-textconv", "--detach", "-b", "-m", "-F", "--stdin", "--force", "-z",
+    "--no-ext-diff", "--no-textconv", "--detach", "--no-checkout", "-b", "-m", "-F", "--stdin", "--force", "-z",
     "--no-decorate", "--oneline", "--format", "--is-ancestor", "--quiet", "--name-only",
     "--is-shallow-repository", "-e",  # read-only probes: a shallow checkout, and git cat-file -e for a commit
     "--count", "--no-replace-objects",  # git rev-list --count walks HEAD's history as its commits name it
