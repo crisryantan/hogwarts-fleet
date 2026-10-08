@@ -190,6 +190,7 @@ Where each piece stands once onboarding stage 4 passes, and what switches it on.
 | Owl reports: McGonagall's one-line report on each new owl, as a notification | Installed, off | Copy the kit's `office/desks/mcgonagall/owl-report-settings.json` to `~/.hogwarts/desks/mcgonagall/`, then `echo on > ~/.hogwarts/owl-reports`. It needs the Owl Post loaded and `claude` signed in. `rm ~/.hogwarts/owl-reports` switches it off, and the plain notification comes back. `~/.hogwarts/pending/README.md` (d) has the details. |
 | Orchestrator: McGonagall picks the next step after an owl or a verdict, as one typed action a script checks | Installed, off | With owl reports' settings file in place, `echo on > ~/.hogwarts/auto-orchestrate`. Her only actions are a fix round, the next review, a data question for Snape (it comes to you), a draft PR after a recorded PASS while `auto-draft-pr` is on, and a one-line note to you. At most 6 wakes per task and 30 a day. `rm ~/.hogwarts/auto-orchestrate` switches it off. |
 | Phone pings for loud events (PR opened, a review that needs you or is blocked on tooling, a refused go, a model outage or sign-in failure, her notes and caps) | Installed, on | A macOS notification by default. Your private overlay can set `PHONE_COMMAND` in `fleet/config.py` to an absolute command that reads one JSON payload on stdin and exits 0 once it delivered it; a failure falls back to the notification. |
+| Go updates: one line each time one of McGonagall's open go tasks changes where it stands | Installed, off | `echo on > ~/.hogwarts/auto-go-updates`. Each line names the go task, its build, the new state and what you do next, from a fixed table, and goes the way phone pings go. The first pass after you switch it on only records where things stand, and a loud event one of its lines already covers isn't pinged a second time. `rm ~/.hogwarts/auto-go-updates` switches it off. |
 | **Terminal loops**: the background jobs run from a Terminal window | Installed, off. launchd runs them by default | `./install.sh --terminal-loops`, or `sh scripts/loops-setup.sh` on an existing install, then keep `fleet loops` running. `rm ~/.hogwarts/loops/jobs` and loading the jobs again goes back to launchd. |
 | **Model failover**: a desk runs on the next model of its family while its own is down | Installed, on | Nothing. Crossing to the other family is the one opt-in: `echo on > ~/.hogwarts/cross-family-failover`, and only for a desk whose runs no review reads. `rm ~/.hogwarts/cross-family-failover` switches it off. |
 
@@ -488,6 +489,7 @@ Everything `castle` prints is JSON. The installer links `castle` and `fleet` int
 | `echo on > ~/.hogwarts/owl-reports` | Get McGonagall's one-line report on each new owl to her as a notification |
 | `echo on > ~/.hogwarts/auto-orchestrate` | Let McGonagall pick the next step after an owl or a verdict, as one checked typed action |
 | `echo on > ~/.hogwarts/cross-family-failover` | Let a desk whose own family is all down run on the other family, where no review reads its runs |
+| `echo on > ~/.hogwarts/auto-go-updates` | Get one line each time one of McGonagall's open go tasks changes where it stands |
 | `rm ~/.hogwarts/<file>` | Switch that one off again |
 
 ## Rules worth remembering
@@ -538,7 +540,7 @@ Everything the fleet installs lives in two folders, a few background jobs and on
 Switch the automations off first. A review or closer pass that is already running is a process of its own, so stopping the background jobs doesn't end it, but with the files gone no draft PR, follow-up push or reply, proven close, worktree removal or memory addition starts after its next check.
 
 ```
-rm -f ~/.hogwarts/auto-draft-pr ~/.hogwarts/pr-followup ~/.hogwarts/auto-close ~/.hogwarts/worktree-cleanup ~/.hogwarts/auto-portrait ~/.hogwarts/owl-reports ~/.hogwarts/auto-orchestrate ~/.hogwarts/cross-family-failover
+rm -f ~/.hogwarts/auto-draft-pr ~/.hogwarts/pr-followup ~/.hogwarts/auto-close ~/.hogwarts/worktree-cleanup ~/.hogwarts/auto-portrait ~/.hogwarts/owl-reports ~/.hogwarts/auto-orchestrate ~/.hogwarts/cross-family-failover ~/.hogwarts/auto-go-updates
 ```
 
 From your clone of the repo, run `./uninstall.sh` to see every step it would take. It changes nothing. Then run `./uninstall.sh --yes` to do it. It stops the background jobs, archives both folders to `~/hogwarts-fleet-archive-<timestamp>.tar.gz` before it removes them, and never edits your Claude or Codex settings. If your settings still mention the fleet, it shows the lines and the backup to restore. [UNINSTALL.md](UNINSTALL.md) has the same steps by hand, and how to restore from the archive.

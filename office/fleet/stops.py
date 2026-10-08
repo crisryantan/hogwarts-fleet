@@ -96,14 +96,22 @@ def release(desk: str, owl_id: str) -> None:
             os.unlink(name, dir_fd=fd)
 
 
-def held() -> list:
-    """The held runs as (owl, marker), oldest first. Never raises."""
+def held(strict: bool = False) -> list:
+    """The held runs as (owl, marker), oldest first. Never raises, unless strict: then a folder that is there but cannot
+    be listed, or a marker in it that cannot be read whole, raises, so a caller that keeps state never reads it as no
+    runs held."""
     try:
         with _held_dir() as fd:
             names = sorted(name for name in os.listdir(fd) if not name.startswith("."))
             found = [(name, markers.read(fd, name)) for name in names]
-    except (FleetError, OSError):
+    except safefs.Missing:
         return []
+    except (FleetError, OSError):
+        if strict:
+            raise
+        return []
+    if strict and any(marker is not None and marker.get("state") == "unknown" for _, marker in found):
+        raise FleetError("a held run's marker cannot be read")
     found = [(name, marker) for name, marker in found if marker is not None]
     return sorted(found, key=lambda item: (item[1].get("at") if type(item[1].get("at")) is int else 0, item[0]))
 

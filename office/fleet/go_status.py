@@ -35,30 +35,43 @@ def _go_tasks(conn) -> list:
             if pensieve.task_spec(conn, task["id"]) is not None]
 
 
-def _held_tasks() -> set:
-    return {marker.get("task") for _, marker in stops.held() if marker.get("state") == "held"}
+def _held_tasks(strict: bool = False) -> set:
+    return {marker.get("task") for _, marker in stops.held(strict) if marker.get("state") == "held"}
+
+
+def open_go_tasks(conn, strict: bool = False) -> list:
+    """Every open go task, newest first, as {"task": its row, "children": its child task rows oldest first, "held":
+    the ids of those Ollivander's stop holds}. Read only: entries renders it for her hooks, and fleet/go_watch.py
+    reduces it to one state per go task. strict raises when the held runs cannot be read, instead of none held."""
+    tasks = _go_tasks(conn)
+    if not tasks:
+        return []
+    children = {task["id"]: [] for task in tasks}
+    for task in pensieve.list_tasks(conn):
+        if task["parent_task_id"] in children:
+            children[task["parent_task_id"]].append(task)
+    held = _held_tasks(strict)
+    return [{"task": task, "children": children[task["id"]],
+             "held": {child["id"] for child in children[task["id"]]} & held} for task in tasks]
 
 
 def entries(conn, now: int) -> tuple:
     """(entries, more): entries is [(go task id, its lines)] for the newest GO_STATUS_CAP open go tasks, and more how
     many open ones were left out."""
-    tasks = _go_tasks(conn)
-    shown = tasks[:config.GO_STATUS_CAP]
+    every = open_go_tasks(conn)
+    shown = every[:config.GO_STATUS_CAP]
     if not shown:
         return [], 0
-    ids = [task["id"] for task in shown]
+    ids = [item["task"]["id"] for item in shown]
     builds = views.build_lines(conn, now, config, include_closed=True, cap=None, parents=ids, waiting=True)
-    children = {task["id"]: [] for task in shown}
-    for task in pensieve.list_tasks(conn):
-        if task["parent_task_id"] in children:
-            children[task["parent_task_id"]].append(task["id"])
+    children = {item["task"]["id"]: [child["id"] for child in item["children"]] for item in shown}
     newest = pensieve.newest_events(conn, ids + [child for kids in children.values() for child in kids])
-    held = _held_tasks()
     found = []
-    for task in shown:
+    for item in shown:
+        task = item["task"]
         mine = [line for line in builds if line.startswith(f"{task['id']} -> ")][:config.GO_STATUS_BUILDS]
         lines = [f"- {line}" for line in mine] or [f"- {task['id']} -> no build yet -> {task['status']}"]
-        if held & set(children[task["id"]]):
+        if item["held"]:
             lines.append("  held: Ollivander's stop refused its run; the Owl Post starts it again once the stop clears")
         events = [newest[key] for key in [task["id"], *children[task["id"]]] if key in newest]
         if events:
@@ -66,7 +79,7 @@ def entries(conn, now: int) -> tuple:
             lines.append(f"  latest: [{event['kind']}] #{event['id']} {event['task_id']}: {event['summary']}")
         # An event summary can quote a desk or git: every line is scrubbed whole before it is cut.
         found.append((task["id"], [common.scrubbed_line(line, config.GO_STATUS_LINE_CHARS) for line in lines]))
-    return found, len(tasks) - len(shown)
+    return found, len(every) - len(shown)
 
 
 def _digest(lines: list) -> str:

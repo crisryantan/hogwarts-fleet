@@ -14,6 +14,9 @@ and each orchestrator run, and sends every new event whose kind is in config.PHO
   (command, macos or none) and how the primary went (ok, failed or unconfigured).
 - The first deliver ever only records the newest event id, so switching this on sends no backlog. At most
   PHONE_MAX_PER_PASS events ping one by one each pass; any more loud events in that pass go as one summary ping.
+- While go updates are on (fleet/go_watch.py), a loud event that one of its lines stands for, on a go task or build
+  it watches that stands in that state now, is marked covered and not pinged here, so Ryan hears it once. Every other
+  loud event pings as before.
 """
 from __future__ import annotations
 
@@ -149,9 +152,15 @@ def _deliver(conn, fd: int) -> list:
     rows = db.fetch_all(conn, "SELECT id, kind, task_id, summary FROM events WHERE id > ? AND verdict = 'headmaster'"
                               " ORDER BY id LIMIT ?", (mark, SCAN_LIMIT))
     loud = [row for row in rows if row["kind"] in config.PHONE_KINDS]
+    from fleet import go_watch  # here, since go_watch sends through this module
+
+    watching = go_watch.watching(conn) if loud else {}
     outcomes, batched = [], []
     for row in loud:
         name = f"ev-{int(row['id'])}"
+        if go_watch.covers(row, watching):
+            markers.publish(fd, name, {"state": "covered", "via": "go-watch"})  # its go update is the one ping
+            continue
         if not markers.publish(fd, name, {"state": "sending"}):
             continue  # another deliver, or this one before a kill, took it: never twice
         if len(outcomes) >= config.PHONE_MAX_PER_PASS:

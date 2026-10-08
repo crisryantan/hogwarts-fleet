@@ -29,8 +29,9 @@ For each regular *.json file in /Users/crisryantan/hogwarts/desks/<sender>/outbo
    request's task and the desk's own. A handoff that starts nothing says why in the pass's output, and the
    first delivery of it also leaves a routine event.
 9. With the orchestrator switched on, the end of each pass lands each new owl to McGonagall and each new build verdict
-   as one item for her headless turn and starts that run (fleet/orchestrator.py). Each pass then pings the loud
-   headmaster events written since the last one to Ryan's phone, or this Mac (fleet/phone.py).
+   as one item for her headless turn and starts that run (fleet/orchestrator.py). Each pass then sends one line for
+   each change in where a go task stands while go updates are on (fleet/go_watch.py), and pings the loud headmaster
+   events written since the last one to Ryan's phone, or this Mac (fleet/phone.py).
 10. Move the file, and any body file, into outbox/.sent/. A refused file goes to
    outbox/.rejected/ with a .reason file, and Ryan gets a headmaster event.
 
@@ -723,6 +724,12 @@ def run_pass(conn, now: Optional[int] = None) -> dict:
     except (StoreError, FleetError, OSError) as exc:
         summary["errors"].append({"desk": config.HOOK_DESK,
                                   "error": "could not start the orchestrator: " + _reason(exc)})
+    try:  # one line per change in where a go task stands, while go updates are on; before the loud events it covers
+        from fleet import go_watch
+
+        go_watch.watch(conn)
+    except Exception as exc:  # noqa: BLE001 - a go update that fails never stops the pass
+        summary["errors"].append({"desk": config.HOOK_DESK, "error": "could not send go updates: " + _reason(exc)})
     try:  # the loud headmaster events, one ping each, to Ryan's phone or else this Mac
         from fleet import phone
 

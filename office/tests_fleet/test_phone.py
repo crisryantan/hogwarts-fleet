@@ -222,3 +222,119 @@ class HardeningTests(PhoneCase):
         for kind in ("review.auto", "review.unpublished", "review.interrupted", "review.fix-round", "push.draft-pr",
                      "go.refused", "orchestrator.notify", "orchestrator.cap", "orchestrator.ask-snape"):
             self.assertIn(kind, config.PHONE_KINDS)
+
+
+class GoWatchTests(PhoneCase):
+    """While go updates are on, a loud event one of their lines stands for, on a watched go task or build, is not
+    pinged here too; every other loud event still is."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        from hogwarts import ids, owlery
+
+        self.go = "tk_00000000000000a0"
+        pensieve.create_task(self.conn, "mcgonagall", "the go", intent_path=ids.intent_path(self.go), task_id=self.go,
+                             now=NOW)
+        pensieve.record_spec(self.conn, self.go, "/private/tmp/checkout", "fix/widget", "origin/main", "a" * 64,
+                             now=NOW)
+        self.build = owlery.open_request(self.conn, "mcgonagall", "harry", "build it", parent_task_id=self.go,
+                                         now=NOW)["task"]["id"]
+
+    def on(self, value: str = "on") -> None:
+        self.write_file(self.office / config.GO_UPDATES_FILE, value + "\n")
+
+    def loud(self, task_id, kind: str) -> int:
+        self.count += 1
+        return pensieve.add_event(self.conn, "mcgonagall", kind, "headmaster", "something needs you",
+                                  task_id=task_id, dedupe_key=f"test:{self.count}", now=NOW + self.count)["id"]
+
+    def standing(self, state: str, line: dict = None):
+        """Where the go task stands now, as go updates read it, and the marker of that state's line (none for None)."""
+        from fleet import go_watch
+
+        key = {"build": self.build, "state": state, "round": 1, "verdict": None, "event": None}
+        line = {"state": "sent", "via": "macos", "primary": "unconfigured"} if line is None else line
+        with safefs.opened_dir(config.OFFICE_ROOT, config.GO_WATCH_DIR) as fd:
+            name = go_watch._marker(json.loads(safefs.read_regular(fd, go_watch.STATE, 4096))["epoch"], self.go, key)
+            if os.path.lexists(self.office / config.GO_WATCH_DIR / name):
+                os.unlink(name, dir_fd=fd)
+            if line:
+                markers.publish(fd, name, line)
+        return mock.patch.object(go_watch, "current", return_value={self.go: (key, None)})
+
+    def test_go_watch_on_skips_a_loud_event_its_go_task_stands_in_now(self):
+        from fleet import go_watch
+
+        self.on()
+        go_watch.watch(self.conn)  # its baseline: the go task and its build are watched from here
+        for kind, state in go_watch.COVERS.items():
+            with self.subTest(kind=kind), self.standing(state):
+                event_id = self.loud(self.go if kind == "go.refused" else self.build, kind)
+                self.assertEqual(self.deliver(), [])
+                self.assertEqual(self.marker(event_id), {"state": "covered", "via": "go-watch"})
+        self.notified.assert_not_called()
+        # A real refusal: once go updates sent its line, as the Owl Post's pass does first, that is the one ping.
+        refused = self.loud(self.go, "go.refused")
+        self.assertEqual(go_watch.watch(self.conn), ["sent"])
+        self.assertEqual(self.deliver(), [])
+        self.assertEqual(self.marker(refused)["state"], "covered")
+        self.assertEqual(self.notified.call_count, 1)
+
+    def test_go_watch_on_pings_an_event_whose_line_is_not_claimed_yet(self):
+        from fleet import go_watch
+
+        self.on()
+        go_watch.watch(self.conn)
+        for line in ({}, {"state": "sending"}, {"state": "undelivered", "via": "none", "primary": "unconfigured"},
+                     {"state": "sent", "via": "macos", "primary": "unconfigured", "batched": True}):
+            with self.subTest(line=line), self.standing("headmaster", line):
+                # No line of its own reached Ryan for where it stands (none yet, cut short, failed or only counted in
+                # a summary), so the loud event is never held back.
+                event_id = self.loud(self.build, "review.headmaster")
+                self.assertEqual(self.deliver(), ["sent"])
+                self.assertEqual(self.marker(event_id)["state"], "sent")
+        self.loud(self.go, "go.refused")
+        with safefs.opened_dir(config.OFFICE_ROOT, config.GO_WATCH_DIR) as fd:  # its state, but not one usable key
+            safefs.write_new(fd, go_watch.STATE, json.dumps({"state": "watching", "epoch": "0" * 8, "tasks": {
+                self.go: {"build": None, "state": [], "round": 0, "verdict": None, "event": None}}}).encode())
+        self.assertEqual(self.deliver(), ["sent"])
+
+    def test_go_watch_on_still_pings_every_other_loud_event(self):
+        from fleet import go_watch
+
+        self.on()
+        go_watch.watch(self.conn)
+        with self.standing("handoff"):
+            pinged = [self.loud(self.build, "review.headmaster"),  # the go task has moved on from it
+                      self.loud(self.build, "push.draft-pr"),  # no PR is bound, so no update carries its link
+                      self.loud(self.build, "review.auto"), self.loud(self.build, "push.auto-failed"),
+                      self.loud(self.build, "review.interrupted"), self.loud(self.build, "ollivander.stopped"),
+                      self.loud(self.task["id"], "review.headmaster"), self.loud(None, "failover.down")]
+            with mock.patch.object(config, "PHONE_MAX_PER_PASS", 20):
+                self.assertEqual(self.deliver(), ["sent"] * len(pinged))
+        for event_id in pinged:
+            self.assertEqual(self.marker(event_id)["state"], "sent")
+        self.assertEqual(self.deliver(), [])
+
+    def test_go_watch_off_or_unreadable_skips_nothing(self):
+        from fleet import go_watch
+
+        self.on()
+        go_watch.watch(self.conn)
+        self.on("off")
+        self.loud(self.build, "review.headmaster")
+        self.assertEqual(self.deliver(), ["sent"])
+        self.on()
+        with self.standing("headmaster"):
+            with mock.patch.object(go_watch, "current", side_effect=FleetError("held runs unreadable")):
+                self.loud(self.build, "review.headmaster")
+                self.assertEqual(self.deliver(), ["sent"])
+            with safefs.opened_dir(config.OFFICE_ROOT, config.GO_WATCH_DIR, create=True) as fd:
+                safefs.write_new(fd, go_watch.STATE, b"not json\n")
+            self.loud(self.build, "review.headmaster")
+            self.assertEqual(self.deliver(), ["sent"])
+
+    def test_go_watch_before_its_first_pass_skips_nothing(self):
+        self.on()
+        self.loud(self.go, "go.refused")
+        self.assertEqual(self.deliver(), ["sent"])

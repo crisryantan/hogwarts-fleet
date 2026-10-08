@@ -152,10 +152,13 @@ CROSS_FAMILY_FAILOVER_FILE = "cross-family-failover"
 # wakes one headless McGonagall turn that picks the next step as one typed action, which a script checks and runs
 # (fleet/orchestrator.py). Off by default: echo on > ~/.hogwarts/auto-orchestrate
 ORCHESTRATOR_FILE = "auto-orchestrate"
+# While this office file holds "on", each change in where one of McGonagall's open go tasks stands is one line to Ryan
+# through the phone transports (fleet/go_watch.py). Off by default: echo on > ~/.hogwarts/auto-go-updates
+GO_UPDATES_FILE = "auto-go-updates"
 # Every office opt-in file. common.opt_in_on reads only these names, so a typo never reads another office file as a
 # switch, every switch is read through that one reader, and a name not listed here always reads off.
 OPT_IN_FILES = (AUTO_DRAFT_PR_FILE, AUTO_PORTRAIT_FILE, PR_FOLLOWUP_FILE, AUTO_CLOSE_FILE, WORKTREE_CLEANUP_FILE,
-                OWL_REPORTS_FILE, CROSS_FAMILY_FAILOVER_FILE, ORCHESTRATOR_FILE)
+                OWL_REPORTS_FILE, CROSS_FAMILY_FAILOVER_FILE, ORCHESTRATOR_FILE, GO_UPDATES_FILE)
 # Review rounds of one follow-up, apart from the task's REVIEW_ROUND_CAP, and the follow-ups one task may take.
 FOLLOWUP_ROUND_CAP = 2
 FOLLOWUP_MAX_PER_TASK = 5
@@ -421,6 +424,12 @@ GO_STATUS_CAP = 10
 GO_STATUS_BUILDS = 2
 GO_STATUS_LINE_CHARS = 300
 GO_STATUS_SEEN_DIR = "go-status-seen"
+# Go updates (fleet/go_watch.py): at most this many lines a pass, each its own ping, and one summary ping for the rest.
+# Every line is cut to GO_WATCH_LINE_CHARS. The last state sent for each go task, and one marker per line, are kept
+# in the office folder GO_WATCH_DIR.
+GO_WATCH_MAX_PER_PASS = 5
+GO_WATCH_LINE_CHARS = 200
+GO_WATCH_DIR = "go-watch"
 # A seen marker a prompt hook left pending this long, or whose hook process is gone, is taken over by the next hook.
 SEEN_PENDING_SECONDS = 60
 

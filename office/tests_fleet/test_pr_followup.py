@@ -304,7 +304,8 @@ class SwitchTests(FollowupCase):
         self.assertEqual(config.OPT_IN_FILES, (config.AUTO_DRAFT_PR_FILE, config.AUTO_PORTRAIT_FILE,
                                                config.PR_FOLLOWUP_FILE, config.AUTO_CLOSE_FILE,
                                                config.WORKTREE_CLEANUP_FILE, config.OWL_REPORTS_FILE,
-                                               config.CROSS_FAMILY_FAILOVER_FILE, config.ORCHESTRATOR_FILE))
+                                               config.CROSS_FAMILY_FAILOVER_FILE, config.ORCHESTRATOR_FILE,
+                                               config.GO_UPDATES_FILE))
 
     def test_opt_in_off_routes_nothing_and_writes_nothing(self):
         self.switch_off()

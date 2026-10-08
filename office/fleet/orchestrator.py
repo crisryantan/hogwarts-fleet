@@ -41,7 +41,7 @@ from typing import Optional
 from hogwarts import capacity, db, followups, ids, owlery, pensieve
 from hogwarts.errors import NotFoundError, StoreError, ValidationError
 
-from fleet import common, config, gitops, markers, owl_post, phone, push, review, run_desk, safefs, worktree
+from fleet import common, config, gitops, go_watch, markers, owl_post, phone, push, review, run_desk, safefs, worktree
 from fleet.safefs import FleetError
 
 DESK = config.HOOK_DESK
@@ -788,6 +788,10 @@ def run(conn, now: Optional[int] = None) -> list:
                 break
             if outcome not in ("capped: wakes per task", "skipped"):  # every item finished, so this always ends
                 turns += 1
+    try:
+        go_watch.watch(conn)
+    except Exception:  # noqa: BLE001 - a go update that fails never stops the run
+        outcomes.append("go updates failed")
     try:
         phone.deliver(conn)
     except (StoreError, FleetError, OSError):

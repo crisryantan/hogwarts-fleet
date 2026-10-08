@@ -108,13 +108,13 @@ def env_problems(source: str, temp_root_allowed: bool = False) -> list:
 
 
 OPT_IN_NAMES = ("auto-draft-pr", "auto-portrait", "pr-followup", "auto-close", "worktree-cleanup", "owl-reports",
-                "cross-family-failover", "auto-orchestrate")
+                "cross-family-failover", "auto-orchestrate", "auto-go-updates")
 # An opt-in file named as a file: the whole string, or the last part of a path. The feature's name in a message
 # ("auto-portrait applied ...") is not a file name.
 OPT_IN_FILE_SHAPE = re.compile(r"(?:^|/)(?:" + "|".join(map(re.escape, OPT_IN_NAMES)) + r")/?$")
 OPT_IN_ATTRIBUTES = {"AUTO_DRAFT_PR_FILE", "AUTO_PORTRAIT_FILE", "PR_FOLLOWUP_FILE", "AUTO_CLOSE_FILE",
                      "WORKTREE_CLEANUP_FILE", "OWL_REPORTS_FILE", "CROSS_FAMILY_FAILOVER_FILE", "ORCHESTRATOR_FILE",
-                     "OPT_IN_FILES"}
+                     "GO_UPDATES_FILE", "OPT_IN_FILES"}
 
 
 def _docstrings(tree: ast.AST) -> set:
@@ -216,7 +216,8 @@ class OptInTests(unittest.TestCase):
         self.assertEqual(set(config.OPT_IN_FILES), {config.AUTO_DRAFT_PR_FILE, config.AUTO_PORTRAIT_FILE,
                                                     config.PR_FOLLOWUP_FILE, config.AUTO_CLOSE_FILE,
                                                     config.WORKTREE_CLEANUP_FILE, config.OWL_REPORTS_FILE,
-                                                    config.CROSS_FAMILY_FAILOVER_FILE, config.ORCHESTRATOR_FILE})
+                                                    config.CROSS_FAMILY_FAILOVER_FILE, config.ORCHESTRATOR_FILE,
+                                                    config.GO_UPDATES_FILE})
         self.assertEqual(len(config.OPT_IN_FILES), len(set(config.OPT_IN_FILES)))
         self.assertEqual(set(OPT_IN_NAMES), set(config.OPT_IN_FILES))
         self.assertIn(FLEET / "hooks" / "session_start.py", SOURCES)
@@ -342,6 +343,33 @@ class ProcessTests(unittest.TestCase):
                 if isinstance(node, ast.Call) and getattr(node.func, "attr", None) in TEMPFILE_CALLS:
                     with self.subTest(path=path.name, line=node.lineno):
                         self.assertIn("dir", [keyword.arg for keyword in node.keywords])
+
+
+class GoWatchTests(unittest.TestCase):
+    # Go updates read and report only: no store write, no desk start, no new process, nothing pushed or closed.
+    STORE_WRITES = {"add_event", "create_task", "start_task", "close_task", "record_spec", "record_commit", "ack",
+                    "ack_matching", "settle_events", "mark_awaiting_close", "set_worktree", "set_review_branch",
+                    "allow_round", "open_review_round", "record_round_verdict", "transaction", "execute",
+                    "executemany", "executescript", "send_owl", "post", "deliver"}
+    LAUNCHES = {"spawn", "spawn_review", "spawn_closer", "spawn_go_confirm", "start_child", "kick", "hold",
+                "resume", "release"}
+    IMPORTS = {"__future__", "hashlib", "json", "os", "re", "secrets", "typing", "hogwarts", "fleet"}
+    FROM_FLEET = {"common", "config", "go_status", "markers", "phone", "safefs", "FleetError"}
+    FROM_STORE = {"capacity", "db", "followups", "ids", "pensieve"}
+
+    def test_go_watch_imports_nothing_that_writes_the_store_or_starts_a_desk(self):
+        tree = ast.parse((FLEET / "go_watch.py").read_text())
+        self.assertLessEqual(imported_modules(tree), self.IMPORTS)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and node.module in ("fleet", "fleet.safefs"):
+                self.assertLessEqual({alias.name for alias in node.names}, self.FROM_FLEET)
+            elif isinstance(node, ast.ImportFrom) and node.module == "hogwarts":
+                self.assertLessEqual({alias.name for alias in node.names}, self.FROM_STORE)
+        self.assertEqual(_references(tree, self.STORE_WRITES | self.LAUNCHES), [])
+        # The only thing it calls in phone.py is the transport.
+        calls = {node.attr for node in ast.walk(tree) if isinstance(node, ast.Attribute)
+                 and isinstance(node.value, ast.Name) and node.value.id == "phone"}
+        self.assertEqual(calls, {"send", "PR_LINK"})
 
 
 class LaunchdTests(unittest.TestCase):

@@ -2361,6 +2361,18 @@ def hold_stopped(conn, desk: str, owl_id: str) -> None:
     stops.hold(desk, owl_id, task_id)
 
 
+def watch_go(conn) -> None:
+    """Go updates at the end of a desk run (fleet/go_watch.py), while they are on. A failure is one line on stderr,
+    never the run's result."""
+    try:
+        from fleet import go_watch  # here, since go_watch sends through phone, which imports this module
+
+        go_watch.watch(conn)
+    except Exception as exc:  # noqa: BLE001 - a go update that fails never changes how the run ended
+        sys.stderr.write(json.dumps({"go_updates": "failed", "error": common.scrubbed_line(exc, 200)},
+                                    ensure_ascii=True) + "\n")
+
+
 def main(argv: Optional[list] = None) -> int:
     parser = argparse.ArgumentParser(prog="run_desk", description="Build or run one headless desk's command.")
     parser.add_argument("desk")
@@ -2404,6 +2416,7 @@ def main(argv: Optional[list] = None) -> int:
         sys.stdout.write(json.dumps({"ok": clean, **result}, ensure_ascii=True) + "\n")
         if not clean and result["cap_source"] is None:
             report_failure(conn, args.desk, args.owl)
+        watch_go(conn)
         return 0 if clean else 1
     except (FleetError, StoreError) as exc:
         sys.stderr.write(json.dumps({"ok": False, "error": common.one_line(exc, 200)}, ensure_ascii=True) + "\n")
@@ -2415,6 +2428,8 @@ def main(argv: Optional[list] = None) -> int:
             hold_stopped(conn, args.desk, args.owl)  # the Owl Post starts it again once the stop is cleared
         elif not args.dry_run and not isinstance(exc, (Capped, Stopped, Blocked, TaskClosed, ReviewOwl)):
             report_failure(conn, args.desk, args.owl)
+        if not args.dry_run:
+            watch_go(conn)
         return 1
     except SystemExit:
         # Ended by SIGTERM or SIGHUP. The run has unwound, so its owl stays unacknowledged in the inbox and Ryan
