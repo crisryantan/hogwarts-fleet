@@ -6,8 +6,9 @@
 # folder, sets private file modes, creates the database, registers the desks and
 # runs both test suites.
 #
-# It never touches ~/.claude/settings.json, ~/.codex or launchd. Those steps are
-# yours, and ~/.hogwarts/pending/README.md walks through them.
+# It never touches ~/.claude/settings.json, ~/.codex, launchd or your shell profile. Those steps are
+# yours, and ~/.hogwarts/pending/README.md walks through them. It links castle and fleet into ~/.local/bin
+# when that folder exists, and otherwise prints the PATH line to add.
 
 set -eu
 umask 077
@@ -172,6 +173,32 @@ find "$OFFICE" "$CASTLE" -type d -exec chmod 700 {} +
 find "$OFFICE" "$CASTLE" -type f -exec chmod 600 {} +
 chmod 700 "$OFFICE/bin/castle" "$OFFICE/bin/fleet" "$OFFICE/bin/hogwarts-spaces"
 
+# --- castle and fleet on your PATH ------------------------------------------
+
+# Links go into ~/.local/bin only when that folder already exists, and an existing file is never replaced. Your shell
+# profile is never edited: when the folder is missing or not on PATH, the exact line to add is printed at the end.
+USER_BIN="$HOME/.local/bin"
+path_line=""
+if [ -d "$USER_BIN" ]; then
+	for tool in castle fleet; do
+		link="$USER_BIN/$tool"
+		if [ -L "$link" ] && [ "$(readlink "$link")" = "$OFFICE/bin/$tool" ]; then
+			say "$link already points at $OFFICE/bin/$tool."
+		elif [ -e "$link" ] || [ -L "$link" ]; then
+			say "Note: $link already exists, so $tool was not linked there. Use $OFFICE/bin/$tool, or replace it yourself."
+		else
+			ln -s "$OFFICE/bin/$tool" "$link"
+			say "Linked $link to $OFFICE/bin/$tool."
+		fi
+	done
+	case ":$PATH:" in
+	*":$USER_BIN:"*) ;;
+	*) path_line="export PATH=\"$USER_BIN:\$PATH\"" ;;
+	esac
+else
+	path_line="export PATH=\"$OFFICE/bin:\$PATH\""
+fi
+
 # --- Snape's agent file, only if missing ------------------------------------
 
 if [ -e "$AGENTS/snape.md" ] || [ -L "$AGENTS/snape.md" ]; then
@@ -254,8 +281,13 @@ if [ -n "$missing" ]; then
 	say ""
 	say "Not on your PATH yet:$missing (docs/ONBOARDING.md, stage 0)."
 fi
+if [ -n "$path_line" ]; then
+	say ""
+	say "To type castle and fleet by name, add this line to your shell profile yourself (for example ~/.zshrc):"
+	say "  $path_line"
+fi
 say ""
 say "Installed. Next steps:"
 say "  1. docs/ONBOARDING.md stage 2: sign in and fill in the placeholders."
 say "  2. Read $OFFICE/pending/README.md and apply those settings yourself (stage 3)."
-say "This script did not touch ~/.claude/settings.json, ~/.codex or launchd."
+say "This script did not touch ~/.claude/settings.json, ~/.codex, launchd or your shell profile."

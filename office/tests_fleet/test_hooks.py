@@ -196,12 +196,115 @@ class UserPromptSubmitTests(HookCase):
         _, digest, _ = self.run_hook(session_start, self.hook_input("SessionStart", source="startup"))
         self.assertIn("Headmaster events, unacked (8 shown, 32 more)", digest)
 
+    def test_a_title_that_is_too_long_and_a_stale_prompt_entry_come_with_a_fix(self):
+        raw = ("# tk_0123456789abcdef " + "t" * 400 + "\n\n## Spec\nrepo: /x\nbranch: b\nbase: main\n").encode()
+        with self.assertRaises(user_prompt_submit.Refused) as raised:
+            user_prompt_submit.read_spec(raw, "tk_0123456789abcdef")
+        self.assertIn("shorten the title", raised.exception.fix)
+        lines = user_prompt_submit.not_confirmed("go", "tk_0123456789abcdef",
+                                                 "this prompt's transcript entry is not current")
+        self.assertTrue(any(line.startswith("Fix: type it again") for line in lines))
+
+    def test_a_session_is_shown_the_full_list_once_then_only_newer_events(self):
+        self.headmaster(2)
+        shown, context = self.said("first")
+        self.assertEqual(len([line for line in shown.splitlines() if line.startswith("- [ci.red]")]), 2)
+        self.assertEqual(self.said("second"), ("", ""))
+        pensieve.add_event(self.conn, "ron", "ci.red", "headmaster", "red build fresh", now=NOW + 9)
+        shown, context = self.said("third")
+        self.assertIn("New headmaster events for Ryan since your last prompt", shown)
+        self.assertEqual(len([line for line in shown.splitlines() if line.startswith("- [ci.red]")]), 1)
+        self.assertIn("red build fresh", shown)
+        self.assertNotIn("red build 0", shown)
+        self.assertIn("1 headmaster events are new and unacked", context)
+        self.assertEqual(self.said("fourth"), ("", ""))
+        self.assertTrue(all(event["acked_at"] is None for event in self.events()))
+
+    def test_another_session_gets_its_own_full_list(self):
+        self.headmaster(1)
+        self.said("first")
+        self.assertEqual(self.said("again"), ("", ""))
+        shown, _ = self.said("elsewhere", session_id="9e8d7c6b-0000-4000-8000-000000000001")
+        self.assertIn("red build 0", shown)
+
+    def test_a_prompt_without_a_session_id_shows_the_list_every_time(self):
+        self.headmaster(1)
+        for _ in range(2):
+            code, out, err = self.run_hook(user_prompt_submit, {
+                "transcript_path": "", "prompt": "hi", "hook_event_name": "UserPromptSubmit"})
+            self.assertEqual(code, 0, err)
+            self.assertIn("red build 0", out)
+
+    def test_the_session_start_digest_counts_as_the_full_list(self):
+        self.headmaster(2)
+        self.run_hook(session_start, self.hook_input("SessionStart", source="startup"))
+        self.assertEqual(self.said("first"), ("", ""))
+        pensieve.add_event(self.conn, "ron", "ci.red", "headmaster", "red build fresh", now=NOW + 9)
+        self.assertIn("red build fresh", self.said("second")[0])
+
+    def test_events_the_cap_cut_off_are_listed_on_later_prompts_never_lost(self):
+        self.headmaster(40, summary_size=120)
+        seen_numbers = set()
+        for index in range(12):
+            shown, _ = self.said(f"prompt {index}")
+            seen_numbers |= {int(number) for number in re.findall(r"red build (\d+) ", shown)}
+            if not shown:
+                break
+        self.assertEqual(seen_numbers, set(range(40)))
+        self.assertEqual(self.said("one more"), ("", ""))
+
+    def test_events_the_digest_cut_off_are_listed_on_the_first_prompt_and_the_shown_ones_are_not(self):
+        self.headmaster(14)
+        _, digest, _ = self.run_hook(session_start, self.hook_input("SessionStart", source="startup"))
+        in_digest = {int(number) for number in re.findall(r"red build (\d+) ", digest)}
+        self.assertEqual(len(in_digest), config.DIGEST_EVENT_LINES)
+        shown, _ = self.said("first")
+        on_prompt = {int(number) for number in re.findall(r"red build (\d+) ", shown)}
+        self.assertEqual(on_prompt | in_digest, set(range(14)))
+        self.assertEqual(on_prompt & in_digest, set())
+        self.assertEqual(self.said("second"), ("", ""))
+
+    def test_several_new_events_of_one_task_between_prompts_are_all_listed(self):
+        task = self.started_task("harry", "one build")
+        self.said("first")
+        for index in range(3):
+            pensieve.add_event(self.conn, "harry", "review.fix-round", "headmaster", f"round {index} of the build",
+                               task_id=task["id"], now=NOW + index)
+        shown, _ = self.said("second")
+        self.assertEqual([index for index in range(3) if f"round {index} of the build" in shown], [0, 1, 2])
+
+    def test_the_digest_marks_only_the_events_that_survive_its_line_cut(self):
+        self.headmaster(6)
+        with mock.patch.object(config, "DIGEST_MAX_LINES", 8):
+            _, digest, _ = self.run_hook(session_start, self.hook_input("SessionStart", source="startup"))
+        printed = {int(number) for number in re.findall(r"red build (\d+) ", digest)}
+        self.assertLess(len(printed), 6)
+        shown, _ = self.said("first")
+        listed = {int(number) for number in re.findall(r"red build (\d+) ", shown)}
+        self.assertEqual(listed | printed, set(range(6)))
+        self.assertEqual(listed & printed, set())
+
+    def test_a_resumed_session_is_shown_the_full_list_on_its_first_prompt(self):
+        self.headmaster(2)
+        self.run_hook(session_start, self.hook_input("SessionStart", source="resume"))
+        self.assertIn("red build 0", self.said("first")[0])
+
+    def test_settled_events_are_acked_before_they_are_listed(self):
+        task = self.started_task("harry", "build it")
+        pensieve.add_event(self.conn, "mcgonagall", "go.refused", "headmaster", "no TASK.md", task_id=task["id"],
+                           dedupe_key=f"go-confirm:{task['id']}:aaaaaaaaaaaaaaaa", now=NOW)
+        pensieve.add_event(self.conn, "mcgonagall", "go.confirmed", "headmaster", "started", task_id=task["id"],
+                           dedupe_key=f"go-confirm:{task['id']}:bbbbbbbbbbbbbbbb", now=NOW + 1)
+        shown, _ = self.said("hi")
+        self.assertIn("started", shown)
+        self.assertNotIn("no TASK.md", shown)
+
     def test_the_prompt_hook_never_prints_fact_or_key_point_text(self):
         texts = remembered(self.conn)
         self.headmaster(2)
-        for prompt in ("what's up", "castle fact list", texts[0]):
-            with self.subTest(prompt=prompt):
-                code, out, err = self.prompt(prompt)
+        for index, prompt in enumerate(("what's up", "castle fact list", texts[0])):
+            with self.subTest(prompt=prompt):  # a session is shown the event list once, so each prompt is a new one
+                code, out, err = self.prompt(prompt, session_id=f"0b6f8c1e-1111-4222-8333-94445555666{index}")
                 self.assertEqual(code, 0, err)
                 self.assertTrue(out)
                 data = json.loads(out)

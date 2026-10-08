@@ -679,17 +679,30 @@ def _event_line(event: dict) -> str:
     return f"[{event['kind']}] #{event['id']} {event['desk']} {event['task_id'] or '-'}: {event['summary']}"
 
 
-def drain(conn: Conn, max_chars: int = 1500) -> dict:
-    max_chars = ids.check_int(max_chars, "max chars", minimum=1, maximum=100000)
-    pending = db.fetch_all(
+def _pending_events(conn: Conn, after_id: Optional[int], skip: Iterable[int] = ()) -> list:
+    after = 0 if after_id is None else ids.check_int(after_id, "after id", minimum=0)
+    skipped = set(skip)
+    return [event for event in db.fetch_all(
         conn,
         """SELECT id, ts, desk, task_id, kind, summary,
                   ROW_NUMBER() OVER (
                       PARTITION BY COALESCE(task_id, 'event:' || id) ORDER BY ts DESC, id DESC
                   ) AS rank_in_task
-           FROM events WHERE verdict = 'headmaster' AND acked_at IS NULL
+           FROM events WHERE verdict = 'headmaster' AND acked_at IS NULL AND id > ?
            ORDER BY rank_in_task, ts DESC, id DESC""",
-    )
+        (after,),
+    ) if event["id"] not in skipped]
+
+
+def drain(conn: Conn, max_chars: int = 1500, after_id: Optional[int] = None, oldest_first: bool = False,
+          skip: Iterable[int] = ()) -> dict:
+    """The unacked headmaster events, newest per task first, cut to max_chars. With after_id, only events newer
+    than that id, and never the ids in skip. With oldest_first, every such event in id order with no folding by task,
+    so a cut leaves the later ones for the next call."""
+    max_chars = ids.check_int(max_chars, "max chars", minimum=1, maximum=100000)
+    pending = _pending_events(conn, after_id, skip)
+    if oldest_first:
+        pending = sorted(pending, key=lambda event: event["id"])
     picked, used = [], 0
     for event in pending:
         line = _event_line(event)
@@ -700,6 +713,29 @@ def drain(conn: Conn, max_chars: int = 1500) -> dict:
     return {"events": picked, "remaining": len(pending) - len(picked), "chars": used}
 
 
+def shown_through(conn: Conn, shown_ids: Iterable[int], after_id: Optional[int] = None,
+                  skip: Iterable[int] = (), folded: bool = False) -> Optional[int]:
+    """The event id a session can be marked as seen through, given the ids it was shown: the newest unacked headmaster
+    event once every event past after_id was shown, else the last id before the first one that was not (so the rest
+    is listed next time). With folded, as in the list that shows only each task's newest event first, an older event
+    of a task counts as shown once that task's newest one was. None when there is nothing to advance to."""
+    shown = set(shown_ids) | set(skip)
+    pending = _pending_events(conn, after_id)
+    if not pending:
+        return None
+    def group(event: dict) -> str:
+        return event["task_id"] or f"event:{event['id']}"
+
+    newest = {group(event): event["id"] for event in pending if event["rank_in_task"] == 1}
+    through = None
+    for event in sorted(pending, key=lambda event: event["id"]):
+        covered = event["id"] in shown or (folded and newest[group(event)] in shown)
+        if not covered:
+            return through
+        through = event["id"]
+    return through
+
+
 def ack(conn: Conn, event_id: int, now: Optional[int] = None) -> dict:
     event_id = ids.check_int(event_id, "event id", minimum=1)
     ts = ids.stamp(now)
@@ -708,6 +744,60 @@ def ack(conn: Conn, event_id: int, now: Optional[int] = None) -> dict:
             raise NotFoundError("event not found")
         conn.execute("UPDATE events SET acked_at = COALESCE(acked_at, ?) WHERE id = ?", (ts, event_id))
     return _event(conn, event_id)
+
+
+def ack_matching(conn: Conn, kind: Optional[str] = None, task_id: Optional[str] = None,
+                 now: Optional[int] = None) -> dict:
+    """Ack every unacked headmaster event of this kind and/or this task; with neither, every one."""
+    kind = ids.optional("kind", kind, "event kind")
+    task_id = ids.optional("task", task_id)
+    ts = ids.stamp(now)
+    with db.transaction(conn):
+        cursor = conn.execute(
+            "UPDATE events SET acked_at = ? WHERE verdict = 'headmaster' AND acked_at IS NULL"
+            " AND (? IS NULL OR kind = ?) AND (? IS NULL OR task_id = ?)",
+            (ts, kind, kind, task_id, task_id),
+        )
+    return {"acked": cursor.rowcount}
+
+
+# A refusal is settled once a later confirmation of the same task exists. The task is read from the event's own
+# dedupe key (the go confirmer writes <kind>-confirm:<task>:<prompt>) when the refusal was written before the task did.
+SETTLED_BY = {"go.refused": "go.confirmed", "close.refused": "close.confirmed"}
+_CONFIRM_KEY = re.compile(r"(go|close)-confirm:(tk_[0-9a-f]{16}):")
+OWL_EVENT_KIND = "owl.to-mcgonagall"
+OWL_EVENT_KEY = "owl:to-mcgonagall:"
+
+
+def settle_events(conn: Conn, now: Optional[int] = None) -> dict:
+    """Ack the headmaster events the fleet has already settled, by two explicit rules: a go or close refusal that a
+    later confirmation of the same task followed, and an owl-to-McGonagall event whose owl she has read."""
+    ts = ids.stamp(now)
+    acked = 0
+    with db.transaction(conn):
+        for refused, confirmed in SETTLED_BY.items():
+            for event in db.fetch_all(
+                    conn, "SELECT id, task_id, dedupe_key FROM events WHERE kind = ? AND verdict = 'headmaster'"
+                          " AND acked_at IS NULL", (refused,)):
+                found = _CONFIRM_KEY.match(event["dedupe_key"] or "")
+                task = event["task_id"] or (found.group(2) if found else None)
+                if task is None:
+                    continue
+                prefix = f"{confirmed.split('.')[0]}-confirm:{task}:"
+                later = [row for row in events_with_key_prefix(conn, prefix)
+                         if row["kind"] == confirmed and row["id"] > event["id"]]
+                later += db.fetch_all(conn, "SELECT id FROM events WHERE kind = ? AND task_id = ? AND id > ?",
+                                      (confirmed, task, event["id"]))
+                if later:
+                    conn.execute("UPDATE events SET acked_at = ? WHERE id = ?", (ts, event["id"]))
+                    acked += 1
+        cursor = conn.execute(
+            "UPDATE events SET acked_at = ? WHERE kind = ? AND verdict = 'headmaster' AND acked_at IS NULL"
+            " AND EXISTS (SELECT 1 FROM owls WHERE ? || owls.id = events.dedupe_key AND owls.read_at IS NOT NULL)",
+            (ts, OWL_EVENT_KIND, OWL_EVENT_KEY),
+        )
+        acked += cursor.rowcount
+    return {"acked": acked}
 
 
 # Sessions, extracts and key points

@@ -255,10 +255,29 @@ def _read_input(raw: bytes) -> dict:
     return data
 
 
+def fitted(lines: list) -> str:
+    """The lines as one event summary within pensieve.SUMMARY_LIMIT. The first line is the reason, then the Fix lines,
+    then any manual steps. What does not fit is cut from the end of the manual steps first, and only then from the
+    reason (with an ellipsis), so a Fix line is never cut."""
+    limit = pensieve.SUMMARY_LIMIT
+    whole = common.scrubbed_line(" ".join(lines), sys.maxsize)
+    if len(whole) <= limit:
+        return whole
+    fixes = common.scrubbed_line(" ".join(line for line in lines[1:] if line.startswith("Fix:")), sys.maxsize)
+    steps = [line for line in lines[1:] if not line.startswith("Fix:")]
+    if not fixes or len(fixes) > limit - 40:  # no Fix line, or one too long to keep whole: plain cut
+        return common.scrubbed_line(" ".join(lines), limit)
+    reason = common.scrubbed_line(lines[0], limit - len(fixes) - 1)
+    head = f"{reason} {fixes}"
+    room = limit - len(head) - 1
+    rest = common.scrubbed_line(" ".join(steps), room) if steps and room > 20 else ""
+    return f"{head} {rest}" if rest else head
+
+
 def _report(conn, kind: str, task_id: str, key: str, lines: list, ok: bool) -> tuple:
     """Record one outcome as a headmaster event on McGonagall's desk, once per prompt and task. Returns (its line,
     whether the event is in the store)."""
-    summary = common.scrubbed_line(" ".join(lines), pensieve.SUMMARY_LIMIT)
+    summary = fitted(lines)
     if conn is None:
         return f"{summary} (its headmaster event could not be written: no store)", False
     try:

@@ -825,12 +825,15 @@ castle model line &lt;name&gt; &lt;line&gt;     file a model name under a tier</
       <div class="tbl"><table>
         <thead><tr><th>Type</th><th>To</th></tr></thead>
         <tbody>
-          <tr><td data-label="Type"><code>castle task list</code></td><td data-label="To">See every task and its status</td></tr>
-          <tr><td data-label="Type"><code>castle task list --desk harry</code></td><td data-label="To">See one desk's tasks</td></tr>
-          <tr><td data-label="Type"><code>castle task list --open</code></td><td data-label="To">See every task that is queued, active or awaiting close</td></tr>
+          <tr><td data-label="Type"><code>castle task list</code></td><td data-label="To">See what is open, one line per task, newest first: task id, desk, title, state and who it waits on</td></tr>
+          <tr><td data-label="Type"><code>castle task list --desk harry</code></td><td data-label="To">The same, for one desk</td></tr>
+          <tr><td data-label="Type"><code>castle task list --all</code></td><td data-label="To">See every task and its status, as full records</td></tr>
+          <tr><td data-label="Type"><code>castle task list --open</code></td><td data-label="To">See every task that is queued, active or awaiting close, as full records</td></tr>
+          <tr><td data-label="Type"><code>castle task builds</code></td><td data-label="To">See one line per open build: go task, build task, branch and state (<code>--all</code> adds closed ones)</td></tr>
           <tr><td data-label="Type"><code>castle task board</code></td><td data-label="To">See each desk's tasks in flight: round, verdict, and whether a run is going</td></tr>
           <tr><td data-label="Type"><code>castle event drain</code></td><td data-label="To">See what needs you</td></tr>
           <tr><td data-label="Type"><code>castle event ack &lt;id&gt;</code></td><td data-label="To">Clear a row once you've dealt with it</td></tr>
+          <tr><td data-label="Type"><code>castle event ack --all</code></td><td data-label="To">Clear every row. <code>--kind &lt;kind&gt;</code> clears every row of one kind, <code>--task &lt;task-id&gt;</code> every row of one task</td></tr>
           <tr><td data-label="Type"><code>castle request list --open</code></td><td data-label="To">See requests between desks still in flight</td></tr>
           <tr><td data-label="Type"><code>castle audit</code></td><td data-label="To">Find stuck requests and unanswered owls</td></tr>
           <tr><td data-label="Type"><code>castle fact current</code></td><td data-label="To">See what the fleet currently believes</td></tr>

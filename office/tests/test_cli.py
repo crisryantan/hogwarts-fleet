@@ -174,6 +174,19 @@ class CommandTests(CliCase):
         self.assertEqual((task["id"], task["state"], task["running"]), (active["id"], "working", False))
         self.assertEqual(self.ok("task", "board", "--desk", "beta")["tasks"], 0)
 
+    def test_task_list_defaults_to_one_line_per_open_task_and_all_restores_the_records(self):
+        queued = self.ok("task", "create", "--desk", "alpha", "--title", "later")
+        closed = self.ok("task", "create", "--desk", "alpha", "--title", "dropped")
+        self.ok("task", "close", closed["id"], "--reason", "abandoned")
+        lines = self.ok("task", "list")
+        self.assertEqual(len(lines), 2)
+        self.assertTrue(lines[1].startswith(queued["id"]) and "later" in lines[1])
+        self.assertEqual([task["id"] for task in self.ok("task", "list", "--all")], [queued["id"], closed["id"]])
+        self.assertEqual(self.ok("task", "list", "--desk", "beta"), ["no open tasks"])
+        self.assertEqual(self.ok("task", "builds"), ["no open builds"])
+        self.assertEqual(self.ok("task", "builds", "--all"), ["no open builds"])
+        self.fails(2, "ValidationError", "task", "list", "--all", "--open")
+
     def test_task_create_takes_a_minted_id_and_its_own_intent_path(self):
         task_id = "tk_0123456789abcdef"
         intent = f"/Users/crisryantan/hogwarts/tasks/{task_id}/TASK.md"
@@ -184,7 +197,7 @@ class CommandTests(CliCase):
         self.fails(2, "ValidationError", "task", "create", "--desk", "alpha", "--title", "x", "--intent-path", intent)
         self.fails(2, "ValidationError", "task", "create", "--desk", "alpha", "--title", "x",
                    "--id", "tk_00000000000000ff", "--intent-path", intent)
-        self.assertEqual(len(self.ok("task", "list")), 1)
+        self.assertEqual(len(self.ok("task", "list", "--all")), 1)
 
     def test_tokens_and_bodies_are_never_taken_from_argv(self):
         task = self.ok("task", "create", "--desk", "alpha", "--title", "a")
@@ -253,6 +266,26 @@ class CommandTests(CliCase):
         self.assertEqual([item["id"] for item in drained["events"]], [event["id"]])
         self.assertIsNotNone(self.ok("event", "ack", str(event["id"]))["acked_at"])
         self.assertEqual(self.ok("event", "drain")["events"], [])
+
+    def test_event_ack_all_by_kind_by_task_and_settle(self):
+        task = self.ok("task", "create", "--desk", "alpha", "--title", "a job")
+
+        def add(kind, *extra):
+            self.ok("event", "add", "--desk", "alpha", "--kind", kind, "--verdict", "headmaster", "--summary", kind,
+                    *extra)
+
+        add("ci.red", "--task", task["id"])
+        add("ci.red")
+        add("push.draft-pr")
+        self.assertEqual(self.ok("event", "ack", "--kind", "push.draft-pr"), {"acked": 1})
+        self.assertEqual(self.ok("event", "ack", "--task", task["id"]), {"acked": 1})
+        self.assertEqual(len(self.ok("event", "drain")["events"]), 1)
+        add("ci.red")
+        self.assertEqual(self.ok("event", "ack", "--all"), {"acked": 2})
+        self.assertEqual(self.ok("event", "settle"), {"acked": 0})
+        for argv in (("event", "ack"), ("event", "ack", "1", "--all"), ("event", "ack", "--all", "--kind", "x")):
+            with self.subTest(argv=argv):
+                self.fails(2, "ValidationError", *argv)
 
     def test_pensieve_commands(self):
         session = self.ok("pensieve", "session", "session-0001", "--project", "web-app", "--desk", "alpha",

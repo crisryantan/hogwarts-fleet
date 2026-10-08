@@ -71,6 +71,9 @@ from fleet.safefs import FleetError, Missing, Unsafe  # noqa: E402
 REQUIRED_FIELDS = ("to", "kind", "subject")
 OPTIONAL_FIELDS = ("body", "body_path", "task_id", "request_id", "in_reply_to", "idempotency_key")
 IGNORED_FIELDS = ("from", "sender")
+# "test": true marks a smoke owl: it is delivered as usual, but McGonagall's announcement event, its notification and
+# its report are skipped, so it never reaches the headmaster queue.
+FLAG_FIELDS = ("test",)
 OWL_FILE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,95}\.json")
 BODY_FILE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,95}")
 SENT_DIR = ".sent"
@@ -125,7 +128,7 @@ def parse_owl(raw: bytes, fresh: bool = False) -> dict:
         raise Rejected("file is not strict JSON") from None
     if not isinstance(message, dict):
         raise Rejected("owl must be a JSON object")
-    unknown = sorted(set(message) - set(REQUIRED_FIELDS + OPTIONAL_FIELDS + IGNORED_FIELDS))
+    unknown = sorted(set(message) - set(REQUIRED_FIELDS + OPTIONAL_FIELDS + IGNORED_FIELDS + FLAG_FIELDS))
     if unknown:
         raise Rejected("owl has a field that is not allowed")
     for name in REQUIRED_FIELDS:
@@ -134,6 +137,9 @@ def parse_owl(raw: bytes, fresh: bool = False) -> dict:
     for name in OPTIONAL_FIELDS:
         if message.get(name) is not None and not isinstance(message[name], str):
             raise Rejected(f"owl field {name} must be text")
+    for name in FLAG_FIELDS:
+        if name in message and not isinstance(message[name], bool):
+            raise Rejected(f"owl field {name} must be true or false")
     if (message.get("body") is None) == (message.get("body_path") is None):
         raise Rejected("owl needs exactly one of body or body_path")
     return message
@@ -577,24 +583,26 @@ def deliver_file(conn, sender: str, outbox_fd: int, fname: str, now: Optional[in
     if message.get("body_path") is not None:
         body_file = _body_file(sender, message["body_path"], outbox_fd)
         body = body_file["text"]
+    smoke = message.get("test") is True
     inbox_fd = _recipient_inbox(conn, message["to"])
     try:
         owl = _store(conn, sender, message, body, key, now)
         newly = owl["delivered_at"] is None
         if newly:
             text = ids.clean_text(body, "body", owlery.BODY_LIMIT, keep_format=True)
-            mcgonagall_inbox.mark_pending(owl)  # before delivery: an event this pass loses is announced on a later one
-            try:
-                owl_report.mark(owl)  # with owl reports on: a failed or killed reporter is retried from this marker
-            except (FleetError, OSError):
-                pass  # no marker: the plain notification is not held back for this owl
+            if not smoke:
+                mcgonagall_inbox.mark_pending(owl)  # before delivery: an event this pass loses is announced later
+                try:
+                    owl_report.mark(owl)  # with owl reports on: a failed or killed reporter is retried from this marker
+                except (FleetError, OSError):
+                    pass  # no marker: the plain notification is not held back for this owl
             copy = _inbox_copy(owl, text, body_file, task_context(conn, owl["task_id"]))
             safefs.write_new(inbox_fd, f"{owl['id']}.json", copy)
             owlery.mark_delivered(conn, owl["id"], now=now)
     finally:
         os.close(inbox_fd)
     rang = _ring(conn, owl["recipient"], owl, newly, now)
-    if newly:  # after the delivery is stored: McGonagall hears of every owl sent to her, and nothing here undoes it
+    if newly and not smoke:  # after the delivery is stored: McGonagall hears of every owl sent to her
         mcgonagall_inbox.announce(conn, owl, text, now)
     reviewing = _start_review(conn, owl, newly, now)
     _ack_replied(conn, sender, owl, now)

@@ -284,7 +284,8 @@ class GoTests(GoCase):
                 for text, named in ((f"go {TASK_ID}", f" to {TASK_ID}"), (f"- `go {TASK_ID}`", "")):
                     with self.subTest(session=label, text=text):
                         shown, context, _ = self.said(text, argv=argv, **fields)
-                        self.assertEqual(shown, f"Go was not applied{named}: {user_prompt_submit.GO_SESSION}")
+                        self.assertEqual(shown, f"Go was not applied{named}: {user_prompt_submit.GO_SESSION}\n"
+                                                f"{user_prompt_submit.GO_SESSION_FIX}")
                         self.assertEqual(context, shown)
                         self.assert_unchanged(before)
         # The same go in McGonagall's own session gets through.
@@ -297,6 +298,7 @@ class GoTests(GoCase):
             shown, _, _ = self.said(f"go {TASK_ID}")
             self.assertIn(f"Go was not applied to {TASK_ID}: there is no TASK.md at ~/hogwarts/tasks/{TASK_ID}/TASK.md",
                           shown)
+            self.assertIn("Fix: ask McGonagall to write the draft to that path before the go", shown)
             # Another task's TASK.md does not stand in for it.
             self.task_md(OTHER_ID)
             shown, _, _ = self.said(f"go {TASK_ID}")
@@ -463,6 +465,12 @@ class GoTests(GoCase):
                     shown, context, _ = self.said(f"go {TASK_ID}")
                     self.assertIn(f"Go was not applied to {TASK_ID}: ", shown)
                     self.assertIn(reason, shown)
+                    self.assertIn("\nFix: ", shown)  # every refusal says what to change, not only why
+                    if label in ("repo with no origin", "repo with another origin"):
+                        self.assertIn("origin remote", shown.split("\nFix: ")[1])  # not told to edit base:
+                        self.assertNotIn("Edit the base:", shown)
+                    if label == "missing base ref":
+                        self.assertIn("Edit the base:", shown)  # a missing ref is the base: line's to fix
                     self.assertNotIn(user_prompt_submit.GO_CONTEXT, context)
                     self.assert_unchanged(before)
 

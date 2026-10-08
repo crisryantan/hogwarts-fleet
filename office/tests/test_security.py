@@ -692,6 +692,9 @@ class TransactionCoverageTests(unittest.TestCase):
         pensieve.close_proven(conn, proven, proof(repo="acme/proven", written_checks=0, judge_desk=None), "closed",
                               f"close:proven:{proven}", now=NOW)
         pensieve.ack(conn, pensieve.add_event(conn, "alpha", "note", "headmaster", "s", now=NOW)["id"], now=NOW)
+        pensieve.add_event(conn, "alpha", "note", "headmaster", "t", now=NOW)
+        pensieve.ack_matching(conn, kind="note", now=NOW)
+        pensieve.settle_events(conn, now=NOW)
         pensieve.record_session(conn, "session-0001", "proj", started_at=NOW)
         pensieve.add_extract(conn, "session-0001", "user", "words", now=NOW)
         pensieve.add_keypoint(conn, "point", session_id="session-0001", now=NOW)
