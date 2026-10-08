@@ -319,9 +319,11 @@ class OwnIntentTests(ToolingMixin, LoopCase):
         with self.reviewer("VERDICT: CHANGES") as bodies:
             first = review.review_own(self.conn, str(self.repo), title="my own fix", intent="Do it.", fetch=False)
             self.commit("second try")
-            second = review.review_own(self.conn, str(self.repo), task_id=first["task_id"],
-                                       intent="Do it better.\nAC-1 it works | check: `true`\n", fetch=False,
-                                       confirm=lambda prompt: first["task_id"] + "\n")
+            with mock.patch.object(review.sys.stdin, "isatty", return_value=True), \
+                    mock.patch.object(review.sys.stdout, "isatty", return_value=True):
+                second = review.review_own(self.conn, str(self.repo), task_id=first["task_id"],
+                                           intent="Do it better.\nAC-1 it works | check: `true`\n", fetch=False,
+                                           confirm=lambda prompt: first["task_id"] + "\n")
         task_md = (self.castle / "tasks" / first["task_id"] / "TASK.md").read_bytes()
         self.assertIn(b"Do it better.", task_md)
         digest = hashlib.sha256(task_md).hexdigest()
@@ -346,10 +348,20 @@ class OwnIntentTests(ToolingMixin, LoopCase):
             asked.append(prompt)
             return "tk_0000000000000000\n"
 
-        not_a_terminal = mock.patch.object(review.sys.stdin, "isatty", return_value=False)
+        def typed(prompt: str) -> str:
+            asked.append(prompt)
+            return first["task_id"] + "\n"
+
+        def terminal(yes: bool):
+            stack = contextlib.ExitStack()
+            for stream in (review.sys.stdin, review.sys.stdout):
+                stack.enter_context(mock.patch.object(stream, "isatty", return_value=yes))
+            return stack
+
         with mock.patch.object(run_desk, "run", side_effect=AssertionError("a reviewer ran")):
-            for confirm in (None, wrong, review.ask_owner_terminal):
-                with self.subTest(confirm=confirm), not_a_terminal, self.assertRaises(review.FleetError):
+            # no confirm, a wrong id, and no terminal even for a caller's confirm that types the right id
+            for confirm, tty in ((None, True), (wrong, True), (review.ask_owner_terminal, False), (typed, False)):
+                with self.subTest(confirm=confirm, tty=tty), terminal(tty), self.assertRaises(review.FleetError):
                     review.review_own(self.conn, str(self.repo), task_id=first["task_id"], intent="Do something else.",
                                       fetch=False, confirm=confirm)
         self.assertEqual(len(asked), 1)

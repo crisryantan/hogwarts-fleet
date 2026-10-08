@@ -326,6 +326,14 @@ class DraftPrTests(OrchestratorCase):
             orchestrator.check_legal(self.conn, self.action)
         self.assertEqual(self.pushed, [])
 
+    def test_a_round_left_without_a_verdict_after_a_pass_opens_nothing(self):
+        self.passed()
+        capacity.open_review_round(self.conn, self.task["id"], "hermione", SHA, "review it again",
+                                   idempotency_key=f"round-{self.tick()}", now=self.clock)
+        with self.assertRaisesRegex(orchestrator.Invalid, "did not record PASS"):
+            orchestrator.check_legal(self.conn, self.action)
+        self.assertEqual(self.pushed, [])
+
     def test_a_pass_for_another_commit_than_head_opens_nothing(self):
         self.passed()
         self.head = OTHER_SHA

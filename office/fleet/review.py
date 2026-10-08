@@ -1495,12 +1495,16 @@ def _own_task_md(task_id: str, title: str, intent: str) -> bytes:
     return text.encode("utf-8")
 
 
-def ask_owner_terminal(prompt: str) -> str:
-    """Ask on Ryan's terminal, as fleet adopt does. Refused when stdin or stdout is not one, so no pipe, script or
-    agent session's tool call can answer."""
+def _owner_terminal() -> None:
+    """Refused unless stdin and stdout are a terminal, as fleet adopt asks, so no pipe or agent tool call answers."""
     if not (sys.stdin.isatty() and sys.stdout.isatty()):
         raise FleetError("--intent-file on a fix round replaces the TASK.md you approved, and asks you to type the"
                          " task id back, so it runs only in your own terminal; nothing was changed")
+
+
+def ask_owner_terminal(prompt: str) -> str:
+    """Ask on Ryan's terminal (_owner_terminal) and return the line he types."""
+    _owner_terminal()
     sys.stdout.write(prompt)
     sys.stdout.flush()
     return sys.stdin.readline()
@@ -1508,10 +1512,12 @@ def ask_owner_terminal(prompt: str) -> str:
 
 def _confirm_new_intent(task: dict, confirm: Optional[Callable[[str], str]]) -> None:
     """Ryan's typed task id is the approval of the new intent, as fleet review own --title was of the first. There is
-    no --yes: with no confirm, or any other answer, nothing changes."""
+    no --yes: with no terminal on stdin and stdout, whatever confirm is passed, no confirm, or any other answer,
+    nothing changes."""
     if confirm is None:
         raise FleetError("--intent-file on a fix round replaces the TASK.md you approved, so it needs you to type the"
                          " task id back in your own terminal; nothing was changed")
+    _owner_terminal()  # here too, so a caller's own confirm never stands in for the terminal
     answer = confirm(f"Replace the approved TASK.md of task {task['id']} ({common.one_line(task['title'], 120)}) with"
                      " the intent in your --intent-file. This is your approval of it.\n"
                      "Type the task id to approve it, or anything else to stop: ")
