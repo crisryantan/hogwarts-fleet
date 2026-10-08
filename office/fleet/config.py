@@ -76,6 +76,9 @@ WORKTREE_DESKS = ("harry",)
 # is review-latest.md in the task folder.
 TASK_PAD_DESKS = ("hermione", "ron")
 PADS_DIR = "pads"
+# Pads a desk keeps across runs rather than per task, as its brief names them: rotated before each launch of the desk,
+# like its scratchpad, while no other run of it is going.
+SHARED_PADS = {"hermione": ("bot-pass",), "ron": ("patrol",)}
 # Reviewer for each author family. A pass needs the other family.
 REVIEWER_FOR_FAMILY = {"codex": "hermione", "claude": "moody"}
 # A Codex desk with no worktree of its own runs here, never in its desk folder: work for run slot 0, and
@@ -281,6 +284,17 @@ INBOX_COPY_MAX_BYTES = 262144
 HOOK_INPUT_MAX_BYTES = 8 * 1024 * 1024
 TRANSCRIPT_TAIL_BYTES = 4 * 1024 * 1024
 SCRATCHPAD_BUDGET_BYTES = 6144
+# A scratchpad or task pad keeps only its latest Checkpoint block; older ones move to this folder next to it
+# (fleet/scratchpad.py), one append-only file per month.
+SCRATCHPAD_ARCHIVE_DIR = "scratchpad-archive"
+# A rotation streams the file and holds at most this much of one line in memory; a longer line is plain text.
+SCRATCHPAD_READ_MAX_BYTES = 1024 * 1024
+# A file larger than this is left as it is, with a warning, so a rotation always ends within a hook's time.
+SCRATCHPAD_ROTATE_MAX_BYTES = 64 * 1024 * 1024
+# A file written this recently is left for the next rotation, since its desk may still be writing it.
+SCRATCHPAD_QUIET_SECONDS = 60
+# How long a rotation waits for another one of the same desk (office locks folder, scratchpad-<desk>.lock).
+SCRATCHPAD_LOCK_WAIT_SECONDS = 5
 # An owl file younger than this that does not parse yet may still be being written.
 OWL_SETTLE_SECONDS = 2
 

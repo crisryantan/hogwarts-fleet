@@ -23,11 +23,48 @@ _PLUS_WHOLE = re.compile(r"\+[0-9]{1,3}")
 _PLUS_AMOUNT = re.compile(r"\+[0-9]{1,3}(?:\.[0-9]{1,2})?")
 TOKEN_LINE_LIMIT = 200
 OPS_FILE_LIMIT = 256 * 1024
+# What a list command prints by default, newest kept, so a paste into a session stays small. --all prints every row,
+# --limit N at most N. A per-task history (review rounds, a fact's versions) keeps its last HISTORY_LIMIT entries.
+LIST_LIMIT = 20
+HISTORY_LIMIT = 10
 
 
 class _Parser(argparse.ArgumentParser):
     def error(self, message: str) -> None:
         raise ValidationError(message)
+
+
+class Listing:
+    """A list command's rows after its cap, with how many there were. main prints the rows as data and adds total,
+    shown and truncated beside them, and a note when rows were left out."""
+
+    def __init__(self, data: object, total: int, shown: int) -> None:
+        self.data, self.total, self.shown = data, total, shown
+
+    def fields(self) -> dict:
+        fields = {"total": self.total, "shown": self.shown, "truncated": self.shown < self.total}
+        if fields["truncated"]:
+            fields["note"] = f"showing {self.shown} of {self.total}, use --all for everything"
+        return fields
+
+
+def _cap(args: argparse.Namespace, default: int) -> Optional[int]:
+    """The row cap a list command was given: None with --all, else --limit or the command's default."""
+    return None if args.all else (args.limit or default)
+
+
+def _newest(rows: list, args: argparse.Namespace, default: int = LIST_LIMIT) -> Listing:
+    """The newest rows of an oldest-first list, kept in their order."""
+    cap = _cap(args, default)
+    shown = rows if cap is None or len(rows) <= cap else rows[-cap:]
+    return Listing(shown, len(rows), len(shown))
+
+
+def _positive(value: str) -> int:
+    number = _whole(value)
+    if number < 1:
+        raise argparse.ArgumentTypeError("expected a whole number of at least 1")
+    return number
 
 
 def _whole(value: str) -> int:
@@ -201,22 +238,42 @@ def _event_ack(conn: sqlite3.Connection, args: argparse.Namespace) -> dict:
     return pensieve.ack_matching(conn, None if args.all else args.kind, None if args.all else args.task)
 
 
-def _fact_decay(conn: sqlite3.Connection, args: argparse.Namespace) -> dict:
-    return pensieve.archive_stale(conn) if args.archive else {"stale": pensieve.decay(conn)}
+def _fact_decay(conn: sqlite3.Connection, args: argparse.Namespace) -> Listing:
+    """The stale fact ids, or with --archive the ids it archived (every stale fact, whatever the cap), newest kept."""
+    key, ids_found = ("archived", pensieve.archive_stale(conn)["archived"]) if args.archive else (
+        "stale", pensieve.decay(conn))
+    kept = _newest(ids_found, args)
+    return Listing({key: kept.data}, kept.total, kept.shown)
 
 
-def _fact_list(conn: sqlite3.Connection, args: argparse.Namespace) -> list:
+def _fact_list(conn: sqlite3.Connection, args: argparse.Namespace) -> Listing:
     if args.context is not None:
         if args.archived or args.history:
             raise ValidationError("--context lists current facts only, so it takes no --archived or --history")
-        return pensieve.context_facts(conn, args.context)
-    return pensieve.list_facts(conn, args.scope, args.archived, args.history)
+        # Most used first, so the cap keeps the head.
+        rows = pensieve.context_facts(conn, args.context)
+        cap = _cap(args, LIST_LIMIT)
+        shown = rows if cap is None else rows[:cap]
+        return Listing(shown, len(rows), len(shown))
+    return _newest(pensieve.list_facts(conn, args.scope, args.archived, args.history), args)
 
 
-def _fact_as_of(conn: sqlite3.Connection, args: argparse.Namespace) -> list:
+def _fact_as_of(conn: sqlite3.Connection, args: argparse.Namespace) -> Listing:
     if args.world is not None:
-        return facts.as_of_world(conn, args.world, args.scope)
-    return facts.as_of_belief(conn, args.belief, args.scope)
+        return _newest(facts.as_of_world(conn, args.world, args.scope), args)
+    return _newest(facts.as_of_belief(conn, args.belief, args.scope), args)
+
+
+def _audit(conn: sqlite3.Connection, args: argparse.Namespace) -> Listing:
+    """The audit, each finding list cut to its newest rows. An escalation still raises every finding first."""
+    report = owlery.audit(conn, escalate=args.escalate)
+    total = shown = 0
+    for key, rows in report.items():
+        if isinstance(rows, list):
+            kept = _newest(rows, args)
+            report[key] = kept.data
+            total, shown = total + kept.total, shown + kept.shown
+    return Listing(report, total, shown)
 
 
 def _clock() -> int:
@@ -274,19 +331,34 @@ def _retiring_window() -> int:
     return fleet_config.RETIRING_SOON_SECONDS
 
 
-def _task_board(conn: sqlite3.Connection, args: argparse.Namespace) -> dict:
+def _task_board(conn: sqlite3.Connection, args: argparse.Namespace) -> Listing:
     """Every active or awaiting-close author task by desk, and any task with a run going for it: its round,
-    verdict and whether a run is going."""
+    verdict and whether a run is going. Each desk keeps its counts; its task rows are the newest across the board."""
     caps = _fleet_caps()
-    return capacity.in_flight(conn, _clock(), caps.RUNNING_WINDOW_SECONDS, args.desk, caps.REVIEW_ROUND_CAP,
-                              caps.FOLLOWUP_ROUND_CAP)
+    board = capacity.in_flight(conn, _clock(), caps.RUNNING_WINDOW_SECONDS, args.desk, caps.REVIEW_ROUND_CAP,
+                               caps.FOLLOWUP_ROUND_CAP)
+    rows = sorted((task for row in board["desks"] for task in row["tasks"]),
+                  key=lambda task: (task["created_at"], task["id"]))
+    kept = {task["id"] for task in _newest(rows, args).data}
+    for row in board["desks"]:
+        row["tasks"] = [task for task in row["tasks"] if task["id"] in kept]
+    # A desk with none of the rows shown is counted, not listed, so the groups stay as few as the rows.
+    shown = [row for row in board["desks"] if row["tasks"]]
+    board.update(desks=shown, desks_total=len(board["desks"]), desks_shown=len(shown))
+    return Listing(board, len(rows), len(kept))
 
 
 def _task_list(conn: sqlite3.Connection, args: argparse.Namespace) -> object:
-    """The open tasks as one line each, newest first, unless --all, --open or --status asks for the full records."""
+    """The open tasks as one line each, newest first, unless --all, --open or --status asks for the full records:
+    every task with --all alone, else the newest of those asked for."""
     if args.all or args.open or args.status:
-        return pensieve.list_tasks(conn, args.desk, args.status, args.open)
-    return views.task_lines(conn, _clock(), _fleet_caps(), args.desk)
+        return _newest(pensieve.list_tasks(conn, args.desk, args.status, args.open), args)
+    return views.task_lines(conn, _clock(), _fleet_caps(), args.desk, args.limit or views.LIST_CAP)
+
+
+def _task_builds(conn: sqlite3.Connection, args: argparse.Namespace) -> list:
+    cap = _cap(args, views.LIST_CAP)
+    return views.build_lines(conn, _clock(), _fleet_caps(), args.all, cap)
 
 
 def _task_start(conn: sqlite3.Connection, args: argparse.Namespace) -> dict:
@@ -325,13 +397,19 @@ def _portrait():
     return portrait_patch
 
 
+def _portrait_patches(conn: sqlite3.Connection, args: argparse.Namespace) -> Listing:
+    patch = _portrait()
+    found, total = patch.patch_listing(conn, _cap(args, patch.LIST_LIMIT))
+    return Listing(found, total, len(found))
+
+
 HANDLERS: dict[str, Callable] = {
     "desk add": lambda c, a: pensieve.add_desk(c, a.name, a.family, a.role, a.model),
-    "desk list": lambda c, a: pensieve.list_desks(c),
+    "desk list": lambda c, a: _newest(pensieve.list_desks(c), a),
     "desk cap": _desk_cap,
-    "desk caps": _desk_caps,
+    "desk caps": lambda c, a: _newest(_desk_caps(c, a), a),
     "desk model": _desk_model,
-    "desk models": lambda c, a: wands.list_desk_models(c),
+    "desk models": lambda c, a: _newest(wands.list_desk_models(c), a),
     "desk many-tasks": lambda c, a: pensieve.allow_many_tasks(c, a.desk),
     "model line": lambda c, a: wands.classify(c, a.name, a.line, blocked=_blocked_models()),
     "task create": lambda c, a: pensieve.create_task(
@@ -343,17 +421,17 @@ HANDLERS: dict[str, Callable] = {
     "task close": lambda c, a: pensieve.close_task(c, a.task, a.reason, _token(a)),
     "task show": lambda c, a: pensieve.get_task(c, a.task),
     "task list": lambda c, a: _task_list(c, a),
-    "task builds": lambda c, a: views.build_lines(c, _clock(), _fleet_caps(), a.all, None if a.all else views.LIST_CAP),
+    "task builds": _task_builds,
     "task board": _task_board,
     "task allow-round": lambda c, a: capacity.allow_round(c, a.task, _clock()),
-    "task rounds": lambda c, a: views.rounds_with_branch(c, a.task, _fleet_caps()),
-    "followup list": lambda c, a: followups.list_followups(c, a.task),
+    "task rounds": lambda c, a: _newest(views.rounds_with_branch(c, a.task, _fleet_caps()), a, HISTORY_LIMIT),
+    "followup list": lambda c, a: _newest(followups.list_followups(c, a.task), a),
     "followup show": lambda c, a: followups.show(c, a.task),
     "token mint": lambda c, a: owlery.mint(c, a.task, "cli", a.ttl),
     "owl send": lambda c, a: owlery.send(
         c, a.sender, a.recipient, a.kind, a.subject, _body(a), a.body_path, a.task, a.request,
         a.reply_to, a.key),
-    "owl inbox": lambda c, a: owlery.inbox(c, a.desk, a.all),
+    "owl inbox": lambda c, a: _newest(owlery.inbox(c, a.desk, a.all), a),
     "owl read": lambda c, a: owlery.read(c, a.owl, a.as_desk),
     "owl ack": lambda c, a: owlery.ack(c, a.owl, a.as_desk),
     "request open": lambda c, a: owlery.open_request(
@@ -362,7 +440,7 @@ HANDLERS: dict[str, Callable] = {
     "request defer": lambda c, a: owlery.defer(c, a.request, a.reason),
     "request decline": lambda c, a: owlery.decline(c, a.request, a.reason),
     "request show": _request_show,
-    "request list": lambda c, a: owlery.list_requests(c, a.desk, a.phase, a.open),
+    "request list": lambda c, a: _newest(owlery.list_requests(c, a.desk, a.phase, a.open), a),
     "review record": lambda c, a: owlery.record_review(
         c, a.repo, a.sha, a.task, a.reviewer, a.verdict, a.review_path),
     "review check": _review_check,
@@ -388,21 +466,21 @@ HANDLERS: dict[str, Callable] = {
         c, a.scope, a.subject_key, a.text, a.source, a.tier, a.valid_from, a.lookup, a.expires_at),
     "fact withdraw": lambda c, a: facts.withdraw(c, a.fact, a.desk),
     "fact expire": lambda c, a: {"expired": facts.expire(c)},
-    "fact current": lambda c, a: facts.current_facts(c, a.scope),
+    "fact current": lambda c, a: _newest(facts.current_facts(c, a.scope), a),
     "fact find": lambda c, a: facts.find_facts(c, a.query, a.scope, a.history, a.limit),
     "fact as-of": _fact_as_of,
-    "fact history": lambda c, a: facts.history(c, a.scope, a.subject_key),
-    "fact candidates": lambda c, a: facts.contradiction_candidates(c, a.since, a.limit_per_fact),
+    "fact history": lambda c, a: _newest(facts.history(c, a.scope, a.subject_key), a, HISTORY_LIMIT),
+    "fact candidates": lambda c, a: _newest(facts.contradiction_candidates(c, a.since, a.limit_per_fact), a),
     "fact apply": lambda c, a: facts.apply_ops(c, _ops(a)),
-    "portrait patches": lambda c, a: _portrait().patches(c),
+    "portrait patches": _portrait_patches,
     "portrait show": lambda c, a: _portrait().show(c, a.date),
     "portrait apply": lambda c, a: _portrait().apply(c, a.date, a.sha256, a.only),
     "metric add": lambda c, a: pensieve.add_metric(
         c, a.desk, a.run_id, a.model, a.input_tokens, a.output_tokens, a.cache_read_tokens,
         a.cost_usd, a.duration_ms, a.ts),
-    "metric summary": lambda c, a: pensieve.summary(c, a.since),
+    "metric summary": lambda c, a: _newest(pensieve.summary(c, a.since), a),
     "purge": lambda c, a: owlery.purge(c, body_days=a.body_days, extract_days=a.extract_days),
-    "audit": lambda c, a: owlery.audit(c, escalate=a.escalate),
+    "audit": _audit,
 }
 
 PATH_HANDLERS: dict[str, Callable] = {"init": _init, "doctor": _doctor, "ollivander clear": _ollivander_clear}
@@ -434,6 +512,13 @@ def _text_options(parser: argparse.ArgumentParser) -> None:
     source.add_argument("--text-stdin", action="store_true")
 
 
+def _limit_options(parser: argparse.ArgumentParser, default: int, rows: str, every: Optional[str] = None) -> None:
+    """--all for every row and --limit N for at most N; with neither, the newest default rows."""
+    cap = parser.add_mutually_exclusive_group()
+    cap.add_argument("--all", action="store_true", help=every or f"every {rows}, with no cap")
+    cap.add_argument("--limit", type=_positive, help=f"at most N {rows}, newest kept (default {default})")
+
+
 def _desk_parsers(commands: argparse._SubParsersAction) -> None:
     group = _group(commands, "desk")
     add = _sub(group, "add", "desk add")
@@ -441,13 +526,13 @@ def _desk_parsers(commands: argparse._SubParsersAction) -> None:
     add.add_argument("--family", required=True)
     add.add_argument("--role")
     add.add_argument("--model")
-    _sub(group, "list", "desk list")
+    _limit_options(_sub(group, "list", "desk list"), LIST_LIMIT, "desks")
     bump = _sub(group, "cap", "desk cap")
     bump.add_argument("desk")
     amount = bump.add_mutually_exclusive_group(required=True)
     amount.add_argument("--runs", type=_plus_whole)
     amount.add_argument("--spend", type=_plus_amount)
-    _sub(group, "caps", "desk caps")
+    _limit_options(_sub(group, "caps", "desk caps"), LIST_LIMIT, "desks")
     _sub(group, "many-tasks", "desk many-tasks").add_argument("desk")
     _desk_model_parsers(group)
 
@@ -459,7 +544,7 @@ def _desk_model_parsers(group: argparse._SubParsersAction) -> None:
     choice.add_argument("value", nargs="?", help="pin to this alias, full claude id or catalog slug")
     choice.add_argument("--role", action="store_true", help="unpin, so the role picks again")
     choice.add_argument("--approve", action="store_true", help="switch to the pending pick")
-    _sub(group, "models", "desk models")
+    _limit_options(_sub(group, "models", "desk models"), LIST_LIMIT, "desks")
 
 
 def _model_parsers(commands: argparse._SubParsersAction) -> None:
@@ -480,8 +565,11 @@ def _task_parsers(commands: argparse._SubParsersAction) -> None:
     create.add_argument("--request")
     create.add_argument("--session")
     create.add_argument("--worktree")
-    for name in ("start", "show", "allow-round", "rounds"):
+    for name in ("start", "show", "allow-round"):
         _sub(group, name, f"task {name}").add_argument("task")
+    rounds = _sub(group, "rounds", "task rounds")
+    rounds.add_argument("task")
+    _limit_options(rounds, HISTORY_LIMIT, "review rounds")
     awaiting = _sub(group, "await-close", "task await-close")
     awaiting.add_argument("task")
     awaiting.add_argument("--repo")
@@ -502,16 +590,21 @@ def _task_parsers(commands: argparse._SubParsersAction) -> None:
     which = listing.add_mutually_exclusive_group()
     which.add_argument("--status", help="full records of one status")
     which.add_argument("--open", action="store_true", help="full records of queued, active or awaiting close tasks")
-    which.add_argument("--all", action="store_true", help="full records of every task, oldest first")
-    _sub(group, "board", "task board").add_argument("--desk")
+    _limit_options(listing, LIST_LIMIT, "tasks", "full records of every task (of --status or --open when given), "
+                   "oldest first, with no cap")
+    board = _sub(group, "board", "task board")
+    board.add_argument("--desk")
+    _limit_options(board, LIST_LIMIT, "task rows")
     builds = _sub(group, "builds", "task builds")
-    builds.add_argument("--all", action="store_true", help="every build, closed ones too, with no cap")
+    _limit_options(builds, views.LIST_CAP, "builds", "every build, closed ones too, with no cap")
 
 
 def _followup_parsers(commands: argparse._SubParsersAction) -> None:
     """PR follow-ups, read only: there is no command that changes one."""
     group = _group(commands, "followup")
-    _sub(group, "list", "followup list").add_argument("--task")
+    listing = _sub(group, "list", "followup list")
+    listing.add_argument("--task")
+    _limit_options(listing, LIST_LIMIT, "follow-ups")
     _sub(group, "show", "followup show").add_argument("task")
 
 
@@ -535,7 +628,7 @@ def _owl_parsers(commands: argparse._SubParsersAction) -> None:
     send.add_argument("--key")
     inbox = _sub(group, "inbox", "owl inbox")
     inbox.add_argument("desk")
-    inbox.add_argument("--all", action="store_true")
+    _limit_options(inbox, LIST_LIMIT, "unacked owls", "every owl, acked ones too, with no cap")
     for name in ("read", "ack"):
         parser = _sub(group, name, f"owl {name}")
         parser.add_argument("owl")
@@ -564,6 +657,7 @@ def _request_parsers(commands: argparse._SubParsersAction) -> None:
     listing.add_argument("--desk")
     listing.add_argument("--phase")
     listing.add_argument("--open", action="store_true")
+    _limit_options(listing, LIST_LIMIT, "requests")
 
 
 def _review_parsers(commands: argparse._SubParsersAction) -> None:
@@ -632,7 +726,9 @@ def _fact_parsers(commands: argparse._SubParsersAction) -> None:
     _new_fact_options(add, None)
     add.add_argument("--subject-key")
     _sub(group, "touch", "fact touch").add_argument("fact", type=_whole)
-    _sub(group, "decay", "fact decay").add_argument("--archive", action="store_true")
+    decay = _sub(group, "decay", "fact decay")
+    decay.add_argument("--archive", action="store_true")
+    _limit_options(decay, LIST_LIMIT, "fact ids")
     _sub(group, "archive", "fact archive").add_argument("facts", type=_whole, nargs="+")
     listing = _sub(group, "list", "fact list")
     view = listing.add_mutually_exclusive_group()
@@ -640,6 +736,7 @@ def _fact_parsers(commands: argparse._SubParsersAction) -> None:
     view.add_argument("--context")
     listing.add_argument("--archived", action="store_true")
     listing.add_argument("--history", action="store_true")
+    _limit_options(listing, LIST_LIMIT, "facts")
     _temporal_fact_parsers(group)
 
 
@@ -651,7 +748,9 @@ def _temporal_fact_parsers(group: argparse._SubParsersAction) -> None:
     withdraw.add_argument("fact", type=_whole)
     withdraw.add_argument("--desk")
     _sub(group, "expire", "fact expire")
-    _sub(group, "current", "fact current").add_argument("--scope")
+    current = _sub(group, "current", "fact current")
+    current.add_argument("--scope")
+    _limit_options(current, LIST_LIMIT, "facts")
     find = _sub(group, "find", "fact find")
     find.add_argument("query")
     find.add_argument("--scope")
@@ -662,12 +761,15 @@ def _temporal_fact_parsers(group: argparse._SubParsersAction) -> None:
     moment.add_argument("--world", type=_whole)
     moment.add_argument("--belief", type=_whole)
     as_of.add_argument("--scope")
+    _limit_options(as_of, LIST_LIMIT, "facts")
     history = _sub(group, "history", "fact history")
     history.add_argument("--scope", required=True)
     history.add_argument("--subject-key", required=True)
+    _limit_options(history, HISTORY_LIMIT, "versions")
     candidates = _sub(group, "candidates", "fact candidates")
     candidates.add_argument("--since", type=_whole, required=True)
     candidates.add_argument("--limit-per-fact", type=_whole, default=3)
+    _limit_options(candidates, LIST_LIMIT, "candidate pairs")
     apply = _sub(group, "apply", "fact apply")
     apply.add_argument("--file", required=True)
     apply.add_argument("--sha256")
@@ -675,7 +777,7 @@ def _temporal_fact_parsers(group: argparse._SubParsersAction) -> None:
 
 def _portrait_parsers(commands: argparse._SubParsersAction) -> None:
     group = _group(commands, "portrait")
-    _sub(group, "patches", "portrait patches")
+    _limit_options(_sub(group, "patches", "portrait patches"), 30, "patches")
     _sub(group, "show", "portrait show").add_argument("date")
     apply = _sub(group, "apply", "portrait apply")
     apply.add_argument("date")
@@ -693,7 +795,9 @@ def _metric_parsers(commands: argparse._SubParsersAction) -> None:
         add.add_argument(name, type=_whole, required=True)
     add.add_argument("--cost-usd", type=_amount, required=True)
     add.add_argument("--ts", type=_whole)
-    _sub(group, "summary", "metric summary").add_argument("--since", type=_whole, default=0)
+    summary = _sub(group, "summary", "metric summary")
+    summary.add_argument("--since", type=_whole, default=0)
+    _limit_options(summary, LIST_LIMIT, "desks")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -708,7 +812,9 @@ def build_parser() -> argparse.ArgumentParser:
     purge = _sub(commands, "purge", "purge")
     purge.add_argument("--body-days", type=_whole, default=30)
     purge.add_argument("--extract-days", type=_whole, default=90)
-    _sub(commands, "audit", "audit").add_argument("--escalate", action="store_true")
+    audit = _sub(commands, "audit", "audit")
+    audit.add_argument("--escalate", action="store_true")
+    _limit_options(audit, LIST_LIMIT, "rows of each finding")
     return parser
 
 
@@ -749,5 +855,8 @@ def main(argv: Optional[Sequence[str]] = None, db_path: Optional[Path] = None) -
     except Exception as exc:
         _emit(sys.stderr, _failure(type(exc).__name__, 1, str(exc)))
         return 1
-    _emit(sys.stdout, {"ok": code == 0, "data": data})
+    if isinstance(data, Listing):
+        _emit(sys.stdout, {"ok": code == 0, "data": data.data, **data.fields()})
+    else:
+        _emit(sys.stdout, {"ok": code == 0, "data": data})
     return code

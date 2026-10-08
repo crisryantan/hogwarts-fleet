@@ -399,7 +399,7 @@ Everything `castle` prints is JSON. The installer links `castle` and `fleet` int
 | --- | --- |
 | `castle task list` | See what is open, one line per task, newest first: task id, desk, title, state and who it waits on |
 | `castle task list --desk harry` | The same, for one desk |
-| `castle task list --all` | See every task and its status, as full records |
+| `castle task list --all` | See every task and its status, as full records. List commands show the newest rows by default and say "showing N of M" when they cut; `--all` shows everything |
 | `castle task list --open` | See every task that is queued, active or awaiting close, as full records |
 | `castle task builds` | See one line per open build: go task, build task, branch and state (`--all` adds closed ones) |
 | `castle task board` | See each desk's tasks in flight: round, verdict, and whether a run is going |

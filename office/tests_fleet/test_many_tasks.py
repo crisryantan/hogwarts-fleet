@@ -15,6 +15,7 @@ import shlex
 import stat
 import subprocess
 import threading
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -643,6 +644,45 @@ class RunDeskPadTests(RunDeskCase):
         self.assertIn(f"This run is for task {task_id}. Your pad is {pads}/{task_id}.md", started.call_args.args[0][-1])
         [launch] = capacity.list_launches(self.conn, "ron")
         self.assertEqual(launch["task_id"], task_id)
+
+    def test_a_launch_rotates_the_pad_and_the_scratchpad_unless_another_slot_runs(self):
+        self.enable("hermione")
+        owl_id, task_id = self.request("hermione")
+        folder = self.castle / "desks" / "hermione"
+        (folder / "pads").mkdir(mode=0o700)
+        blocks = "".join(f"\n### Checkpoint 2027-01-0{n}\n- round {n}\n" for n in (1, 2))
+        pad = self.write_file(folder / "pads" / f"{task_id}.md", "# Pad\n\n## Checkpoint\n" + blocks)
+        scratch = self.write_file(folder / "scratchpad.md", "# Scratchpad\n\n## Notes\n- kept\n" + blocks)
+        shared = self.write_file(folder / "pads" / "bot-pass.md", "# Pad\n\n## Checkpoint\n" + blocks)
+        for path in (pad, scratch, shared):  # written a while ago, so no desk is still writing them
+            os.utime(path, (time.time() - 600, time.time() - 600))
+        # A slot past today's count, held by a run from before RUN_SLOTS shrank, may be writing the scratchpad.
+        with run_desk.slot_lock("hermione", db.RUN_SLOT_LIMIT - 1):
+            code, err, _ = self.real_run("hermione", owl_id)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(pad.read_text(), "# Pad\n\n## Checkpoint\n\n### Checkpoint 2027-01-02\n- round 2\n")
+        [archived] = (folder / "pads" / config.SCRATCHPAD_ARCHIVE_DIR).iterdir()
+        self.assertTrue(archived.name.startswith(f"{task_id}-"))
+        self.assertIn("- round 1", archived.read_text())
+        self.assertIn("- round 1", scratch.read_text())
+        self.assertIn("- round 1", shared.read_text())
+        os.unlink(scratch)
+        os.symlink(self.tmp, scratch)  # a refused scratchpad never stops the shared pad's rotation or the run
+        second, _ = self.titled("hermione", "triage the comments")
+        with fake_children():
+            code, out, err = self.main("hermione", "--owl", second)
+        self.assertEqual(code, 0, err)
+        self.assertIn("Scratchpad rotation skipped", out)
+        self.assertNotIn("- round 1", shared.read_text())
+        os.unlink(scratch)
+        self.write_file(scratch, "# Scratchpad\n\n## Notes\n- kept\n" + blocks)
+        os.utime(scratch, (time.time() - 600, time.time() - 600))
+        third, _ = self.titled("hermione", "triage the replies")
+        code, err, _ = self.real_run("hermione", third)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(scratch.read_text(),
+                         "# Scratchpad\n\n## Notes\n- kept\n\n### Checkpoint 2027-01-02\n- round 2\n")
+        self.assertIn("- round 1", next((folder / config.SCRATCHPAD_ARCHIVE_DIR).iterdir()).read_text())
 
     def test_an_existing_pad_is_kept_and_a_linked_pad_is_refused(self):
         self.enable("hermione")

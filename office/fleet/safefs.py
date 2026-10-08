@@ -108,6 +108,21 @@ def open_dir(root: str, *parts: str, create: bool = False, mode: int = 0o700) ->
     return fd
 
 
+def open_subdir(dir_fd: int, name: str, create: bool = False, mode: int = 0o700) -> int:
+    """Open (or make) one plain directory of ours inside dir_fd. The caller closes the fd."""
+    check_component(name)
+    fd = _open_component(dir_fd, name, name, create, mode)
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISDIR(st.st_mode):
+            raise Unsafe(f"{name} is not a directory")
+        _check_owned(st, name)
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
 @contextlib.contextmanager
 def opened_dir(root: str, *parts: str, create: bool = False) -> Iterator[int]:
     fd = open_dir(root, *parts, create=create)
@@ -130,6 +145,23 @@ def lstat(dir_fd: int, name: str) -> Optional[os.stat_result]:
         return os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
     except FileNotFoundError:
         return None
+
+
+def open_regular(dir_fd: int, name: str, label: str = "file") -> int:
+    """Open a plain, singly linked file of ours for reading, with no link followed. The caller closes the fd."""
+    check_component(name)
+    try:
+        fd = os.open(name, READ_FLAGS, dir_fd=dir_fd)
+    except FileNotFoundError:
+        raise Missing(f"{label} does not exist") from None
+    except OSError as exc:
+        raise Unsafe(f"{label} is a symlink or cannot be opened") from exc
+    try:
+        _check_regular(os.fstat(fd), label)
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
 
 
 def read_regular(dir_fd: int, name: str, max_bytes: int, label: str = "file") -> bytes:

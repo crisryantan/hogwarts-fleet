@@ -66,7 +66,8 @@ The store has none of these:
                                         (fleet loops, the background jobs run from a terminal), failover.py (the
                                         model breaker and in-family fallback), orchestrator.py (McGonagall's typed
                                         next step), owl_report.py (her one-line owl reports), phone.py (loud events to
-                                        the phone) and their helpers
+                                        the phone), scratchpad.py (keeps each scratchpad and task pad to its latest
+                                        Checkpoint, older ones archived) and their helpers
   fleet/hooks/                          the castle's session hooks and the push gate, push_gate.py
   launchd/                              the launchd plist templates, one per background job; fleet loops reads them too
   loops/jobs                            only with terminal loops: the jobs fleet loops runs instead of launchd, one per line
@@ -360,12 +361,12 @@ All output is JSON. Errors go to stderr as JSON with the exit code below. `--hel
 castle init
 castle doctor
 castle desk add NAME --family F [--role R] [--model M]
-castle desk list
+castle desk list [--all | --limit N]
 castle desk cap DESK (--runs +N | --spend +X)
-castle desk caps
+castle desk caps [--all | --limit N]
 castle desk many-tasks DESK
 castle desk model DESK (MODEL | --role | --approve)
-castle desk models
+castle desk models [--all | --limit N]
 castle model line NAME frontier|workhorse|fast|ignore
 castle ollivander clear
 castle task create --desk D --title T [--id TASK] [--intent-path P] [--parent TASK] [--request REQ] [--session S] [--worktree P]
@@ -373,22 +374,22 @@ castle task start|show TASK
 castle task await-close TASK [--repo O/N --sha SHA]
 castle task commit TASK --repo O/N --sha SHA
 castle task close TASK --reason complete|abandoned|superseded [--token-stdin]
-castle task list [--desk D] [--status S | --open | --all]
-castle task builds [--all]
-castle task board [--desk D]
+castle task list [--desk D] [--status S | --open] [--all | --limit N]
+castle task builds [--all | --limit N]
+castle task board [--desk D] [--all | --limit N]
 castle task allow-round TASK
-castle task rounds TASK
-castle followup list [--task TASK]
+castle task rounds TASK [--all | --limit N]
+castle followup list [--task TASK] [--all | --limit N]
 castle followup show TASK
 castle token mint TASK [--ttl SECONDS]
 castle owl send --from D --to D --kind K --subject S [--body-path P | --body-stdin] [--task T] [--request R] [--reply-to OWL] [--key K]
-castle owl inbox DESK [--all]
+castle owl inbox DESK [--all | --limit N]
 castle owl read|ack OWL --as DESK
 castle request open --from D --to D --title T [--body-path P | --body-stdin] [--parent TASK] [--key K]
 castle request advance REQ PHASE [--detail TEXT]
 castle request defer|decline REQ --reason R
 castle request show REQ
-castle request list [--desk D] [--phase P] [--open]
+castle request list [--desk D] [--phase P] [--open] [--all | --limit N]
 castle review record --repo O/N --sha SHA --task TASK --reviewer DESK --verdict V [--review-path P]
 castle review check --repo O/N --sha SHA
 castle event add --desk D --kind K --verdict V --summary S [--task T] [--dedupe-key K]
@@ -401,29 +402,31 @@ castle pensieve keypoint (--text T | --text-stdin) [--tags a,b] [--session S]
 castle pensieve find QUERY [--limit N]
 castle fact add --scope fleet|DESK --tier T --text T [--expires-at N] [--source S] [--subject-key K] [--valid-from N] [--lookup L]
 castle fact touch ID
-castle fact decay [--archive]
+castle fact decay [--archive] [--all | --limit N]
 castle fact archive ID [ID ...]
-castle fact list [--scope S] [--archived] [--history]
-castle fact list --context DESK
+castle fact list [--scope S] [--archived] [--history] [--all | --limit N]
+castle fact list --context DESK [--all | --limit N]
 castle fact supersede --scope fleet|DESK --subject-key K --text T [--tier T] [--expires-at N] [--source S] [--valid-from N] [--lookup L]
 castle fact withdraw ID [--desk D]
 castle fact expire
-castle fact current [--scope S]
+castle fact current [--scope S] [--all | --limit N]
 castle fact find QUERY [--scope S] [--history] [--limit N]
-castle fact as-of (--world T | --belief T) [--scope S]
-castle fact history --scope S --subject-key K
-castle fact candidates --since N [--limit-per-fact N]
+castle fact as-of (--world T | --belief T) [--scope S] [--all | --limit N]
+castle fact history --scope S --subject-key K [--all | --limit N]
+castle fact candidates --since N [--limit-per-fact N] [--all | --limit N]
 castle fact apply --file PATH [--sha256 HEX]
-castle portrait patches
+castle portrait patches [--all | --limit N]
 castle portrait show DATE
 castle portrait apply DATE --sha256 HEX [--only ID [ID ...]]
 castle metric add --desk D --run-id R --model M --input-tokens N --output-tokens N --cache-read-tokens N --cost-usd X --duration-ms N [--ts N]
-castle metric summary [--since N]
+castle metric summary [--since N] [--all | --limit N]
 castle purge [--body-days N] [--extract-days N]
-castle audit [--escalate]
+castle audit [--escalate] [--all | --limit N]
 ```
 
 Every command except `init` and `doctor` needs an existing database. `init` is safe to run twice. `request show` includes the request's owls as metadata. `fact decay --archive` archives what is stale at that moment. `fact list` shows open rows. `--history` adds superseded, withdrawn and expired rows, and `--archived` adds archived ones. `--context` lists what a desk sees and takes neither flag.
+
+List commands print the newest 20 rows by default (`task rounds` and `fact history` the last 10, `task list`, `task builds` and `portrait patches` 30), so a listing pasted into a session stays small. A cut listing says so beside its data: `total`, `shown`, `truncated` and a `note` such as "showing 20 of 500, use --all for everything". `--all` prints every row and `--limit N` at most N. On `owl inbox`, `--all` also adds acked owls, and on `task list` it means full records. `task board` lists only the desks with a row shown and counts the rest in `desks_total`, and a round's `sha_note` names at most five other builds.
 
 `fact apply --file` takes a JSON list of ops, for example:
 

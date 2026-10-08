@@ -185,7 +185,8 @@ class CommandTests(CliCase):
         self.assertEqual(self.ok("task", "list", "--desk", "beta"), ["no open tasks"])
         self.assertEqual(self.ok("task", "builds"), ["no open builds"])
         self.assertEqual(self.ok("task", "builds", "--all"), ["no open builds"])
-        self.fails(2, "ValidationError", "task", "list", "--all", "--open")
+        self.assertEqual([task["id"] for task in self.ok("task", "list", "--all", "--open")], [queued["id"]])
+        self.fails(2, "ValidationError", "task", "list", "--all", "--limit", "5")
 
     def test_task_create_takes_a_minted_id_and_its_own_intent_path(self):
         task_id = "tk_0123456789abcdef"

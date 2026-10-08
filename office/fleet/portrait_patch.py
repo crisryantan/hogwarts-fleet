@@ -44,7 +44,7 @@ import re
 import sqlite3
 import time
 import unicodedata
-from typing import Iterator, Optional
+from typing import Optional
 
 from hogwarts import db, facts, ids, pensieve
 from hogwarts.errors import ConflictError, IntegrityError, NotFoundError, StoreError, ValidationError
@@ -563,7 +563,8 @@ def apply(conn, date: str, sha256: str, only: Optional[list] = None, now: Option
 # Listing
 
 
-def _patch_names() -> Iterator[str]:
+def _patch_names() -> list:
+    """Every patch file name in Dumbledore's outbox, newest first."""
     try:
         with _outbox() as fd:
             names = [name for name in os.listdir(fd) if PATCH_FILE.fullmatch(name)]
@@ -571,46 +572,58 @@ def _patch_names() -> Iterator[str]:
         raise NotFoundError("Dumbledore's outbox does not exist") from None
     except FleetError as exc:
         raise ValidationError(f"Dumbledore's outbox was refused: {common.one_line(exc, 200)}") from None
-    return iter(sorted(names, reverse=True)[:LIST_LIMIT])
+    return sorted(names, reverse=True)
 
 
 def _lane_line(row: dict) -> dict:
     return {"state": row["state"], "outcome": row["outcome"], "applied": split_ids(row["applied_ids"])}
 
 
-def patches(conn) -> list:
-    """The newest patches in Dumbledore's outbox, newest first: each one's sha256, its op ids, the ones out
-    of schema and the ones applied, and what auto-portrait did on its night. A patch that cannot be read or
-    parsed says why instead. A night auto-portrait took on whose file is gone is listed too, with file null. When the
-    outbox itself cannot be read, the nights auto-portrait took on are still listed, each naming its file with the
-    outbox's problem, since whether that file is there is unknown; with no such night, the outbox's error is raised."""
-    lane = {row["date"]: row for row in pensieve.recent_auto_patches(conn, LIST_LIMIT)}
+def _file_item(conn, name: str, lane: dict) -> dict:
+    named = PATCH_FILE.fullmatch(name).group(1)
+    item = {"file": name}
     try:
-        names, outbox_problem = list(_patch_names()), None
+        date = check_date(named)
+        item.update(date=date, applied=sorted(applied_ops(conn, date)))
+        if date in lane:
+            item["auto"] = _lane_line(lane[date])
+        raw = read_patch(date)
+        patch = parse_patch(raw, date)
+        item.update(sha256=hashlib.sha256(raw).hexdigest(), ops=[entry["id"] for entry in patch["ops"]],
+                    out_of_schema=[entry["id"] for entry in patch["ops"] if entry["problem"] is not None])
+    except (StoreError, OSError) as exc:
+        item["problem"] = common.one_line(exc, 200)
+    return item
+
+
+def patch_listing(conn, limit: Optional[int] = LIST_LIMIT) -> tuple:
+    """(the newest limit patches, how many there are; every one with a limit of None), newest first: each one's
+    sha256, its op ids, the ones out of schema and the ones applied, and what auto-portrait did on its night. A patch
+    that cannot be read or parsed says why instead. A night auto-portrait took on whose file is gone is listed too,
+    with file null. When the outbox itself cannot be read, the nights auto-portrait took on are still listed, each
+    naming its file with the outbox's problem, since whether that file is there is unknown; with no such night, the
+    outbox's error is raised. Only the patches listed are read."""
+    lane = {row["date"]: row for row in pensieve.recent_auto_patches(conn, None)}
+    try:
+        names, outbox_problem = _patch_names(), None
     except (StoreError, OSError) as exc:
         if not lane:
             raise
         names, outbox_problem = [], common.one_line(exc, 200)
+    files = {PATCH_FILE.fullmatch(name).group(1): name for name in names}
+    keys = sorted(set(files) | set(lane), reverse=True)
     found = []
-    for name in names:
-        named = PATCH_FILE.fullmatch(name).group(1)
-        item = {"file": name}
-        try:
-            date = check_date(named)
-            item.update(date=date, applied=sorted(applied_ops(conn, date)))
-            if date in lane:
-                item["auto"] = _lane_line(lane.pop(date))
-            raw = read_patch(date)
-            patch = parse_patch(raw, date)
-            item.update(sha256=hashlib.sha256(raw).hexdigest(), ops=[entry["id"] for entry in patch["ops"]],
-                        out_of_schema=[entry["id"] for entry in patch["ops"] if entry["problem"] is not None])
-        except (StoreError, OSError) as exc:
-            item["problem"] = common.one_line(exc, 200)
-        found.append((named, item))
-    for date, row in lane.items():
-        item = {"file": None, "date": date, "applied": sorted(applied_ops(conn, date)), "auto": _lane_line(row)}
+    for key in keys if limit is None else keys[:limit]:
+        if key in files:
+            found.append(_file_item(conn, files[key], lane))
+            continue
+        item = {"file": None, "date": key, "applied": sorted(applied_ops(conn, key)), "auto": _lane_line(lane[key])}
         if outbox_problem is not None:
-            item.update(file=PATCH_NAME.format(date=date), problem=outbox_problem)
-        found.append((date, item))
-    found.sort(key=lambda pair: pair[0], reverse=True)
-    return [item for _, item in found[:LIST_LIMIT]]
+            item.update(file=PATCH_NAME.format(date=key), problem=outbox_problem)
+        found.append(item)
+    return found, len(keys)
+
+
+def patches(conn, limit: Optional[int] = LIST_LIMIT) -> list:
+    """The newest patches, as patch_listing lists them."""
+    return patch_listing(conn, limit)[0]

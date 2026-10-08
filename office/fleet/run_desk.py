@@ -80,7 +80,9 @@ run's task, or for a review round by its author task, so the rounds of one revie
 review of a task runs at a time. An owl of a review round runs only from the review that opened it, which
 holds the author task's review lock and passes the run slot the round recorded; any other launch of it (by
 hand, the Owl Post or a patrol) is refused before it waits for a slot. The run makes the pad under its slot
-just before launch, never on a dry run, and the prompt names it in one trusted line.
+just before launch, never on a dry run, and the prompt names it in one trusted line. Then it rotates the pad and,
+when no other slot of the desk is held, the desk's scratchpad and shared pads (fleet/scratchpad.py): each keeps
+only its latest Checkpoint, older ones move to the archive, and a warning lands in the result's scratchpad list.
 A run that gives up waiting for a free slot raises its own event, not a failed-run one.
 A build desk's run on its own task (config.WORKTREE_DESKS) holds that task's review lock (task_lock) from before it
 waits for a slot until its process has exited, and the process inherits it, so no review of the task (manual or
@@ -151,7 +153,7 @@ if __name__ == "__main__" and "/Users/crisryantan/.hogwarts" not in sys.path:
 from hogwarts import capacity, db, followups, ids, owlery, pensieve, wands  # noqa: E402
 from hogwarts.errors import ConflictError, NotFoundError, StoreError  # noqa: E402
 
-from fleet import common, config, failover, gitops, safefs, toolchain  # noqa: E402
+from fleet import common, config, failover, gitops, safefs, scratchpad, toolchain  # noqa: E402
 from fleet.safefs import FleetError  # noqa: E402
 
 FORBIDDEN_PARTS = (
@@ -396,6 +398,49 @@ def ensure_pad(plan: dict) -> None:
             safefs.write_new(fd, name, PAD_HEADER.format(key=plan["pad_key"]).encode("utf-8"))
         elif not safefs.is_safe_regular(fd, name):
             raise safefs.Unsafe("the run's pad is a link or not a plain file")
+
+
+def _other_slots_idle(desk: str, index: int, own_fds: tuple = ()) -> bool:
+    """Whether no other run slot the desk could ever have (below db.RUN_SLOT_LIMIT, as all_slots_lock takes them) is
+    held, probed without waiting. A slot this process holds through one of own_fds, as the nightly portrait job holds
+    them all, counts as idle: no other run can be writing while this one holds it."""
+    with safefs.opened_dir(config.OFFICE_ROOT, "locks", create=True) as locks_fd:
+        named = {other: safefs.lstat(locks_fd, slot_lock_name(desk, other)) for other in range(db.RUN_SLOT_LIMIT)}
+    mine = [os.fstat(fd) for fd in own_fds]
+    for other, st in named.items():
+        if other == index or st is None or any(os.path.samestat(st, held) for held in mine):
+            continue
+        try:
+            with slot_lock(desk, other):
+                pass
+        except safefs.Busy:
+            return False
+    return True
+
+
+def rotate_pads(plan: dict, slot_index: int, now: int, own_fds: tuple = ()) -> list:
+    """Before a launch, rotate the run's pad and, while no other run of the desk is going to be writing them, the
+    desk's scratchpad and shared pads (config.SHARED_PADS) (fleet/scratchpad.py). Best effort, file by file: a warning
+    or a failure is a line for the result, never a refusal."""
+    desk = plan["desk"]
+    if desk not in config.HEADLESS_CLAUDE:  # a Codex desk writes no scratchpad or pad of its own
+        return []
+    keys = [] if plan["pad"] is None else [plan["pad_key"]]
+    lines = []
+    try:
+        if _other_slots_idle(desk, slot_index, own_fds):
+            keys = list(dict.fromkeys([None, *config.SHARED_PADS.get(desk, ()), *keys]))
+        with scratchpad.desk_lock(desk):
+            for key in keys:
+                try:
+                    warning = scratchpad.rotate_held(desk, now, key)["warning"]
+                except (FleetError, OSError) as exc:
+                    warning = f"Scratchpad rotation skipped: {common.one_line(exc, 200)}"
+                if warning:
+                    lines.append(warning)
+    except (FleetError, OSError) as exc:
+        lines.append(f"Scratchpad rotation skipped: {common.one_line(exc, 200)}")
+    return lines
 
 
 class Slot(NamedTuple):
@@ -1992,6 +2037,7 @@ def run(conn, desk: str, owl_id: str, mcp_job: Optional[str] = None, now: Option
             require_castle_dir(plan["cwd"])
             if plan["pad"] is not None:
                 ensure_pad(plan)
+            rotated = rotate_pads(plan, slot.index, common.now_stamp(now), keep_fds)
             if on_start is not None:
                 on_start()
             if on_run_id is not None:
@@ -2022,6 +2068,8 @@ def run(conn, desk: str, owl_id: str, mcp_job: Optional[str] = None, now: Option
         _ack_owl(conn, plan["desk"], plan["owl_id"], now)
     if notes is not None:
         result["held"] = notes
+    if rotated:
+        result["scratchpad"] = rotated
     return result
 
 

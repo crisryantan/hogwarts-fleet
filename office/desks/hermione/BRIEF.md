@@ -75,4 +75,4 @@ VERDICT: PASS | CHANGES | HEADMASTER
 or, only when my tools failed: BLOCKED-ON-TOOLING: <what failed>
 
 ## Before my context is trimmed
-I add a Checkpoint block at the end of the pad my run names, with the task, the sha, the round, the open findings and my next step. If my run names no pad, the Checkpoint goes at the end of my scratchpad.
+I add a Checkpoint block at the end of the pad my run names, with the task, the sha, the round, the open findings and my next step. If my run names no pad, the Checkpoint goes at the end of my scratchpad. Each Checkpoint starts with a `### Checkpoint <date>` heading. Before each run the fleet keeps only the latest one in place and moves older ones to scratchpad-archive/ next to the file. Findings that must outlast a round go in my review, not a Checkpoint.

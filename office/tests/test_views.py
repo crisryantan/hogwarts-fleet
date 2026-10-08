@@ -104,7 +104,8 @@ class BuildLinesTests(StoreCase):
         self.second_build()
         capped = self.lines(cap=1)
         self.assertEqual(len(capped), 2)
-        self.assertIn("1 more builds (castle task builds --all lists every one)", capped[-1])
+        self.assertIn("1 more builds: showing", capped[-1])
+        self.assertIn("use --all for everything (castle task builds --all lists every one)", capped[-1])
         self.assertEqual(len(self.lines(cap=None)), 2)
         self.assertNotIn("more builds", "\n".join(self.lines(cap=None)))
 

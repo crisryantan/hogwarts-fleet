@@ -234,7 +234,9 @@ All in `~/.hogwarts/fleet/config.py`:
 | `RUN_SLOTS` | How many runs a desk may have going at once: Moody 2, Hermione 2 and every other desk 1, so two reviews of different tasks run at once. Each slot has its own lock, Codex work folder and temp folder, and the caps stay per desk across all of them. Raise it only for a desk whose runs never write the same file, at most 8 |
 | `RUN_TIMEOUT_SECONDS` | How long one run may take |
 | `TEMPUS_THRESHOLD` | Context size that triggers the Tempus warning |
-| `SCRATCHPAD_BUDGET_BYTES` | The scratchpad size the PreCompact hook respects |
+| `SCRATCHPAD_BUDGET_BYTES` | The scratchpad size the PreCompact hook respects, and the size a rotation warns past |
+| `SCRATCHPAD_ARCHIVE_DIR` | The folder next to a scratchpad or task pad where older Checkpoint blocks move, one file per month |
+| `SCRATCHPAD_QUIET_SECONDS` | How long after its last write a scratchpad waits before a rotation takes it |
 | `TASK_PAD_DESKS` | The desks that get one pad per task, `desks/<desk>/pads/<key>.md`: Hermione and Ron |
 | `RUNNING_WINDOW_SECONDS` | How long a launch with no usage yet counts as running in the digest and `castle task board` |
 | `DIGEST_MAX_LINES` | The length of McGonagall's startup digest |

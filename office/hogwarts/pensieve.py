@@ -249,8 +249,10 @@ def open_auto_patches(conn: Conn) -> list[dict]:
                         " ORDER BY auto_patches.date")
 
 
-def recent_auto_patches(conn: Conn, limit: int = 30) -> list[dict]:
-    """The newest auto-portrait nights, newest date first. Read only."""
+def recent_auto_patches(conn: Conn, limit: Optional[int] = 30) -> list[dict]:
+    """The newest auto-portrait nights, newest date first, every one with a limit of None. Read only."""
+    if limit is None:
+        return db.fetch_all(conn, _AUTO_SELECT + " ORDER BY auto_patches.date DESC")
     limit = ids.check_int(limit, "limit", minimum=1, maximum=1000)
     return db.fetch_all(conn, _AUTO_SELECT + " ORDER BY auto_patches.date DESC LIMIT ?", (limit,))
 

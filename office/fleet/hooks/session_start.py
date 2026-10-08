@@ -14,6 +14,10 @@ is going, as Owl Post starts an ordinary request's run, shows in flight as runni
 Input field: source ("startup", "resume", "clear", "compact", "fork"). Anything else
 counts as startup.
 
+Before the digest of a new session it rotates the scratchpad of the desk whose session this is (fleet/scratchpad.py),
+so the desk reads only its latest Checkpoint; older ones are in the archive. A warning from that is one line after the
+digest.
+
 It acks no events on Ryan's behalf except those the fleet already settled (pensieve.settle_events); Ryan acks the
 rest in his terminal. The digest lists the events in full once and records the newest id for the session
 (fleet/events_seen.py), so each prompt after it lists only newer ones. Answer, result and fyi owls that
@@ -32,9 +36,12 @@ if __name__ == "__main__" and "/Users/crisryantan/.hogwarts" not in sys.path:
 from hogwarts import capacity, owlery, pensieve  # noqa: E402
 from hogwarts.errors import StoreError  # noqa: E402
 
-from fleet import common, config, events_seen  # noqa: E402
+from fleet import common, config, events_seen, scratchpad  # noqa: E402
+from fleet.safefs import FleetError  # noqa: E402
 
 ONE_LINE_SOURCES = ("resume", "fork")
+# A session that carries on: its desk may still have its scratchpad in context, and a compact's PreCompact rotated it.
+NO_ROTATION_SOURCES = ("resume", "fork", "compact")
 TITLE_LIMIT = 90
 INFO_KINDS = ("answer", "result", "fyi")
 
@@ -166,7 +173,8 @@ def _memory(conn, desk: str) -> list:
     return [
         "Memory pointers:",
         f"- {len(facts)} current facts for {desk}: castle fact list --context {desk} (Ryan's terminal)",
-        f"- Scratchpad: read only the last Checkpoint in {config.castle_desk_dir(desk)}/scratchpad.md",
+        f"- Scratchpad: read only the last Checkpoint in {config.castle_desk_dir(desk)}/scratchpad.md"
+        f" (older ones are in {config.SCRATCHPAD_ARCHIVE_DIR}/)",
         f"- Plan: {config.CASTLE_ROOT}/PLAN.md and {config.CASTLE_ROOT}/standing-orders.md",
     ]
 
@@ -207,8 +215,24 @@ def resume_line(conn, desk: str, now: Optional[int] = None) -> str:
             f"{queued} queued.")
 
 
+def rotate_scratchpad(data: dict, desk: str, now: int) -> list:
+    """Rotate the scratchpad of the desk whose session this is, if it keeps one: its warning line, if any. A failure
+    is one line too and never stops the digest."""
+    owner = common.session_desk(data, desk)
+    if owner not in config.CASTLE_DESKS:
+        return []
+    try:
+        warning = scratchpad.rotate(owner, now)["warning"]
+    except (FleetError, OSError) as exc:
+        return [f"Scratchpad rotation skipped: {common.one_line(exc, 200)}"]
+    except Exception as exc:  # noqa: BLE001 - the digest still prints
+        return [f"Scratchpad rotation skipped: {type(exc).__name__}"]
+    return [warning] if warning else []
+
+
 def _body(data: dict, desk: str, out, now: int) -> None:
     source = data.get("source")
+    rotated = [] if source in NO_ROTATION_SOURCES else rotate_scratchpad(data, desk, now)
     conn = common.connect()
     try:
         if source in ONE_LINE_SOURCES:
@@ -216,7 +240,7 @@ def _body(data: dict, desk: str, out, now: int) -> None:
         else:
             listed: list = []
             lines = digest(conn, desk, now, listed)
-            out.write("\n".join(lines) + "\n")
+            out.write("\n".join(lines + rotated) + "\n")
             out.flush()
             if listed:  # the prompt hook then lists only what the digest did not show
                 events_seen.record(common.session_id(data), events_seen.mark(

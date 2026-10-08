@@ -12,6 +12,8 @@ from . import capacity, ids, pensieve
 Conn = sqlite3.Connection
 
 LIST_CAP = 30
+# The most other builds a round's sha note names; the rest are counted.
+SHA_NOTE_NAMES = 5
 TITLE_WIDTH = 46
 STATE_WIDTH = 14
 SHORT_SHA = 12
@@ -60,7 +62,8 @@ def task_lines(conn: Conn, now: int, caps, desk: Optional[str] = None, cap: int 
         lines.append(f"{task['id']:<19} {task['desk']:<10} {_clip(task['title'], TITLE_WIDTH):<{TITLE_WIDTH}}"
                      f" {state:<{STATE_WIDTH}} {waiting_on(task, state)}")
     if len(tasks) > cap:
-        lines.append(f"... {len(tasks) - cap} more open (castle task list --all lists every task)")
+        lines.append(f"... {len(tasks) - cap} more open: showing {cap} of {len(tasks)}, use --all for everything"
+                     " (castle task list --all lists every task)")
     return lines
 
 
@@ -110,7 +113,8 @@ def build_lines(conn: Conn, now: int, caps, include_closed: bool = False, cap: O
             line += f" | {'base sha' if users[sha] > 1 else 'sha'} {ids.check('sha', sha)[:SHORT_SHA]}"
         lines.append(line)
     if cap is not None and len(shown) > cap:
-        lines.append(f"... {len(shown) - cap} more builds (castle task builds --all lists every one)")
+        lines.append(f"... {len(shown) - cap} more builds: showing {cap} of {len(shown)}, use --all for everything"
+                     " (castle task builds --all lists every one)")
     return lines
 
 
@@ -124,6 +128,12 @@ def rounds_with_branch(conn: Conn, task_id: str, caps) -> list:
     others = {sha: [item["id"] for item in builds if _head_sha(conn, item["id"]) == sha]
               for sha in {row["sha"] for row in rounds}}
     branch = _branch(conn, task)
-    return [{**row, "branch": branch,
-             "sha_note": f"base sha, also shown on {', '.join(others[row['sha']])}" if others[row["sha"]] else None}
-            for row in rounds]
+    return [{**row, "branch": branch, "sha_note": _sha_note(others[row["sha"]])} for row in rounds]
+
+
+def _sha_note(builds: list) -> Optional[str]:
+    if not builds:
+        return None
+    named = ", ".join(builds[-SHA_NOTE_NAMES:])  # the newest builds
+    more = len(builds) - SHA_NOTE_NAMES
+    return f"base sha, also shown on {named}" + (f" and {more} more" if more > 0 else "")
