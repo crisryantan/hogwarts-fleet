@@ -18,9 +18,12 @@
   fleet close <task-id>
       One auto-close try in the foreground (fleet/closer.py), only while auto-close is on: it clears a stopped task
       once, keeps every kept result, and runs a command or judge run again only past the automatic tries.
+  fleet loops [--dry-run]
+      Runs the background jobs named in loops/jobs in the foreground until Ctrl+C, instead of launchd, so they get
+      this terminal's folder access (fleet/loops.py). --dry-run prints each job's schedule and starts nothing.
 
 Output is one JSON object, like castle. Exit 0 on success, 1 on a refusal or error. fleet feed
-is the exception: it prints a live, read-only text feed until Ctrl+C (see fleet/feed.py).
+and fleet loops are the exceptions: they print live text lines until Ctrl+C (see fleet/feed.py and fleet/loops.py).
 Run it through ~/.hogwarts/bin/fleet, which clears the environment first. No desk can run it:
 desks cannot read the office, and Ryan's own sessions are denied it by his settings.
 """
@@ -41,7 +44,7 @@ from hogwarts.errors import StoreError  # noqa: E402
 from fleet import adopt, closer, common, config, gitops, push, review, verify, worktree  # noqa: E402
 from fleet import gringotts, ollivander  # noqa: E402
 from fleet.safefs import FleetError  # noqa: E402
-from fleet import feed  # noqa: E402
+from fleet import feed, loops  # noqa: E402
 
 INTENT_MAX_BYTES = 16384
 
@@ -85,6 +88,7 @@ def build_parser() -> argparse.ArgumentParser:
     reviewed.add_argument("--task")
     reviewed.add_argument("--base", default=config.DEFAULT_BASE)
     reviewed.add_argument("--no-fetch", action="store_true")
+    commands.add_parser("loops", allow_abbrev=False).add_argument("--dry-run", action="store_true")
     watched = commands.add_parser("feed", allow_abbrev=False)
     which = watched.add_mutually_exclusive_group(required=True)
     which.add_argument("--desk", help="one desk; owl-post shows every owl")
@@ -164,10 +168,24 @@ def run_feed(desk: Optional[str]) -> int:
     return feed.follow(desk)
 
 
+def run_loops(dry_run: bool) -> int:
+    """fleet loops needs no store connection: the jobs it starts open their own."""
+    try:
+        if dry_run:
+            sys.stdout.write(json.dumps({"ok": True, "data": loops.plan()}, ensure_ascii=True, indent=2) + "\n")
+            return 0
+        return loops.supervise()
+    except FleetError as exc:
+        sys.stdout.write(json.dumps({"ok": False, "error": common.one_line(exc, 600)}, ensure_ascii=True) + "\n")
+        return 1
+
+
 def main(argv: Optional[list] = None) -> int:
     args = build_parser().parse_args(sys.argv[1:] if argv is None else argv)
     if args.command == "feed":
         return run_feed(None if args.all else args.desk)
+    if args.command == "loops":
+        return run_loops(args.dry_run)
     try:
         conn = common.connect()
     except StoreError as exc:

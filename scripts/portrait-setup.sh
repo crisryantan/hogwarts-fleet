@@ -11,7 +11,9 @@
 # It prints OK or FAILED after each step and stops at the first failure.
 # Nothing here applies a patch. Dumbledore only proposes, and you apply what
 # you accept with castle portrait apply. auto-portrait stays off until you
-# write ~/.hogwarts/auto-portrait yourself.
+# write ~/.hogwarts/auto-portrait yourself. With terminal loops chosen
+# (~/.hogwarts/loops/jobs is there) steps 5 and 6 add the job to that list
+# instead and load nothing into launchd.
 set -u
 
 ok() { printf '   OK      %s\n' "$1"; }
@@ -37,6 +39,7 @@ AGENTS="$HOME/Library/LaunchAgents"
 TARGET="$AGENTS/$LABEL.plist"
 DOMAIN="gui/$(id -u)"
 MARKER="$OFFICE/desks/portrait/enabled"
+LOOPS_LIST="$OFFICE/loops/jobs"
 
 # One fleet module, run the way launchd runs it: a cleared environment and the system Python.
 run_module() {
@@ -82,16 +85,27 @@ else
 	fail "could not make $MARKER"
 fi
 
-echo "Step 5 of 6: checking the job file and copying it into place"
-plutil -lint "$TEMPLATE" >/dev/null 2>&1 || fail "the job template did not pass plutil -lint"
-if mkdir -p "$OFFICE/logs" "$AGENTS" && cp "$TEMPLATE" "$TARGET" && chmod 644 "$TARGET"; then ok "copied to $TARGET"; else fail "could not copy the job file"; fi
+if [ -f "$LOOPS_LIST" ]; then
+	echo "Step 5 of 6: checking the job file"
+	plutil -lint "$TEMPLATE" >/dev/null 2>&1 || fail "the job template did not pass plutil -lint"
+	[ ! -e "$TARGET" ] || fail "launchd also has $TARGET. Run sh scripts/loops-setup.sh to move it to the terminal loops"
+	if mkdir -p "$OFFICE/logs"; then ok "the template is fine, and launchd has no copy"; else fail "could not create $OFFICE/logs"; fi
 
-echo "Step 6 of 6: switching the job on"
-if launchctl print "$DOMAIN/$LABEL" >/dev/null 2>&1; then
-	ok "it was already switched on"
+	echo "Step 6 of 6: adding the job to the terminal loops"
+	grep -qx portrait "$LOOPS_LIST" || printf 'portrait\n' >>"$LOOPS_LIST" || fail "could not add portrait to $LOOPS_LIST"
+	ok "portrait is in $LOOPS_LIST. fleet loops reads the list when it starts: start it, or stop and start it"
 else
-	launchctl bootstrap "$DOMAIN" "$TARGET" 2>&1 | sed 's/^/           /'
-	if launchctl print "$DOMAIN/$LABEL" >/dev/null 2>&1; then ok "switched on"; else fail "launchd did not accept the job"; fi
+	echo "Step 5 of 6: checking the job file and copying it into place"
+	plutil -lint "$TEMPLATE" >/dev/null 2>&1 || fail "the job template did not pass plutil -lint"
+	if mkdir -p "$OFFICE/logs" "$AGENTS" && cp "$TEMPLATE" "$TARGET" && chmod 644 "$TARGET"; then ok "copied to $TARGET"; else fail "could not copy the job file"; fi
+
+	echo "Step 6 of 6: switching the job on"
+	if launchctl print "$DOMAIN/$LABEL" >/dev/null 2>&1; then
+		ok "it was already switched on"
+	else
+		launchctl bootstrap "$DOMAIN" "$TARGET" 2>&1 | sed 's/^/           /'
+		if launchctl print "$DOMAIN/$LABEL" >/dev/null 2>&1; then ok "switched on"; else fail "launchd did not accept the job"; fi
+	fi
 fi
 
 echo ""
@@ -100,4 +114,8 @@ echo "In the morning, nothing has changed until you say so:"
 echo "  $OFFICE/bin/castle portrait patches"
 echo "  $OFFICE/bin/castle portrait show <date>"
 echo "  $OFFICE/bin/castle portrait apply <date> --sha256 <hash from show> [--only <op ids>]"
-echo "To switch it off later:  launchctl bootout $DOMAIN/$LABEL && rm $TARGET $MARKER"
+if [ -f "$LOOPS_LIST" ]; then
+	echo "To switch it off later: remove the portrait line from $LOOPS_LIST, restart fleet loops, and rm $MARKER"
+else
+	echo "To switch it off later:  launchctl bootout $DOMAIN/$LABEL && rm $TARGET $MARKER"
+fi

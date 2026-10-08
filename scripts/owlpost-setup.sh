@@ -9,6 +9,8 @@
 #
 # It prints OK or FAILED after each step and stops at the first failure.
 # The same steps by hand are in ~/.hogwarts/pending/b-owlpost-launchctl.txt.
+# With terminal loops chosen (~/.hogwarts/loops/jobs is there) it adds the job
+# to that list instead and loads nothing into launchd.
 set -u
 
 ok() { printf '   OK      %s\n' "$1"; }
@@ -33,6 +35,12 @@ TEMPLATE="$OFFICE/launchd/$LABEL.plist"
 AGENTS="$HOME/Library/LaunchAgents"
 TARGET="$AGENTS/$LABEL.plist"
 DOMAIN="gui/$(id -u)"
+LOOPS_LIST="$OFFICE/loops/jobs"
+
+# Whether a live fleet loops runs this job here, as fleet loops --dry-run reads it from the supervisor's lock and marker.
+loops_run() {
+	"$OFFICE/bin/fleet" loops --dry-run 2>/dev/null | tr -d ' \n' | grep -q "\"running\":\[[^]]*\"$1\""
+}
 
 echo "Step 1 of 6: checking the seven desk outboxes"
 count=$(find "$CASTLE/desks" -mindepth 2 -maxdepth 2 -type d -name outbox 2>/dev/null | wc -l | tr -d ' ')
@@ -47,23 +55,43 @@ rc=$?
 printf '%s\n' "$out" | head -8 | sed 's/^/           /'
 if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -Eq '"ok": ?true'; then ok "one clean pass"; else fail "the hand pass did not report ok (exit $rc)"; fi
 
-echo "Step 4 of 6: checking the job file and copying it into place"
-plutil -lint "$TEMPLATE" >/dev/null 2>&1 || fail "the job template did not pass plutil -lint"
-if mkdir -p "$AGENTS" && cp "$TEMPLATE" "$TARGET" && chmod 644 "$TARGET"; then ok "copied to $TARGET"; else fail "could not copy the job file"; fi
+if [ -f "$LOOPS_LIST" ]; then
+	echo "Step 4 of 6: checking the job file and adding it to the terminal loops"
+	plutil -lint "$TEMPLATE" >/dev/null 2>&1 || fail "the job template did not pass plutil -lint"
+	[ ! -e "$TARGET" ] || fail "launchd also has $TARGET. Run sh scripts/loops-setup.sh to move it to the terminal loops"
+	grep -qx owlpost "$LOOPS_LIST" || printf 'owlpost\n' >>"$LOOPS_LIST" || fail "could not add owlpost to $LOOPS_LIST"
+	ok "owlpost is in $LOOPS_LIST, and launchd has no copy"
 
-echo "Step 5 of 6: switching the job on"
-if launchctl print "$DOMAIN/$LABEL" >/dev/null 2>&1; then
-	ok "it was already switched on"
+	echo "Step 5 of 6: checking fleet loops runs it"
+	if ! loops_run owlpost; then
+		echo "           Start fleet loops, or stop and start it if it runs, in its own herdr pane or Terminal window:"
+		echo "           $OFFICE/bin/fleet loops"
+		echo "           Then run this script again for the test owl."
+		exit 0
+	fi
+	ok "fleet loops runs owlpost"
+	REF="$OFFICE/logs/.owlpost-setup-stamp"
+	: >"$REF" || fail "could not write $REF"
 else
-	launchctl bootstrap "$DOMAIN" "$TARGET" 2>&1 | sed 's/^/           /'
-	if launchctl print "$DOMAIN/$LABEL" >/dev/null 2>&1; then ok "switched on"; else fail "launchd did not accept the job"; fi
+	echo "Step 4 of 6: checking the job file and copying it into place"
+	plutil -lint "$TEMPLATE" >/dev/null 2>&1 || fail "the job template did not pass plutil -lint"
+	if mkdir -p "$AGENTS" && cp "$TEMPLATE" "$TARGET" && chmod 644 "$TARGET"; then ok "copied to $TARGET"; else fail "could not copy the job file"; fi
+
+	echo "Step 5 of 6: switching the job on"
+	if launchctl print "$DOMAIN/$LABEL" >/dev/null 2>&1; then
+		ok "it was already switched on"
+	else
+		launchctl bootstrap "$DOMAIN" "$TARGET" 2>&1 | sed 's/^/           /'
+		if launchctl print "$DOMAIN/$LABEL" >/dev/null 2>&1; then ok "switched on"; else fail "launchd did not accept the job"; fi
+	fi
+	REF="$TARGET"
 fi
 
 echo "Step 6 of 6: sending a test owl from McGonagall to Hermione"
 printf '%s\n' '{"to": "hermione", "kind": "fyi", "subject": "owl post test", "body": "hello"}' >"$CASTLE/desks/mcgonagall/outbox/hello.json"
 # The Owl Post renames a sent file to .sent/owl_<id>-<original name> and
 # delivers the inbox copy as owl_<id>.json.
-sent_owl() { find "$CASTLE/desks/mcgonagall/outbox/.sent" -maxdepth 1 -name 'owl_*-hello.json' -newer "$TARGET" 2>/dev/null | head -1; }
+sent_owl() { find "$CASTLE/desks/mcgonagall/outbox/.sent" -maxdepth 1 -name 'owl_*-hello.json' -newer "$REF" 2>/dev/null | head -1; }
 waited=0
 while [ -z "$(sent_owl)" ] && [ "$waited" -lt 30 ]; do
 	sleep 2
@@ -82,4 +110,8 @@ fi
 
 echo ""
 echo "All six steps passed. The Owl Post is live."
-echo "To switch it off later:  launchctl bootout $DOMAIN/$LABEL && rm $TARGET"
+if [ -f "$LOOPS_LIST" ]; then
+	echo "It runs while fleet loops runs. To switch it off: remove the owlpost line from $LOOPS_LIST, then restart fleet loops."
+else
+	echo "To switch it off later:  launchctl bootout $DOMAIN/$LABEL && rm $TARGET"
+fi

@@ -30,7 +30,7 @@ It isn't a hosted service and it isn't multi-user. The fleet runs locally on one
 - Homebrew, and from it the Claude Code CLI, the Codex CLI, `jq`, `gh`, `ripgrep` and `shellcheck`.
 - `claude`, `codex` and `gh` signed in from your own terminal.
 - Your organization's approval before its code goes to OpenAI. Harry and Moody run on Codex, and both start switched off.
-- Repos the fleet builds in cloned outside `~/Documents`, `~/Desktop`, `~/Downloads` and iCloud Drive, for example under `~/fleet-repos/<repo>`. macOS keeps background jobs out of those folders without a privacy grant, and the Owl Post, the Map and the closer are background jobs, so the go, `fleet worktree` and `fleet adopt` refuse a repo there. `fleet review own` still runs on one, but its task can't be auto-closed.
+- Repos the fleet builds in cloned outside `~/Documents`, `~/Desktop`, `~/Downloads` and iCloud Drive, for example under `~/fleet-repos/<repo>`. macOS keeps background jobs out of those folders without a privacy grant, and the Owl Post, the Map and the closer are background jobs, so the go, `fleet worktree` and `fleet adopt` refuse a repo there. `fleet review own` still runs on one, but its task can't be auto-closed. If your repos live in `~/Documents`, the background jobs can run from a terminal window instead of launchd ([Terminal loops](docs/ONBOARDING.md#terminal-loops)); the refusal stays until an automatic review there has been proven.
 
 Optional:
 
@@ -49,7 +49,7 @@ cd ~/hogwarts-fleet
 ./install.sh
 ```
 
-`install.sh` copies the kit into two folders in your home, creates the database, registers the desks and runs both test suites. It refuses to touch an existing install. It never changes `~/.claude/settings.json`, `~/.codex` or launchd, and every headless desk starts switched off.
+`install.sh` copies the kit into two folders in your home, creates the database, registers the desks and runs both test suites. It refuses to touch an existing install. It never changes `~/.claude/settings.json`, `~/.codex` or launchd, and every headless desk starts switched off. `./install.sh --terminal-loops` chooses to run the background jobs from a terminal window (`~/.hogwarts/bin/fleet loops`) instead of launchd.
 
 From there, follow [docs/ONBOARDING.md](docs/ONBOARDING.md) from stage 2. You switch on one piece at a time, and each stage ends with a "You're done when" check. If you'd like Claude to walk you through it, paste the [setup prompt](prompts/setup-prompt.md) into a fresh Claude Code session in your clone.
 

@@ -49,6 +49,8 @@ The Owl Post runs whenever a desk outbox changes (`WatchPaths` on all seven outb
 
 Only McGonagall's request owls start a headless run. Any other owl waits in the inbox. The one other thing an owl starts is a review: Harry's handoff for his own active task starts that task's review, as in (g). A refused owl file raises a headmaster event, so you see it in the digest.
 
+With terminal loops chosen (`./install.sh --terminal-loops`, or `sh scripts/loops-setup.sh` later; docs/ONBOARDING.md, "Terminal loops"), skip `b-owlpost-launchctl.txt`: `scripts/owlpost-setup.sh` adds the Owl Post to `~/.hogwarts/loops/jobs` instead, and `~/.hogwarts/bin/fleet loops`, started in a herdr pane or a Terminal window, runs it on the same triggers. No launchd job is loaded for a job on that list, so nothing runs twice. The other setup scripts do the same.
+
 Most of the other jobs have setup scripts in the kit. `scripts/patrol-setup.sh` loads the patrol's five plists from `launchd/` (map, morning, keeper, scoreboard, gringotts) in shadow mode, at onboarding stage 5.2. `scripts/portrait-setup.sh` loads Dumbledore's, at onboarding stage 5.3. You load Ollivander's job by hand at onboarding stage 5.5.
 
 ## (c) Codex approval and enabling desks

@@ -33,11 +33,11 @@ It archives both folders before it removes them. If you are sure you want no arc
 
 It is safe to run again. A second run finds nothing left to do.
 
-It exits with 0 when nothing is left for you, with 1 when your settings still mention the fleet or a step failed, and with 2 when it stopped at a worktree with uncommitted changes.
+It exits with 0 when nothing is left for you, with 1 when your settings still mention the fleet or a step failed, and with 2 when it stopped at a worktree with uncommitted changes or at a `fleet loops` that is still running.
 
 ## The same steps by hand
 
-1. **Stop the background jobs.** For each `com.hogwarts.*` job that is loaded, unload it, then remove its plist.
+1. **Stop the background jobs.** If `fleet loops` runs them from a terminal window, press Ctrl+C in that window and wait for `fleet loops: stopped`, and remove `fleet-loops.command` from your Login Items if you added it. For each `com.hogwarts.*` job that is loaded, unload it, then remove its plist.
 
    ```
    launchctl list | grep com.hogwarts
