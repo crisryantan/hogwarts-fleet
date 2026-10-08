@@ -139,6 +139,18 @@ def land(conn, fd: int, now: Optional[int] = None) -> int:
     return new
 
 
+def skip_owl(owl_id: str, task_id: Optional[str], why: str, now: Optional[int] = None) -> None:
+    """Finish an owl's item before it can land, so it never wakes her: the Owl Post's smoke owls ("test": true). Only
+    while the switch is on, and create-exclusive, so an item that landed already is left as it is."""
+    if not on():
+        return
+    stamp = common.now_stamp(now)
+    with _dir(create=True) as fd:
+        markers.publish(fd, ids.check("owl", owl_id), {"state": "done", "kind": "owl", "task_id": task_id,
+                                                         "ref": owl_id, "at": stamp, "done_at": stamp,
+                                                         "outcome": common.scrubbed_line(why, 300)})
+
+
 def _items(fd: int, state: Optional[str] = None) -> list:
     """(name, marker) for each item, oldest first, in one state or all."""
     found = []

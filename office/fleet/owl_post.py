@@ -75,8 +75,8 @@ from fleet.safefs import FleetError, Missing, Unsafe  # noqa: E402
 REQUIRED_FIELDS = ("to", "kind", "subject")
 OPTIONAL_FIELDS = ("body", "body_path", "task_id", "request_id", "in_reply_to", "idempotency_key")
 IGNORED_FIELDS = ("from", "sender")
-# "test": true marks a smoke owl: it is delivered as usual, but McGonagall's announcement event, its notification and
-# its report are skipped, so it never reaches the headmaster queue.
+# "test": true marks a smoke owl: it is delivered as usual, but McGonagall's announcement event, its notification, its
+# report and the orchestrator's wake are skipped, so it never reaches the headmaster queue.
 FLAG_FIELDS = ("test",)
 OWL_FILE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,95}\.json")
 BODY_FILE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,95}")
@@ -594,6 +594,13 @@ def deliver_file(conn, sender: str, outbox_fd: int, fname: str, now: Optional[in
         newly = owl["delivered_at"] is None
         if newly:
             text = ids.clean_text(body, "body", owlery.BODY_LIMIT, keep_format=True)
+            if smoke and owl["recipient"] == config.HOOK_DESK:
+                try:  # before delivery, so the end of this pass or a later one never wakes the orchestrator for it
+                    from fleet import orchestrator
+
+                    orchestrator.skip_owl(owl["id"], owl["task_id"], "a smoke owl wakes no turn", now)
+                except (FleetError, OSError):
+                    pass  # the item may land and wake one turn, as any owl to her would
             if not smoke:
                 mcgonagall_inbox.mark_pending(owl)  # before delivery: an event this pass loses is announced later
                 try:
