@@ -40,7 +40,8 @@ one that is waiting for its author's run to end, its reviewer to be free or anot
 It does the same for a task with a round whose after record is not done (write_after): a review killed after its
 verdict, whose fix round, push or PR the review loop then finishes or reports, never twice. And it starts again the run
 of each owl that waited because every model its desk may run was down, once one of them is back (failover), and the
-automatic review of a handoff whose reviewer waited so, which until then it does not start again.
+automatic review of a handoff whose reviewer waited so, which until then it does not start again. Once Ollivander's
+stop is cleared, it starts again, once each, every desk run the stop refused, and says so in one event (fleet/stops.py).
 The review counts its own tries and gives up, telling Ryan, after config.AUTO_REVIEW_MAX_TRIES of them.
 
 A rerun after a crash at any step stores nothing twice. File content is only parsed
@@ -674,7 +675,8 @@ def drain_outbox(conn, sender: str, outbox_fd: int, summary: dict, now: Optional
 
 
 def run_pass(conn, now: Optional[int] = None) -> dict:
-    summary: dict = {"delivered": [], "rejected": [], "waiting": [], "errors": [], "reviews": [], "resumed": []}
+    summary: dict = {"delivered": [], "rejected": [], "waiting": [], "errors": [], "reviews": [], "resumed": [],
+                     "restarted": []}
     for desk in pensieve.list_desks(conn):
         sender = desk["name"]
         if sender not in config.CASTLE_DESKS:
@@ -694,6 +696,12 @@ def run_pass(conn, now: Optional[int] = None) -> dict:
     summary["reviews"] = resume_reviews(conn, now, started)
     # A run that waited because every model it may run was down starts again once one is back (fleet/failover.py).
     summary["resumed"] = failover.resume_waiting(conn, run_desk.spawn, now, spawn_review=run_desk.spawn_review)
+    try:  # a run Ollivander's stop refused starts again, once, after the stop is cleared (fleet/stops.py)
+        from fleet import stops
+
+        summary["restarted"] = stops.resume(conn, run_desk.spawn, run_desk.stop_requested, now)
+    except (StoreError, FleetError, OSError) as exc:
+        summary["errors"].append({"desk": config.HOOK_DESK, "error": "could not restart held runs: " + _reason(exc)})
     try:  # an owl to McGonagall whose event a stopped pass or a failed write lost is announced now, once
         mcgonagall_inbox.announce_pending(conn, now)
     except (StoreError, FleetError, OSError) as exc:

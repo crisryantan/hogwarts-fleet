@@ -17,7 +17,8 @@
 - Every other author's code runs with bash in the worktree under `codex sandbox` and a fleet permission profile:
   the worktree writable, the repo's .git readable, a throwaway home and temp folder writable in its
   own <user temp>/hogwarts-verify-<random> folder, xcrun's cache readable, /private/tmp and the office
-  denied, no network, nothing else. codex sandbox runs no model and spends no tokens.
+  denied, no network, nothing else. codex sandbox runs no model and spends no tokens. TMPDIR, TEST_TMP_ROOT and
+  xcrun's own cache (xcrun_db) all point into that run's temp folder, removed when the run ends (child_env).
   Code a desk wrote therefore never runs with Ryan's own reach, even when he starts the check.
 - Writes evidence.md next to TASK.md in the castle (with a per-commit copy), and the same text in
   the office reviews folder, where no desk can change it. Every run also keeps the exact TASK.md bytes it read in
@@ -186,10 +187,14 @@ def sandbox_argv(record: dict, scratch: str, command: str) -> list:
 
 
 def child_env(scratch: str, record: Optional[dict] = None) -> dict:
-    tools = toolchain.for_record(record, f"{scratch}/tmp")
-    return {"HOME": f"{scratch}/home", "TMPDIR": f"{scratch}/tmp", "PATH": ":".join([*tools["path"], config.CHILD_PATH]),
-            "LANG": "en_US.UTF-8", "CI": "1", "RTK_DISABLED": "1", **config.GIT_NO_LAZY_FETCH_ENV,
-            **tools["env"]}
+    """The fixed environment of a check. Every temp a check makes stays in the run's own scratch/tmp, the one folder
+    the sandbox lets it write besides the worktree: TMPDIR, TEST_TMP_ROOT (this kit's own tests, tests/support.py) and
+    xcrun's cache (xcrun_db), which otherwise sits in the per-user temp folder the sandbox only lets it read."""
+    temp = f"{scratch}/tmp"
+    tools = toolchain.for_record(record, temp)
+    return {"HOME": f"{scratch}/home", "TMPDIR": temp, "TEST_TMP_ROOT": temp,
+            "xcrun_db": f"{temp}/{config.XCRUN_CACHE}", "PATH": ":".join([*tools["path"], config.CHILD_PATH]),
+            "LANG": "en_US.UTF-8", "CI": "1", "RTK_DISABLED": "1", **config.GIT_NO_LAZY_FETCH_ENV, **tools["env"]}
 
 
 def _read_at(fd: int, offset: int, length: int) -> bytes:

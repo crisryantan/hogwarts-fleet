@@ -20,9 +20,7 @@ names them (build_task). It refuses rather than guesses:
   single-task Harry started a task under another TASK.md meanwhile, or McGonagall closed the parent, the
   command takes back the worktree, its new branch and its record, however far it got, before it says why.
   When the store cannot say whether the task kept its worktree, it takes back nothing and says what is left;
-- the repo must be a main checkout in Ryan's home, outside the office and the castle, with a GitHub origin, and on
-  macOS outside the home folders launchd jobs cannot read (config.PROTECTED_HOME_DIRS: Documents, Desktop, Downloads,
-  iCloud Drive), since the Owl Post, the Map and the closer run as launchd jobs;
+- the repo must be a main checkout in Ryan's home, outside the office and the castle, with a GitHub origin;
 - the branch must be new, plain and free of fleet words. One command makes a given branch in a given repo at a
   time, whichever TASK.md asks for it: it takes that branch's lock without waiting before it checks the branch
   is new, and holds it until the task has the worktree or it is taken back. A take-back removes the branch only
@@ -405,8 +403,6 @@ def create(conn, task_id: str, repo_dir: str, branch: str, base: str = config.DE
     change, and the caller keeps the claim's with block open until its own transaction commits or it has called
     settle or take_back, whether create refused or something after it did."""
     task, used = build_task(conn, pensieve.get_task(conn, ids.check("task", task_id)))
-    if isinstance(repo_dir, str):
-        gitops.check_unprotected(repo_dir)  # a build's checkout must be one the fleet's background jobs can read
     branch = gitops.check_branch(branch)
     holder = _holder(conn, task["id"])
     with holder_lock(holder):

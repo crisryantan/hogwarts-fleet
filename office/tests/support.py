@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import shutil
 import tempfile
 import unittest
@@ -12,7 +13,9 @@ HOUR = 3600
 DAY = 86400
 REPO = "acme/web-app"
 SHA = "0123456789abcdef0123456789abcdef01234567"
-TEST_TMP_ROOT = Path("/private/tmp")
+# Where every test makes its temp folders: /private/tmp, or the absolute folder TEST_TMP_ROOT names (fleet verify sets
+# it to its run's private temp, since its sandbox denies /private/tmp).
+TEST_TMP_ROOT = Path(os.path.realpath(os.environ.get("TEST_TMP_ROOT") or "/private/tmp"))
 
 
 def temp_dir(case: unittest.TestCase) -> Path:

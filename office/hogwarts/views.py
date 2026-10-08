@@ -5,7 +5,7 @@ Each view is a list of plain text lines, one per task or build, so it fits a scr
 from __future__ import annotations
 
 import sqlite3
-from typing import Optional
+from typing import Iterable, Optional
 
 from . import capacity, ids, pensieve
 
@@ -92,14 +92,18 @@ def _sha_users(conn: Conn, tasks: list) -> tuple:
     return heads, users
 
 
-def build_lines(conn: Conn, now: int, caps, include_closed: bool = False, cap: Optional[int] = LIST_CAP) -> list:
+def build_lines(conn: Conn, now: int, caps, include_closed: bool = False, cap: Optional[int] = LIST_CAP,
+                parents: Optional[Iterable[str]] = None, waiting: bool = False) -> list:
     """One line per build, newest first: go task -> build task -> branch -> state. A build is a task of a worktree
     desk under a parent task (parent_task_id); the branch is the one the go recorded on the parent. A sha that shows on
     several builds is the base they all branched from, so it is labelled as that, not as the build's own work. cap None
-    lists every build."""
+    lists every build. parents, when given, keeps only the builds under those tasks, and waiting adds who each one
+    waits on after its state (waiting_on)."""
     tasks = pensieve.list_tasks(conn)
     by_id = {task["id"]: task for task in tasks}
-    builds = [task for task in tasks if task["desk"] in caps.WORKTREE_DESKS and task["parent_task_id"] in by_id]
+    kept = None if parents is None else set(parents)
+    builds = [task for task in tasks if task["desk"] in caps.WORKTREE_DESKS and task["parent_task_id"] in by_id
+              and (kept is None or task["parent_task_id"] in kept)]
     heads, users = _sha_users(conn, builds)
     states = _states(conn, now, caps)
     shown = [task for task in reversed(builds) if include_closed or task["status"] != "closed"]
@@ -107,7 +111,10 @@ def build_lines(conn: Conn, now: int, caps, include_closed: bool = False, cap: O
         return ["no open builds"]
     lines = []
     for task in shown[:cap]:  # [:None] is every build
-        line = f"{task['parent_task_id']} -> {task['id']} -> {_branch(conn, task)} -> {_state(task, states)}"
+        state = _state(task, states)
+        line = f"{task['parent_task_id']} -> {task['id']} -> {_branch(conn, task)} -> {state}"
+        if waiting:
+            line += f" -> waiting on {'nobody' if task['status'] == 'closed' else waiting_on(task, state)}"
         sha = heads[task["id"]]
         if sha is not None:
             line += f" | {'base sha' if users[sha] > 1 else 'sha'} {ids.check('sha', sha)[:SHORT_SHA]}"

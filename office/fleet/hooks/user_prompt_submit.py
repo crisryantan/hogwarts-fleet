@@ -43,7 +43,12 @@ What it says (each part only when there is something to say):
 4. In McGonagall's session only, her delivered owls she has not read and has not been shown,
    one line each with a scrubbed one-line status, at most config.INBOX_NOTICE_CAP and a count
    of the rest, each listed once (fleet/mcgonagall_inbox.py). No owl body beyond that line.
-5. One Tempus line when the last assistant call in the transcript carried more than
+   Then her go status: each open go task's build, branch, state, who it waits on and newest event,
+   in full once per session and then only what changed (fleet/go_status.py), so she reads where her
+   work stands without asking anyone to run castle.
+5. Ollivander's stop, while one is in place, as the first line of the events part on every prompt in
+   every desk session, with the exact command that clears it (fleet/stops.py).
+6. One Tempus line when the last assistant call in the transcript carried more than
    200k tokens of context (input plus cache read plus cache creation).
 
 The close runs only when every check passes (for the bulk close, every check but the first, which
@@ -115,7 +120,8 @@ show finds Harry's task without its worktree. A kill no process can catch
 and the next go refuses because the branch exists until Ryan removes them. Nothing a go prints
 carries a token, the prompt's id or the TASK.md hash. A go Ryan's typing could not confirm
 prints the manual steps instead. Every go refusal says how to fix it as well as why (a Fix: line, from
-Refused.fix); the protected-folder refusal carries its own fix in its text.
+Refused.fix). A go that applied also says plainly when the jobs a build needs are not running, so it will not move on
+by itself, or run under launchd alone on a repo launchd cannot read (loops.build_notice); neither refuses it.
 
 The hook input has no documented field that says a person typed the prompt, so the typed
 check reads the transcript entry, as above. A refused close prints the castle commands, and
@@ -139,7 +145,7 @@ if __name__ == "__main__" and "/Users/crisryantan/.hogwarts" not in sys.path:
 from hogwarts import db, ids, owlery, pensieve  # noqa: E402
 from hogwarts.errors import NotFoundError, StoreError  # noqa: E402
 
-from fleet import common, config, events_seen, safefs, transcript  # noqa: E402
+from fleet import common, config, events_seen, safefs, stops, transcript  # noqa: E402
 from fleet.safefs import FleetError  # noqa: E402
 
 MISCHIEF = re.compile(r"Mischief managed (tk_[0-9a-f]{16})")
@@ -184,7 +190,7 @@ MISSING_TASK_MD_FIX = ("ask McGonagall to write the draft to that path before th
 SPEC_FIX = ("put exactly three lines first under ## Spec, repo: <folder>, then branch: <new branch>, then base: <ref>,"
             " and no other line that starts with one of those words, then type the go again.")
 SPEC_LINE_FIXES = {
-    "repo": "name a git checkout that exists, outside ~/Documents, ~/Desktop, ~/Downloads and iCloud Drive.",
+    "repo": "name a main git checkout that exists in your home folder, outside the office and the castle.",
     "branch": "pick a new branch name in lowercase letters, digits, dot, dash, underscore and slash, with no fleet"
               " words, that the repo does not have yet.",
     "base": "name a ref the repo has, usually origin/main.",
@@ -440,16 +446,15 @@ def read_spec(raw: bytes, task_id: str) -> dict:
         raise Refused(SPEC_BLOCK, SPEC_FIX)
     if sum(1 for line in section if SPEC_KEY_ANYWHERE.match(line)) != len(SPEC_KEYS):
         raise Refused("the ## Spec section names repo:, branch: or base: more than once", SPEC_FIX)
-    checks = (("repo", lambda value: gitops.check_unprotected(gitops.check_repo_dir(value))),
+    checks = (("repo", gitops.check_repo_dir),
               ("branch", gitops.check_branch),
               ("base", lambda value: gitops.check_ref(value, "the base")))
     for key, check in checks:
         try:
             values[key] = check(values[key])
         except FleetError as exc:
-            protected = key == "repo" and gitops.protected_reason(values[key]) is not None
-            fix = None if protected else f"{SPEC_LINE_FIXES[key]} Edit the {key}: line, then type the go again."
-            raise Refused(f"the Spec's {key}: line is refused: {exc}", fix) from None
+            raise Refused(f"the Spec's {key}: line is refused: {exc}",
+                          f"{SPEC_LINE_FIXES[key]} Edit the {key}: line, then type the go again.") from None
     return {"title": title, "repo_dir": values["repo"], "branch": values["branch"], "base": values["base"]}
 
 
@@ -580,7 +585,9 @@ def _go(conn, task_id: str, now: int, note: Optional[Callable[[dict], None]] = N
     except (FleetError, StoreError, OSError) as exc:
         reason = common.one_line(exc, 200) if not isinstance(exc, OSError) else type(exc).__name__
         lines.append(f"Harry's run did not start ({reason}); start it with fleet build {build_id}.")
-    return lines, True
+    from fleet import loops  # only a go that applied pays for this import
+
+    return lines + loops.build_notice(spec["repo_dir"]), True
 
 
 def run_go(conn, task_id: str, now: int, note: Optional[Callable[[dict], None]] = None) -> tuple:
@@ -677,10 +684,13 @@ def _deferred(conn, data: dict, desk: str, kind: str, task_ids: list) -> tuple:
         line = (f"{what} for {named}: Claude Code writes this prompt to the transcript only after this hook returns,"
                 " so your typing is being confirmed from it now. The result arrives as a headmaster event within"
                 " about half a minute.")
-    check = ("castle task list --open" if kind == "bulk" else
-             " ".join(f"castle task show {task_id}" for task_id in task_ids))
+    if kind == "go":  # McGonagall has no shell: her go status block shows it, so she asks no one to run castle
+        check = "Your go status block shows where it stands once it applies."
+    else:
+        check = "Check where it stands with " + ("castle task list --open." if kind == "bulk" else
+                                                 " ".join(f"castle task show {task_id}" for task_id in task_ids) + ".")
     context = [line, f"Until that event comes, nothing is applied for {named}: write no castle task create command"
-                     f" and no request owl for it. Check where it stands with {check}."]
+                     f" and no request owl for it. {check}"]
     return [line], context
 
 
@@ -781,6 +791,16 @@ def events(conn, seen: Optional[tuple] = None) -> tuple:
     return lines, len(drained["events"]) + drained["remaining"], marked
 
 
+def _go_status(conn, data: dict, now: int) -> tuple:
+    """(lines, mark) of McGonagall's go status for this prompt (fleet/go_status.py). Never breaks the prompt."""
+    from fleet import go_status  # only her session pays for this import
+
+    try:
+        return go_status.block(conn, now, go_status.last(common.session_id(data)))
+    except Exception:  # noqa: BLE001 - a status block never breaks the prompt
+        return [], None
+
+
 def tempus(data: dict) -> Optional[str]:
     try:
         total = transcript.last_usage(transcript.tail_entries(data.get("transcript_path")))
@@ -797,9 +817,10 @@ def _body(data: dict, desk: str, out, now: int) -> None:
     with its output written, so they are shown on the next prompt instead of never."""
     made: list = []
     seen: list = []
+    status: list = []
     try:
         with common.ended_by_signals():  # SIGTERM or SIGHUP ends the hook through this cleanup too
-            text = _output(data, desk, now, made, seen)
+            text = _output(data, desk, now, made, seen, status)
             if text is not None:
                 out.write(text)
                 out.flush()  # a write still buffered fails here, not after the markers say shown
@@ -815,51 +836,74 @@ def _body(data: dict, desk: str, out, now: int) -> None:
         mcgonagall_inbox.shown(made)
     if seen:  # only once the events are written: a prompt that failed shows them again
         events_seen.record(common.session_id(data), seen[0])
+    if status:  # the same for McGonagall's go status
+        from fleet import go_status
+
+        go_status.record(common.session_id(data), status[0])
 
 
-def _output(data: dict, desk: str, now: int, made: list, seen: Optional[list] = None) -> Optional[str]:
-    shown, context = [], []
+def _output(data: dict, desk: str, now: int, made: list, seen: Optional[list] = None,
+            status: Optional[list] = None) -> Optional[str]:
+    shown, context, board = [], [], []
     prompt = data.get("prompt")
-    conn = common.connect()
+    # Read first, from its own file: a store that cannot be read never hides an active stop.
+    stop = stops.active_line()
+    pending, count, marked, after, session = [], 0, None, None, None
     try:
-        task_id = close_request(prompt)
-        if task_id is not None:
-            closed, said = _close(conn, data, desk, task_id, now)
-            shown += closed
-            context += said
-        if bulk_request(prompt):
-            closed, said = _bulk(conn, data, desk, now)
-            shown += closed
-            context += said
-        go_ids = go_requests(prompt)
-        attempt = go_ids is None and go_attempt(prompt)
-        if (go_ids is not None or attempt) and common.session_desk(data, desk) != TASK_DESK:
-            named = "" if go_ids is None or len(go_ids) != 1 else " to " + go_ids[0]
-            elsewhere = [f"Go was not applied{named}: {GO_SESSION}", GO_SESSION_FIX]
-            shown += elsewhere
-            context += elsewhere
-        elif go_ids is not None and len(go_ids) > config.GO_MAX_PER_PROMPT:
-            shown += [GO_TOO_MANY, GO_TOO_MANY_FIX]
-            context += [GO_TOO_MANY, GO_TOO_MANY_FIX]
-        elif go_ids is not None:
-            started, said = _starts(conn, data, desk, go_ids, now)
-            shown += started
-            context += said
-        elif attempt:
-            said = [GO_EXACT, GO_ONE_PER_LINE_FIX if several_on_a_line(prompt) else GO_EXACT_FIX]
-            shown += said
-            context += said
-        if common.session_desk(data, desk) == TASK_DESK:
-            from fleet import mcgonagall_inbox  # only her session pays for this import
+        conn = common.connect()
+        try:
+            task_id = close_request(prompt)
+            if task_id is not None:
+                closed, said = _close(conn, data, desk, task_id, now)
+                shown += closed
+                context += said
+            if bulk_request(prompt):
+                closed, said = _bulk(conn, data, desk, now)
+                shown += closed
+                context += said
+            go_ids = go_requests(prompt)
+            attempt = go_ids is None and go_attempt(prompt)
+            if (go_ids is not None or attempt) and common.session_desk(data, desk) != TASK_DESK:
+                named = "" if go_ids is None or len(go_ids) != 1 else " to " + go_ids[0]
+                elsewhere = [f"Go was not applied{named}: {GO_SESSION}", GO_SESSION_FIX]
+                shown += elsewhere
+                context += elsewhere
+            elif go_ids is not None and len(go_ids) > config.GO_MAX_PER_PROMPT:
+                shown += [GO_TOO_MANY, GO_TOO_MANY_FIX]
+                context += [GO_TOO_MANY, GO_TOO_MANY_FIX]
+            elif go_ids is not None:
+                started, said = _starts(conn, data, desk, go_ids, now)
+                shown += started
+                context += said
+            elif attempt:
+                said = [GO_EXACT, GO_ONE_PER_LINE_FIX if several_on_a_line(prompt) else GO_EXACT_FIX]
+                shown += said
+                context += said
+            if common.session_desk(data, desk) == TASK_DESK:
+                from fleet import mcgonagall_inbox  # only her session pays for this import
 
-            owls, _ = mcgonagall_inbox.safe_unseen(conn, made)  # marker ages are by the real clock
-            shown += owls
-            context += owls
-        session = common.session_id(data)
-        after = events_seen.last(session)
-        pending, count, marked = events(conn, after)
-    finally:
-        conn.close()
+                owls, _ = mcgonagall_inbox.safe_unseen(conn, made)  # marker ages are by the real clock
+                shown += owls
+                context += owls
+                board, mark = _go_status(conn, data, now)
+                if status is not None and mark is not None:
+                    status.append(mark)  # recorded only once this output is written
+            session = common.session_id(data)
+            after = events_seen.last(session)
+            pending, count, marked = events(conn, after)
+        finally:
+            conn.close()
+    except (StoreError, FleetError, sqlite3.Error):
+        if stop is None:
+            raise
+        board = []  # what was gathered before the failure still shows, with the stop
+        if status is not None:
+            status.clear()
+    if stop is not None:  # first in the events part, on every prompt until the stop is cleared
+        shown.append(stop)
+        context.append(stop)
+    shown += board
+    context += board
     if pending:
         shown += pending
         what = "unacked" if after is None else "new and unacked"

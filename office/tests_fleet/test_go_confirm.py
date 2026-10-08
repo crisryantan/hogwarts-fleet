@@ -101,7 +101,7 @@ class DeferredGoTests(ConfirmCase):
         before = self.snapshot()
         shown, context, payload = self.deferred(f"go {TASK_ID}", transcript=path)
         self.assertIn("The result arrives as a headmaster event within about half a minute.", shown)
-        self.assertIn(f"castle task show {TASK_ID}", context)
+        self.assertIn("Your go status block shows where it stands once it applies.", context)
         self.assertNotIn(user_prompt_submit.GO_CONTEXT, context)
         self.assert_unchanged(before)  # the hook itself changed nothing
         self.assertNotIn(PROMPT_ID, " ".join(map(str, self.spawned_confirms.call_args[0][1:])))
@@ -292,7 +292,7 @@ class ManyGosTests(ConfirmCase):
         text = f"go {OTHER_ID}\n\n  go {TASK_ID}\ngo {THIRD_ID}\ngo {TASK_ID}\n"
         with mock.patch.object(run_desk, "spawn"):
             shown, context, _ = self.said(text, transcript=self.transcript(text))
-        lines = shown.splitlines()
+        lines = shown.split("\nYour open go tasks")[0].splitlines()  # her go status block follows the gos
         self.assertEqual(len(lines), 3)
         self.assertTrue(lines[0].startswith(f"Go was not applied to {OTHER_ID}: there is no TASK.md"))
         self.assertTrue(lines[1].startswith(f"Go: {TASK_ID} is registered"))
@@ -306,7 +306,8 @@ class ManyGosTests(ConfirmCase):
         text = f"go {OTHER_ID}\ngo {TASK_ID}"
         path = self.later()
         _, context, payload = self.deferred(text, transcript=path)
-        self.assertIn(f"castle task show {OTHER_ID} castle task show {TASK_ID}", context)
+        self.assertIn(f"nothing is applied for {OTHER_ID}, {TASK_ID}", context)
+        self.assertIn("Your go status block shows where it stands once it applies.", context)
         self.confirm(payload, self.appears(path, user_entry(text, promptId=PROMPT_ID)))
         kinds = [(event["kind"], event["dedupe_key"].split(":")[1]) for event in self.headmaster_events()]
         self.assertEqual(kinds, [("go.refused", OTHER_ID), ("go.confirmed", TASK_ID)])

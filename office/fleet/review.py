@@ -178,7 +178,7 @@ from typing import Callable, Iterator, Optional
 from hogwarts import capacity, followups, ids, owlery, pensieve
 from hogwarts.errors import ConflictError, StoreError
 
-from fleet import common, config, failover, followup, gitops, owl_post, push, run_desk, safefs, verify, worktree
+from fleet import common, config, failover, followup, gitops, loops, owl_post, push, run_desk, safefs, verify, worktree
 from fleet.safefs import FleetError
 
 REVIEW_HEADER = re.compile(r"REVIEW (tk_[0-9a-f]{16}) @ ([0-9a-f]{40})")
@@ -1612,18 +1612,15 @@ def review_own(conn, repo_dir: str, title: Optional[str] = None, intent: Optiona
                task_id: Optional[str] = None, base: str = config.DEFAULT_BASE, fetch: bool = True,
                confirm: Optional[Callable[[str], str]] = None) -> dict:
     """A commit from one of Ryan's own Claude sessions, reviewed by Moody in a detached worktree. It runs in the
-    foreground, so a checkout in a macOS privacy-protected folder is not refused, but the result warns that the
-    closer, a background job, cannot auto-close its task. A fix round with a new intent replaces the task's approval,
-    so it runs only once Ryan types the task id back through confirm (ask_owner_terminal)."""
+    foreground, but the closer, a background job, auto-closes its task, so the result warns when the jobs a build needs
+    run nowhere, or under launchd alone on a checkout launchd cannot read (loops.build_notice). A fix round with a new
+    intent replaces the task's approval, so it runs only once Ryan types the task id back through confirm
+    (ask_owner_terminal)."""
     target = ids.new_id("task") if task_id is None else ids.check("task", task_id)
     with task_review_lock(target) as lock_fd:
         result = _review_own(conn, repo_dir, title, intent, task_id, target, base, fetch, lock_fd, confirm)
-    protected = gitops.protected_folder(repo_dir) if isinstance(repo_dir, str) else None
-    if protected is None or not isinstance(result, dict):
-        return result
-    return {**result, "warning": (f"this checkout is inside ~/{protected}, which macOS keeps from the fleet's"
-                                  " background jobs, so the closer cannot auto-close this task; close it by hand, or"
-                                  " clone the repo elsewhere in your home folder for the next one")}
+    notice = loops.build_notice(repo_dir) if isinstance(result, dict) else []
+    return {**result, "warning": " ".join(notice)} if notice else result
 
 
 def _review_own(conn, repo_dir: str, title: Optional[str], intent: Optional[str], task_id: Optional[str],

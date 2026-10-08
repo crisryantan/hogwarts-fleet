@@ -25,6 +25,9 @@ supervisor that runs each job named in the office file loops/jobs on the schedul
   and its pid lives (running_jobs).
 - The on/off files in the office (desks/<desk>/enabled, patrol/shadow, auto-close and the other opt-ins) are read by
   the jobs themselves, which run exactly the command launchd would, so they switch the same things.
+- build_notice is what a go and fleet worktree say about the jobs a build needs: start fleet loops when nothing runs
+  them, or a warning when launchd alone runs them and the repo sits in a folder launchd jobs cannot read. Neither
+  refuses anything.
 """
 from __future__ import annotations
 
@@ -473,12 +476,46 @@ def running_jobs() -> tuple:
     return tuple(jobs)
 
 
-def protected_dirs_ok() -> bool:
-    """The seam for gitops.protected_reason: True only while config.PROTECTED_DIRS_OK_UNDER_TERMINAL_LOOPS is on and a
-    live fleet loops runs every job in config.TERMINAL_LOOPS_REPO_JOBS, which then has the terminal's folder access."""
-    if not config.PROTECTED_DIRS_OK_UNDER_TERMINAL_LOOPS:
-        return False
-    return set(config.TERMINAL_LOOPS_REPO_JOBS) <= set(running_jobs())
+def blind_folder(path: str) -> Optional[str]:
+    """On macOS, the folder of config.LAUNCHD_BLIND_DIRS a repo folder sits in, else None. Elsewhere always None."""
+    if sys.platform != "darwin" or not isinstance(path, str):
+        return None
+    folded = path.lower()
+    for name in config.LAUNCHD_BLIND_DIRS:
+        root = f"{config.USER_HOME_DIR}/{name}".lower()
+        if folded == root or folded.startswith(root + "/"):
+            return name
+    return None
+
+
+def build_notice(repo_dir: Optional[str] = None) -> list:
+    """What a go or fleet worktree says about the jobs a build needs (config.BUILD_JOBS), [] when they run where the
+    repo lets them. Not running at all: start fleet loops. Run by launchd alone on macOS while the repo sits in a
+    folder launchd jobs cannot read: a warning. Never refuses and never raises."""
+    try:
+        live = set(running_jobs())
+        launchd = {job for job in config.BUILD_JOBS if job not in live and launchd_has(job)}
+    except Exception:  # noqa: BLE001 - a notice never stops a go
+        return []
+    missing = [job for job in config.BUILD_JOBS if job not in live and job not in launchd]
+    if missing:
+        try:
+            listed = chosen_jobs() is not None
+        except (FleetError, OSError):
+            listed = True  # a list is there, only unreadable
+        hint = "" if listed else " There is no loops job list yet: sh scripts/loops-setup.sh makes one."
+        return [f"Start `fleet loops`, the background jobs are not running, so the build will not move on by itself"
+                f" ({_named(missing)} under neither fleet loops nor launchd).{hint}"]
+    folder = blind_folder(repo_dir) if launchd else None
+    if folder is None:
+        return []
+    return [f"Warning: the repo is inside ~/{folder}, which macOS keeps launchd jobs out of, and"
+            f" {_named(sorted(launchd))} under launchd here, so git fails for them and the build will not move on by"
+            " itself. Run the jobs from a terminal with `fleet loops` (sh scripts/loops-setup.sh moves them there)."]
+
+
+def _named(jobs: list) -> str:
+    return f"{' and '.join(jobs)} {'runs' if len(jobs) == 1 else 'run'}"
 
 
 # The command

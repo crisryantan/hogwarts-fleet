@@ -331,17 +331,12 @@ GO_CONFIRM_KEEP_SECONDS = 86400
 GO_CONFIRM_INPUT_MAX_BYTES = 16384
 # The most distinct gos one prompt may start, one "go <task-id>" per line.
 GO_MAX_PER_PROMPT = 5
-# Folders in your home that macOS keeps from launchd jobs without a privacy grant. The Owl Post, the Map and the
-# closer run as launchd jobs, so git cannot read a worktree's git dir in a repo under one of these, and every automatic
-# review of it fails. On macOS a build's repo folder (the go, fleet worktree, fleet adopt) must be outside them.
-PROTECTED_HOME_DIRS = ("Documents", "Desktop", "Downloads", "Library/Mobile Documents")
-# Where the refusal suggests cloning such a repo instead, under your home folder.
-SUGGESTED_REPOS_DIR = "fleet-repos"
-# The seam that lifts the refusal above once the loops run in a terminal (fleet/loops.py): with this True, a repo in
-# one of those folders is allowed while a live fleet loops runs every job in TERMINAL_LOOPS_REPO_JOBS. Off until a real
-# automatic review of a ~/Documents repo has passed under fleet loops.
-PROTECTED_DIRS_OK_UNDER_TERMINAL_LOOPS = False
-TERMINAL_LOOPS_REPO_JOBS = ("owlpost", "map")
+# The background jobs a build needs to move on by itself: the Owl Post starts its runs and reviews, and the Map starts
+# the closer. A go applies either way, but says plainly when neither a live fleet loops nor launchd runs one of them.
+BUILD_JOBS = ("owlpost", "map")
+# Home folders macOS keeps launchd jobs out of without a privacy grant. A build's repo under one needs those jobs run
+# by fleet loops from a terminal; while launchd runs them, the go and fleet worktree still apply and say so.
+LAUNCHD_BLIND_DIRS = ("Documents", "Desktop", "Downloads", "Library/Mobile Documents")
 
 # fleet loops (fleet/loops.py): the background jobs run from a terminal you start, instead of launchd, so they get the
 # terminal's folder access. The office folder loops/ holds the job list you choose (one launchd/ job name per line;
@@ -414,9 +409,18 @@ PHONE_KINDS = ("push.draft-pr", "push.auto-failed", "go.refused", "review.headma
                "orchestrator.ask-snape", "orchestrator.auth", "orchestrator.failed", "orchestrator.interrupted",
                # Each needs Ryan: a review no reviewer could judge (only once its tries or wait are spent, or its
                # worktree needs rebuilding), a model family down or a run waiting on it, and a CLI that cannot sign in.
-               "review.blocked-on-tooling", "failover.down", "failover.wait", "failover.wait-ended", "failover.auth")
+               "review.blocked-on-tooling", "failover.down", "failover.wait", "failover.wait-ended", "failover.auth",
+               # Ollivander's stop, which blocks every headless desk run until it is cleared by hand.
+               "ollivander.stopped")
 # How many new owls in McGonagall's inbox the prompt hook lists at once, with a count of the rest.
 INBOX_NOTICE_CAP = 10
+# McGonagall's go status block (fleet/go_status.py): at most this many open go tasks, newest first, each with at most
+# GO_STATUS_BUILDS build lines, every line cut to GO_STATUS_LINE_CHARS. What each session was shown is kept per
+# session in the office folder GO_STATUS_SEEN_DIR, removed after EVENTS_SEEN_KEEP_SECONDS.
+GO_STATUS_CAP = 10
+GO_STATUS_BUILDS = 2
+GO_STATUS_LINE_CHARS = 300
+GO_STATUS_SEEN_DIR = "go-status-seen"
 # A seen marker a prompt hook left pending this long, or whose hook process is gone, is taken over by the next hook.
 SEEN_PENDING_SECONDS = 60
 
@@ -476,6 +480,14 @@ STATE_DIR = "state"
 STOP_FILE = "ollivander-stop"
 # Also in the state folder, only while a CLI update and its checks run. run_desk honours it like the stop file.
 UPDATING_FILE = "ollivander-updating"
+# Also in the state folder: one marker per desk run a stop refused (fleet/stops.py), which the Owl Post's first pass
+# after the stop clears starts again, once each.
+STOP_HELD_DIR = "stop-held"
+# A held run whose launch never started is tried again at most this many launches in all, then dropped and said so.
+STOP_RESUMES_MAX = 3
+# At most this many held runs are started again (or given up on) in one Owl Post pass, so its one event names each.
+STOP_RESTARTS_PER_PASS = 3
+STOP_TEXT_MAX_BYTES = 1024
 # In the office locks folder. Ollivander holds it exclusively from before he writes the update marker until
 # the checks after the update end. run_desk holds it shared from its last stop check until the desk's
 # process exists, so launches never wait on each other and never overlap an update. run_desk never waits

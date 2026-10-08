@@ -24,6 +24,8 @@ ENV_NAMES = {
     "environ", "environb", "getenv", "getenvb", "putenv", "unsetenv", "expanduser", "expandvars",
     "home", "gettempdir", "gettempdirb", "getuser",
 }
+# The one environment read the kit allows, and only in tests/support.py and run_suites.py (tests/test_security.py).
+TEMP_ROOT_READ = 'os.environ.get("TEST_TMP_ROOT")'
 PROCESS_MODULES = {"subprocess", "pty", "multiprocessing", "asyncio"}
 PROCESS_CALLS = {
     "system", "popen", "execv", "execve", "execl", "execle", "execlp", "execlpe", "execvp", "execvpe",
@@ -86,7 +88,9 @@ REAL_OFFICE = "/Users/crisryantan/.hogwarts"
 REAL_CASTLE = "/Users/crisryantan/hogwarts"
 
 
-def env_problems(source: str) -> list:
+def env_problems(source: str, temp_root_allowed: bool = False) -> list:
+    allowed = {number for number, line in enumerate(source.splitlines(), 1)
+               if temp_root_allowed and TEMP_ROOT_READ in line}
     found = []
     for node in ast.walk(ast.parse(source)):
         names = []
@@ -98,7 +102,8 @@ def env_problems(source: str) -> list:
             names = [part for alias in node.names for part in alias.name.split(".") + [alias.asname or ""]]
             if isinstance(node, ast.ImportFrom) and node.module:
                 names += node.module.split(".")
-        found += [f"line {node.lineno}: {name}" for name in names if name in ENV_NAMES]
+        found += [f"line {node.lineno}: {name}" for name in names
+                  if name in ENV_NAMES and not (name == "environ" and node.lineno in allowed)]
     return found
 
 
@@ -174,7 +179,7 @@ class EnvironmentTests(unittest.TestCase):
         self.assertGreater(len(SOURCES), 10)
         for path in SOURCES + TESTS + [RUNNER]:
             with self.subTest(path=str(path.relative_to(ROOT))):
-                self.assertEqual(env_problems(path.read_text()), [])
+                self.assertEqual(env_problems(path.read_text(), path == RUNNER), [])
 
     def test_the_checker_catches_indirect_reads(self):
         for snippet in ('x = os.getenv("HOME")', 'p = Path.home()', 'p = os.path.expanduser("~")',

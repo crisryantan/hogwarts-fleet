@@ -335,6 +335,13 @@ def update_lock_busy() -> bool:
             return True
 
 
+class CheckTempTests(VerifyChecksCase):
+    def test_every_temp_a_check_makes_stays_in_its_runs_own_scratch(self):
+        env = verify.child_env("/private/tmp/x")
+        self.assertEqual((env["TMPDIR"], env["TEST_TMP_ROOT"], env["xcrun_db"]),
+                         ("/private/tmp/x/tmp", "/private/tmp/x/tmp", "/private/tmp/x/tmp/xcrun_db"))
+
+
 class OllivanderStopTests(VerifyChecksCase):
     """Before the merge, as after it, each check command starts only through Ollivander's launch gate, reads his stop
     file and update marker again under it, and its process holds the gate for its whole life."""

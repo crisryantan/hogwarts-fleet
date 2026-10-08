@@ -210,7 +210,7 @@ How the loops behave:
 
 To go back to launchd, stop the loops, delete `~/.hogwarts/loops/jobs` and run each setup script again.
 
-The go, `fleet worktree` and `fleet adopt` still refuse a repo in `~/Documents` for now. That changes once a real automatic review, one the Owl Post started under `fleet loops`, has passed on a repo there. Then setting `PROTECTED_DIRS_OK_UNDER_TERMINAL_LOOPS = True` in `~/.hogwarts/fleet/config.py` lets such a repo through, but only while `fleet loops` is running the Owl Post and the Map.
+A go, `fleet worktree` and `fleet adopt` take a repo in `~/Documents` like any other. When `fleet loops` isn't running the Owl Post and the Map, and launchd isn't either, a go still applies but tells you to start `fleet loops`, because the build won't move on by itself until the jobs run. Under launchd alone, a go on a repo in one of those folders warns you the same way.
 
 ## Stage 3: Apply the pending settings yourself
 

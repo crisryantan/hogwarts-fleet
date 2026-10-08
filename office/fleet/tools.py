@@ -114,7 +114,9 @@ def build_parser() -> argparse.ArgumentParser:
 
 def run(conn, args: argparse.Namespace) -> object:
     if args.command == "worktree":
-        return worktree.create(conn, args.task, args.repo_dir, args.branch, args.base, fetch=not args.no_fetch)
+        made = worktree.create(conn, args.task, args.repo_dir, args.branch, args.base, fetch=not args.no_fetch)
+        notice = loops.build_notice(made.get("repo") if isinstance(made, dict) else None)
+        return {**made, "warning": " ".join(notice)} if notice and isinstance(made, dict) else made
     if args.command == "build":
         # The review lock every review of the task holds, the automatic one included, so a fix round never starts
         # while a review is committing, checking or judging the desk's work. The run is handed it, so no review

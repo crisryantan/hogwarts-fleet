@@ -538,7 +538,7 @@ def main():
         self.assertEqual(os.stat(self.office / "logs" / "switchy.out.log").st_mode & 0o777, 0o600)
 
 
-class GuardSeamTests(LoopsCase):
+class BuildNoticeTests(LoopsCase):
     def marker(self, pid: int, jobs: list) -> None:
         self.write_file(self.office / "loops" / "running.json", json.dumps({"pid": pid, "jobs": jobs, "started": 1}))
 
@@ -549,35 +549,66 @@ class GuardSeamTests(LoopsCase):
         stack.enter_context(safefs.held_lock(fd, config.LOOPS_LOCK, blocking=False))
         return stack
 
-    def test_the_protected_folder_guard_stays_on_unless_the_seam_is_switched_on_and_the_loops_run(self):
-        repo = f"{self.home_dir}/Documents/web-app"
+    def in_launchd(self, *jobs) -> None:
+        for job in jobs:
+            self.write_file(self.agents / f"com.hogwarts.{job}.plist", "plist")
+
+    def test_jobs_that_run_nowhere_say_start_fleet_loops_and_never_refuse(self):
+        repo = f"{self.home_dir}/code/web-app"
+        [line] = loops.build_notice(repo)
+        self.assertIn("Start `fleet loops`, the background jobs are not running, so the build will not move on by"
+                      " itself (owlpost and map run under neither fleet loops nor launchd).", line)
+        self.assertIn("sh scripts/loops-setup.sh makes one", line)
+        # A stale marker (pid alive, lock free) is no loops: the Map still runs nowhere.
+        self.write_file(self.office / "loops" / "jobs", "owlpost\nmap\n")
+        self.marker(os.getpid(), ["owlpost", "map"])
+        self.in_launchd("owlpost")
+        [line] = loops.build_notice(repo)
+        self.assertIn("(map runs under neither fleet loops nor launchd).", line)
+        self.assertNotIn("loops-setup", line)
+
+    def test_live_loops_or_launchd_quiet_it_and_launchd_alone_warns_on_a_folder_it_cannot_read(self):
+        documents = f"{self.home_dir}/Documents/web-app"
+        elsewhere = f"{self.home_dir}/code/web-app"
+        self.in_launchd("owlpost", "map")
         with mock.patch.object(sys, "platform", "darwin"):
-            # A marker whose pid lives but whose lock no one holds is a stale one: a reused pid never counts.
-            self.marker(os.getpid(), ["owlpost", "map", "morning"])
-            self.assertEqual(loops.running_jobs(), ())
-            with mock.patch.object(config, "PROTECTED_DIRS_OK_UNDER_TERMINAL_LOOPS", True):
-                self.assertIn("inside ~/Documents", gitops.protected_reason(repo))
+            self.assertEqual(loops.build_notice(elsewhere), [])
+            [line] = loops.build_notice(documents)
+            self.assertIn("the repo is inside ~/Documents, which macOS keeps launchd jobs out of, and map and owlpost"
+                          " run under launchd here", line)
+            self.assertIn("Run the jobs from a terminal with `fleet loops`", line)
             held = self.held()
             self.addCleanup(held.close)
-            self.assertEqual(loops.running_jobs(), ("owlpost", "map", "morning"))
-            self.assertFalse(config.PROTECTED_DIRS_OK_UNDER_TERMINAL_LOOPS)
-            self.assertIn("inside ~/Documents", gitops.protected_reason(repo))
-            with mock.patch.object(config, "PROTECTED_DIRS_OK_UNDER_TERMINAL_LOOPS", True):
-                self.assertIsNone(gitops.protected_reason(repo))
-                self.assertEqual(gitops.check_unprotected(repo), repo)
-                self.marker(os.getpid(), ["owlpost"])
-                self.assertIn("inside ~/Documents", gitops.protected_reason(repo))
-                gone = subprocess.Popen(["/usr/bin/true"])
-                gone.wait()
-                self.marker(gone.pid, ["owlpost", "map"])
-                self.assertEqual(loops.running_jobs(), ())
-                self.assertIn("inside ~/Documents", gitops.protected_reason(repo))
-                os.unlink(self.office / "loops" / "running.json")
-                self.assertIn("inside ~/Documents", gitops.protected_reason(repo))
+            self.marker(os.getpid(), ["owlpost", "map", "morning"])
+            self.assertEqual(loops.build_notice(documents), [])
+            # One of the two under launchd alone still warns, naming only that one.
+            self.marker(os.getpid(), ["owlpost"])
+            self.assertIn("and map runs under launchd here", loops.build_notice(documents)[0])
+        with mock.patch.object(sys, "platform", "linux"):
+            self.assertEqual(loops.build_notice(documents), [])
 
-    def test_the_kit_ships_the_seam_off(self):
-        self.assertIs(kit_setting("PROTECTED_DIRS_OK_UNDER_TERMINAL_LOOPS"), False)
-        self.assertEqual(kit_setting("TERMINAL_LOOPS_REPO_JOBS"), ("owlpost", "map"))
+    def test_each_folder_launchd_cannot_read_is_found_on_macos_only(self):
+        root = str(self.home_dir)
+        cases = ((f"{root}/Documents/web-app", "Documents"), (f"{root}/Desktop/a/b", "Desktop"),
+                 (f"{root}/Downloads/x", "Downloads"), (f"{root}/Library/Mobile Documents/com~apple~CloudDocs/x",
+                                                        "Library/Mobile Documents"),
+                 (f"{root}/documents/web-app", "Documents"), (f"{root}/DocumentsX/web-app", None),
+                 (f"{root}/code/Documents/web-app", None))
+        for path, found in cases:
+            with self.subTest(path=path):
+                with mock.patch.object(sys, "platform", "darwin"):
+                    self.assertEqual(loops.blind_folder(path), found)
+                with mock.patch.object(sys, "platform", "linux"):
+                    self.assertIsNone(loops.blind_folder(path))
+
+    def test_the_guard_and_its_seam_are_gone_from_the_kit(self):
+        self.assertEqual(kit_setting("BUILD_JOBS"), ("owlpost", "map"))
+        for name in ("PROTECTED_DIRS_OK_UNDER_TERMINAL_LOOPS", "TERMINAL_LOOPS_REPO_JOBS", "PROTECTED_HOME_DIRS",
+                     "SUGGESTED_REPOS_DIR"):
+            self.assertFalse(hasattr(config, name), name)
+        for name in ("check_unprotected", "protected_reason", "protected_folder"):
+            self.assertFalse(hasattr(gitops, name), name)
+        self.assertFalse(hasattr(loops, "protected_dirs_ok"))
 
 
 class CommandTests(LoopsCase):

@@ -10,7 +10,9 @@ One pass:
    stops headless launches from before the first update until every check passes. Then checks: both
    --version commands and run_desk's dry run for every enabled headless desk. Any failure, or a new
    Codex version (its sandbox boundary was proven on one version), writes the stop file, so run_desk
-   launches no headless desk until Ryan runs castle ollivander clear. A new Claude Code version is a fyi.
+   launches no headless desk until Ryan runs castle ollivander clear. Each stop is one loud event (stopped_summary)
+   naming the failed check and that command; a run it refused is held and started again once it clears
+   (fleet/stops.py). A new Claude Code version is a fyi.
    The update lock (config.UPDATE_LOCK) is held exclusively from before the marker is written until the
    checks end and the marker is gone. run_desk holds it shared from its last stop check until the desk's
    process has exited, and hands it to that process, so no launch can pass its check and then start a
@@ -763,6 +765,14 @@ def leftover_update() -> Optional[str]:
     return stamp.decode("ascii") if stamp.isdigit() and len(stamp) <= 12 else "unknown"
 
 
+def stopped_summary(reason: str) -> str:
+    """The one loud event of a stop: that every headless desk run is blocked, the exact command that clears it, and
+    the failed check, with the clear command first so a cut never loses it."""
+    return common.one_line(f"Ollivander stopped every headless desk run, and each stays blocked until you run castle"
+                           f" ollivander clear in your terminal. Why: {reason}. The log is"
+                           f" {config.logs_dir()}/{LOG_NAME}.", 480)
+
+
 def _stop_after_unfinished(conn, stamp: str, now: int, result: dict) -> None:
     """An update that never finished: stop launches and tell Ryan. The marker stays for castle ollivander clear."""
     reason = ("a CLI update did not finish, so the CLIs may have moved with no check run. Check both versions"
@@ -770,9 +780,7 @@ def _stop_after_unfinished(conn, stamp: str, now: int, result: dict) -> None:
     write_stop(reason, now)
     result["stopped"] = True
     key = stamp if stamp != "unknown" else f"unknown-{now // config.DAY_SECONDS}"
-    pensieve.add_event(conn, config.OLLIVANDER_DESK, "ollivander.stopped", "headmaster",
-                       common.one_line(f"Ollivander stopped every headless desk: {reason}. The log is "
-                                       f"{config.logs_dir()}/{LOG_NAME}. Once done: castle ollivander clear", 480),
+    pensieve.add_event(conn, config.OLLIVANDER_DESK, "ollivander.stopped", "headmaster", stopped_summary(reason),
                        dedupe_key=f"ollivander:unfinished:{key}", now=now)
 
 
@@ -839,9 +847,7 @@ def _update_locked(conn, runner: Runner, now: int, result: dict) -> None:
         reason = ". ".join(reasons)
         write_stop(reason, now)
         result["stopped"] = True
-        pensieve.add_event(conn, config.OLLIVANDER_DESK, "ollivander.stopped", "headmaster",
-                           common.one_line(f"Ollivander stopped every headless desk: {reason}. The log is "
-                                           f"{config.logs_dir()}/{LOG_NAME}. Once done: castle ollivander clear", 480),
+        pensieve.add_event(conn, config.OLLIVANDER_DESK, "ollivander.stopped", "headmaster", stopped_summary(reason),
                            dedupe_key=f"ollivander:stopped:{now}", now=now)
     for family, what in notes:
         pensieve.add_event(conn, config.OLLIVANDER_DESK, "ollivander.cli-version", "headmaster",

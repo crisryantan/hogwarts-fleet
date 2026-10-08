@@ -157,6 +157,24 @@ class ChildTests(unittest.TestCase):
         self.assertTrue(run_suites.passed(outcome))
         self.assertEqual(self.killed, [])
 
+    def test_a_temp_root_the_runner_was_given_is_the_one_variable_each_child_gets(self):
+        folder = temp_dir(self)
+        with mock.patch.dict("os.environ", {"TEST_TMP_ROOT": str(folder)}):
+            self.assertEqual(run_suites.temp_root(), str(folder))
+        for bad in ("relative/tmp", "/nonexistent/tmp", ""):
+            with mock.patch.dict("os.environ", {"TEST_TMP_ROOT": bad}):
+                self.assertIsNone(run_suites.temp_root())
+        children = Children(self.OFFICE, popen=lambda argv, **kwargs: self.started.append(argv) or FakeChild(
+            argv, (unittest_output(1).encode(),), 0, **kwargs), kill=self.killed.append, timeout=600,
+            temp_root=str(folder))
+        children.run(self.MODULE)
+        [argv] = self.started
+        self.assertEqual(argv[:6], ["/usr/bin/env", "-i", f"TEST_TMP_ROOT={folder}", f"TMPDIR={folder}",
+                                    f"xcrun_db={folder}/xcrun_db", "/usr/bin/python3"])
+        self.assertEqual(argv[6:], [*config.PYTHON_WRAPPER[3:], "-m", "unittest", "discover", "-s",
+                                    "/nonexistent/office/tests_fleet", "-t", "/nonexistent/office", "-p",
+                                    "test_caps.py"])
+
     def test_a_module_that_runs_too_long_is_killed_and_keeps_what_it_printed(self):
         late = subprocess.TimeoutExpired(["x"], 600, output=b"....")
         outcome = self.children(late, b"....\nTraceback", code=-9).run(self.MODULE)

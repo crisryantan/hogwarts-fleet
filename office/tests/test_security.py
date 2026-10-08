@@ -30,6 +30,9 @@ ENV_NAMES = {
     "environ", "environb", "getenv", "getenvb", "putenv", "unsetenv", "expanduser", "expandvars",
     "home", "gettempdir", "gettempdirb", "getuser",
 }
+# The one environment read the kit allows, and only in tests/support.py and run_suites.py: where the tests make their
+# temp folders, which fleet verify points into its sandbox's own temp. Nothing in the store or the fleet reads it.
+TEMP_ROOT_READ = 'os.environ.get("TEST_TMP_ROOT")'
 SQL_ARG = {"execute": 0, "executemany": 0, "executescript": 0, "fetch_one": 1, "fetch_all": 1}
 SQL_PASS_THROUGH = {("fetch_one", "sql"), ("fetch_all", "sql"), ("migrate", "statement")}
 TEMPFILE_CALLS = {"mkdtemp", "mkstemp", "TemporaryDirectory", "NamedTemporaryFile", "TemporaryFile",
@@ -37,7 +40,9 @@ TEMPFILE_CALLS = {"mkdtemp", "mkstemp", "TemporaryDirectory", "NamedTemporaryFil
 WRITE_VERBS = {"INSERT", "UPDATE", "DELETE", "REPLACE", "CREATE", "DROP", "ALTER"}
 
 
-def env_problems(source: str) -> list[str]:
+def env_problems(source: str, temp_root_allowed: bool = False) -> list[str]:
+    allowed = {number for number, line in enumerate(source.splitlines(), 1)
+               if temp_root_allowed and TEMP_ROOT_READ in line}
     found = []
     for node in ast.walk(ast.parse(source)):
         names = []
@@ -47,7 +52,8 @@ def env_problems(source: str) -> list[str]:
             names = [node.id]
         elif isinstance(node, (ast.Import, ast.ImportFrom)):
             names = [part for alias in node.names for part in alias.name.split(".") + [alias.asname or ""]]
-        found += [f"line {node.lineno}: {name}" for name in names if name in ENV_NAMES]
+        found += [f"line {node.lineno}: {name}" for name in names
+                  if name in ENV_NAMES and not (name == "environ" and node.lineno in allowed)]
     return found
 
 
@@ -131,7 +137,9 @@ class EnvironmentTests(unittest.TestCase):
     def test_no_environment_variables_are_read(self):
         for path in SOURCES + TESTS:
             with self.subTest(path=path.name):
-                self.assertEqual(env_problems(path.read_text()), [])
+                self.assertEqual(env_problems(path.read_text(), path == ROOT / "tests" / "support.py"), [])
+        self.assertNotEqual(env_problems('x = os.environ.get("TEST_TMP_ROOT")'), [])
+        self.assertNotEqual(env_problems('x = os.environ.get("HOME")', True), [])
 
     def test_environment_checker_catches_indirect_reads(self):
         for snippet in ('x = os.getenvb(b"HOME")', 'p = Path.home() / ".hogwarts"',

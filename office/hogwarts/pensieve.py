@@ -743,6 +743,16 @@ def events_with_key_prefix(conn: Conn, prefix: str) -> list[dict]:
                         (len(prefix), prefix))
 
 
+def newest_events(conn: Conn, task_ids: Iterable[str]) -> dict:
+    """The newest event, of any kind or verdict, acked or not, of each task named, by task id. Read only."""
+    found = {}
+    for task_id in sorted({ids.check("task", task_id) for task_id in task_ids}):
+        row = db.fetch_one(conn, "SELECT * FROM events WHERE task_id = ? ORDER BY id DESC LIMIT 1", (task_id,))
+        if row is not None:
+            found[task_id] = row
+    return found
+
+
 def _event_line(event: dict) -> str:
     return f"[{event['kind']}] #{event['id']} {event['desk']} {event['task_id'] or '-'}: {event['summary']}"
 

@@ -6,7 +6,9 @@ SUITE is tests or tests_fleet, and both run when none is named. --jobs is how ma
 6 by default, or the number of cores on a Mac with fewer.
 
 - Finds the office folder from this file's own path, so it runs the same from any folder.
-- Runs each test module alone in a child process, in the office folder, with an empty environment and
+- Runs each test module alone in a child process, in the office folder, with an empty environment (but for
+  TEST_TMP_ROOT, passed on when this runner has it, which tests/support.py makes its temp folders in, with TMPDIR
+  and xcrun's cache set inside it) and
   the same hardened line as the reference discover run, narrowed to that one module file:
     /usr/bin/env -i /usr/bin/python3 -I -B -X pycache_prefix=/var/empty
         -m unittest discover -s <office>/<suite> -t <office> -p <module file>
@@ -43,6 +45,9 @@ DEFAULT_JOBS = 6
 MAX_JOBS = 32
 # unittest's own default pattern, and the names this runner can pass to -p as one exact file name.
 DISCOVER_PATTERN = "test*.py"
+# Where the tests make their temp folders, when the runner's own environment names one: a sandbox that denies the
+# default /private/tmp, such as fleet verify's, sets it to a folder it may write.
+TEMP_ROOT_ENV = "TEST_TMP_ROOT"
 MODULE_FILE = re.compile(r"test[A-Za-z0-9_]*\.py")
 # A module still running after this long is killed with everything it started, and counts as failed.
 MODULE_TIMEOUT_SECONDS = 600
@@ -172,10 +177,22 @@ def discover(office: Path, suite: str) -> list:
     return modules
 
 
-def command(office: Path, module: Module) -> list:
-    """The reference discover line for one suite, narrowed to one module file."""
-    return [*WRAPPER, "-m", "unittest", "discover", "-s", str(office / module.suite), "-t", str(office),
+def command(office: Path, module: Module, temp_root: Optional[str] = None) -> list:
+    """The reference discover line for one suite, narrowed to one module file, with TEST_TMP_ROOT (and TMPDIR and
+    xcrun_db inside it) set only when the runner was given one."""
+    wrapper = list(WRAPPER)
+    if temp_root is not None:
+        # After env -i, so these are the only variables set: the test temp root, and TMPDIR and xcrun's cache in it, so
+        # nothing a module starts writes a temp outside it.
+        wrapper[2:2] = [f"{TEMP_ROOT_ENV}={temp_root}", f"TMPDIR={temp_root}", f"xcrun_db={temp_root}/xcrun_db"]
+    return [*wrapper, "-m", "unittest", "discover", "-s", str(office / module.suite), "-t", str(office),
             "-p", module.name]
+
+
+def temp_root() -> Optional[str]:
+    """TEST_TMP_ROOT from this runner's environment when it names an absolute folder, else None."""
+    value = os.environ.get("TEST_TMP_ROOT")  # the kit's one allowed environment read (tests/test_security.py)
+    return value if value and os.path.isabs(value) and os.path.isdir(value) and "=" not in value else None
 
 
 # running
@@ -193,8 +210,9 @@ class Children:
     """Runs one module per child process and tracks the live ones, so an interrupt can stop them all."""
 
     def __init__(self, office: Path, popen=subprocess.Popen, kill: Callable = kill_group,
-                 timeout: float = MODULE_TIMEOUT_SECONDS):
+                 timeout: float = MODULE_TIMEOUT_SECONDS, temp_root: Optional[str] = None):
         self.office, self.popen, self.kill, self.timeout = office, popen, kill, timeout
+        self.temp_root = temp_root
         self.lock = threading.Lock()
         self.live = set()
         self.stopped = False
@@ -205,7 +223,7 @@ class Children:
             if self.stopped:
                 return Outcome(module, None, "", 0.0, "not started, because the run was interrupted")
             try:
-                child = self.popen(command(self.office, module), cwd=str(self.office), env={},
+                child = self.popen(command(self.office, module, self.temp_root), cwd=str(self.office), env={},
                                    stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                    start_new_session=True)
             except OSError as error:
@@ -372,7 +390,7 @@ def main(argv: Optional[list] = None, out=None, office: Path = OFFICE,
     except RunnerError as error:
         out.write(f"run_suites.py: {error}\n")
         return 1
-    children = Children(office)
+    children = Children(office, temp_root=temp_root())
     out.write(f"Running {len(modules)} test modules from {' and '.join(args.suites)}, {args.jobs} at a time.\n")
     out.flush()
     started = time.monotonic()

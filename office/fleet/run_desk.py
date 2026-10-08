@@ -2349,6 +2349,18 @@ def _launch(conn, plan: dict, now: Optional[int], keep_fds: tuple = (), own: Opt
     return found
 
 
+def hold_stopped(conn, desk: str, owl_id: str) -> None:
+    """Keep a run Ollivander's stop refused (fleet/stops.py), with its owl's task when the inbox names it. Never
+    raises: the stop's own event already told Ryan, once."""
+    from fleet import stops
+
+    try:
+        task_id = next((owl["task_id"] for owl in owlery.inbox(conn, desk) if owl["id"] == owl_id), None)
+    except (StoreError, sqlite3.Error):
+        task_id = None
+    stops.hold(desk, owl_id, task_id)
+
+
 def main(argv: Optional[list] = None) -> int:
     parser = argparse.ArgumentParser(prog="run_desk", description="Build or run one headless desk's command.")
     parser.add_argument("desk")
@@ -2375,6 +2387,9 @@ def main(argv: Optional[list] = None) -> int:
                                                     "cwd", "argv")}}
             sys.stdout.write(json.dumps(result, ensure_ascii=True, indent=2) + "\n")
             return 0
+        from fleet import stops
+
+        stops.release(args.desk, args.owl)  # this run has started: a run the stop held needs no restart now
         # The Owl Post starts this run detached. SIGTERM or SIGHUP then ends it through its finally blocks, not
         # mid-step: the desk's process is killed and the locks are released as the run unwinds.
         with common.ended_by_signals():
@@ -2396,6 +2411,8 @@ def main(argv: Optional[list] = None) -> int:
             report_lock_wait(conn, args.desk, args.owl)
         elif not args.dry_run and isinstance(exc, failover.ModelsDown):
             failover.note_waiting(args.desk, args.owl, exc)  # the Owl Post starts it again once a model is back
+        elif not args.dry_run and isinstance(exc, Stopped):
+            hold_stopped(conn, args.desk, args.owl)  # the Owl Post starts it again once the stop is cleared
         elif not args.dry_run and not isinstance(exc, (Capped, Stopped, Blocked, TaskClosed, ReviewOwl)):
             report_failure(conn, args.desk, args.owl)
         return 1
