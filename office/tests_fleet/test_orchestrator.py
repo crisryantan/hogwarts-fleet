@@ -419,6 +419,8 @@ class TurnTests(OrchestratorCase):
         for text in (orchestrator.PROMPT, orchestrator.BRIEF):  # on stdin and in the brief file, never in argv
             self.assertNotIn(text, " ".join(run["argv"]))
         self.assertEqual((run["stdin"], run["brief"]), (orchestrator.PROMPT, orchestrator.BRIEF))
+        self.assertIn(f"{self.office}/runs/mcgonagall/orchestrator.brief", run["argv"])
+        self.assertFalse((self.office / "runs" / "mcgonagall" / "orchestrator.brief").exists())
         self.assertIn("--restricted", run["argv"])
         self.assertIn(f"{config.office_desk_dir('mcgonagall')}/{config.OWL_REPORT_SETTINGS_FILE}", run["argv"])
         # Her turn runs on its own model and budget, not the owl report's.

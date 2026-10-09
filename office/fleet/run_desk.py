@@ -13,8 +13,9 @@ Codex desks (harry, moody):
          --ephemeral --json --output-last-message <office runs file> -      (brief and owl prompt on stdin)
 
 No brief or prompt is ever in argv, so none shows in a process listing. The prompt goes through a pipe on the
-process's stdin. A Claude desk's brief goes in runs/<desk>/<run_id>.brief, a new file only Ryan can read, made just
-before the process starts and removed once it has ended.
+process's stdin. A Claude desk's brief goes in runs/<desk>/run.brief (run.slot<n>.brief for slot n), a new file
+only Ryan can read, made under the run's slot just before the process starts and removed once it has ended. One a
+killed run left is replaced by the next run in its slot, which holds the slot lock that run's process inherited.
 
 A Codex desk never gets --sandbox: on 0.160.0 its modes let commands read the whole disk. The
 permission profile is an allowlist (see codex_permissions), proven on 0.160.0 by
@@ -495,9 +496,12 @@ def desk_choice(conn, desk: str) -> dict:
     return {"model": model, "effort": effort, "change_id": chosen["change_id"]}
 
 
-def brief_name(run_id: str) -> str:
-    """The name, in runs/<desk>, of the file that holds a Claude run's brief while its process runs."""
-    return safefs.check_component(f"{run_id}.brief")
+def brief_name(base: str, slot: int = 0) -> str:
+    """The name of a brief file in an office runs folder: <base>.brief, or <base>.slot<n>.brief for run slot n. A
+    Claude desk's run uses its slot's (base "run"), which only a run holding that slot ever writes. Its process
+    inherits the slot lock, so a brief found under that name by the next run in the slot belongs to a run whose
+    process has ended, and is replaced."""
+    return safefs.check_component(f"{slot_name(base, slot)}.brief")
 
 
 def _claude_argv(desk: str, row: dict, brief_path: str, mcp_job: Optional[str],
@@ -788,8 +792,8 @@ def build_plan(conn, desk: str, owl_id: Optional[str] = None, mcp_job: Optional[
     if family == "claude":
         default_model = row.get("model") if family == own else None
         row = {**row, "model": choice["model"] or default_model}
-        argv, cwd, model = _claude_argv(desk, row, f"{config.runs_dir()}/{desk}/{brief_name(run_id)}", mcp_job,
-                                        choice["effort"])
+        argv, cwd, model = _claude_argv(desk, row, f"{config.runs_dir()}/{desk}/{brief_name('run', slot)}",
+                                        mcp_job, choice["effort"])
         env = child_env()
         stdin, brief_file = prompt, brief
     else:
@@ -1147,24 +1151,27 @@ def notifications_on() -> bool:
 
 
 class ReportTurn(NamedTuple):
-    """One headless owl-report turn as owl_report_argv builds it: its argv, the brief its brief file (brief_name, in
-    the office runs folder of HOOK_DESK) holds while it runs, and the prompt it gets on stdin."""
+    """One headless owl-report turn as owl_report_argv builds it: its argv, the name of its brief file (brief_name, in
+    the office runs folder of HOOK_DESK), the brief that file holds while it runs, and the prompt it gets on stdin."""
     argv: list
     brief_name: str
     brief: str
     prompt: str
 
 
-def owl_report_argv(brief: str, prompt: str, model: str = None, budget: str = None) -> ReportTurn:
+def owl_report_argv(brief: str, prompt: str, model: str = None, budget: str = None,
+                    kind: str = "owl-report") -> ReportTurn:
     """One headless McGonagall owl-report turn on the one owl in its working folder: claude -p --restricted (file
     tools confined to the working folder) under the report-only settings file, no MCP, only Read, Grep and Glob, the
     fixed brief in its own brief file and the fixed prompt on stdin, and JSON output so a failure is told apart from a
     report. The settings file is checked first (check_report_settings). model and budget default to the owl report's
-    own. run_report_turn writes the brief file and removes it after."""
+    own. kind names the brief file (<kind>.brief): one per caller, the owl reporter or the orchestrator, each of which
+    runs one turn at a time under a lock its turn inherits. run_report_turn writes the brief file and removes it
+    after."""
     desk = config.HOOK_DESK
     check_report_settings(_read_office(desk, config.OWL_REPORT_SETTINGS_FILE, config.SETTINGS_MAX_BYTES,
                                        "owl report settings"))
-    name = brief_name(f"report-{secrets.token_hex(8)}")
+    name = brief_name(kind)
     argv = [config.CLAUDE_BIN, "-p", "--restricted", "--settings",
             f"{config.office_desk_dir(desk)}/{config.OWL_REPORT_SETTINGS_FILE}", "--strict-mcp-config",
             "--tools", config.OWL_REPORT_TOOLS, "--permission-mode", "dontAsk", "--model", model or config.OWL_REPORT_MODEL,
@@ -1262,13 +1269,16 @@ def kill_report_turn(pid: int) -> bool:
 def run_report_turn(turn: ReportTurn, cwd: str, hand: tuple = (),
                     on_start: Optional[Callable[[int], None]] = None) -> tuple:
     """(outcome, text) for one owl-report turn. outcome is "ok" with the result text, "auth" when claude could not
-    sign in, or "failed". Its brief file is written just before it starts and removed once it has ended, and its
-    prompt goes through a pipe on its stdin (feed_stdin), a dead or stuck reader counting as failed. stdout is read as
+    sign in, or "failed". Its brief file is written just before it starts and removed once it has ended, replacing one
+    a killed caller left (the caller's lock, held here and inherited by the turn, means no earlier turn of its kind
+    still runs), and its prompt goes through a pipe on its stdin (feed_stdin), a dead or stuck reader counting as
+    failed. stdout is read as
     it comes, at most OWL_REPORT_OUTPUT_MAX_BYTES, and the process (a session of its own) is killed on overflow, at
     the timeout, or when this process is stopped. stderr is never read. hand holds the reporter's lock and the launch
     gate, handed to the child, so no other reporter starts and no CLI update runs while it lives, even if this process
     dies first. on_start gets the child's pid as soon as it runs."""
     with safefs.opened_dir(config.OFFICE_ROOT, "runs", config.HOOK_DESK, create=True) as run_fd:
+        drop_brief(run_fd, turn.brief_name)
         brief = write_brief(run_fd, turn.brief_name, turn.brief)
         try:
             return _report_turn(turn, cwd, hand, on_start)
@@ -2375,7 +2385,9 @@ def _launch(conn, plan: dict, now: Optional[int], keep_fds: tuple = (), own: Opt
             out_fd = safefs.create_new(run_fd, f"{run_id}.out")
             err_fd = safefs.create_new(run_fd, f"{run_id}.err")
             if plan.get("brief") is not None:
-                brief = write_brief(run_fd, brief_name(run_id), plan["brief"])
+                # Under its slot, so a brief left here is a dead run's (brief_name), replaced.
+                drop_brief(run_fd, brief_name("run", plan["slot"]))
+                brief = write_brief(run_fd, brief_name("run", plan["slot"]), plan["brief"])
             started = time.monotonic()
             if own is not None:
                 own.keep = True

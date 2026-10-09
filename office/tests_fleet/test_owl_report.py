@@ -150,7 +150,7 @@ class HappyPathTests(OwlReportCase):
             self.assertNotIn(marker, " ".join(argv))
         self.assertEqual(run["stdin"], owl_report.PROMPT)
         self.assertEqual((run["brief"], run["brief_mode"]), (owl_report.BRIEF, 0o600))
-        self.assertTrue(run["brief_path"].startswith(f"{self.office}/runs/mcgonagall/report-"))
+        self.assertEqual(run["brief_path"], f"{self.office}/runs/mcgonagall/owl-report.brief")
         self.assertFalse(os.path.lexists(run["brief_path"]))  # removed once the turn ended
         self.assertNotIn("--append-system-prompt", argv)
         self.assertEqual(argv[-2:], ["--max-budget-usd", config.OWL_REPORT_MAX_BUDGET_USD])
@@ -174,6 +174,15 @@ class HappyPathTests(OwlReportCase):
             self.assertNotIn("second line", text)
         self.assertEqual(call[0][1], f"Owl: ron {self.task['id']}")
         self.assertIn(f"\t{owl_id}\ttoken ", self.log()[0])
+
+    def test_a_brief_a_killed_reporter_left_is_replaced_and_removed(self):
+        (self.office / "runs" / "mcgonagall").mkdir(parents=True, mode=0o700, exist_ok=True)
+        self.write_file(self.office / "runs" / "mcgonagall" / "owl-report.brief", "stale brief")
+        self.send()
+        owl_report.run(self.conn)
+        [run] = self.runs()
+        self.assertEqual(run["brief"], owl_report.BRIEF)
+        self.assertFalse(os.path.lexists(run["brief_path"]))
 
     def test_a_folder_a_killed_run_left_is_removed_before_the_next_turn(self):
         stale = self.root / "turn-00000000000000aa"

@@ -89,7 +89,7 @@ class ClaudeDeskTests(RunDeskCase):
                                  ["stream-json", "--verbose"])
                 self.assertEqual(argv[argv.index("--max-budget-usd") + 1], config.MAX_BUDGET_USD[desk])
                 brief = argv[argv.index("--append-system-prompt-file") + 1]
-                self.assertTrue(brief.startswith(f"{self.office}/runs/{desk}/run-") and brief.endswith(".brief"))
+                self.assertEqual(brief, f"{self.office}/runs/{desk}/run.brief")
                 self.assertNotIn("--append-system-prompt", argv)
                 self.assertEqual(argv[-2:], ["--max-budget-usd", config.MAX_BUDGET_USD[desk]])
                 self.assertEqual(plan["stdin"], run_desk.DRY_RUN_PROMPT)
@@ -405,11 +405,14 @@ class StdinTests(RunDeskCase):
                     self.assertTrue(plan["stdin"].startswith(f"# {desk} brief"))
                     self.assertEqual(plan["argv"][-1], "-")
 
-    def cat_run(self, desk: str) -> tuple:
+    def cat_run(self, desk: str, stale: bool = False) -> tuple:
         """A real run of desk on a new owl, whose process is /bin/cat: what it read from stdin lands in the run's
         output. Returns (owl id, run result, what the brief file held and its mode while the process started)."""
         self.enable(desk)
         owl_id, _ = self.request(desk)
+        if stale:  # a brief a killed run left in slot 0
+            self.runs_dir(desk).mkdir(mode=0o700, exist_ok=True)
+            self.write_file(self.runs_dir(desk) / "run.brief", "stale brief")
         seen = {}
 
         def start(argv, **kwargs):
@@ -433,6 +436,15 @@ class StdinTests(RunDeskCase):
         self.assertEqual(seen["mode"], 0o600)
         self.assertNotIn(owl_id, " ".join(seen["argv"]))
         self.assertEqual([name for name in os.listdir(self.runs_dir("hermione")) if name.endswith(".brief")], [])
+
+    def test_a_brief_a_killed_run_left_in_the_slot_is_replaced_then_removed(self):
+        _, _, seen = self.cat_run("hermione", stale=True)
+        self.assertIn("# hermione brief", seen["brief"])
+        self.assertFalse((self.runs_dir("hermione") / "run.brief").exists())
+
+    def test_each_slot_has_its_own_brief_file(self):
+        argv = run_desk.build_plan(self.conn, "hermione", slot=1)["argv"]
+        self.assertEqual(argv[argv.index("--append-system-prompt-file") + 1], f"{self.office}/runs/hermione/run.slot1.brief")
 
     def test_a_codex_run_reads_its_brief_and_prompt_on_stdin(self):
         owl_id, result, seen = self.cat_run("moody")
