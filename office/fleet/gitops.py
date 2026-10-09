@@ -108,14 +108,16 @@ def repo_dirs(path: object) -> dict:
     <main>/.git is its common_dir (objects, refs, config, other worktrees). Read from the files themselves, never
     through git, so no repo config runs. Both folders get every check: plain characters, inside the home folder,
     outside the office and the castle, no symlink on the way. The entry's commondir must name <main>/.git and its
-    gitdir must name this .git file back, so a .git file can point only at the entry made for this folder. A worktree
-    of a bare repo, or one whose main checkout or entry is gone, is refused."""
+    gitdir must name this .git file back, so a .git file can point only at the entry made for this folder. A bare repo
+    (by its folder name or its core.bare), a worktree of one, or a worktree whose main checkout or entry is gone, is
+    refused."""
     path = _check_checkout(path, "the repo folder", "repo folder")
     try:
         st = os.lstat(path + "/.git")
     except OSError:
         raise FleetError(NOT_A_CHECKOUT) from None
     if stat.S_ISDIR(st.st_mode):
+        _check_not_bare(path + "/.git")
         return {"repo_dir": path, "git_dir": path + "/.git", "common_dir": path + "/.git", "main_dir": path}
     if not stat.S_ISREG(st.st_mode):
         raise FleetError(NOT_A_CHECKOUT)
@@ -146,8 +148,17 @@ def repo_dirs(path: object) -> dict:
     if back != path + "/.git":
         raise FleetError("the worktree entry the .git file names points back to another folder, or to this one"
                          " spelled another way, so the .git file is refused")
+    _check_not_bare(common_dir)
     return {"repo_dir": path, "git_dir": entry, "common_dir": common_dir, "main_dir": main_dir}
 
+
+
+def _check_not_bare(common_dir: str) -> None:
+    """Refuse a bare repo, which can sit in a folder named .git too: its config must say core.bare = false, as git
+    init and git clone write it, read with the hardened git every other read here uses. Any other spelling refuses."""
+    if git(["config", "--get", "core.bare"], common_dir, check=False).strip() != "false":
+        raise FleetError("the repo folder's git folder is a bare repo (core.bare is not false), and the fleet builds"
+                         " only from a main checkout or a linked worktree of one")
 
 
 def _check_place(path: str, label: str) -> None:

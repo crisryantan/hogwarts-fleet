@@ -129,6 +129,13 @@ class RepoDirsTests(LinkedCase):
         self.git("clone", "-q", "--bare", str(self.repo), str(bare), cwd=self.home_dir)
         folder = self.add_linked("from-bare", "feature/bare", repo=bare)
         self.refused(folder, "a worktree of a bare repo")
+        # A bare repo cloned into a folder named .git passes the name check, so its core.bare refuses it.
+        project = self.home_dir / "project"
+        project.mkdir()
+        self.git("clone", "-q", "--bare", str(self.repo), str(project / ".git"), cwd=self.home_dir)
+        hidden = self.add_linked("from-hidden-bare", "feature/hidden", repo=project / ".git")
+        self.refused(hidden, "is a bare repo")
+        self.refused(project, "is a bare repo")
 
     def test_a_worktree_whose_entry_was_pruned_or_main_checkout_moved_is_refused_plainly(self):
         shutil.rmtree(self.entry(self.linked))
