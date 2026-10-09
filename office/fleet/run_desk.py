@@ -2361,13 +2361,14 @@ def hold_stopped(conn, desk: str, owl_id: str) -> None:
     stops.hold(desk, owl_id, task_id)
 
 
-def watch_go(conn) -> None:
-    """Go updates at the end of a desk run (fleet/go_watch.py), while they are on. A failure is one line on stderr,
-    never the run's result."""
+def watch_go(conn, wait: float = 0) -> None:
+    """Go updates at the end of a desk run (fleet/go_watch.py), while they are on, and right after the go confirmer or
+    verify records a change (waiting up to wait for a watch already running). A failure is one line on stderr, never
+    the run's result."""
     try:
         from fleet import go_watch  # here, since go_watch sends through phone, which imports this module
 
-        go_watch.watch(conn)
+        go_watch.watch(conn, wait=wait)
     except Exception as exc:  # noqa: BLE001 - a go update that fails never changes how the run ended
         sys.stderr.write(json.dumps({"go_updates": "failed", "error": common.scrubbed_line(exc, 200)},
                                     ensure_ascii=True) + "\n")

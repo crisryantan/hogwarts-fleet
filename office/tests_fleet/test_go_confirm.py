@@ -23,6 +23,7 @@ from tests.support import NOW
 
 from fleet import common, config, go_confirm, run_desk, worktree
 from fleet.hooks import user_prompt_submit
+from fleet.safefs import FleetError
 from tests_fleet.support import PROMPT_ID, TOKEN_SHAPE, assistant_entry, peer_entry, user_entry
 from tests_fleet.test_go import (
     OTHER_ID, TASK_ID, GoCase, committed_then_unreadable, then_terminated, unreadable_tasks,
@@ -264,6 +265,85 @@ class DeferredGoTests(ConfirmCase):
         [event] = self.headmaster_events()
         self.assertIn(f"Go for {TASK_ID} was stopped by a signal while it ran", event["summary"])
         self.assertIn(f"castle task show {TASK_ID}", event["summary"])
+
+
+class GoUpdatesTests(ConfirmCase):
+    """Once a go's outcome is recorded, the confirmer runs one go updates pass, so it reaches Ryan now rather than at
+    the next Owl Post pass. A pass that fails changes nothing the confirmer did or says."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.task_md()
+        self.enable("harry")
+
+    def test_a_confirmed_go_runs_one_go_watch_after_its_outcome_is_recorded(self):
+        from fleet import go_watch
+
+        path = self.later()
+        _, _, payload = self.deferred(f"go {TASK_ID}", transcript=path)
+        seen = []
+
+        def watched(conn, wait=0):
+            seen.append((wait, [event["kind"] for event in self.headmaster_events()]))
+            return []
+
+        with mock.patch.object(go_watch, "watch", side_effect=watched):
+            self.confirm(payload, self.appears(path, user_entry(f"go {TASK_ID}", promptId=PROMPT_ID)))
+        self.assertEqual(seen, [(config.GO_WATCH_WAIT_SECONDS, ["go.confirmed"])])
+
+    def test_a_refused_go_runs_one_too_and_a_failed_one_changes_nothing(self):
+        from fleet import go_watch
+
+        _, _, payload = self.deferred(f"go {TASK_ID}")
+        failing = FleetError("the go watch state cannot be read")
+        with mock.patch.object(go_watch, "watch", side_effect=failing) as watch, \
+                mock.patch("sys.stderr", new_callable=io.StringIO) as err:
+            lines = self.confirm(payload)
+        watch.assert_called_once()
+        [event] = self.headmaster_events()
+        self.assertEqual(event["kind"], "go.refused")
+        self.assertEqual(lines, [event["summary"]])
+        self.assertTrue(go_confirm.finished({"prompt_id": PROMPT_ID}))
+        self.assertIn('"go_updates": "failed"', err.getvalue())
+        self.phoned.assert_not_called()  # go updates are off: the Owl Post's pass delivers its loud events as before
+
+    def test_while_go_updates_are_on_its_loud_events_are_delivered_right_after_the_watch(self):
+        from fleet import go_watch
+
+        self.write_file(self.office / config.GO_UPDATES_FILE, "on\n")
+        _, _, payload = self.deferred(f"go {TASK_ID}")
+        order = []
+        self.phoned.side_effect = lambda conn: order.append("deliver") or []
+        with mock.patch.object(go_watch, "watch", side_effect=lambda conn, wait=0: order.append("watch") or []):
+            self.confirm(payload)
+        self.assertEqual(order, ["watch", "deliver"])  # so a refusal no go task covers still pings now
+
+    def test_a_delivery_that_fails_changes_nothing_the_confirmer_did(self):
+        from fleet import go_watch
+
+        self.write_file(self.office / config.GO_UPDATES_FILE, "on\n")
+        _, _, payload = self.deferred(f"go {TASK_ID}")
+        self.phoned.side_effect = FleetError("the phone watermark cannot be read")
+        with mock.patch.object(go_watch, "watch", return_value=[]), \
+                mock.patch("sys.stderr", new_callable=io.StringIO) as err:
+            lines = self.confirm(payload)
+        [event] = self.headmaster_events()
+        self.assertEqual(lines, [event["summary"]])
+        self.assertTrue(go_confirm.finished({"prompt_id": PROMPT_ID}))
+        self.assertIn('"phone": "failed"', err.getvalue())
+
+    def test_a_close_runs_no_go_watch(self):
+        from fleet import go_watch
+
+        task = pensieve.create_task(self.conn, "harry", "fix it", now=NOW)
+        pensieve.start_task(self.conn, task["id"], now=NOW)
+        pensieve.mark_awaiting_close(self.conn, task["id"], now=NOW)
+        path = self.later()
+        text = f"Mischief managed {task['id']}"
+        _, _, payload = self.deferred(text, transcript=path, agent_type=None)
+        with mock.patch.object(go_watch, "watch", side_effect=AssertionError("a go watch ran")):
+            self.confirm(payload, self.appears(path, user_entry(text, promptId=PROMPT_ID)))
+        self.assertEqual(pensieve.get_task(self.conn, task["id"])["status"], "closed")
 
 
 class DeferredCloseTests(ConfirmCase):
@@ -577,6 +657,20 @@ class InterruptedTests(ConfirmCase):
             self.confirm(payload)
         self.assert_interrupted_once()
         self.assert_unchanged(before)
+
+    def test_a_confirmer_finding_a_dead_ones_marker_runs_one_go_watch_after_its_report(self):
+        from fleet import go_watch
+
+        path = self.later()
+        _, _, payload = self.deferred(f"go {TASK_ID}", transcript=path)
+        self.pending(dead_pid(), self.old)
+        self.append(path, user_entry(f"go {TASK_ID}", promptId=PROMPT_ID))
+        seen = []
+        with mock.patch.object(go_watch, "watch",
+                               side_effect=lambda conn, wait=0: seen.append(len(self.headmaster_events())) or []):
+            self.confirm(payload)
+        self.assertEqual(seen, [1])  # after the interrupted report is an event
+        self.assert_interrupted_once()
 
     def test_a_store_outage_leaves_the_marker_pending_for_the_sweep(self):
         path = self.later()

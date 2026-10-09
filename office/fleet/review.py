@@ -1480,7 +1480,7 @@ def _bind_pr(conn, task_id: str, pushed: dict, now: Optional[int]) -> bool:
 
 def main(argv: Optional[list] = None) -> int:
     """The automatic review the Owl Post starts (run_desk.spawn_review): one argument, the build task's id. Prints
-    one JSON object, like the fleet command."""
+    one JSON object, like the fleet command, then runs one go updates pass (fleet/go_watch.py), passed or failed."""
     args = sys.argv[1:] if argv is None else argv
     if len(args) != 1 or not isinstance(args[0], str) or ids.PATTERNS["task"].fullmatch(args[0]) is None:
         sys.stderr.write("the automatic review takes one build task id\n")
@@ -1491,14 +1491,18 @@ def main(argv: Optional[list] = None) -> int:
         sys.stdout.write(json.dumps({"ok": False, "error": common.scrubbed_line(exc, 300)}, ensure_ascii=True) + "\n")
         return 1
     try:
-        with common.ended_by_signals():
-            data = auto_review(conn, args[0])
-        sys.stdout.write(json.dumps({"ok": True, "data": data}, ensure_ascii=True) + "\n")
-        return 0
-    except (FleetError, StoreError) as exc:
-        # Printed to review-auto.log: an error can quote git, so all of it is scrubbed before it is cut.
-        sys.stdout.write(json.dumps({"ok": False, "error": common.scrubbed_line(exc, 600)}, ensure_ascii=True) + "\n")
-        return 1
+        try:
+            with common.ended_by_signals():
+                data = auto_review(conn, args[0])
+            result, code = {"ok": True, "data": data}, 0
+        except (FleetError, StoreError) as exc:
+            # Printed to review-auto.log: an error can quote git, so all of it is scrubbed before it is cut.
+            result, code = {"ok": False, "error": common.scrubbed_line(exc, 600)}, 1
+        sys.stdout.write(json.dumps(result, ensure_ascii=True) + "\n")
+        sys.stdout.flush()  # in review-auto.log before the watch, which may wait
+        # Its verdict, draft PR or stop as a go update now, not at the next Owl Post pass; a failure changes nothing.
+        run_desk.watch_go(conn, wait=config.GO_WATCH_WAIT_SECONDS)
+        return code
     finally:
         conn.close()
 

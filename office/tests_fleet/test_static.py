@@ -353,7 +353,8 @@ class GoWatchTests(unittest.TestCase):
                     "executemany", "executescript", "send_owl", "post", "deliver"}
     LAUNCHES = {"spawn", "spawn_review", "spawn_closer", "spawn_go_confirm", "start_child", "kick", "hold",
                 "resume", "release"}
-    IMPORTS = {"__future__", "hashlib", "json", "os", "re", "secrets", "typing", "hogwarts", "fleet"}
+    IMPORTS = {"__future__", "calendar", "hashlib", "json", "os", "re", "secrets", "stat", "time", "typing", "hogwarts",
+               "fleet"}
     FROM_FLEET = {"common", "config", "go_status", "markers", "phone", "safefs", "FleetError"}
     FROM_STORE = {"capacity", "db", "followups", "ids", "pensieve"}
 

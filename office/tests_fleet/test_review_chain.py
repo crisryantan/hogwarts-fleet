@@ -459,6 +459,30 @@ class EntryTests(ChainCase):
         self.assertEqual(result["data"]["outcome"], "no handoff of this task waits for its review")
 
 
+class GoUpdatesTests(ChainCase):
+    def test_main_runs_one_waiting_go_watch_once_it_printed_and_a_failed_one_changes_nothing(self):
+        from fleet import go_watch
+
+        out, seen = io.StringIO(), []
+
+        def watched(conn, wait=0):
+            seen.append((wait, out.getvalue()))
+            return []
+
+        with mock.patch.object(go_watch, "watch", side_effect=watched), contextlib.redirect_stdout(out):
+            self.assertEqual(review.main([self.task["id"]]), 0)
+        [(wait, printed)] = [call for call in seen if call[0]]  # any desk run it started ends with its own pass
+        self.assertEqual(wait, config.GO_WATCH_WAIT_SECONDS)
+        self.assertTrue(json.loads(printed)["ok"])
+        out = io.StringIO()
+        with mock.patch.object(review, "auto_review", side_effect=FleetError("the worktree is gone")), \
+                mock.patch.object(go_watch, "watch", side_effect=FleetError("the go watch state cannot be read")) \
+                as watch, contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(review.main([self.task["id"]]), 1)
+        watch.assert_called_once_with(mock.ANY, wait=config.GO_WATCH_WAIT_SECONDS)
+        self.assertEqual(json.loads(out.getvalue()), {"ok": False, "error": "the worktree is gone"})
+
+
 class SameSecondTests(ChainCase):
     """Owls of one second keep the order they came in. Owl ids are random, so they never order anything."""
 

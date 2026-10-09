@@ -7,33 +7,51 @@ changes what any run may do.
   from store fields: its newest build, the state from the fixed table below (task status, the build's PR binding and
   proven close, its live review round and that round's verdict, the newest result owl from its desk, Ollivander's held
   runs, and the loud events a state stands for), the round and verdict that state is about, and the id of the event
-  a state is made of (a go refusal, a tooling block, a refused round). No timestamp or wording is in the key, so a
-  cosmetic change never pings.
+  a state is made of (a go refusal, a tooling block, a refused round). The one state read from a file is verify's:
+  once the build's newest office evidence (reviews/<build>/evidence-<sha>.md, which no desk can write) ran at or
+  after the handoff its round is for, the key holds the counts of that evidence's structured head (its RAN, SUMMARY
+  and STOPPED lines, each exactly once), never its free text. No timestamp or wording is in the key, so a cosmetic
+  change never pings.
 - Kept: the last key sent for each go task, in one state file in the office folder GO_WATCH_DIR, read and written
   whole under its own lock. A pass compares the current keys with it: a go task whose key changed gets one line, one
   that left the open set gets one final line and its entry goes. A pass with no change sends and writes nothing. A
-  state file, a store or a held-runs folder that cannot be read whole sends nothing and keeps the file as it was.
+  state file, a store, a held-runs folder or an evidence folder that cannot be read whole sends nothing and keeps the
+  file as it was.
+- The end: once a go task's kept state is PASS, HEADMASTER, round cap or closed (ENDS), that line was its last. Nothing
+  more is sent for it, and its kept key stays as it was, with one exception: after PASS, the draft PR opened line
+  still goes, since that is Ryan's cue to merge, and is then the last. When such a go task closes, its entry is
+  dropped with no line. A go task that closes before its end still gets its closed line.
 - The line is `<go id> / <build id or "no build">: <state>. <action>`, both from the fixed table (STATES), never from
   an owl or a model, scrubbed and cut to GO_WATCH_LINE_CHARS. It goes through phone.send: the overlay's command when
-  one is configured, else the macOS notification.
+  one is configured, else the macOS notification. Each line is also appended, with a local timestamp, to
+  logs/GO_UPDATES_LOG in the office (_log), which no desk can write, before it is sent, so a tail -F shows it after
+  the banner has gone. Its marker says logging, with the record and where it goes, until then: a record a kill cut
+  short is logged by the next pass (_relog) unless it is where its marker says it went.
 - Never twice: before a line is sent, a marker named by a digest of (epoch, go id, key) is published create-exclusive
   in the folder, then records the outcome as phone.py's do, so a rerun, a second watcher or a kill never sends it
   again. The first pass with the switch on only records a baseline (with a new epoch), so there is no backlog; with
   the switch off the state file is removed, so turning it on again starts from a new baseline.
 - At most GO_WATCH_MAX_PER_PASS lines ping one by one each pass; any more go as one summary ping naming the count.
+- When: at the end of each Owl Post pass, orchestrator run and desk run, and right after the go confirmer records a
+  go's outcome and after verify writes its evidence. Those two wait up to GO_WATCH_WAIT_SECONDS for a watch already
+  running, and past that ask it to run once more when it lets go (AGAIN), so their change goes out within about a
+  minute; both run detached from Ryan's prompt.
 - No double ping: phone.deliver skips a loud event whose kind a state here stands for (COVERS) when it is on a go
   task this file keeps, or its build, that go task stands in that state now, and that state's own line was sent
   (watching, covers). Every other loud event, of these tasks or any other, pings as before, and so does every
-  one while the kept state or the store cannot be read.
+  one while the kept state or the store cannot be read, and every one of a go task past its end that moved on.
 """
 from __future__ import annotations
 
+import calendar
 import hashlib
 import json
 import os
 import re
 import secrets
-from typing import Optional
+import stat
+import time
+from typing import Callable, Optional
 
 from hogwarts import capacity, db, followups, ids, pensieve
 
@@ -42,15 +60,27 @@ from fleet.safefs import FleetError
 
 STATE = "state.json"
 LOCK = "go-watch.lock"
+# Left by a pass that waited and still found the lock held: the pass holding it runs again after it lets go.
+AGAIN = "again"
 STATE_MAX_BYTES = 1 << 20
 # A line's marker: <epoch>.<go task id>.<digest of the epoch, go task id and key>.
 MARKER = re.compile(r"([0-9a-f]{8})\.(tk_[0-9a-f]{16})\.[0-9a-f]{32}")
 KEY_FIELDS = ("build", "state", "round", "verdict", "event")
+# A verify state's key also holds its counts: [commands run, commands, run that exited 0, malformed checks].
+CHECKS = "checks"
+EVIDENCE_NAME = re.compile(r"evidence-([0-9a-f]{40})\.md")
+EVIDENCE_HEAD_BYTES = 1 << 17
+HEAD_RAN = re.compile(r"RAN (\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ) (?:under|without) .+")
+HEAD_SUMMARY = re.compile(r"SUMMARY (\d{1,4}) of (\d{1,4}) commands exited 0, (\d{1,4}) malformed checks not run,"
+                          r" \d{1,4} observations for the reviewer")
+HEAD_STOPPED = re.compile(r"STOPPED (\d{1,4}) commands never started: .+")
+HEAD_FIELD = re.compile(r"(RAN|SUMMARY|STOPPED)(?![A-Za-z0-9_])")
 # The fixed table: state -> (what the line calls it, what Ryan does). Nothing else is ever put in a line.
 STATES = {
     "confirmed": ("go confirmed, build started", "Nothing for you."),
     "refused": ("go refused", "Fix the TASK.md as the refusal says, then send the go again."),
     "handoff": ("Harry handed off, review running", "Nothing for you."),
+    "verify": ("verify ran {ran} of {total} checks, {passed} passed, {malformed} malformed", "Nothing for you."),
     "changes": ("review CHANGES, fix round started", "Nothing for you."),
     "pass": ("review PASS", "Nothing for you; the draft PR opens next if auto-draft-pr is on, otherwise push it"
                             " yourself."),
@@ -69,6 +99,8 @@ STATES = {
 COVERS = {"go.refused": "refused", "review.headmaster": "headmaster", "review.round-cap": "round-cap",
           "review.loop-stopped": "round-cap", "review.blocked-on-tooling": "tooling", "review.ready-for-push": "pass",
           "push.draft-pr": "draft-pr"}
+# A go task's end: once its kept state is one of these, nothing more is sent for it (see the module notes).
+ENDS = ("pass", "draft-pr", "merged", "headmaster", "round-cap", "closed")
 
 
 def on() -> bool:
@@ -86,9 +118,58 @@ def _newest(conn, task_id: str, kinds: tuple) -> Optional[dict]:
 
 
 def _key(build: Optional[str], state: str, round_no: int = 0, verdict: Optional[str] = None,
-         event: Optional[dict] = None) -> dict:
-    return {"build": build, "state": state, "round": round_no, "verdict": verdict,
-            "event": None if event is None else int(event["id"])}
+         event: Optional[dict] = None, checks: Optional[list] = None) -> dict:
+    key = {"build": build, "state": state, "round": round_no, "verdict": verdict,
+           "event": None if event is None else int(event["id"])}
+    return key if checks is None else {**key, CHECKS: checks}
+
+
+def _counts(raw: bytes, build_id: str, sha: str, floor: int) -> Optional[list]:
+    """The verify counts from an evidence file's head (up to its first blank line), or None unless it names this build
+    and sha, holds one RAN, one SUMMARY and at most one STOPPED line, and ran at or after floor."""
+    head = raw.split(b"\n\n", 1)
+    if len(head) != 2:
+        return None
+    lines = head[0].decode("utf-8", "replace").split("\n")
+    # Every line that starts with one of these field words counts, so a second or malformed one fails the head.
+    fields = [(match.group(1), entry) for match, entry in ((HEAD_FIELD.match(entry), entry) for entry in lines)
+              if match is not None]
+    ran, summary, stopped = ([entry for field, entry in fields if field == word]
+                             for word in ("RAN", "SUMMARY", "STOPPED"))
+    if lines[0] != f"EVIDENCE {build_id} @ {sha}" or len(ran) != 1 or len(summary) != 1 or len(stopped) > 1:
+        return None
+    ran, summary = HEAD_RAN.fullmatch(ran[0]), HEAD_SUMMARY.fullmatch(summary[0])
+    stopped = [HEAD_STOPPED.fullmatch(entry) for entry in stopped]
+    if ran is None or summary is None or None in stopped:
+        return None
+    try:
+        at = calendar.timegm(time.strptime(ran.group(1), "%Y-%m-%dT%H:%M:%SZ"))
+    except ValueError:
+        return None
+    passed, run, malformed = (int(value) for value in summary.groups())
+    if at < floor or passed > run:
+        return None
+    return [run, run + (int(stopped[0].group(1)) if stopped else 0), passed, malformed]
+
+
+def _verified(build_id: str, floor: int) -> Optional[list]:
+    """The counts of the build's newest office evidence (by its file's time) when its verify ran at or after floor,
+    else None. Raises when the evidence folder or that file cannot be read."""
+    try:
+        with safefs.opened_dir(config.OFFICE_ROOT, "reviews", build_id) as fd:
+            newest = None
+            for name in os.listdir(fd):
+                match = EVIDENCE_NAME.fullmatch(name)
+                info = None if match is None else safefs.lstat(fd, name)
+                if info is not None and stat.S_ISREG(info.st_mode) \
+                        and (newest is None or (info.st_mtime_ns, name) > newest[:2]):
+                    newest = (info.st_mtime_ns, name, match.group(1))
+            if newest is None:
+                return None
+            raw, _ = safefs.read_range(fd, newest[1], 0, EVIDENCE_HEAD_BYTES, "verify evidence")
+    except safefs.Missing:
+        return None
+    return _counts(raw, build_id, newest[2], floor)
 
 
 def _link(pr: Optional[dict]) -> Optional[str]:
@@ -118,14 +199,16 @@ def _build_state(conn, build: dict, held: set) -> tuple:
     stop = _newest(conn, build_id, ("review.blocked-on-tooling", "review.round-cap", "review.loop-stopped"))
     if stop is not None and stop["ts"] >= since:
         return _key(build_id, COVERS[stop["kind"]], round_no, event=stop), None
-    if handoff > round_at:
-        return _key(build_id, "handoff", round_no + 1), None  # the round this handoff opens next
+    if handoff > round_at:  # the round this handoff opens next, once verify has run for it
+        checks = _verified(build_id, handoff)
+        return _key(build_id, "handoff" if checks is None else "verify", round_no + 1, checks=checks), None
     if latest is None:
         return _key(build_id, "confirmed"), None
     if pr is not None and pr["opened_at"] >= round_at:
         return _key(build_id, "draft-pr", round_no, latest["verdict"]), _link(pr)
-    if not latest["has_verdict"]:
-        return _key(build_id, "handoff", round_no), None
+    if not latest["has_verdict"]:  # its verify ran after the handoff and the round before it
+        checks = _verified(build_id, max(handoff, live[-2]["created_at"] if len(live) > 1 else 0))
+        return _key(build_id, "handoff" if checks is None else "verify", round_no, checks=checks), None
     verdict = latest["verdict"]
     if verdict == "PASS":
         return _key(build_id, "pass", round_no, verdict), None
@@ -173,6 +256,8 @@ def current(conn) -> dict:
 
 def line(go_id: str, key: dict) -> str:
     label, action = STATES[key["state"]]
+    if key["state"] == "verify":
+        label = label.format(**dict(zip(("ran", "total", "passed", "malformed"), key[CHECKS])))
     return common.scrubbed_line(f"{go_id} / {key['build'] or 'no build'}: {label}. {action}",
                                 config.GO_WATCH_LINE_CHARS)
 
@@ -181,8 +266,11 @@ def line(go_id: str, key: dict) -> str:
 
 
 def _valid_key(key: object) -> bool:
-    return (isinstance(key, dict) and set(key) == set(KEY_FIELDS) and isinstance(key["state"], str)
-            and key["state"] in STATES
+    verify = isinstance(key, dict) and key.get("state") == "verify"
+    return (isinstance(key, dict) and set(key) == set(KEY_FIELDS) | ({CHECKS} if verify else set())
+            and isinstance(key["state"], str) and key["state"] in STATES
+            and (not verify or (isinstance(key[CHECKS], list) and len(key[CHECKS]) == 4
+                                and all(type(count) is int and count >= 0 for count in key[CHECKS])))
             and (key["build"] is None or (isinstance(key["build"], str)
                                           and ids.PATTERNS["task"].fullmatch(key["build"]) is not None))
             and type(key["round"]) is int and key["round"] >= 0
@@ -234,19 +322,45 @@ def _prune(fd: int, epoch: str, keep: set) -> None:
 # A pass
 
 
-def watch(conn) -> list:
+def watch(conn, wait: float = 0) -> list:
     """One pass (see the module notes). Returns one outcome per line looked at. Raises when what it reads cannot be
-    read whole; then nothing was sent or written. With the switch off it only forgets the kept state."""
+    read whole; then nothing was sent or written. With the switch off it only forgets the kept state. wait is how long
+    to wait for a pass another process is running; 0 leaves this change to that pass or the next. A pass that waited
+    and still finds the lock held leaves AGAIN, then tries once more: either it runs, or the pass holding the lock
+    finds AGAIN once it lets go and runs again. Only a pass that holds the lock takes AGAIN, before it reads, so a
+    change made before an ask is never left to the next scheduled pass."""
     if not on():
         _forget()
         return []
-    with safefs.opened_dir(config.OFFICE_ROOT, "locks", create=True) as locks_fd:
+    with safefs.opened_dir(config.OFFICE_ROOT, "locks", create=True) as locks_fd, \
+            safefs.opened_dir(config.OFFICE_ROOT, config.GO_WATCH_DIR, create=True) as fd:
         try:
-            with safefs.held_lock(locks_fd, LOCK, blocking=False), \
-                    safefs.opened_dir(config.OFFICE_ROOT, config.GO_WATCH_DIR, create=True) as fd:
-                return _watch(conn, fd)
+            outcomes = _locked(conn, locks_fd, fd, wait)
         except safefs.Busy:
-            return ["another go watch is running"]
+            if wait <= 0:
+                return ["another go watch is running"]
+            safefs.write_new(fd, AGAIN, b"")
+            try:
+                outcomes = _locked(conn, locks_fd, fd, 0)
+            except safefs.Busy:
+                return ["left to the running go watch"]
+        # Asked while this pass held the lock: again until no ask is left, unless another pass holds the lock now,
+        # which looks once it lets go. Only a waiter that waited out GO_WATCH_WAIT_SECONDS asks, so this ends.
+        while safefs.lstat(fd, AGAIN) is not None:
+            try:
+                outcomes += _locked(conn, locks_fd, fd, 0)
+            except safefs.Busy:
+                break
+        return outcomes
+
+
+def _locked(conn, locks_fd: int, fd: int, wait: float) -> list:
+    with safefs.held_lock(locks_fd, LOCK, blocking=wait > 0, timeout=wait or None):
+        try:
+            os.unlink(AGAIN, dir_fd=fd)  # this pass reads after every ask made so far
+        except FileNotFoundError:
+            pass
+        return _watch(conn, fd)
 
 
 def _forget() -> None:
@@ -271,29 +385,44 @@ def _unlink_state(fd: int) -> None:
 def _watch(conn, fd: int) -> list:
     kept = _read_state(fd)
     found = current(conn)
-    keys = {go_id: key for go_id, (key, _) in found.items()}
     if kept is None:  # the first pass with the switch on: no backlog
         if not on():
             return []
         epoch = secrets.token_hex(4)
-        _write_state(fd, epoch, keys)
-        _prune(fd, epoch, set(keys))
+        _write_state(fd, epoch, {go_id: key for go_id, (key, _) in found.items()})
+        _prune(fd, epoch, set(found))
         return []
     epoch, before = kept["epoch"], kept["tasks"]
-    changed = [(go_id, key, link) for go_id, (key, link) in found.items() if before.get(go_id) != key]
-    changed += [(go_id, _key(key["build"], "closed"), None) for go_id, key in before.items() if go_id not in found]
-    if not changed:
+    _relog(fd, epoch)
+    keys, changed = {}, []
+    for go_id, (key, link) in found.items():
+        old = before.get(go_id)
+        if old is not None and _ended(old, key):
+            keys[go_id] = old  # past its end: nothing more for it until it closes
+            continue
+        keys[go_id] = key
+        if old != key:
+            changed.append((go_id, key, link))
+    # One that left the open set gets its closed line, unless it had ended: then its entry goes with no line.
+    changed += [(go_id, _key(key["build"], "closed"), None) for go_id, key in before.items()
+                if go_id not in found and key["state"] not in ENDS]
+    if keys == before:
         return []
     outcomes, batched = [], []
     for go_id, key, link in changed:
-        name = _marker(epoch, go_id, key)
-        if not markers.publish(fd, name, {"state": "sending"}):
+        name, text = _marker(epoch, go_id, key), line(go_id, key)
+        record = f"{time.strftime('%Y-%m-%d %H:%M:%S %z', time.localtime())} {text}"
+        if not markers.publish(fd, name, {"state": "logging", "record": record}):
             continue  # another watcher, or this one before a kill, took it: never twice
+        # Logged before it is sent, so the log has every line a marker claimed, batched ones too; the marker names
+        # where the record goes before it is written, so a kill in between is repaired exactly (_relog).
+        _log(record, lambda at, name=name, record=record: markers.replace(
+            fd, name, {"state": "logging", "record": record, "log": at}))
+        markers.replace(fd, name, {"state": "sending"})
         if len(outcomes) >= config.GO_WATCH_MAX_PER_PASS:
             batched.append(name)
             continue
-        outcome = phone.send({"event_id": 0, "kind": "go.update", "task_id": go_id, "line": line(go_id, key),
-                              "pr_link": link})
+        outcome = phone.send({"event_id": 0, "kind": "go.update", "task_id": go_id, "line": text, "pr_link": link})
         markers.replace(fd, name, outcome)
         outcomes.append(outcome["state"])
     if batched:
@@ -309,6 +438,94 @@ def _watch(conn, fd: int) -> list:
     _write_state(fd, epoch, keys)
     _prune(fd, epoch, set(keys))
     return outcomes
+
+
+def _ended(kept: dict, key: dict) -> bool:
+    """Whether a go task's kept state is its end, so this key is not sent. After PASS the draft PR line still goes."""
+    return kept["state"] in ENDS and not (kept["state"] == "pass" and key["state"] == "draft-pr")
+
+
+def _relog(fd: int, epoch: str) -> None:
+    """A line whose log record a kill cut short (its marker still says logging): logged now unless it is in the log
+    where its marker says it went, and never sent, as any line a kill stopped before its send."""
+    for name in sorted(os.listdir(fd)):
+        match = MARKER.fullmatch(name)
+        marker = None if match is None or match.group(1) != epoch else markers.read(fd, name)
+        if marker is not None and marker["state"] == "logging" and isinstance(marker.get("record"), str):
+            record = common.one_line(marker["record"], config.GO_WATCH_LINE_CHARS + 40)
+            if not _logged(record, marker.get("log")):  # where it goes now is noted first, as on its first try
+                _log(record, lambda at, name=name, record=record: markers.replace(
+                    fd, name, {"state": "logging", "record": record, "log": at}))
+            markers.replace(fd, name, {"state": "sending"})
+
+
+def _logged(record: str, at: object) -> bool:
+    """Whether the record is in the log where its marker said it would go: [the log's inode, its size then]."""
+    if not (isinstance(at, list) and len(at) == 2 and all(type(value) is int and value >= 0 for value in at)):
+        return False
+    data = (record + "\n").encode("ascii", "replace")
+    try:
+        with safefs.opened_dir(config.OFFICE_ROOT, "logs") as fd:
+            info = safefs.lstat(fd, config.GO_UPDATES_LOG)
+            if info is None or info.st_ino != at[0]:
+                return False
+            chunk, _ = safefs.read_range(fd, config.GO_UPDATES_LOG, at[1], len(data) + 1, "go updates log")
+    except (FleetError, OSError):
+        return False
+    return chunk.startswith(data) or chunk.startswith(b"\n" + data)
+
+
+def _log(record: str, noted: Optional[Callable[[list], None]] = None) -> None:
+    """Append one record (a local timestamp and a line) to logs/GO_UPDATES_LOG in the office, where no desk can write,
+    as the owl reports log is written: a plain file of yours with one link, and a line a kill cut short is ended
+    first. Past GO_UPDATES_LOG_MAX_BYTES the log moves to GO_UPDATES_LOG.1 first, its cut line ended. noted gets
+    [inode, size] of the log just before the record is written, and what it raises is the caller's. A log that cannot
+    be written never holds a line back."""
+    name, data = config.GO_UPDATES_LOG, (record + "\n").encode("ascii", "replace")
+    try:
+        dir_fd = safefs.open_dir(config.OFFICE_ROOT, "logs", create=True)
+    except (FleetError, OSError):
+        return
+    try:
+        try:
+            try:
+                tail, size = safefs.read_range(dir_fd, name, None, 1, "go updates log")
+            except safefs.Missing:
+                tail, size = b"", 0
+            cut = tail not in (b"", b"\n")
+            if size + cut + len(data) > config.GO_UPDATES_LOG_MAX_BYTES:
+                if cut:
+                    log_fd = _open_log(dir_fd, name)
+                    try:
+                        safefs.write_all(log_fd, b"\n")
+                    finally:
+                        os.close(log_fd)
+                safefs.move(dir_fd, name, dir_fd, f"{name}.1")
+                cut = False
+            log_fd = _open_log(dir_fd, name)
+        except (FleetError, OSError):
+            return
+        try:
+            if noted is not None:
+                info = os.fstat(log_fd)
+                noted([info.st_ino, info.st_size])
+            try:
+                safefs.write_all(log_fd, (b"\n" if cut else b"") + data)
+            except OSError:
+                pass
+        finally:
+            os.close(log_fd)
+    finally:
+        os.close(dir_fd)
+
+
+def _open_log(dir_fd: int, name: str) -> int:
+    log_fd = safefs.open_append(dir_fd, name, "go updates log")
+    info = os.fstat(log_fd)
+    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_uid != os.getuid():
+        os.close(log_fd)
+        raise FleetError("the go updates log is not a plain file of yours")
+    return log_fd
 
 
 # What phone.deliver leaves to go updates

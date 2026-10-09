@@ -22,7 +22,8 @@
 - Writes evidence.md next to TASK.md in the castle (with a per-commit copy), and the same text in
   the office reviews folder, where no desk can change it. Every run also keeps the exact TASK.md bytes it read in
   the office, as reviews/<task>/task-md-<sha256>.md, and its result names that digest, so a review round can record
-  which TASK.md its verify read.
+  which TASK.md its verify read. Then one go updates pass runs (fleet/go_watch.py), so a watched build's verify
+  counts reach Ryan right away; a failed pass never changes what verify returns.
 
 After-merge checks. A criterion may say "| after merge: <check>" instead of "| check: <check>": the same command,
 written or malformed rule, but judged after the merge. verify lists each one under its own line and never runs it,
@@ -446,6 +447,7 @@ def verify(conn, task_id: str, now: Optional[int] = None, keep_fds: tuple = ()) 
     text = render(task["id"], sha, record, md_digest, checks, results, common.now_stamp(now), sandboxed, cleaned,
                   stopped)
     paths = write_evidence(task["id"], holder_id, sha, text)
+    run_desk.watch_go(conn, wait=config.GO_WATCH_WAIT_SECONDS)  # its counts as a go update; a failure changes nothing
     if stopped is not None:
         raise run_desk.Stopped(f"verify ran {len(results)} of {len(commands)} check commands and started no more:"
                                f" {stopped}. The evidence of those that ran is in {paths['office']}; run it again"

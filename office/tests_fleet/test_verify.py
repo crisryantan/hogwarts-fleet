@@ -6,6 +6,7 @@ Runs on real git repos in temp folders, with verify's sandbox replaced by plain 
 from __future__ import annotations
 
 import contextlib
+import io
 import os
 import signal
 import subprocess
@@ -413,3 +414,38 @@ class OllivanderStopTests(VerifyChecksCase):
             review.review_build(self.conn, task["id"])
         self.assertFalse((worktree / "first-ran.txt").exists())
         self.assertEqual(pensieve.list_tasks(self.conn, desk="hermione"), [])
+
+
+class GoUpdatesTests(VerifyChecksCase):
+    """Right after verify writes its evidence, one go updates pass runs, so a watched build's counts go out now. It
+    waits for a pass already running, and a pass that fails never changes what verify returns."""
+
+    def test_verify_runs_one_go_watch_once_its_evidence_is_written_and_go_watch_reads_its_counts(self):
+        from fleet import go_watch
+
+        seen = []
+
+        def watched(conn, wait=0):
+            seen.append((wait, sorted(path.name for path in (self.office / "reviews").glob("*/evidence-*.md"))))
+            return []
+
+        with mock.patch.object(go_watch, "watch", side_effect=watched):
+            _, result, _, _ = self.checked()
+        # The build's own desk run ends with a pass that does not wait; verify's is the one that does.
+        self.assertEqual([call for call in seen if call[0]],
+                         [(config.GO_WATCH_WAIT_SECONDS, [f"evidence-{result['sha']}.md"])])
+        with safefs.opened_dir(config.OFFICE_ROOT, "reviews", result["task_id"]) as fd:
+            raw = safefs.read_regular(fd, f"evidence-{result['sha']}.md", 1 << 20)
+        # One command (AC-1), its exit, and the four malformed checks, read from verify's own SUMMARY line.
+        self.assertEqual(go_watch._counts(raw, result["task_id"], result["sha"], 0),
+                         [1, 1, 1 - len(result["failed"]), 4])
+
+    def test_a_go_watch_that_fails_never_changes_what_verify_returns(self):
+        from fleet import go_watch
+
+        with mock.patch.object(go_watch, "watch", side_effect=FleetError("the go watch state cannot be read")), \
+                mock.patch("sys.stderr", new_callable=io.StringIO) as err:
+            _, result, text, _ = self.checked()
+        self.assertEqual(result["malformed"], ["AC-2", "AC-4", "AC-5", "AC-6"])
+        self.assertIn("\nSUMMARY ", text)
+        self.assertIn('"go_updates": "failed"', err.getvalue())

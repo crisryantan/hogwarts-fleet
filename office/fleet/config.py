@@ -430,6 +430,12 @@ GO_STATUS_SEEN_DIR = "go-status-seen"
 GO_WATCH_MAX_PER_PASS = 5
 GO_WATCH_LINE_CHARS = 200
 GO_WATCH_DIR = "go-watch"
+# The go confirmer and verify wait at most this long for a watch another process is running, so their change is not
+# left to the next pass. Each line is also appended to the office's logs/GO_UPDATES_LOG, which past
+# GO_UPDATES_LOG_MAX_BYTES moves to GO_UPDATES_LOG.1 (one older file kept) before the next line.
+GO_WATCH_WAIT_SECONDS = 20
+GO_UPDATES_LOG = "go-updates.log"
+GO_UPDATES_LOG_MAX_BYTES = 256 * 1024
 # A seen marker a prompt hook left pending this long, or whose hook process is gone, is taken over by the next hook.
 SEEN_PENDING_SECONDS = 60
 

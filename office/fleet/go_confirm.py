@@ -24,7 +24,10 @@ module as one detached process (run_desk.spawn_go_confirm), with its input on a 
   bulk close through bulk_close.close_everything, which closes each task through that same close;
 - it reports each outcome as one headmaster event on McGonagall's desk, so it shows on the next prompt, and writes
   the same line to logs/go-confirm.log. A bulk close reports one close event per task it closed or refused as soon as that
-  task is done, each refusal with its Fix line, then its head line. Neither carries the prompt id, a token or the TASK.md hash.
+  task is done, each refusal with its Fix line, then its head line. Neither carries the prompt id, a token or the TASK.md hash;
+- after a go's outcomes are recorded it runs one go updates pass (fleet/go_watch.py) and, while those are on, one
+  phone.deliver, so the go's new state or its refusal reaches Ryan right away rather than at the next Owl Post pass;
+  a pass that fails changes nothing here.
 SIGTERM or SIGHUP ends a go through its take-back, as in the hook, and the event says the confirmer was stopped.
 """
 from __future__ import annotations
@@ -412,6 +415,21 @@ def _done_if(key: str, recorded: bool) -> None:
         pass
 
 
+def _tell(conn) -> None:
+    """A go's outcome reaches Ryan now, not at the next Owl Post pass: one go updates pass, then, while go updates are
+    on, the loud events it does not cover, such as the refusal of a go that was never registered, through
+    phone.deliver's own once-only path. A failure is one line on stderr and changes nothing the confirmer did."""
+    run_desk.watch_go(conn, wait=config.GO_WATCH_WAIT_SECONDS)
+    try:
+        from fleet import go_watch, phone  # only a go pays for these imports
+
+        if go_watch.on():
+            phone.deliver(conn)
+    except Exception as exc:  # noqa: BLE001 - the outcome is recorded; the Owl Post's pass delivers it otherwise
+        sys.stderr.write(json.dumps({"phone": "failed", "error": common.scrubbed_line(exc, 200)},
+                                    ensure_ascii=True) + "\n")
+
+
 def confirm(raw: bytes, clock: Callable[[], float] = time.time,
             sleep: Callable[[float], None] = time.sleep) -> list:
     """The log lines of one confirmer run on raw, the input the hook piped in."""
@@ -425,6 +443,7 @@ def confirm(raw: bytes, clock: Callable[[], float] = time.time,
     except Exception:  # noqa: BLE001 - nothing can be applied, and the marker stays pending
         conn = None
     try:
+        interrupted = None
         try:
             with safefs.opened_dir(config.OFFICE_ROOT, config.GO_CONFIRM_DIR) as fd:
                 claim = markers.read(fd, key)
@@ -438,15 +457,22 @@ def confirm(raw: bytes, clock: Callable[[], float] = time.time,
                                                                          made=[])):
                     ran = _ran(fd, key)
                     if ran is not None and ran["state"] != "done" and _stale(fd, key):
-                        return _report_interrupted(conn, fd, key)
-                    if ran is not None and ran["state"] == "done":
+                        interrupted = _report_interrupted(conn, fd, key)
+                    elif ran is not None and ran["state"] == "done":
                         return ["refused: this prompt was confirmed already"]
-                    return ["refused: another confirmer has this prompt"]
-                _prune(fd, key)
+                    else:
+                        return ["refused: another confirmer has this prompt"]
+                else:
+                    _prune(fd, key)
         except (FleetError, OSError) as exc:
             return [f"refused: the claim could not be read ({type(exc).__name__})"]
-        lines, recorded = _confirmed(data, conn, key, clock, sleep)
-        _done_if(key, recorded)
+        if interrupted is not None:
+            lines = interrupted
+        else:
+            lines, recorded = _confirmed(data, conn, key, clock, sleep)
+            _done_if(key, recorded)
+        if data["kind"] == "go" and conn is not None:  # an interrupted go's report too
+            _tell(conn)
         return lines
     finally:
         if conn is not None:
