@@ -375,3 +375,10 @@ class GoWatchTests(PhoneCase):
         self.assertEqual(self.deliver(), ["sent"])
         self.assertEqual(self.marker(third)["state"], "sent")
         self.assertEqual(self.notified.call_count, 5)
+        # The pass that comes later logs its line, but that ping was the escalation's one.
+        self.assertEqual(go_watch.watch(self.conn), ["covered"])
+        self.assertEqual(self.notified.call_count, 5)
+        self.assertEqual(self.marker(third)["state"], "sent")
+        logged = (self.office / "logs" / config.GO_UPDATES_LOG).read_text().splitlines()
+        self.assertTrue(logged[-1].endswith(go_watch.STATES["owner"][1]))
+        self.assertEqual(self.deliver(), [])

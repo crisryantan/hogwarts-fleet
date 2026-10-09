@@ -377,6 +377,15 @@ class TableTests(GoWatchCase):
         self.expect("refused", built, go_id=other)
         self.event(other, "orchestrator.notify")
         self.expect("owner", built, go_id=other)
+        # A build made before an escalation but started after it moves it on too.
+        late = self.go_task(2)
+        self.expect("confirmed", go_id=late)
+        opened = owlery.open_request(self.conn, "mcgonagall", "harry", "build it", parent_task_id=late,
+                                     now=self.tick())
+        self.event(late, "orchestrator.notify")
+        self.expect("owner", opened["task"], go_id=late)
+        pensieve.start_task(self.conn, opened["task"]["id"], now=self.tick())
+        self.expect("confirmed", opened["task"], go_id=late)
 
 
 class OnceTests(GoWatchCase):

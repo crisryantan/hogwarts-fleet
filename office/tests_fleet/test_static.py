@@ -367,10 +367,10 @@ class GoWatchTests(unittest.TestCase):
             elif isinstance(node, ast.ImportFrom) and node.module == "hogwarts":
                 self.assertLessEqual({alias.name for alias in node.names}, self.FROM_STORE)
         self.assertEqual(_references(tree, self.STORE_WRITES | self.LAUNCHES), [])
-        # The only thing it calls in phone.py is the transport.
+        # The only things it uses in phone.py are the transport, the PR link pattern and its folder name.
         calls = {node.attr for node in ast.walk(tree) if isinstance(node, ast.Attribute)
                  and isinstance(node.value, ast.Name) and node.value.id == "phone"}
-        self.assertEqual(calls, {"send", "PR_LINK"})
+        self.assertEqual(calls, {"send", "PR_LINK", "PHONE_DIR"})
 
 
 class LaunchdTests(unittest.TestCase):

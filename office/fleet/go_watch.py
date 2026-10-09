@@ -43,9 +43,10 @@ changes what any run may do.
   task this file keeps, or its build, that go task stands in that state now, that state's own line was sent, and a
   state made of an event is made of this one (watching, covers). Every other loud event, of these tasks or any
   other, pings as before, and so does every one while the kept state or the store cannot be read, and every one of
-  a go task past its end that moved on. Every caller runs a pass before phone.deliver, so an escalation's line goes
-  first and its loud event is marked covered; one whose line did not go (a busy watcher, a batch, a failed send)
-  pings itself, so it is never dropped.
+  a go task past its end that moved on. And a line for a state made of a loud event first claims that event's own
+  marker in phone.deliver's folder (_claim_event), so exactly one of the two goes: every caller runs a pass before
+  phone.deliver, so an escalation's line usually goes and its event is marked covered; one whose line did not go (a
+  busy watcher, a failed pass, a line only counted in a summary) pings itself, is never dropped, and a later pass logs its line without a ping.
 """
 from __future__ import annotations
 
@@ -222,10 +223,12 @@ def _build_state(conn, go_id: str, build: dict, held: set) -> tuple:
     verdict_at = db.fetch_one(conn, "SELECT created_at FROM review_passes WHERE id = ?",
                               (latest["review_id"],))["created_at"] if latest and latest["has_verdict"] else 0
     # The newest, by event id, of a tooling block or a refused or stopped round after the newest handoff and round,
-    # and McGonagall's escalation to Ryan on the go task or the build after those, the build's start, its round's
-    # verdict and its PR, is where it stands until the next of them.
+    # and McGonagall's escalation to Ryan on the go task or the build after those, the build's making and start, its
+    # round's verdict and its PR, is where it stands until the next of them. A tie in the same second keeps the
+    # escalation: telling Ryan once too often is the safe side.
     stop, ask = _newest(conn, (build_id,), STOPS), _newest(conn, (go_id, build_id), ASKS)
-    moved = max(since, int(build["created_at"]), verdict_at, pr["opened_at"] if pr is not None else 0)
+    moved = max(since, int(build["created_at"]), int(build["started_at"] or 0), verdict_at,
+                pr["opened_at"] if pr is not None else 0)
     found = [event for event, floor in ((stop, since), (ask, moved)) if event is not None and event["ts"] >= floor]
     if found:
         event = max(found, key=lambda row: row["id"])
@@ -446,7 +449,7 @@ def _watch(conn, fd: int) -> list:
                 if go_id not in found and key["state"] not in ENDS]
     if keys == before:
         return []
-    outcomes, batched = [], []
+    outcomes, batched, covered = [], [], 0
     for go_id, key, link in changed:
         name, text = _marker(epoch, go_id, key), line(go_id, key)
         record = f"{time.strftime('%Y-%m-%d %H:%M:%S %z', time.localtime())} {text}"
@@ -457,12 +460,17 @@ def _watch(conn, fd: int) -> list:
         _log(record, lambda at, name=name, record=record: markers.replace(
             fd, name, {"state": "logging", "record": record, "log": at}))
         markers.replace(fd, name, {"state": "sending"})
-        if len(outcomes) >= config.GO_WATCH_MAX_PER_PASS:
+        if len(outcomes) >= config.GO_WATCH_MAX_PER_PASS:  # only counted: the event it is made of pings itself
             batched.append(name)
+            continue
+        if not _claim_event(key):  # phone.deliver already pinged the event this state is made of: that was its ping
+            markers.replace(fd, name, {"state": "covered", "via": "phone"})
+            covered += 1
             continue
         outcome = phone.send({"event_id": 0, "kind": "go.update", "task_id": go_id, "line": text, "pr_link": link})
         markers.replace(fd, name, outcome)
         outcomes.append(outcome["state"])
+    outcomes += ["covered"] * covered
     if batched:
         outcome = phone.send({"event_id": 0, "kind": "go.update", "task_id": None, "pr_link": None,
                               "line": f"{len(batched)} more go tasks changed where they stand; castle task builds"
@@ -476,6 +484,21 @@ def _watch(conn, fd: int) -> list:
     _write_state(fd, epoch, keys)
     _prune(fd, epoch, set(keys))
     return outcomes
+
+
+def _claim_event(key: dict) -> bool:
+    """For a state made of a loud event (a refusal, a stop, an escalation to Ryan), claim that event's ping in
+    phone.deliver's folder: its ev-<id> marker, published create-exclusive as phone.deliver publishes it, so exactly
+    one of this line and the event's own ping goes, whichever claims it first. False when phone.deliver took it. A
+    state made of no event, or a folder that cannot be opened (where phone.deliver cannot ping either), claims
+    nothing and lets the line go."""
+    if key["event"] is None:
+        return True
+    try:
+        with safefs.opened_dir(config.OFFICE_ROOT, phone.PHONE_DIR, create=True) as fd:
+            return markers.publish(fd, f"ev-{int(key['event'])}", {"state": "covered", "via": "go-watch"})
+    except (FleetError, OSError):
+        return True
 
 
 def _ended(kept: dict, key: dict) -> bool:
