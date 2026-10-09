@@ -382,3 +382,10 @@ class GoWatchTests(PhoneCase):
         logged = (self.office / "logs" / config.GO_UPDATES_LOG).read_text().splitlines()
         self.assertTrue(logged[-1].endswith(go_watch.STATES["owner"][1]))
         self.assertEqual(self.deliver(), [])
+        # One that phone.deliver could not deliver lets the go update try too.
+        self.notified.return_value = False
+        fourth = self.loud(self.build, "orchestrator.notify")
+        self.assertEqual(self.deliver(), ["undelivered"])
+        self.notified.return_value = True
+        self.assertEqual(go_watch.watch(self.conn), ["sent"])
+        self.assertEqual(self.marker(fourth)["state"], "undelivered")

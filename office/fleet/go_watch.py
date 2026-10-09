@@ -46,7 +46,8 @@ changes what any run may do.
   a go task past its end that moved on. And a line for a state made of a loud event first claims that event's own
   marker in phone.deliver's folder (_claim_event), so exactly one of the two goes: every caller runs a pass before
   phone.deliver, so an escalation's line usually goes and its event is marked covered; one whose line did not go (a
-  busy watcher, a failed pass, a line only counted in a summary) pings itself, is never dropped, and a later pass logs its line without a ping.
+  busy watcher, a failed pass, a line only counted in a summary) pings itself, is never dropped, and a later pass
+  logs its line without a ping, or sends it when that ping went undelivered.
 """
 from __future__ import annotations
 
@@ -489,16 +490,20 @@ def _watch(conn, fd: int) -> list:
 def _claim_event(key: dict) -> bool:
     """For a state made of a loud event (a refusal, a stop, an escalation to Ryan), claim that event's ping in
     phone.deliver's folder: its ev-<id> marker, published create-exclusive as phone.deliver publishes it, so exactly
-    one of this line and the event's own ping goes, whichever claims it first. False when phone.deliver took it. A
-    state made of no event, or a folder that cannot be opened (where phone.deliver cannot ping either), claims
-    nothing and lets the line go."""
+    one of this line and the event's own ping goes, whichever claims it first. False only when phone.deliver sent
+    it; one it could not deliver lets the line try too. A state made of no event, or a folder that cannot be opened
+    (where phone.deliver cannot ping either), claims nothing and lets the line go."""
     if key["event"] is None:
         return True
+    name = f"ev-{int(key['event'])}"
     try:
         with safefs.opened_dir(config.OFFICE_ROOT, phone.PHONE_DIR, create=True) as fd:
-            return markers.publish(fd, f"ev-{int(key['event'])}", {"state": "covered", "via": "go-watch"})
+            if markers.publish(fd, name, {"state": "covered", "via": "go-watch"}):
+                return True
+            taken = markers.read(fd, name)
     except (FleetError, OSError):
         return True
+    return taken is None or taken.get("state") not in ("sent", "covered")
 
 
 def _ended(kept: dict, key: dict) -> bool:
