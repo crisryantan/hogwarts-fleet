@@ -428,6 +428,28 @@ class MapRoundTests(PatrolCase):
         self.assertEqual(sum(len(items) for items in given), 1)
         self.assertEqual(len([event for event in self.events() if event["kind"] == "patrol.not-picked-up"]), 1)
 
+    def test_an_owl_held_by_ollivanders_stop_is_not_given_up_and_runs_after_the_clear(self):
+        self.go_live()
+        stop = self.write_file(self.office / config.STATE_DIR / config.STOP_FILE, "1 stopped\n")
+        self.github.prs = [pr_node()]
+        self.round(NOW - 900)
+        self.github.prs = [pr_node(rollup="FAILURE", contexts=(check("build"),))]
+        woke = self.round(NOW)["woke"]
+        self.assertFalse(woke["launched"])
+        self.assertIn("stop file", woke["error"])
+        step = config.PATROL_RESEND_AFTER_SECONDS
+        for index in range(1, config.PATROL_MAX_RESENDS + 3):
+            self.assertEqual(self.round(NOW + step * index)["resent"]["given_up"], [])
+        self.assertEqual(self.pending()[woke["owl_id"]]["tries"], 0)
+        self.assertEqual([event for event in self.events() if event["kind"] == "patrol.not-picked-up"], [])
+        os.unlink(stop)
+        with self.desk_writes() as started:
+            later = self.round(NOW + step * (config.PATROL_MAX_RESENDS + 3))
+        self.assertEqual(started.call_count, 1)
+        self.assertEqual([item["owl_id"] for item in later["resent"]["resent"]], [woke["owl_id"]])
+        self.assertEqual(self.pending(), {})
+        self.assertIn("One red on web-app.", self.round_text())
+
     def test_reviews_that_arrive_before_the_first_poll_still_wake_ron(self):
         self.round(NOW - 900)  # the baseline, before the PR opened
         self.github.prs = [pr_node(created=NOW - 600, decision="CHANGES_REQUESTED",

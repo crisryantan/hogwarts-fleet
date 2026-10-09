@@ -789,7 +789,13 @@ def attempt(conn, owl_id: str, now: Optional[int] = None, shadow: bool = True) -
         result = run_desk.run(conn, entry["desk"], owl_id, now=now, shadow=shadow)
     except (FleetError, StoreError) as exc:
         error = common.scrubbed_line(exc, 200)
-        if shadow and isinstance(exc, run_desk.Capped):
+        if isinstance(exc, run_desk.Stopped):
+            # Nothing launched under Ollivander's stop, so the try is not counted: the owl waits for the clear.
+            pending = _pending()
+            if owl_id in pending:
+                pending[owl_id]["tries"] = max(0, pending[owl_id]["tries"] - 1)
+                _save_pending(pending)
+        elif shadow and isinstance(exc, run_desk.Capped):
             hold(entry, [f"{entry['desk']} was not started: {error}"])
         return {"launched": False, "clean": False, "collected": False, "error": error}
     hold(entry, result.get("held") or [])
