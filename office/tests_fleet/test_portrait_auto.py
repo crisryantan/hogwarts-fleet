@@ -74,7 +74,7 @@ class AutoCase(PortraitCase):
     def desk_writes(self, files: dict = None, returncode: int = 0, during=None):
         """A portrait run that calls during() as it runs, writes files (name to text or bytes) into its outbox, and
         prints a Claude result."""
-        def run(argv, cwd, env, stdin, stdout, stderr, timeout, check, pass_fds=()):
+        def run(argv, cwd, env, input, stdout, stderr, timeout, check, pass_fds=()):
             if during is not None:
                 during()
             for name, text in (files or {}).items():
@@ -156,7 +156,7 @@ class AutoCase(PortraitCase):
         not kept, so the next such run is one that calls it again rather than one refused at launch."""
         called = {**CLAUDE_OK, "modelUsage": {"claude-quill-9-9": {"inputTokens": 10, "outputTokens": 5}}}
 
-        def run(argv, cwd, env, stdin, stdout, stderr, timeout, check, pass_fds=()):
+        def run(argv, cwd, env, input, stdout, stderr, timeout, check, pass_fds=()):
             self.write_patch(self.ops, date=date_of(now))
             os.write(stdout, (json.dumps(called) + "\n").encode("utf-8"))
             return subprocess.CompletedProcess(args=argv, returncode=returncode)
@@ -759,7 +759,7 @@ class ProvenanceTests(AutoCase):
                     except safefs.Busy:
                         tried.append("busy")
 
-        def run(argv, cwd, env, stdin, stdout, stderr, timeout, check, pass_fds=()):
+        def run(argv, cwd, env, input, stdout, stderr, timeout, check, pass_fds=()):
             seen["inherited"] = {(os.fstat(fd).st_dev, os.fstat(fd).st_ino) for fd in pass_fds}
             another_run()
             os.write(stdout, (json.dumps(CLAUDE_OK) + "\n").encode("utf-8"))

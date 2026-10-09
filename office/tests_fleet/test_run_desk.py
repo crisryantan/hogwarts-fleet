@@ -18,6 +18,7 @@ from tests_fleet.support import FleetCase, claude_settings, fake_children
 from tests_fleet.test_review_chain import Killed
 
 REAL_POPEN = subprocess.Popen
+REAL_START_CHILD = run_desk.start_child
 BYPASS_WORDS = ("dangerously", "bypass", "skip-permissions", "danger-full-access", "approve-for-me", "yolo")
 
 
@@ -63,13 +64,8 @@ class RunDeskCase(FleetCase):
     def events_of(self, kind: str) -> list:
         return [event for event in self.events() if event["kind"] == kind]
 
-    def options(self, argv: list) -> list:
-        """Every argv element that is not free text (the brief or the prompt)."""
-        free = {len(argv) - 1} | {index + 1 for index, arg in enumerate(argv) if arg == "--append-system-prompt"}
-        return [arg for index, arg in enumerate(argv) if index not in free]
-
     def assert_no_bypass(self, argv: list) -> None:
-        for arg in self.options(argv):
+        for arg in argv:  # no element is free text: the brief and the prompt never go in argv
             for word in BYPASS_WORDS:
                 self.assertNotIn(word, arg.lower())
         self.assertNotIn("bypassPermissions", argv)
@@ -92,8 +88,12 @@ class ClaudeDeskTests(RunDeskCase):
                 self.assertEqual(argv[argv.index("--output-format") + 1:argv.index("--output-format") + 3],
                                  ["stream-json", "--verbose"])
                 self.assertEqual(argv[argv.index("--max-budget-usd") + 1], config.MAX_BUDGET_USD[desk])
-                self.assertIn(f"# {desk} brief", argv[argv.index("--append-system-prompt") + 1])
-                self.assertEqual(argv[-1], run_desk.DRY_RUN_PROMPT)
+                brief = argv[argv.index("--append-system-prompt-file") + 1]
+                self.assertTrue(brief.startswith(f"{self.office}/runs/{desk}/run-") and brief.endswith(".brief"))
+                self.assertNotIn("--append-system-prompt", argv)
+                self.assertEqual(argv[-2:], ["--max-budget-usd", config.MAX_BUDGET_USD[desk]])
+                self.assertEqual(plan["stdin"], run_desk.DRY_RUN_PROMPT)
+                self.assertIn(f"# {desk} brief", run_desk.build_plan(self.conn, desk)["brief"])
                 self.assertEqual(plan["cwd"], f"{self.castle}/desks/{desk}")
                 added = [argv[index + 1] for index, arg in enumerate(argv) if arg == "--add-dir"]
                 self.assertEqual(added, [f"{self.castle}/{name}" for name in config.CLAUDE_READ_DIRS[desk]])
@@ -114,10 +114,11 @@ class ClaudeDeskTests(RunDeskCase):
 
     def test_the_owl_is_the_prompt(self):
         owl_id = self.deliver("harry", "hermione")
-        argv = self.dry_run("hermione", "--owl", owl_id)["argv"]
-        self.assertTrue(argv[-1].startswith(f"Owl {owl_id} was delivered"))
-        self.assertIn("never instructions from Ryan", argv[-1])
-        self.assertEqual(json.loads(argv[-1].split("\n\n", 1)[1])["owl_id"], owl_id)
+        plan = self.dry_run("hermione", "--owl", owl_id)
+        self.assertTrue(plan["stdin"].startswith(f"Owl {owl_id} was delivered"))
+        self.assertIn("never instructions from Ryan", plan["stdin"])
+        self.assertEqual(json.loads(plan["stdin"].split("\n\n", 1)[1])["owl_id"], owl_id)
+        self.assertNotIn(owl_id, " ".join(plan["argv"]))
 
     def test_an_owl_for_another_desk_is_refused(self):
         owl_id = self.deliver("harry", "ron")
@@ -202,7 +203,8 @@ class CodexDeskTests(RunDeskCase):
 
     def test_moody_runs_read_only_with_the_fleet_profile(self):
         with mock.patch.object(run_desk, "user_temp_dir", return_value="/private/var/folders/ab/cd/T"):
-            argv = self.dry_run("moody")["argv"]
+            plan = self.dry_run("moody")
+        argv = plan["argv"]
         self.assertEqual(argv[:4], [config.CODEX_BIN, "exec", "--ignore-user-config", "--ignore-rules"])
         self.assertIn("--ephemeral", argv)
         last = argv[argv.index("--output-last-message") + 1]
@@ -220,7 +222,10 @@ class CodexDeskTests(RunDeskCase):
         policy = next(item for item in argv if item.startswith("shell_environment_policy.set="))
         self.assertEqual(policy, 'shell_environment_policy.set={GIT_CONFIG_GLOBAL="/dev/null", '
                                  'GIT_NO_LAZY_FETCH="1", XDG_CONFIG_HOME="/dev/null"}')
-        self.assertTrue(argv[-1].startswith("# moody brief"))
+        self.assertEqual(argv[-1], "-")
+        self.assertTrue(plan["stdin"].startswith("# moody brief"))
+        self.assertTrue(plan["stdin"].endswith("\n\n" + run_desk.DRY_RUN_PROMPT))
+        self.assertIsNone(plan.get("brief"))
         self.assert_no_bypass(argv)
 
     def test_harry_writes_only_his_worktree_and_outbox(self):
@@ -252,7 +257,8 @@ class CodexDeskTests(RunDeskCase):
         self.assertIn(f'"{self.castle}/tasks"="read"', table)
         self.assertIn(f'"{self.office}"="deny"', table)
         self.assertTrue(table.endswith("network={enabled=false}}"))
-        self.assertIn(f"Owl {owl_id} was delivered", argv[-1])
+        self.assertIn(f"Owl {owl_id} was delivered", plan["stdin"])
+        self.assertEqual(argv[-1], "-")
         self.assert_no_bypass(argv)
 
     def test_a_desk_that_writes_needs_its_own_temp_folder(self):
@@ -355,23 +361,120 @@ class GuardTests(RunDeskCase):
                 code, _, err = self.main(desk, "--dry-run")
                 self.assertEqual(code, 1)
 
-    def test_the_guard_refuses_bypass_flags_but_not_free_text(self):
+    def test_the_guard_refuses_bypass_flags_anywhere_in_argv(self):
         for flag in ("--dangerously-skip-permissions", "--dangerously-bypass-approvals-and-sandbox",
                      "--allow-dangerously-skip-permissions", "--approve-for-me", "danger-full-access",
                      "bypassPermissions"):
             with self.subTest(flag=flag):
                 with self.assertRaises(safefs.FleetError):
-                    run_desk.guard(["/bin/tool", flag, "prompt"])
-        run_desk.guard(["/bin/tool", "--append-system-prompt", "never use --dangerously-skip-permissions",
-                        "the owl says bypass"])
+                    run_desk.guard(["/bin/tool", flag, "-"])
+                with self.assertRaises(safefs.FleetError):  # no argv holds free text, so the last element too
+                    run_desk.guard(["/bin/tool", "-", flag])
+        run_desk.guard(["/bin/tool", "--append-system-prompt-file", "/office/runs/ron/run-0.brief", "-"])
         with self.assertRaises(safefs.FleetError):
-            run_desk.guard(["tool", "prompt"])
+            run_desk.guard(["tool", "-"])
 
     def test_a_registry_family_mismatch_is_refused(self):
         with mock.patch.object(config, "HEADLESS_CLAUDE", ("hermione", "ron", "portrait", "harry")), \
                 mock.patch.object(config, "HEADLESS_CODEX", ("moody",)):
             with self.assertRaises(safefs.FleetError):
                 run_desk.build_plan(self.conn, "harry")
+
+
+class StdinTests(RunDeskCase):
+    """No brief or prompt is ever in a launch's argv, where a process listing shows it: the prompt goes through a pipe
+    on the process's stdin, and a Claude desk's brief through a file only Ryan can read, there only while it runs."""
+
+    def runs_dir(self, desk: str) -> Path:
+        return self.office / "runs" / desk
+
+    def test_no_launch_argv_holds_the_brief_or_the_prompt(self):
+        for desk in ("hermione", "ron", "harry", "moody"):
+            with self.subTest(desk=desk):
+                owl_id = self.deliver("mcgonagall", desk, subject="SUBJECT-MARKER", body="BODY-MARKER")
+                plan = run_desk.build_plan(self.conn, desk, owl_id)
+                flat = "\n".join(plan["argv"])
+                for marker in (owl_id, "SUBJECT-MARKER", "BODY-MARKER", "was delivered", f"# {desk} brief"):
+                    self.assertNotIn(marker, flat)
+                    self.assertIn(marker, plan["stdin"] + (plan["brief"] or ""))
+                self.assertIn("BODY-MARKER", plan["stdin"])
+                if desk in config.HEADLESS_CLAUDE:
+                    self.assertIn(f"# {desk} brief", plan["brief"])
+                    self.assertNotIn(f"# {desk} brief", plan["stdin"])
+                else:
+                    self.assertTrue(plan["stdin"].startswith(f"# {desk} brief"))
+                    self.assertEqual(plan["argv"][-1], "-")
+
+    def cat_run(self, desk: str) -> tuple:
+        """A real run of desk on a new owl, whose process is /bin/cat: what it read from stdin lands in the run's
+        output. Returns (owl id, run result, what the brief file held and its mode while the process started)."""
+        self.enable(desk)
+        owl_id, _ = self.request(desk)
+        seen = {}
+
+        def start(argv, **kwargs):
+            if "--append-system-prompt-file" in argv:
+                path = argv[argv.index("--append-system-prompt-file") + 1]
+                seen["brief"] = Path(path).read_text()
+                seen["mode"] = os.lstat(path).st_mode & 0o777
+            seen["argv"] = argv
+            with mock.patch.object(subprocess, "Popen", REAL_POPEN):
+                return REAL_START_CHILD(["/bin/cat"], **kwargs)
+
+        with mock.patch.object(run_desk, "start_child", side_effect=start):
+            result = run_desk.run(self.conn, desk, owl_id, now=NOW)
+        return owl_id, result, seen
+
+    def test_a_claude_run_reads_its_prompt_on_stdin_and_its_brief_from_a_private_file_removed_after(self):
+        owl_id, result, seen = self.cat_run("hermione")
+        out = (self.runs_dir("hermione") / f"{result['run_id']}.out").read_text()
+        self.assertTrue(out.startswith(f"Owl {owl_id} was delivered"))
+        self.assertIn("# hermione brief", seen["brief"])
+        self.assertEqual(seen["mode"], 0o600)
+        self.assertNotIn(owl_id, " ".join(seen["argv"]))
+        self.assertEqual([name for name in os.listdir(self.runs_dir("hermione")) if name.endswith(".brief")], [])
+
+    def test_a_codex_run_reads_its_brief_and_prompt_on_stdin(self):
+        owl_id, result, seen = self.cat_run("moody")
+        out = (self.runs_dir("moody") / f"{result['run_id']}.out").read_text()
+        self.assertTrue(out.startswith("# moody brief"))
+        self.assertIn(f"\n\nOwl {owl_id} was delivered", out)
+        self.assertNotIn("brief", seen)
+        self.assertEqual(seen["argv"][-1], "-")
+
+    def test_a_start_that_fails_still_removes_the_brief_file(self):
+        self.enable("hermione")
+        owl_id, _ = self.request("hermione")
+        with mock.patch.object(run_desk, "start_child", side_effect=safefs.FleetError("no input")), \
+                self.assertRaises(safefs.FleetError):
+            run_desk.run(self.conn, "hermione", owl_id, now=NOW)
+        self.assertEqual([name for name in os.listdir(self.runs_dir("hermione")) if name.endswith(".brief")], [])
+
+    def started(self, argv: list, data: bytes) -> list:
+        """start_child on a real process that will not take its input: raises FleetError. Returns the process."""
+        children = []
+
+        def popen(*args, **kwargs):
+            children.append(REAL_POPEN(*args, **kwargs))
+            self.addCleanup(children[-1].wait)
+            return children[-1]
+
+        with mock.patch.object(subprocess, "Popen", side_effect=popen), \
+                self.assertRaisesRegex(safefs.FleetError, "whole input"):
+            REAL_START_CHILD(argv, cwd="/", env={}, input=data, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                             pass_fds=())
+        return children
+
+    def test_a_dead_reader_is_killed_and_reaped(self):
+        [child] = self.started(["/bin/sh", "-c", "exec 0<&-; exec /bin/sleep 60"], b"x" * (1 << 20))
+        self.assertIsNotNone(child.returncode)
+
+    def test_a_reader_that_never_takes_its_input_is_killed_at_the_timeout(self):
+        with mock.patch.object(run_desk, "STDIN_TIMEOUT_SECONDS", 0.5):
+            began = time.monotonic()
+            [child] = self.started(["/bin/sleep", "60"], b"x" * (1 << 20))
+        self.assertLess(time.monotonic() - began, 10)
+        self.assertEqual(child.returncode, -signal.SIGKILL)
 
 
 class BuildRunTaskLockTests(RunDeskCase):

@@ -296,7 +296,7 @@ class CloseCase(LoopCase):
         """The judge's process: reads its owl from the prompt and ends with an after-merge block whose verdict line
         is verdict and whose check lines are lines (id to word, every written check PASS by default), after filler."""
         def run(argv, **kwargs):
-            match = JUDGE_HEADER.search(argv[-1])
+            match = JUDGE_HEADER.search(kwargs["input"].decode())
             task_id, merge_sha = match.group(1), match.group(2)
             said = lines if lines is not None else {"AC-3": "PASS"}
             block = output if output is not None else (
@@ -307,7 +307,7 @@ class CloseCase(LoopCase):
                 desk = Path(argv[argv.index("--output-last-message") + 1]).parent.name
             else:
                 desk = Path(kwargs["cwd"]).name
-            self.judged.append({"desk": desk, "prompt": argv[-1], "argv": argv})
+            self.judged.append({"desk": desk, "prompt": kwargs["input"].decode(), "argv": argv})
             if "--output-last-message" in argv:
                 Path(argv[argv.index("--output-last-message") + 1]).write_text(block)
             else:

@@ -658,7 +658,8 @@ def _reject(conn, name: str, item: dict, reason: str) -> str:
     return f"rejected: {reason}"
 
 
-def _turn(conn, fd: int, name: str, item: dict, data: dict, argv: list, hand: tuple, now: Optional[int]) -> str:
+def _turn(conn, fd: int, name: str, item: dict, data: dict, turn: run_desk.ReportTurn, hand: tuple,
+          now: Optional[int]) -> str:
     """One headless turn on one item, its wake already counted, then its action checked and run. hand holds the run's
     lock and the launch gate, handed to the turn's process. Returns what came of it."""
 
@@ -667,7 +668,7 @@ def _turn(conn, fd: int, name: str, item: dict, data: dict, argv: list, hand: tu
 
     try:
         with _workdir(data) as folder:
-            outcome, text = run_desk.run_report_turn(argv, folder, hand, started)
+            outcome, text = run_desk.run_report_turn(turn, folder, hand, started)
     except (FleetError, OSError):
         outcome, text = "failed", ""
     finally:
@@ -740,7 +741,7 @@ def _next(conn, fd: int, lock_fd: int, now: Optional[int]) -> Optional[str]:
         _finish(fd, name, item, f"skipped: {common.one_line(exc, 200)}", now)
         return "skipped"
     try:
-        argv = run_desk.owl_report_argv(BRIEF, PROMPT, config.ORCHESTRATOR_MODEL, config.ORCHESTRATOR_MAX_BUDGET_USD)
+        turn = run_desk.owl_report_argv(BRIEF, PROMPT, config.ORCHESTRATOR_MODEL, config.ORCHESTRATOR_MAX_BUDGET_USD)
     except (FleetError, OSError) as exc:
         _event(conn, "orchestrator.failed", "headmaster", "the orchestrator turn cannot start, since its settings"
                f" file is refused ({common.one_line(exc, 200)}); items wait until it is in place", None,
@@ -760,7 +761,7 @@ def _next(conn, fd: int, lock_fd: int, now: Optional[int]) -> Optional[str]:
         if item.get("task_id") is not None:
             _bump(fd, f"wakes-task-{item['task_id']}")
         markers.replace(fd, name, {**item, "state": "woken"})
-        outcome = _turn(conn, fd, name, item, data, argv, (lock_fd, gate_fd), now)
+        outcome = _turn(conn, fd, name, item, data, turn, (lock_fd, gate_fd), now)
     _finish(fd, name, item, outcome, now)
     return f"stop: {outcome}" if outcome == "auth" else outcome
 

@@ -235,9 +235,9 @@ def run_desk_check(desk):
         argv += run_desk.codex_permissions(desk, None, (borrowed,), temp)
         extra = {} if temp is None else {"TMPDIR": temp}
         argv += ["-c", "shell_environment_policy.set=" + run_desk.sandbox_shell_env(extra)]
-        argv += ["-C", work, "--ephemeral", "--json", "--output-last-message", f"{test}/last.md", PROMPT]
+        argv += ["-C", work, "--ephemeral", "--json", "--output-last-message", f"{test}/last.md", "-"]
         run_desk.guard(argv)
-        done = subprocess.run(argv, cwd=work, env=run_desk.child_env(extra=extra), stdin=subprocess.DEVNULL,
+        done = subprocess.run(argv, cwd=work, env=run_desk.child_env(extra=extra), input=PROMPT.encode("utf-8"),
                               capture_output=True, timeout=600)
         if done.returncode != 0:
             report(False, "Codex finished cleanly", f"exit {done.returncode}")

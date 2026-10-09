@@ -536,8 +536,8 @@ CLAUDE_529 = {"type": "result", "subtype": "success", "is_error": True, "result"
 class PatrolFailureTests(tp.PatrolCase):
     def desk_says(self, result: dict, returncode: int = 0):
         """Ron writing his file, then his CLI ending with result."""
-        def run(argv, cwd, env, stdin, stdout, stderr, timeout, check, pass_fds=()):
-            owl = re.search(r"Owl (owl_[0-9a-f]{16}) was delivered", argv[-1]).group(1)
+        def run(argv, cwd, env, input, stdout, stderr, timeout, check, pass_fds=()):
+            owl = re.search(r"Owl (owl_[0-9a-f]{16}) was delivered", input.decode()).group(1)
             self.write_file(self.outbox("ron") / f"{owl}-{patrol.REPORT_SUFFIX['ron']}.md", tp.RON_WORDS)
             os.write(stdout, json.dumps(result).encode("utf-8"))
             return subprocess.CompletedProcess(args=argv, returncode=returncode)

@@ -186,7 +186,7 @@ class ExportTests(PortraitCase):
 class NightlyRunTests(PortraitCase):
     def desk_writes(self, files: dict, returncode: int = 0):
         """A portrait run that writes files into its outbox and prints a Claude result."""
-        def run(argv, cwd, env, stdin, stdout, stderr, timeout, check, pass_fds=()):
+        def run(argv, cwd, env, input, stdout, stderr, timeout, check, pass_fds=()):
             for name, text in files.items():
                 self.write_file(self.outbox("portrait") / name, text)
             os.write(stdout, (json.dumps(CLAUDE_OK) + "\n").encode("utf-8"))
@@ -205,7 +205,8 @@ class NightlyRunTests(PortraitCase):
         argv = started.call_args.args[0]
         self.assertEqual(argv[argv.index("--model") + 1], "opus")
         self.assertNotIn("--mcp-config", argv)
-        self.assertTrue(argv[-1].startswith(f"Owl {result['owl_id']} was delivered"))
+        self.assertTrue(started.call_args.kwargs["input"].decode().startswith(f"Owl {result['owl_id']} was delivered"))
+        self.assertNotIn(result["owl_id"], " ".join(argv))
         self.assertEqual(started.call_args.kwargs["cwd"], f"{self.castle}/desks/portrait")
         self.assertEqual(owlery.inbox(self.conn, "portrait"), [])
         [ready] = self.events_of("portrait.patch-ready")

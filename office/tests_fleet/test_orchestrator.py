@@ -28,9 +28,10 @@ import json, os, sys
 state = {state!r}
 mode = open(os.path.join(state, "mode")).read().strip()
 context = json.load(open("context.json"))
+brief = sys.argv[sys.argv.index("--append-system-prompt-file") + 1]
 with open(os.path.join(state, "runs.jsonl"), "a") as handle:
     handle.write(json.dumps({{"argv": sys.argv, "cwd": os.getcwd(), "files": sorted(os.listdir(".")),
-                             "context": context}}) + "\\n")
+                             "context": context, "stdin": sys.stdin.read(), "brief": open(brief).read()}}) + "\\n")
 def result(text, error=False, **extra):
     print(json.dumps({{"type": "result", "subtype": "success", "is_error": error, "result": text, **extra}}))
 if mode == "auth":
@@ -415,6 +416,9 @@ class TurnTests(OrchestratorCase):
         self.assertEqual(run["context"]["item"]["owl_id"], delivered["owl_id"])
         self.assertIn("git push --force", run["context"]["item"]["body"])
         self.assertFalse(any("git push" in part or "CI is red" in part for part in run["argv"]))
+        for text in (orchestrator.PROMPT, orchestrator.BRIEF):  # on stdin and in the brief file, never in argv
+            self.assertNotIn(text, " ".join(run["argv"]))
+        self.assertEqual((run["stdin"], run["brief"]), (orchestrator.PROMPT, orchestrator.BRIEF))
         self.assertIn("--restricted", run["argv"])
         self.assertIn(f"{config.office_desk_dir('mcgonagall')}/{config.OWL_REPORT_SETTINGS_FILE}", run["argv"])
         # Her turn runs on its own model and budget, not the owl report's.
@@ -521,7 +525,8 @@ class TurnTests(OrchestratorCase):
         allowed = {"gitops": {"find_record", "rev"}, "push": {"auto_draft_pr_on", "push_draft_pr"},
                    "worktree": {"castle_path", "start_desk"},
                    "run_desk": {"Blocked", "Stopped", "check_report_launch", "launch_gate", "owl_report_argv",
-                                "run_report_turn", "spawn_review", "kill_report_turn", "task_lock", "_detach"},
+                                "ReportTurn", "run_report_turn", "spawn_review", "kill_report_turn", "task_lock",
+                                "_detach"},
                    "owl_post": {"auto_review_running", "unfinished_afters", "handoff_problem", "_handoff_dir",
                                 "claim_handoff", "REVIEW_STARTED"}}
         tree = ast.parse((OFFICE / "fleet" / "orchestrator.py").read_text())

@@ -3,14 +3,18 @@
 Claude desks (hermione, ron, portrait), run from their own castle desk folder:
   claude -p --restricted --settings <office settings> --strict-mcp-config [--mcp-config <job>]
          [--add-dir <castle tasks or worktrees, read only>]... --tools <list> --permission-mode dontAsk
-         --model <model> [--effort <effort>] --append-system-prompt "<brief>"
-         --output-format stream-json --verbose --max-budget-usd <cap> "<owl prompt>"
+         --model <model> [--effort <effort>] --append-system-prompt-file <office runs file>
+         --output-format stream-json --verbose --max-budget-usd <cap>      (owl prompt on stdin)
 Codex desks (harry, moody):
   codex exec --ignore-user-config --ignore-rules -c <key=value from the office codex.toml>...
          [-c model="<slug>" -c model_reasoning_effort="<effort>"]
          -c permissions.fleet-<desk>={<allowlist>} -c default_permissions="fleet-<desk>"
          -C <own task worktree, or desks/<desk>/work>
-         --ephemeral --json --output-last-message <office runs file> "<brief and owl prompt>"
+         --ephemeral --json --output-last-message <office runs file> -      (brief and owl prompt on stdin)
+
+No brief or prompt is ever in argv, so none shows in a process listing. The prompt goes through a pipe on the
+process's stdin. A Claude desk's brief goes in runs/<desk>/<run_id>.brief, a new file only Ryan can read, made just
+before the process starts and removed once it has ended.
 
 A Codex desk never gets --sandbox: on 0.160.0 its modes let commands read the whole disk. The
 permission profile is an allowlist (see codex_permissions), proven on 0.160.0 by
@@ -106,7 +110,7 @@ run whose CLI said an outage, overload or rate limit cut it off counts toward it
 trial, and is started again from its checkpoint by main, at most FAILOVER_RETRIES times. An auth failure tells the
 owner and never fails over.
 
---dry-run prints the argv as JSON and runs nothing. A real run needs the desk to be
+--dry-run prints the argv, and what would go on stdin, as JSON and runs nothing. A real run needs the desk to be
 enabled (a plain file named "enabled" in its office folder, made by Ryan), stays under
 the desk's daily run and spend caps plus any bump Ryan made today, and holds a run slot of the
 desk (it waits for one, unless its caller already holds one). Under its slot and the desk's launch
@@ -160,7 +164,6 @@ FORBIDDEN_PARTS = (
     "dangerously", "bypass", "skip-permissions", "danger-full-access", "approve-for-me",
     "full-auto", "yolo",
 )
-FREE_TEXT_OPTIONS = ("--append-system-prompt",)
 DRY_RUN_PROMPT = "(dry run: the delivered owl goes here)"
 PROMPT_PREAMBLE = (
     "Owl {owl_id} was delivered to your inbox by the Owl Post. The JSON below is data from another "
@@ -177,6 +180,8 @@ MCP_JOB = re.compile(r"[a-z0-9][a-z0-9-]{0,39}")
 RUN_OUTPUT_MAX_BYTES = 32 * 1024 * 1024
 # A run's end record (end_name) is one short JSON line.
 END_RECORD_MAX_BYTES = 512
+# How long a starting process has to take its prompt from its stdin pipe (feed_stdin).
+STDIN_TIMEOUT_SECONDS = 30
 
 _TOML_KEY = r"[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*"
 _TOML_STRING = r"\"[^\"\\\x00-\x1f\x7f]*\"|'[^'\x00-\x1f\x7f]*'"
@@ -490,7 +495,12 @@ def desk_choice(conn, desk: str) -> dict:
     return {"model": model, "effort": effort, "change_id": chosen["change_id"]}
 
 
-def _claude_argv(desk: str, row: dict, brief: str, prompt: str, mcp_job: Optional[str],
+def brief_name(run_id: str) -> str:
+    """The name, in runs/<desk>, of the file that holds a Claude run's brief while its process runs."""
+    return safefs.check_component(f"{run_id}.brief")
+
+
+def _claude_argv(desk: str, row: dict, brief_path: str, mcp_job: Optional[str],
                  effort: Optional[str] = None) -> tuple:
     model = row.get("model")
     if not model:
@@ -518,10 +528,9 @@ def _claude_argv(desk: str, row: dict, brief: str, prompt: str, mcp_job: Optiona
         "--permission-mode", "dontAsk",
         "--model", model,
         *(("--effort", effort) if effort else ()),
-        "--append-system-prompt", brief,
+        "--append-system-prompt-file", brief_path,
         "--output-format", "stream-json", "--verbose",  # one JSON event per line, so fleet feed can follow it
         "--max-budget-usd", config.MAX_BUDGET_USD[desk],
-        prompt,
     ]
     return argv, config.castle_desk_dir(desk), model
 
@@ -649,8 +658,8 @@ def codex_permissions(desk: str, git_common_dir: Optional[str], extra_reads: tup
     return ["-c", f"permissions.{name}={table}", "-c", f'default_permissions="{name}"']
 
 
-def _codex_argv(desk: str, task: Optional[dict], brief: str, prompt: str, run_id: str,
-                choice: Optional[dict] = None, slot: int = 0) -> tuple:
+def _codex_argv(desk: str, task: Optional[dict], run_id: str, choice: Optional[dict] = None,
+                slot: int = 0) -> tuple:
     profile = _text(_read_office(desk, config.CODEX_PROFILE_FILE, config.SETTINGS_MAX_BYTES, "codex profile"),
                     "codex profile")
     worktree = None if task is None else task.get("worktree")
@@ -679,7 +688,7 @@ def _codex_argv(desk: str, task: Optional[dict], brief: str, prompt: str, run_id
         "--ephemeral",
         "--json",
         "--output-last-message", f"{config.runs_dir()}/{desk}/{run_id}-last-message.md",
-        brief.rstrip("\n") + "\n\n" + prompt,
+        "-",  # the brief and the prompt come on stdin
     ]
     model = (choice or {}).get("model") or selected or top or CODEX_DEFAULT
     return argv, cwd, model, {**tools, "temp": temp}, selected or top
@@ -731,11 +740,9 @@ def model_overrides(choice: dict, profile: Optional[str] = None) -> list:
 
 
 def guard(argv: list) -> None:
-    """Refuse any option that bypasses a sandbox or permission check. Free text is not an option."""
-    free = {len(argv) - 1} | {index + 1 for index, arg in enumerate(argv) if arg in FREE_TEXT_OPTIONS}
-    for index, arg in enumerate(argv):
-        if index in free:
-            continue
+    """Refuse any option that bypasses a sandbox or permission check. No argv holds free text (the brief and the
+    prompt never go there), so every element is checked."""
+    for arg in argv:
         lowered = arg.lower()
         if any(part in lowered for part in FORBIDDEN_PARTS):
             raise FleetError("refusing a bypass flag")
@@ -745,9 +752,10 @@ def guard(argv: list) -> None:
 
 def build_plan(conn, desk: str, owl_id: Optional[str] = None, mcp_job: Optional[str] = None, slot: int = 0,
                pick: Optional[dict] = None) -> dict:
-    """The run's plan: its command, folder, environment and model. slot is the run slot it will hold, which picks
-    a Codex desk's work and temp folders; a dry run plans for slot 0. pick is failover.choose's model, which
-    replaces the desk's own, in the family it names."""
+    """The run's plan: its command, folder, environment and model, the text its process gets on stdin, and for a
+    Claude desk the brief its brief file holds (brief_name; None for Codex, whose brief leads its stdin). slot is the
+    run slot it will hold, which picks a Codex desk's work and temp folders; a dry run plans for slot 0. pick is
+    failover.choose's model, which replaces the desk's own, in the family it names."""
     desk = ids.check("desk", desk)
     if desk not in config.HEADLESS_DESKS:
         raise FleetError("run_desk only launches headless desks")
@@ -780,20 +788,24 @@ def build_plan(conn, desk: str, owl_id: Optional[str] = None, mcp_job: Optional[
     if family == "claude":
         default_model = row.get("model") if family == own else None
         row = {**row, "model": choice["model"] or default_model}
-        argv, cwd, model = _claude_argv(desk, row, brief, prompt, mcp_job, choice["effort"])
+        argv, cwd, model = _claude_argv(desk, row, f"{config.runs_dir()}/{desk}/{brief_name(run_id)}", mcp_job,
+                                        choice["effort"])
         env = child_env()
+        stdin, brief_file = prompt, brief
     else:
         if mcp_job is not None:
             raise FleetError("Codex desks take no MCP job")
-        argv, cwd, model, tools, default_model = _codex_argv(desk, task, brief, prompt, run_id, choice, slot)
+        argv, cwd, model, tools, default_model = _codex_argv(desk, task, run_id, choice, slot)
         env = child_env(tools["path"], tools["env"])
         temp = tools["temp"]
+        stdin, brief_file = brief.rstrip("\n") + "\n\n" + prompt, None
     guard(argv)
     return {"desk": desk, "family": family, "desk_family": own, "failover_from": None if pick is None else pick["from"],
             "owl_id": owl_id, "run_id": run_id, "model": model,
             "effort": choice["effort"] if choice["model"] or family == "claude" else None,
             "change_id": choice["change_id"], "default_model": default_model, "cwd": cwd, "argv": argv, "env": env,
-            "temp": temp, "slot": slot, "task_id": None if task is None else task["id"],
+            "stdin": stdin, "brief": brief_file, "temp": temp, "slot": slot,
+            "task_id": None if task is None else task["id"],
             "task_status": None if task is None else task["status"], "pad": pad, "pad_key": key,
             "review_round": review_round}
 
@@ -1134,19 +1146,31 @@ def notifications_on() -> bool:
     return sys.platform == "darwin" and bool(config.DESKTOP_NOTIFY)
 
 
-def owl_report_argv(brief: str, prompt: str, model: str = None, budget: str = None) -> list:
-    """argv for one headless McGonagall owl-report turn on the one owl in its working folder: claude -p --restricted
-    (file tools confined to the working folder) under the report-only settings file, no MCP, only Read, Grep and Glob,
-    the fixed brief and the fixed prompt, and JSON output so a failure is told apart from a report. The settings file
-    is checked first (check_report_settings). model and budget default to the owl report's own."""
+class ReportTurn(NamedTuple):
+    """One headless owl-report turn as owl_report_argv builds it: its argv, the brief its brief file (brief_name, in
+    the office runs folder of HOOK_DESK) holds while it runs, and the prompt it gets on stdin."""
+    argv: list
+    brief_name: str
+    brief: str
+    prompt: str
+
+
+def owl_report_argv(brief: str, prompt: str, model: str = None, budget: str = None) -> ReportTurn:
+    """One headless McGonagall owl-report turn on the one owl in its working folder: claude -p --restricted (file
+    tools confined to the working folder) under the report-only settings file, no MCP, only Read, Grep and Glob, the
+    fixed brief in its own brief file and the fixed prompt on stdin, and JSON output so a failure is told apart from a
+    report. The settings file is checked first (check_report_settings). model and budget default to the owl report's
+    own. run_report_turn writes the brief file and removes it after."""
     desk = config.HOOK_DESK
     check_report_settings(_read_office(desk, config.OWL_REPORT_SETTINGS_FILE, config.SETTINGS_MAX_BYTES,
                                        "owl report settings"))
-    return [config.CLAUDE_BIN, "-p", "--restricted", "--settings",
+    name = brief_name(f"report-{secrets.token_hex(8)}")
+    argv = [config.CLAUDE_BIN, "-p", "--restricted", "--settings",
             f"{config.office_desk_dir(desk)}/{config.OWL_REPORT_SETTINGS_FILE}", "--strict-mcp-config",
             "--tools", config.OWL_REPORT_TOOLS, "--permission-mode", "dontAsk", "--model", model or config.OWL_REPORT_MODEL,
-            "--append-system-prompt", brief, "--output-format", "json",
-            "--max-budget-usd", budget or config.OWL_REPORT_MAX_BUDGET_USD, prompt]
+            "--append-system-prompt-file", f"{config.runs_dir()}/{desk}/{name}", "--output-format", "json",
+            "--max-budget-usd", budget or config.OWL_REPORT_MAX_BUDGET_USD]
+    return ReportTurn(argv, name, brief, prompt)
 
 
 # The exact shape the report-only settings must have. Anything broader is refused.
@@ -1235,16 +1259,28 @@ def kill_report_turn(pid: int) -> bool:
     return True
 
 
-def run_report_turn(argv: list, cwd: str, hand: tuple = (), on_start: Optional[Callable[[int], None]] = None) -> tuple:
+def run_report_turn(turn: ReportTurn, cwd: str, hand: tuple = (),
+                    on_start: Optional[Callable[[int], None]] = None) -> tuple:
     """(outcome, text) for one owl-report turn. outcome is "ok" with the result text, "auth" when claude could not
-    sign in, or "failed". stdout is read as it comes, at most OWL_REPORT_OUTPUT_MAX_BYTES, and the process (a session
-    of its own) is killed on overflow, at the timeout, or when this process is stopped. stderr is never read. hand
-    holds the reporter's lock and the launch gate, handed to the child, so no other reporter starts and no CLI update
-    runs while it lives, even if this process dies first. on_start gets the child's pid as soon as it runs."""
+    sign in, or "failed". Its brief file is written just before it starts and removed once it has ended, and its
+    prompt goes through a pipe on its stdin (feed_stdin), a dead or stuck reader counting as failed. stdout is read as
+    it comes, at most OWL_REPORT_OUTPUT_MAX_BYTES, and the process (a session of its own) is killed on overflow, at
+    the timeout, or when this process is stopped. stderr is never read. hand holds the reporter's lock and the launch
+    gate, handed to the child, so no other reporter starts and no CLI update runs while it lives, even if this process
+    dies first. on_start gets the child's pid as soon as it runs."""
+    with safefs.opened_dir(config.OFFICE_ROOT, "runs", config.HOOK_DESK, create=True) as run_fd:
+        brief = write_brief(run_fd, turn.brief_name, turn.brief)
+        try:
+            return _report_turn(turn, cwd, hand, on_start)
+        finally:
+            drop_brief(run_fd, brief)
+
+
+def _report_turn(turn: ReportTurn, cwd: str, hand: tuple, on_start: Optional[Callable[[int], None]]) -> tuple:
     for fd in hand:
         safefs.hand_over(fd)
     try:
-        child = subprocess.Popen(argv, cwd=cwd, env=child_env(), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+        child = subprocess.Popen(turn.argv, cwd=cwd, env=child_env(), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                  stderr=subprocess.DEVNULL, close_fds=True, pass_fds=tuple(hand),
                                  start_new_session=True)
     except OSError:
@@ -1255,10 +1291,12 @@ def run_report_turn(argv: list, cwd: str, hand: tuple = (), on_start: Optional[C
         except BaseException:
             child.kill()
             child.wait()
+            child.stdin.close()
             child.stdout.close()
             raise
     chunks, total, deadline = [], 0, time.monotonic() + config.OWL_REPORT_TIMEOUT_SECONDS
     try:
+        feed_stdin(child, turn.prompt.encode("utf-8"), min(STDIN_TIMEOUT_SECONDS, config.OWL_REPORT_TIMEOUT_SECONDS))
         fd = child.stdout.fileno()
         while True:
             left = deadline - time.monotonic()
@@ -1275,7 +1313,7 @@ def run_report_turn(argv: list, cwd: str, hand: tuple = (), on_start: Optional[C
                 return "failed", ""
             chunks.append(chunk)
         code = child.wait(timeout=max(1.0, deadline - time.monotonic()))
-    except subprocess.TimeoutExpired:
+    except (subprocess.TimeoutExpired, FleetError):  # FleetError: it did not take its whole prompt
         return "failed", ""
     finally:
         if child.poll() is None:
@@ -2080,12 +2118,67 @@ def run(conn, desk: str, owl_id: str, mcp_job: Optional[str] = None, now: Option
     return result
 
 
-def start_child(argv: list, cwd: str, env: dict, stdin: int, stdout: int, stderr: int,
+def write_brief(dir_fd: int, name: str, brief: str) -> str:
+    """Put a brief in a new file only Ryan can read, for --append-system-prompt-file, so it is never in argv. The name
+    must be free. Returns the name, for drop_brief once the process that reads it has ended."""
+    fd = safefs.create_new(dir_fd, name)
+    try:
+        safefs.write_all(fd, brief.encode("utf-8"))
+    except BaseException:
+        os.close(fd)
+        drop_brief(dir_fd, name)
+        raise
+    os.close(fd)
+    return name
+
+
+def drop_brief(dir_fd: int, name: str) -> None:
+    with contextlib.suppress(FileNotFoundError):
+        os.unlink(name, dir_fd=dir_fd)
+
+
+def feed_stdin(child: subprocess.Popen, data: bytes, timeout: Optional[float] = None) -> None:
+    """Write data to the process's stdin pipe and close it, so its prompt goes through the pipe, never its argv.
+    A reader that dies, or has not taken it all within timeout seconds (STDIN_TIMEOUT_SECONDS by default), raises
+    FleetError, with the pipe closed; the caller then kills and reaps the process."""
+    try:
+        fd = child.stdin.fileno()
+        os.set_blocking(fd, False)
+        view = memoryview(data)
+        deadline = time.monotonic() + (STDIN_TIMEOUT_SECONDS if timeout is None else timeout)
+        while view:
+            left = deadline - time.monotonic()
+            if left <= 0:
+                raise TimeoutError
+            if not select.select([], [fd], [], left)[1]:
+                continue
+            try:
+                view = view[os.write(fd, view):]
+            except BlockingIOError:
+                continue
+        child.stdin.close()
+    except (OSError, ValueError):  # a dead reader is BrokenPipeError, a slow one TimeoutError
+        with contextlib.suppress(OSError, ValueError):
+            child.stdin.close()
+        raise FleetError("the process did not take its whole input on stdin") from None
+
+
+def start_child(argv: list, cwd: str, env: dict, input: bytes, stdout: int, stderr: int,
                 pass_fds: tuple) -> subprocess.Popen:
-    """Start a desk's process. It returns once the binary has been executed, so a binary replaced after
-    this never affects the run. Only the fds in pass_fds are inherited."""
-    return subprocess.Popen(argv, cwd=cwd, env=env, stdin=stdin, stdout=stdout, stderr=stderr,
-                            pass_fds=pass_fds, close_fds=True)
+    """Start a desk's process and hand it input through a pipe on its stdin (feed_stdin). Popen returns once the
+    binary has been executed, so a binary replaced after this never affects the run. Only the fds in pass_fds are
+    inherited. When the input does not all reach it, the process is killed and reaped and FleetError is raised: it
+    never got its whole prompt, so it never started on it."""
+    child = subprocess.Popen(argv, cwd=cwd, env=env, stdin=subprocess.PIPE, stdout=stdout, stderr=stderr,
+                             pass_fds=pass_fds, close_fds=True)
+    try:
+        feed_stdin(child, input)
+    except BaseException:
+        with contextlib.suppress(OSError, subprocess.SubprocessError):
+            child.kill()
+            child.wait(timeout=5)
+        raise
+    return child
 
 
 def wait_child(child, timeout: int) -> int:
@@ -2273,7 +2366,7 @@ def _launch(conn, plan: dict, now: Optional[int], keep_fds: tuple = (), own: Opt
     vendor limit once it has ended, or killed here, and no exit code when an error kept it from starting at all."""
     desk, run_id = plan["desk"], plan["run_id"]
     with safefs.opened_dir(config.OFFICE_ROOT, "runs", desk, create=True) as run_fd:
-        out_fd = err_fd = child = None
+        out_fd = err_fd = child = brief = None
         started = time.monotonic()
         try:
             if plan.get("temp"):
@@ -2281,12 +2374,15 @@ def _launch(conn, plan: dict, now: Optional[int], keep_fds: tuple = (), own: Opt
                 fresh_temp(plan["temp"])
             out_fd = safefs.create_new(run_fd, f"{run_id}.out")
             err_fd = safefs.create_new(run_fd, f"{run_id}.err")
+            if plan.get("brief") is not None:
+                brief = write_brief(run_fd, brief_name(run_id), plan["brief"])
             started = time.monotonic()
             if own is not None:
                 own.keep = True
             with common.signals_held():  # a process that started always has its handle here, to be killed below
                 child = start_child(plan["argv"], cwd=plan["cwd"], env=plan.get("env") or child_env(),
-                                    stdin=subprocess.DEVNULL, stdout=out_fd, stderr=err_fd, pass_fds=tuple(keep_fds))
+                                    input=plan["stdin"].encode("utf-8"), stdout=out_fd, stderr=err_fd,
+                                    pass_fds=tuple(keep_fds))
             exit_code = wait_child(child, config.RUN_TIMEOUT_SECONDS)
         except BaseException:
             settled = child is None  # it never started, so it spent nothing
@@ -2301,7 +2397,8 @@ def _launch(conn, plan: dict, now: Optional[int], keep_fds: tuple = (), own: Opt
                 settled = _record_interrupted(conn, plan, run_fd, started, now)
             else:
                 # Whatever was raised before the process had a handle here, a refused or failed start or a signal
-                # before it, none started: start_child returns once the binary runs, and signals are held around it.
+                # before it, none started: start_child returns once the binary runs and has its whole prompt (one
+                # that did not get it is killed there), and signals are held around it.
                 _keep_end(run_fd, run_id, None, None)
             if own is not None and settled:
                 own.keep = False
@@ -2310,6 +2407,8 @@ def _launch(conn, plan: dict, now: Optional[int], keep_fds: tuple = (), own: Opt
             for fd in (out_fd, err_fd):
                 if fd is not None:
                     os.close(fd)
+            if brief is not None:  # the process has ended here, or never started
+                drop_brief(run_fd, brief)
         duration_ms = int((time.monotonic() - started) * 1000)
         output, whole, _, cap_source = _ended(run_fd, plan, exit_code)
         # Kept before anything else, so a caller killed from here on can still tell how the run ended (run_end).
@@ -2404,7 +2503,7 @@ def main(argv: Optional[list] = None) -> int:
             result = {"ok": True, "dry_run": True, "enabled": is_enabled(plan["desk"]), "stopped": stop_requested(),
                       "blocked": blocked_model(plan, conn) is not None,
                       **{key: plan[key] for key in ("desk", "family", "owl_id", "task_id", "pad", "model", "effort",
-                                                    "cwd", "argv")}}
+                                                    "cwd", "argv", "stdin")}}
             sys.stdout.write(json.dumps(result, ensure_ascii=True, indent=2) + "\n")
             return 0
         from fleet import stops

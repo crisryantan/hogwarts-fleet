@@ -10,10 +10,10 @@ desktop notification, without typing anything. Only while the office file owl-re
   again before each turn and each publication (off: stop, markers kept). For each turn the reporter makes a private
   folder under OWL_REPORT_ROOT holding only owl.json, that owl's delivered copy built from the store, and runs claude
   -p there under the report-only settings (run_desk.owl_report_argv: --restricted confines the file tools to that
-  folder, the allow list is empty, and every other tool is denied), with a fixed brief and a fixed prompt. No owl
-  text, subject or id is ever in argv or the prompt. The lock is handed to the turn's process, so no second reporter
-  starts while it lives, even if this one dies. The folder goes after the turn, and any a killed run left goes when
-  the next run starts.
+  folder, the allow list is empty, and every other tool is denied), with a fixed brief, in its own file in the
+  office, and a fixed prompt on its stdin, neither in argv. No owl text, subject or id is ever in argv or the prompt.
+  The lock is handed to the turn's process, so no second reporter starts while it lives, even if this one dies. The
+  folder goes after the turn, and any a killed run left goes when the next run starts.
 - Her answer is the JSON result's text: normalized, scrubbed, first line, at most 200 characters, and bound to the owl
   the turn ran on, so she can never name another. Empty counts as a skipped try. An owl is tried at most
   OWL_REPORT_MAX_TRIES times, and an owl out of tries is reported with a fallback line without another turn.
@@ -426,8 +426,8 @@ def _turn(conn, fd: int, owl: dict, marker: dict, lock_fd: int) -> str:
 
     try:
         with run_desk.launch_gate() as gate_fd, _workdir(conn, owl["id"]) as folder:
-            argv = run_desk.owl_report_argv(BRIEF, PROMPT)
-            outcome, text = run_desk.run_report_turn(argv, folder, (lock_fd, gate_fd), started)
+            turn = run_desk.owl_report_argv(BRIEF, PROMPT)
+            outcome, text = run_desk.run_report_turn(turn, folder, (lock_fd, gate_fd), started)
     except run_desk.Stopped:
         markers.replace(fd, owl["id"], marker)  # a CLI update: not a try
         return "stopped"

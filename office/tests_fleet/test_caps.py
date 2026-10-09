@@ -101,7 +101,7 @@ class CapCase(RunDeskCase):
 
     def fake_output(self, raw: bytes, returncode: int):
         """A desk process that writes raw to the run's stdout file, as the desk would."""
-        def run(argv, cwd, env, stdin, stdout, stderr, timeout, check, pass_fds=()):
+        def run(argv, cwd, env, input, stdout, stderr, timeout, check, pass_fds=()):
             os.write(stdout, raw)
             return subprocess.CompletedProcess(args=argv, returncode=returncode)
         return fake_children(run)

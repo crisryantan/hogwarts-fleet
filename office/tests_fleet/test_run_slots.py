@@ -89,7 +89,7 @@ class ConcurrentReviewTests(ManyCase):
     def reviewer(self, argv, **kwargs):
         """Moody's process: it writes the review block its prompt asks for. A commit in self.gates waits, once its
         reviewer runs, until the test releases it; one in self.failing exits 1 with no review."""
-        task_id, sha = REVIEW_LINE.search(argv[-1]).groups()
+        task_id, sha = REVIEW_LINE.search(kwargs["input"].decode()).groups()
         self.seen[sha] = {"locks": lock_names(self.office, kwargs["pass_fds"]), "cwd": kwargs["cwd"]}
         if sha in self.gates:
             running, release = self.gates[sha]

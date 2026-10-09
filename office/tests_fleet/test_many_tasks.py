@@ -587,7 +587,7 @@ class RunDeskTaskTests(ManyCase):
         plan = run_desk.build_plan(self.conn, "hermione", opened["owl"]["id"])
         pad = f"{self.castle}/desks/hermione/pads/{task['id']}.md"
         self.assertEqual((plan["task_id"], plan["pad"], plan["pad_key"]), (opened["task"]["id"], pad, task["id"]))
-        self.assertIn(run_desk.PAD_LINE.format(task_id=opened["task"]["id"], pad=pad), plan["argv"][-1])
+        self.assertIn(run_desk.PAD_LINE.format(task_id=opened["task"]["id"], pad=pad), plan["stdin"])
         self.assertFalse((self.castle / "desks" / "hermione" / "pads").exists())
 
     def test_another_task_under_the_same_task_md_gets_its_own_pad(self):
@@ -608,7 +608,7 @@ class RunDeskTaskTests(ManyCase):
                    if item["request_id"] == task["request_id"])
         plan = run_desk.build_plan(self.conn, "harry", owl["id"])
         self.assertEqual((plan["task_id"], plan["pad"]), (task["id"], None))
-        self.assertNotIn("Your pad is", plan["argv"][-1])
+        self.assertNotIn("Your pad is", plan["stdin"])
         self.assertEqual(config.TASK_PAD_DESKS, ("hermione", "ron"))
 
 
@@ -641,7 +641,8 @@ class RunDeskPadTests(RunDeskCase):
         self.assertEqual(stat.S_IMODE(os.lstat(pads).st_mode), 0o700)
         self.assertEqual(stat.S_IMODE(os.lstat(pads / f"{task_id}.md").st_mode), 0o600)
         self.assertEqual((pads / f"{task_id}.md").read_text(), f"# Pad {task_id}\n\n## Checkpoint\n")
-        self.assertIn(f"This run is for task {task_id}. Your pad is {pads}/{task_id}.md", started.call_args.args[0][-1])
+        self.assertIn(f"This run is for task {task_id}. Your pad is {pads}/{task_id}.md",
+                      started.call_args.kwargs["input"].decode())
         [launch] = capacity.list_launches(self.conn, "ron")
         self.assertEqual(launch["task_id"], task_id)
 

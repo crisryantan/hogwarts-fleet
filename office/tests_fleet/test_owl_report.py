@@ -28,9 +28,11 @@ if sys.argv[-1] == "hang":
 state = {state!r}
 mode = open(os.path.join(state, "mode")).read().strip()
 owl = json.load(open("owl.json"))
+brief = sys.argv[sys.argv.index("--append-system-prompt-file") + 1]
 with open(os.path.join(state, "runs.jsonl"), "a") as handle:
     handle.write(json.dumps({{"argv": sys.argv, "cwd": os.getcwd(), "files": sorted(os.listdir(".")),
-                             "owl": owl["owl_id"]}}) + "\\n")
+                             "owl": owl["owl_id"], "stdin": sys.stdin.read(), "brief_path": brief,
+                             "brief": open(brief).read(), "brief_mode": os.lstat(brief).st_mode & 0o777}}) + "\\n")
 def result(text, error=False, subtype="success", **extra):
     print(json.dumps({{"type": "result", "subtype": subtype, "is_error": error, "result": text, **extra}}))
 if mode == "auth":
@@ -144,9 +146,14 @@ class HappyPathTests(OwlReportCase):
         owl_report.run(self.conn)
         [run] = self.runs()
         argv = run["argv"]
-        for marker in (owl_id, "SUBJECT-MARKER", "body text", self.task["id"]):
+        for marker in (owl_id, "SUBJECT-MARKER", "body text", self.task["id"], owl_report.PROMPT, owl_report.BRIEF):
             self.assertNotIn(marker, " ".join(argv))
-        self.assertEqual(argv[-1], owl_report.PROMPT)
+        self.assertEqual(run["stdin"], owl_report.PROMPT)
+        self.assertEqual((run["brief"], run["brief_mode"]), (owl_report.BRIEF, 0o600))
+        self.assertTrue(run["brief_path"].startswith(f"{self.office}/runs/mcgonagall/report-"))
+        self.assertFalse(os.path.lexists(run["brief_path"]))  # removed once the turn ended
+        self.assertNotIn("--append-system-prompt", argv)
+        self.assertEqual(argv[-2:], ["--max-budget-usd", config.OWL_REPORT_MAX_BUDGET_USD])
         self.assertEqual(argv[1:4], ["-p", "--restricted", "--settings"])
         self.assertEqual(argv[4], f"{self.office}/desks/mcgonagall/{config.OWL_REPORT_SETTINGS_FILE}")
         self.assertEqual(argv[argv.index("--tools") + 1], "Read,Grep,Glob")

@@ -156,8 +156,8 @@ class PatrolCase(RunDeskCase):
 
     def desk_writes(self, text: str = RON_WORDS, returncode: int = 0):
         """Ron or Hermione, writing the file their brief asks for, named by the owl in the prompt."""
-        def run(argv, cwd, env, stdin, stdout, stderr, timeout, check, pass_fds=()):
-            owl = re.search(r"Owl (owl_[0-9a-f]{16}) was delivered", argv[-1]).group(1)
+        def run(argv, cwd, env, input, stdout, stderr, timeout, check, pass_fds=()):
+            owl = re.search(r"Owl (owl_[0-9a-f]{16}) was delivered", input.decode()).group(1)
             desk = os.path.basename(cwd)
             self.write_file(self.outbox(desk) / f"{owl}-{patrol.REPORT_SUFFIX[desk]}.md", text)
             os.write(stdout, json.dumps({"type": "result", "subtype": "success", "is_error": False,
@@ -177,9 +177,9 @@ class PatrolCase(RunDeskCase):
     def desk_leaves(self, link_to: str = None):
         """Ron or Hermione ending cleanly (which acks the owl) but leaving no file, or, with link_to, a link
         where the file should be, which the patrol refuses."""
-        def run(argv, cwd, env, stdin, stdout, stderr, timeout, check, pass_fds=()):
+        def run(argv, cwd, env, input, stdout, stderr, timeout, check, pass_fds=()):
             if link_to is not None:
-                owl = re.search(r"Owl (owl_[0-9a-f]{16}) was delivered", argv[-1]).group(1)
+                owl = re.search(r"Owl (owl_[0-9a-f]{16}) was delivered", input.decode()).group(1)
                 desk = os.path.basename(cwd)
                 os.symlink(link_to, self.outbox(desk) / f"{owl}-{patrol.REPORT_SUFFIX[desk]}.md")
             os.write(stdout, json.dumps({"type": "result", "subtype": "success", "is_error": False,
@@ -586,7 +586,7 @@ class ShadowCapTests(PatrolCase):
         self.assertEqual(list(json.loads(self.read("map", "pending.json"))), [result["woke"]["owl_id"]])
 
     def test_a_vendor_limit_is_recorded_but_not_an_event(self):
-        def limited(argv, cwd, env, stdin, stdout, stderr, timeout, check, pass_fds=()):
+        def limited(argv, cwd, env, input, stdout, stderr, timeout, check, pass_fds=()):
             os.write(stdout, json.dumps(CLAUDE_USAGE_LIMIT).encode("utf-8"))
             return subprocess.CompletedProcess(args=argv, returncode=1)
         with fake_children(limited):

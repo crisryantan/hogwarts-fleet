@@ -38,7 +38,7 @@ TEMPFILE_CALLS = {"mkdtemp", "mkstemp", "TemporaryDirectory", "NamedTemporaryFil
 FLAG_SHAPE = re.compile(r"-{1,2}[A-Za-z][A-Za-z0-9-]*")
 KNOWN_FLAGS = {
     "-p", "--restricted", "--settings", "--strict-mcp-config", "--mcp-config", "--tools", "--permission-mode",
-    "--model", "--append-system-prompt", "--output-format", "--max-budget-usd", "exec", "--ignore-user-config",
+    "--model", "--append-system-prompt-file", "--output-format", "--max-budget-usd", "exec", "--ignore-user-config",
     "--ignore-rules",
     "-c", "--sandbox", "-C", "--add-dir", "--ephemeral", "--json", "--output-last-message", "--owl", "--dry-run",
     "--mcp-job", "--desk", "-i", "-I", "-B", "-X",
