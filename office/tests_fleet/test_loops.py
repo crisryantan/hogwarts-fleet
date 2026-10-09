@@ -35,7 +35,7 @@ def background_policy_allowed() -> bool:
     """Whether this process may put a child under darwin's background policy. A Codex sandbox refuses the setpriority
     call taskpolicy -b makes, and taskpolicy then exits 70 before the job starts."""
     done = subprocess.run([*loops.PROCESS_TYPES["Background"], "/usr/bin/true"], stdin=subprocess.DEVNULL,
-                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env={}, timeout=WAIT)
+                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env={}, timeout=BACKGROUND_WAIT)
     return done.returncode == 0
 
 
