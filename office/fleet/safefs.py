@@ -72,14 +72,55 @@ def _open_component(parent_fd: int, name: str, label: str, create: bool, mode: i
     return fd
 
 
+def _open_whole(path: str, parts: list, depth: int) -> int:
+    """Open path in one call, once a sandbox refused to open its ancestor parts[depth]. No component from there down
+    may be a link, and the fd must name path itself (F_GETPATH), so a link swapped in meanwhile is never kept."""
+    get_path = getattr(fcntl, "F_GETPATH", None)
+    if get_path is None:
+        raise Unsafe("root path cannot be opened one folder at a time")
+    for end in range(depth + 1, len(parts) + 1):
+        try:
+            st = os.lstat("/" + "/".join(parts[:end]))
+        except FileNotFoundError:
+            raise Missing("root path does not exist") from None
+        except OSError as exc:
+            raise Unsafe("root path is not a plain directory") from exc
+        if not stat.S_ISDIR(st.st_mode):
+            raise Unsafe("root path is not a plain directory")
+    try:
+        fd = os.open(path, DIR_FLAGS)
+    except FileNotFoundError:
+        raise Missing("root path does not exist") from None
+    except OSError as exc:
+        raise Unsafe("root path is not a plain directory") from exc
+    try:
+        if fcntl.fcntl(fd, get_path, bytes(1024)).rstrip(b"\0") != os.fsencode(path):
+            raise Unsafe("root path is reached through a link")
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
 def open_root(path: str) -> int:
-    """Open an absolute directory with no symlink anywhere on the way down."""
+    """Open an absolute directory with no symlink anywhere on the way down. Where a sandbox refuses to open an
+    ancestor it can see but not read, such as /private, the rest is checked and opened whole (_open_whole)."""
     if not isinstance(path, str) or not path.startswith("/") or os.path.normpath(path) != path or path == "/":
         raise Unsafe("root must be an absolute normalised path")
+    parts = path.strip("/").split("/")
     fd = os.open("/", DIR_FLAGS)
     try:
-        for part in path.strip("/").split("/"):
-            child = _open_component(fd, part, "root path", create=False, mode=0o700)
+        for depth, part in enumerate(parts):
+            try:
+                child = _open_component(fd, part, "root path", create=False, mode=0o700)
+            except Unsafe as exc:
+                # EPERM or EACCES only: a link (ELOOP) or a file (ENOTDIR) is refused as before.
+                if not isinstance(exc.__cause__, PermissionError):
+                    raise
+                child = _open_whole(path, parts, depth)
+                os.close(fd)
+                fd = child
+                break
             os.close(fd)
             fd = child
         _check_owned(os.fstat(fd), "root folder")

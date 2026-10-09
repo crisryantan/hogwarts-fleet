@@ -12,8 +12,7 @@
   so no check can lean on a file the commit doesn't hold. Ignored content git clean would skip, such
   as a nested git repository, or more than the evidence can list, stops verify before anything is removed.
 - Code from Ryan's own sessions is checked the way he would check it himself: plain bash, no Codex
-  sandbox, but still a fixed environment with a throwaway home and temp folder. The fleet's own file
-  layer opens every folder from / down, which a Codex sandbox refuses, so its suites can only pass there.
+  sandbox, but still a fixed environment with a throwaway home and temp folder.
 - Every other author's code runs with bash in the worktree under `codex sandbox` and a fleet permission profile:
   the worktree writable, the repo's .git readable, a throwaway home and temp folder writable in its
   own <user temp>/hogwarts-verify-<random> folder, xcrun's cache readable, /private/tmp and the office
