@@ -190,7 +190,8 @@ MISSING_TASK_MD_FIX = ("ask McGonagall to write the draft to that path before th
 SPEC_FIX = ("put exactly three lines first under ## Spec, repo: <folder>, then branch: <new branch>, then base: <ref>,"
             " and no other line that starts with one of those words, then type the go again.")
 SPEC_LINE_FIXES = {
-    "repo": "name a main git checkout that exists in your home folder, outside the office and the castle.",
+    "repo": "name a git checkout that exists in your home folder, outside the office and the castle: a main checkout"
+            " or a linked worktree of one.",
     "branch": "pick a new branch name in lowercase letters, digits, dot, dash, underscore and slash, with no fleet"
               " words, that the repo does not have yet.",
     "base": "name a ref the repo has, usually origin/main.",

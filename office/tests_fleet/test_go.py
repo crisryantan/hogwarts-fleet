@@ -198,6 +198,20 @@ class GoTests(GoCase):
         self.assertIsNone(re.search(r"[0-9a-f]{64}", out))
         self.assertNotIn(PROMPT_ID, out)
 
+    def test_a_go_whose_repo_is_a_linked_worktree_builds_from_its_main_checkout(self):
+        linked = self.home_dir / "linked"
+        self.git("worktree", "add", "-q", "-b", "feature/linked", str(linked), "HEAD")
+        self.task_md(spec=self.spec(repo=linked))
+        moved = self.origin_moves_on()
+        self.go_ok()
+        self.assertEqual(pensieve.task_spec(self.conn, TASK_ID)["repo_dir"], str(linked))
+        built = self.harry_task()
+        record = gitops.read_record(built["id"])
+        self.assertEqual((record["repo_dir"], record["common_dir"], record["base"]),
+                         (str(linked), f"{self.repo}/.git", moved))
+        self.assertEqual(self.git("rev-parse", "HEAD", cwd=config.worktree_dir(built["id"])), moved)
+        self.assertEqual(self.git("for-each-ref", "--format=%(refname)", f"refs/heads/{BRANCH}"), f"refs/heads/{BRANCH}")
+
     def test_a_disabled_harry_gets_his_task_and_worktree_but_no_run(self):
         self.task_md()
         with mock.patch.object(run_desk, "spawn", side_effect=AssertionError("spawned")):
@@ -503,6 +517,16 @@ class GoWorktreeChecksTests(GoCase):
         super().setUp()
         self.task_md()
         self.enable("harry")
+
+    def test_a_linked_worktree_whose_git_file_names_another_folders_entry_is_refused_through_go(self):
+        linked = self.home_dir / "linked"
+        self.git("worktree", "add", "-q", "-b", "feature/linked", str(linked), "HEAD")
+        copy = self.home_dir / "copy"
+        copy.mkdir()
+        self.write_file(copy / ".git", (linked / ".git").read_text())
+        self.task_md(spec=self.spec(repo=copy))
+        self.refused("the Spec's repo: line is refused: the worktree entry the .git file names points back to"
+                     " another folder")
 
     def test_an_existing_branch_is_refused_through_go(self):
         self.git("branch", BRANCH)

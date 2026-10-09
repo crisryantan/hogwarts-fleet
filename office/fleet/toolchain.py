@@ -1,12 +1,12 @@
 """What a worktree's own tools need inside a Codex sandbox with no network.
 
-A desk cannot install anything, so a worktree borrows what Ryan's main checkout and machine already
-have, read-only:
+A desk cannot install anything, so a worktree borrows what Ryan's repo folder (a main checkout or a linked worktree
+of one) and machine already have, read-only:
 - Node: the version the worktree's .nvmrc names, chosen from the versions installed under nvm. Its
   bin folder goes first on PATH, and its install folder becomes readable. A desk can change .nvmrc,
   but that only picks among installed versions.
 - Dependencies: names in config.LINKABLE_DEPS (node_modules) that exist as real, git-ignored folders in the
-  main checkout are linked into the worktree. The main checkout's folder is readable, never writable,
+  repo folder are linked into the worktree. The repo folder's copy is readable, never writable,
   so a desk can use the packages but cannot change them. Git is told to ignore the links.
 - Go: a worktree with go.mod reads the module cache, gets GOPROXY=off so nothing is fetched, and keeps
   its build cache in the run's private temp folder.
@@ -66,20 +66,21 @@ def node_dir(worktree: str) -> Optional[str]:
     return gitops.check_safe_path(f"{root}/{max(found)[1]}", "the Node folder")
 
 
-def linkable(repo_dir: str) -> list:
-    """Dependency folders in the main checkout that a new worktree should link to, read-only."""
+def linkable(repo_dir: str, git_dir: str) -> list:
+    """Dependency folders in the repo folder that a new worktree should link to, read-only. git_dir is the repo
+    folder's own git folder (gitops.repo_dirs), which for a linked worktree is its entry in the main checkout."""
     if not os.path.isfile(f"{repo_dir}/package.json"):
         return []
     names = []
     for name in config.LINKABLE_DEPS:
         path = f"{repo_dir}/{name}"
-        if os.path.isdir(path) and not os.path.islink(path) and _ignored(repo_dir, name):
+        if os.path.isdir(path) and not os.path.islink(path) and _ignored(repo_dir, git_dir, name):
             names.append(name)
     return names
 
 
-def _ignored(repo_dir: str, name: str) -> bool:
-    out = gitops.git(["check-ignore", "--", f"{name}/"], f"{repo_dir}/.git", repo_dir, check=False)
+def _ignored(repo_dir: str, git_dir: str, name: str) -> bool:
+    out = gitops.git(["check-ignore", "--", f"{name}/"], git_dir, repo_dir, check=False)
     return out.strip() == f"{name}/"
 
 

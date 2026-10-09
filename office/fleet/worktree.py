@@ -6,7 +6,7 @@ stored from the TASK.md Spec, then start_locked once its store transaction has c
 fleet/hooks/user_prompt_submit.py). Every check below runs for it the same way. The command is the fallback,
 for a go the hook could not confirm or a build task McGonagall routed by owl. Ryan runs it from his terminal,
 after the Owl Post says a build task is waiting for its worktree:
-  fleet worktree <task-id> --repo-dir <main checkout> --branch <name> [--base origin/main] [--no-fetch]
+  fleet worktree <task-id> --repo-dir <checkout> --branch <name> [--base origin/main] [--no-fetch]
 The task id may be McGonagall's own, the one her TASK.md carries: when it is not a build desk's task and exactly one
 open build-desk task sits under it, that one is used and the result says so; with none or several it refuses and
 names them (build_task). It refuses rather than guesses:
@@ -20,7 +20,9 @@ names them (build_task). It refuses rather than guesses:
   single-task Harry started a task under another TASK.md meanwhile, or McGonagall closed the parent, the
   command takes back the worktree, its new branch and its record, however far it got, before it says why.
   When the store cannot say whether the task kept its worktree, it takes back nothing and says what is left;
-- the repo must be a main checkout in Ryan's home, outside the office and the castle, with a GitHub origin;
+- the repo must be a main checkout in Ryan's home, or a linked git worktree of one, outside the office and the castle,
+  with a GitHub origin. For a linked worktree, both it and its main checkout must pass every check, and the castle
+  worktree, fetch and branch are made in the main checkout (gitops.repo_dirs);
 - the branch must be new, plain and free of fleet words. One command makes a given branch in a given repo at a
   time, whichever TASK.md asks for it: it takes that branch's lock without waiting before it checks the branch
   is new, and holds it until the task has the worktree or it is taken back. A take-back removes the branch only
@@ -116,9 +118,8 @@ def fetch_base(repo_dir: str, base: str) -> None:
     """The fetch add_worktree makes, after the same checks of the checkout and its GitHub origin. The go hook
     runs it before it opens its store transaction, so no network wait holds the store, then calls create with
     fetch=False, which checks everything again."""
-    repo_dir = gitops.check_repo_dir(repo_dir)
+    common_dir = gitops.repo_dirs(repo_dir)["common_dir"]
     base = gitops.check_ref(base, "base")
-    common_dir = f"{repo_dir}/.git"
     origin = gitops.git(["config", "--get", "remote.origin.url"], common_dir, check=False)
     if not origin.strip():
         raise FleetError("the repo has no origin remote")
@@ -136,9 +137,9 @@ def add_worktree(conn, task_id: str, repo_dir: str, base: str, branch: Optional[
     far it got, with no record saved yet. A new branch needs a claim from branch_claim for it, held from before the
     check that the branch is new until the caller has taken back what this made or its task has the worktree.
     claim["made_branch"] is set only once git has made the branch, so a take-back never removes one it did not."""
-    repo_dir = gitops.check_repo_dir(repo_dir)
+    dirs = gitops.repo_dirs(repo_dir)  # a linked worktree's castle worktree is made from its main checkout
+    repo_dir, common_dir = dirs["repo_dir"], dirs["common_dir"]
     base = gitops.check_ref(base, "base")
-    common_dir = f"{repo_dir}/.git"
     name = ids.check("task", task_id) if name is None else safefs.check_component(name)
     path = config.worktree_dir(name)
     if os.path.lexists(path):
@@ -164,7 +165,7 @@ def add_worktree(conn, task_id: str, repo_dir: str, base: str, branch: Optional[
         add = ["worktree", "add", "--detach", path, detach_at]
     record = {"name": name, "task_id": task_id, "path": path, "repo_dir": repo_dir, "common_dir": common_dir,
               "git_dir": f"{common_dir}/worktrees/{name}", "branch": branch, "base": base_sha, "base_ref": base,
-              "repo": slug, "links": toolchain.linkable(repo_dir)}
+              "repo": slug, "links": toolchain.linkable(repo_dir, dirs["git_dir"])}
     claim["record"] = record  # from here the caller takes back what git makes
     if branch is not None:
         # git branch makes the branch only when it does not exist yet, so a branch it made is this command's. From a
@@ -198,8 +199,8 @@ def branch_claim(repo_dir: str, branch: str) -> Iterator[dict]:
     without waiting before the check that the branch is new, and the caller keeps the block open until its task has
     the worktree or it has taken back what add_worktree made, so no other command finds the branch missing while
     this one may still remove it. A second command is refused at once and changes nothing."""
-    repo_dir, branch = gitops.check_repo_dir(repo_dir), gitops.check_branch(branch)
-    name = _branch_lock_name(f"{repo_dir}/.git", branch)
+    common_dir, branch = gitops.repo_dirs(repo_dir)["common_dir"], gitops.check_branch(branch)
+    name = _branch_lock_name(common_dir, branch)  # every worktree of one main checkout shares its branches
     with contextlib.ExitStack() as stack:
         locks_fd = stack.enter_context(safefs.opened_dir(config.OFFICE_ROOT, "locks", create=True))
         try:

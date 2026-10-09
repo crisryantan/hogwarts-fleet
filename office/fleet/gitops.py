@@ -9,7 +9,8 @@ hook folders such as .husky. So every git call here:
   a partial clone never fetches a missing object quietly with those credentials: git reports it missing.
 
 Office records live in ~/.hogwarts/worktrees/<name>.json, one per castle worktree, written only by
-the worktree and review scripts. They name the main checkout, its .git folder, the branch and base.
+the worktree and review scripts. They name the repo folder (a main checkout or a linked worktree of one), the main
+checkout's .git folder, the branch and base.
 
 This module and run_desk are the only fleet modules that start git or a desk. This module also runs the only gh
 commands that write to GitHub, three shapes held exactly by one guard (check_write_argv): gh pr create --draft for the
@@ -89,19 +90,131 @@ def check_safe_path(path: object, label: str) -> str:
     return path
 
 
+NOT_A_CHECKOUT = "the repo folder must be a main checkout with its own .git folder, or a linked worktree of one"
+MAIN_GONE = ("the repo folder is a linked worktree whose main checkout, or its entry there, is gone (moved, removed or"
+             " pruned): run git worktree repair from the main checkout, or name the main checkout instead")
+POINTER_MAX_BYTES = 4096
+
+
 def check_repo_dir(path: object) -> str:
-    """A main checkout in Ryan's home: a real folder with a real .git folder, outside the fleet."""
-    path = check_safe_path(path, "repo folder")
+    """A checkout in Ryan's home, outside the fleet: a main checkout or a linked worktree of one (repo_dirs)."""
+    return repo_dirs(path)["repo_dir"]
+
+
+def repo_dirs(path: object) -> dict:
+    """{"repo_dir", "git_dir", "common_dir", "main_dir"} for a checkout in Ryan's home. A main checkout is a real
+    folder with a real .git folder, which is both its git_dir and its common_dir. A linked worktree is a real folder
+    whose .git file names its entry <main>/.git/worktrees/<id>: that entry is its git_dir (HEAD, index) and
+    <main>/.git is its common_dir (objects, refs, config, other worktrees). Read from the files themselves, never
+    through git, so no repo config runs. Both folders get every check: plain characters, inside the home folder,
+    outside the office and the castle, no symlink on the way. The entry's commondir must name <main>/.git and its
+    gitdir must name this .git file back, so a .git file can point only at the entry made for this folder. A worktree
+    of a bare repo, or one whose main checkout or entry is gone, is refused."""
+    path = _check_checkout(path, "the repo folder", "repo folder")
+    try:
+        st = os.lstat(path + "/.git")
+    except OSError:
+        raise FleetError(NOT_A_CHECKOUT) from None
+    if stat.S_ISDIR(st.st_mode):
+        return {"repo_dir": path, "git_dir": path + "/.git", "common_dir": path + "/.git", "main_dir": path}
+    if not stat.S_ISREG(st.st_mode):
+        raise FleetError(NOT_A_CHECKOUT)
+    line = _read_pointer(path + "/.git", "the repo folder's .git file")
+    if not line.startswith("gitdir: "):
+        raise FleetError("the repo folder's .git file does not name a git folder")
+    entry = _pointed(path, line[len("gitdir: "):], "the git folder the .git file names")
+    worktrees, name = os.path.split(entry)
+    common_dir = os.path.dirname(worktrees)
+    if os.path.basename(worktrees) != "worktrees" or not name:
+        raise FleetError("the repo folder's .git file does not name a worktree entry of a main checkout")
+    if os.path.basename(common_dir) != ".git":
+        raise FleetError("the repo folder is a worktree of a bare repo or a separate git folder, and the fleet builds"
+                         " only from a main checkout or a linked worktree of one")
+    main_dir = _check_checkout(os.path.dirname(common_dir), "the worktree's main checkout", "the main checkout",
+                               entry)
+    for folder in (common_dir, worktrees, entry):
+        try:
+            if not stat.S_ISDIR(os.lstat(folder).st_mode):
+                raise FleetError("the worktree's main checkout has no real .git folder with this worktree's entry")
+        except OSError:
+            raise FleetError(MAIN_GONE) from None
+    if _pointed(entry, _read_pointer(entry + "/commondir", "the worktree entry's commondir file"),
+                "the worktree entry's commondir") != common_dir:
+        raise FleetError("the worktree entry's commondir does not name its main checkout's .git folder")
+    back = _pointed(entry, _read_pointer(entry + "/gitdir", "the worktree entry's gitdir file"),
+                    "the worktree entry's gitdir")
+    if back != path + "/.git":
+        raise FleetError("the worktree entry the .git file names points back to another folder, or to this one"
+                         " spelled another way, so the .git file is refused")
+    return {"repo_dir": path, "git_dir": entry, "common_dir": common_dir, "main_dir": main_dir}
+
+
+
+def _check_place(path: str, label: str) -> None:
+    """The place rules every repo folder keeps, on the path as spelled: inside the home folder, outside the fleet."""
     if not path.startswith(config.USER_HOME_DIR + "/"):
-        raise FleetError("the repo folder must be inside your home folder")
+        raise FleetError(f"{label} must be inside your home folder")
     for root in (config.OFFICE_ROOT, config.CASTLE_ROOT):
         if path == root or path.startswith(root + "/"):
-            raise FleetError("the repo folder must be outside the office and the castle")
+            raise FleetError(f"{label} must be outside the office and the castle")
+
+
+def _check_checkout(path: object, label: str, plain: str, entry: Optional[str] = None) -> str:
+    """A checkout folder: plain characters (plain names it for check_safe_path), _check_place, no symlink on the way
+    and a real folder. For a main checkout found through a worktree's .git file, entry is the worktree's entry there,
+    so a main checkout that is gone is told apart from a folder that was never one."""
+    path = check_safe_path(path, plain)
+    _check_place(path, label)
+    if entry is not None and not os.path.lexists(entry):
+        raise FleetError(MAIN_GONE)
     if os.path.realpath(path) != path:
-        raise FleetError("the repo folder must not go through a symlink")
-    if not os.path.isdir(path) or os.path.islink(path + "/.git") or not os.path.isdir(path + "/.git"):
-        raise FleetError("the repo folder must be a main checkout with its own .git folder")
+        raise FleetError(f"{label} must not go through a symlink")
+    if not os.path.isdir(path):
+        raise FleetError(NOT_A_CHECKOUT)
     return path
+
+
+def _read_pointer(path: str, label: str) -> str:
+    """The one line of a small git pointer file (.git, commondir, gitdir), read without following a symlink, with
+    the line ending git itself drops taken off."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except FileNotFoundError:
+        raise FleetError(f"{label} is missing") from None
+    except OSError:
+        raise FleetError(f"{label} cannot be read as a plain file") from None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise FleetError(f"{label} is not a plain file")
+        raw = os.read(fd, POINTER_MAX_BYTES + 1)
+    finally:
+        os.close(fd)
+    try:
+        text = raw.decode("utf-8").rstrip("\r\n")
+    except UnicodeDecodeError:
+        raise FleetError(f"{label} is not plain text") from None
+    if len(raw) > POINTER_MAX_BYTES or not text or any(char in text for char in "\r\n\0"):
+        raise FleetError(f"{label} is not one plain line")
+    return text
+
+
+def _pointed(base: str, target: str, label: str) -> str:
+    """The absolute path a pointer file names, relative ones from base (a folder already checked to have no symlink).
+    A relative one may climb only at its start (../../x), so reading it by spelling and git following it on disk
+    agree; the result must have plain characters and no symlink on the way."""
+    if not target.startswith("/"):
+        parts = target.split("/")
+        climb = 0
+        while climb < len(parts) and parts[climb] == "..":
+            climb += 1
+        if any(part in ("", ".", "..") for part in parts[climb:]):
+            raise FleetError(f"{label} is not a plain path")
+        target = os.path.normpath(f"{base}/{target}")
+    path = check_safe_path(target, label)
+    if os.path.realpath(path) != path:
+        raise FleetError(f"{label} must not go through a symlink")
+    return path
+
 
 
 def same_checkout(first: str, second: str) -> bool:
@@ -549,7 +662,7 @@ def link_excludes(record: dict) -> list:
 
 
 def borrowed_link(record: dict, name: str) -> bool:
-    """Whether <worktree>/<name> is still the link to the main checkout's copy that the worktree script made."""
+    """Whether <worktree>/<name> is still the link to the repo folder's copy that the worktree script made."""
     path = f"{record['path']}/{name}"
     return os.path.islink(path) and os.readlink(path) == f"{record['repo_dir']}/{name}"
 
@@ -559,7 +672,7 @@ def check_links(record: dict) -> None:
     would let checks use files that no commit holds."""
     for name in record.get("links") or []:
         if os.path.lexists(f"{record['path']}/{name}") and not borrowed_link(record, name):
-            raise FleetError(f"{name} in the worktree is no longer the read-only link to the main checkout's copy, "
+            raise FleetError(f"{name} in the worktree is no longer the read-only link to the repo folder's copy, "
                              "so checks could use files no commit holds; delete it from the worktree first")
 
 
@@ -663,8 +776,13 @@ def _check_record(data: object, name: str) -> dict:
         raise FleetError("worktree record path is not its castle worktree")
     for key in ("repo_dir", "common_dir", "git_dir"):
         check_safe_path(record[key], f"worktree record {key}")
+    # The repo folder is a main checkout, whose .git folder is common_dir, or a linked worktree of the main checkout
+    # whose .git folder it is (repo_dirs, run when the record was written).
+    if not record["common_dir"].endswith("/.git"):
+        raise FleetError("worktree record common_dir is not a main checkout's .git folder")
     if record["common_dir"] != record["repo_dir"] + "/.git":
-        raise FleetError("worktree record common_dir is not the repo's .git folder")
+        for key in ("repo_dir", "common_dir"):
+            _check_place(record[key], f"worktree record {key}")
     if record["git_dir"] != f"{record['common_dir']}/worktrees/{name}":
         raise FleetError("worktree record git_dir is not the repo's entry for this worktree")
     if record["branch"] is not None:

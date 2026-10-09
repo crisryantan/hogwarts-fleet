@@ -42,7 +42,7 @@ import sys
 import time
 from typing import Callable, Iterator, NamedTuple, Optional
 
-from fleet import config, safefs
+from fleet import config, gitops, safefs
 from fleet.safefs import FleetError
 
 NAME = re.compile(r"[a-z][a-z0-9-]{0,39}")
@@ -507,6 +507,10 @@ def build_notice(repo_dir: Optional[str] = None) -> list:
         return [f"Start `fleet loops`, the background jobs are not running, so the build will not move on by itself"
                 f" ({_named(missing)} under neither fleet loops nor launchd).{hint}"]
     folder = blind_folder(repo_dir) if launchd else None
+    if folder is None and launchd and repo_dir is not None:
+        # The jobs run git in a linked worktree's main checkout too, so that folder counts as well.
+        with contextlib.suppress(Exception):
+            folder = blind_folder(gitops.repo_dirs(repo_dir)["main_dir"])
     if folder is None:
         return []
     return [f"Warning: the repo is inside ~/{folder}, which macOS keeps launchd jobs out of, and"

@@ -156,9 +156,9 @@ class DependencyLinkTests(ToolchainCase):
 
     def test_a_repo_without_package_json_or_ignore_rule_gets_no_link(self):
         (self.repo / "node_modules").mkdir()
-        self.assertEqual(toolchain.linkable(str(self.repo)), [])
+        self.assertEqual(toolchain.linkable(str(self.repo), f"{self.repo}/.git"), [])
         self.write_file(self.repo / "package.json", "{}\n")
-        self.assertEqual(toolchain.linkable(str(self.repo)), [])
+        self.assertEqual(toolchain.linkable(str(self.repo), f"{self.repo}/.git"), [])
 
     def test_a_record_naming_another_folder_is_refused(self):
         self.node_repo()

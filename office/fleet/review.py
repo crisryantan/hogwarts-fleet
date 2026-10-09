@@ -1633,12 +1633,13 @@ def _review_own(conn, repo_dir: str, title: Optional[str], intent: Optional[str]
     reviewer = config.REVIEWER_FOR_FAMILY["claude"]
     if not run_desk.is_enabled(reviewer):
         raise FleetError(f"{reviewer} is not enabled, so no review can run")
-    repo_dir = gitops.check_repo_dir(repo_dir)
-    common_dir = f"{repo_dir}/.git"
-    sha = gitops.git(["rev-parse", "--verify", "--end-of-options", "HEAD^{commit}"], common_dir).strip()
+    dirs = gitops.repo_dirs(repo_dir)
+    # HEAD and its branch are the checkout's own (a linked worktree's entry); refs and history are the main checkout's.
+    repo_dir, common_dir = dirs["repo_dir"], dirs["common_dir"]
+    sha = gitops.git(["rev-parse", "--verify", "--end-of-options", "HEAD^{commit}"], dirs["git_dir"]).strip()
     if gitops.SHA.fullmatch(sha) is None:
         raise FleetError("git did not return a full commit sha")
-    branch = _own_branch(common_dir)
+    branch = _own_branch(dirs["git_dir"])
     if task_id is None:
         title = ids.clean_text(title or "", "title", 200, single_line=True)
         if not title:
@@ -1712,15 +1713,16 @@ def own_lineage_lock() -> Iterator[None]:
         yield
 
 
-def _own_branch(common_dir: str) -> str:
-    """The branch the checkout has out, which names the review's lineage. A detached HEAD has none. Any name git
-    takes as a branch counts, in printable ASCII: the fleet's branch rule is only for the branches it pushes."""
-    branch = gitops.current_branch(common_dir)
+def _own_branch(git_dir: str) -> str:
+    """The branch the checkout whose own git folder is git_dir has out, which names the review's lineage. A detached
+    HEAD has none. Any name git takes as a branch counts, in printable ASCII: the fleet's branch rule is only for the
+    branches it pushes."""
+    branch = gitops.current_branch(git_dir)
     if branch is None:
         raise FleetError("your checkout's HEAD is detached, so this review has no branch to follow: check out"
                          " the branch the commit is on and run it again")
     try:
-        return gitops.check_lineage_branch(common_dir, branch)
+        return gitops.check_lineage_branch(git_dir, branch)
     except FleetError as exc:
         raise FleetError(f"your checkout's branch cannot name a review: {exc}") from None
 
