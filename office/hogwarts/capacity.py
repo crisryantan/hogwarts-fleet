@@ -279,6 +279,12 @@ def list_launches(conn: Conn, desk: Optional[str] = None) -> list[dict]:
                         (desk, desk))
 
 
+def newest_launch(conn: Conn, task_id: str) -> Optional[dict]:
+    """The task's own newest run launch, or None when no run was launched for it. Read only."""
+    return db.fetch_one(conn, "SELECT * FROM run_launches WHERE task_id = ? ORDER BY launched_at DESC, rowid DESC"
+                              " LIMIT 1", (ids.check("task", task_id),))
+
+
 def open_launches(conn: Conn, desk: str) -> list[dict]:
     """The desk's launches with no usage recorded yet, oldest first: runs still going, or ended before they could
     record it. A desk with several run slots holds their cost against its spend cap until it is recorded."""

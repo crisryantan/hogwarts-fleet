@@ -100,6 +100,40 @@ class StopNoticeTests(StopsCase):
         os.mkdir(self.office / "state" / config.STOP_FILE)
         self.assertIn("Ollivander's stop is on: it could not be read.", stops.active_line())
 
+    def test_an_unacked_stop_event_is_marked_cleared_once_no_stop_is_in_place(self):
+        ollivander._stop_after_unfinished(self.conn, str(NOW), NOW, {})
+        start = {"session_id": SESSION, "transcript_path": "", "cwd": str(self.castle),
+                 "hook_event_name": "SessionStart", "source": "startup"}
+
+        def stop_event_line(out: str) -> str:
+            return next(line for line in out.splitlines() if "[ollivander.stopped]" in line)
+
+        _, out, _ = self.run_hook(session_start, start)
+        self.assertTrue(stop_event_line(out).startswith("- [ollivander.stopped]"))  # on: as it was stored
+        self.clear()
+        _, out, _ = self.run_hook(session_start, start)
+        self.assertNotIn("Ollivander's stop is on", out)
+        self.assertTrue(stop_event_line(out).startswith(f"- {stops.CLEARED_MARK} [ollivander.stopped]"))
+        prompt = {**start, "session_id": "1c7a9d2f-1111-4222-8333-944455556666", "hook_event_name": "UserPromptSubmit",
+                  "prompt": "how is it going"}
+        code, out, _ = self.run_hook(user_prompt_submit, prompt)
+        self.assertEqual(code, 0)
+        shown = json.loads(out)["systemMessage"]  # the event lines Ryan sees
+        self.assertIn(f"- {stops.CLEARED_MARK} [ollivander.stopped]", shown)
+        self.assertNotIn("Ollivander's stop is on", shown)
+        self.stop("1 a CLI update is running\n", config.UPDATING_FILE)  # an update marker is a stop in place too
+        _, out, _ = self.run_hook(session_start, start)
+        self.assertTrue(stop_event_line(out).startswith("- [ollivander.stopped]"))
+
+    def test_a_stop_event_is_left_as_stored_when_the_state_folder_cannot_be_read(self):
+        event = {"kind": stops.STOPPED_KIND, "line": "[ollivander.stopped] #1 ollivander -: stopped"}
+        with mock.patch.object(stops.safefs, "opened_dir", side_effect=stops.FleetError("unreadable")):
+            self.assertIsNone(stops.in_place())
+            self.assertEqual(stops.event_lines([event]), [event["line"]])
+        with mock.patch.object(stops, "in_place") as looked:  # the files are read only when a stop event is listed
+            self.assertEqual(stops.event_lines([{"kind": "go.refused", "line": "x"}]), ["x"])
+        looked.assert_not_called()
+
 
 class HeldRunTests(StopsCase):
     def refused(self, desk: str = "moody") -> str:

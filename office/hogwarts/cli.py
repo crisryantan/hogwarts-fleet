@@ -377,6 +377,31 @@ def _task_start(conn: sqlite3.Connection, args: argparse.Namespace) -> dict:
         raise ConflictError(str(exc)) from None
 
 
+def _task_run(conn: sqlite3.Connection, task_id: str) -> Optional[dict]:
+    """The task's newest run launch as the launcher left it (fleet/run_desk.py next to this package): its id, model and
+    start, its end record and last output write from the office runs folder, and going: no usage recorded, no end
+    record (one that cannot be read is left to the other two) and launched inside the running window, as the board's
+    running. No pid is kept for a run. None when no run was launched for the task. Read only."""
+    launch = capacity.newest_launch(conn, task_id)
+    if launch is None:
+        return None
+    from fleet import run_desk as fleet_run_desk
+
+    seen = fleet_run_desk.run_seen(launch["desk"], launch["run_id"])
+    recorded = launch["metric_id"] is not None
+    recent = _clock() - launch["launched_at"] < _fleet_caps().RUNNING_WINDOW_SECONDS
+    return {"run_id": launch["run_id"], "desk": launch["desk"], "model": launch["model"],
+            "launched_at": launch["launched_at"], "usage_recorded": recorded, **seen,
+            "going": not recorded and recent and not isinstance(seen["end"], dict)}
+
+
+def _task_show(conn: sqlite3.Connection, args: argparse.Namespace) -> dict:
+    """The task's record, its newest run (run) and its newest event of any kind (newest_event). Read only."""
+    task = pensieve.get_task(conn, args.task)
+    return {**task, "run": _task_run(conn, task["id"]),
+            "newest_event": pensieve.newest_events(conn, [task["id"]]).get(task["id"])}
+
+
 def _desk_model(conn: sqlite3.Connection, args: argparse.Namespace) -> dict:
     if args.approve:
         return wands.approve(conn, args.desk, blocked=_blocked_models(), retiring_within=_retiring_window())
@@ -419,7 +444,7 @@ HANDLERS: dict[str, Callable] = {
     "task commit": lambda c, a: pensieve.record_commit(c, a.task, a.repo, a.sha),
     "task worktree": lambda c, a: pensieve.set_worktree(c, a.task, a.path),
     "task close": lambda c, a: pensieve.close_task(c, a.task, a.reason, _token(a)),
-    "task show": lambda c, a: pensieve.get_task(c, a.task),
+    "task show": _task_show,
     "task list": lambda c, a: _task_list(c, a),
     "task builds": _task_builds,
     "task board": _task_board,

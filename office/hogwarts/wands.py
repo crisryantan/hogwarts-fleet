@@ -640,9 +640,19 @@ def last_event_key(conn: Conn, desk: str, kind: str) -> Optional[str]:
 # The stop file
 
 
+# What castle ollivander clear says it did, by the files it removed.
+_CLEAR_NOTES = {
+    (): "no stop was on: neither the stop file nor an update marker was in place, so nothing was removed",
+    (STOP_FILE,): "removed the stop file",
+    (UPDATING_FILE,): "removed the update marker a CLI update left",
+    (STOP_FILE, UPDATING_FILE): "removed the stop file and the update marker a CLI update left",
+}
+
+
 def clear_stop(db_path: Path) -> dict:
     """Remove the stop file, and any update marker a crashed update left, next to the database. Ryan runs
-    this through castle once he has looked."""
+    this through castle once he has looked. The result names what it removed and says why in its note, also when
+    there was nothing to remove."""
     state = Path(db_path).parent
     try:
         fd = os.open(str(state), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
@@ -652,14 +662,15 @@ def clear_stop(db_path: Path) -> dict:
         if exc.errno in (errno.ELOOP, errno.ENOTDIR):
             raise ValidationError("the office state folder is not a plain folder") from None
         raise
-    cleared = False
+    removed = []
     try:
         for name in (STOP_FILE, UPDATING_FILE):
             try:
                 os.unlink(name, dir_fd=fd)
-                cleared = True
+                removed.append(name)
             except FileNotFoundError:
                 pass
     finally:
         os.close(fd)
-    return {"cleared": cleared, "stop_file": str(state / STOP_FILE)}
+    return {"cleared": bool(removed), "removed": removed, "stop_file": str(state / STOP_FILE),
+            "note": _CLEAR_NOTES[tuple(removed)]}

@@ -805,3 +805,21 @@ class CliTests(WandsCase):
         code, out, _ = self.cli("ollivander", "clear")
         self.assertEqual((code, out["data"]["cleared"]), (0, True))
         self.assertFalse(updating.exists())
+
+    def test_ollivander_clear_says_what_it_removed_and_why_nothing_was_when_no_stop_was_on(self):
+        state = self.db_path.parent
+        code, out, _ = self.cli("ollivander", "clear")
+        self.assertEqual(code, 0)
+        self.assertEqual(out["data"], {"cleared": False, "removed": [], "stop_file": str(state / wands.STOP_FILE),
+                                       "note": "no stop was on: neither the stop file nor an update marker was in"
+                                               " place, so nothing was removed"})
+        for names, note in (((wands.STOP_FILE,), "removed the stop file"),
+                            ((wands.UPDATING_FILE,), "removed the update marker a CLI update left"),
+                            ((wands.STOP_FILE, wands.UPDATING_FILE),
+                             "removed the stop file and the update marker a CLI update left")):
+            with self.subTest(names=names):
+                for name in names:
+                    (state / name).write_text("1 stopped\n")
+                code, out, _ = self.cli("ollivander", "clear")
+                self.assertEqual((code, out["data"]["cleared"], out["data"]["removed"], out["data"]["note"]),
+                                 (0, True, list(names), note))

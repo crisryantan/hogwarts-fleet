@@ -2271,6 +2271,23 @@ def run_end(desk: str, run_id: str) -> Optional[dict]:
     return {"exit_code": code, "cap_source": data["cap_source"]}
 
 
+def run_seen(desk: str, run_id: str) -> dict:
+    """What the office runs folder shows of one run, read only: its end record (run_end, None while it has none,
+    "unreadable" when it cannot be read) and when its output was last written (output_at, None when it has no
+    output file). No pid is kept for a run, so this is how a reader tells a run that ended from one still going.
+    Never raises."""
+    try:
+        end = run_end(desk, run_id)
+    except (FleetError, StoreError, OSError):
+        end = "unreadable"
+    output_at = None
+    with contextlib.suppress(FleetError, StoreError, OSError):
+        with safefs.opened_dir(config.OFFICE_ROOT, "runs", ids.check("desk", desk)) as fd:
+            info = safefs.lstat(fd, f"{safefs.check_component(run_id)}.out")
+            output_at = None if info is None else int(info.st_mtime)
+    return {"end": end, "output_at": output_at}
+
+
 def _ended(run_fd: int, plan: dict, exit_code: int) -> tuple:
     """(output, whole, errors, cap_source) of a run whose process has ended with exit_code."""
     output, whole = _run_output(run_fd, plan["run_id"])

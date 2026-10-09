@@ -3,6 +3,9 @@
 - active_line: one line naming the stop in place (the stop file, else the update marker), with why and the exact
   command that clears it, or None. The prompt and session start hooks put it at the top of the events banner in every
   desk session until castle ollivander clear removes it. A stop that cannot be read still shows, as unreadable.
+- event_lines: the banner lines of drained headmaster events, with each ollivander.stopped event marked cleared first
+  when no stop file or update marker is in place now, read from the files at that moment, so an unacked stop event
+  never reads as a stop still on.
 - hold: run_desk keeps a launch the stop refused (desk, owl, task) as one marker per owl in the office state folder
   (config.STOP_HELD_DIR), written create-exclusive, so a run refused again and again is kept once. Never raises.
 - resume: the Owl Post's pass, once no stop or update marker is in place, starts each held run again once through
@@ -29,6 +32,8 @@ from fleet.safefs import FleetError
 
 CLEAR = "castle ollivander clear"
 EVENT_KIND = "owlpost.stop-restarted"
+STOPPED_KIND = "ollivander.stopped"
+CLEARED_MARK = "(cleared since: no stop is in place now)"
 
 
 def _stop_text(fd: int, name: str) -> Optional[tuple]:
@@ -58,6 +63,32 @@ def active_line() -> Optional[str]:
     what = "Ollivander's stop is on" if found is not None else "Ollivander's CLI update marker is in place"
     return (f"{what}{since}: {common.one_line(reason, 300)}. Every headless desk run is blocked until `{CLEAR}` runs"
             " in your terminal; the Owl Post starts the runs it held once it is clear.")
+
+
+def in_place() -> Optional[bool]:
+    """Whether the stop file or the update marker is in place now, None when the state folder cannot be read. Never
+    raises."""
+    try:
+        with safefs.opened_dir(config.OFFICE_ROOT, config.STATE_DIR) as fd:
+            return any(safefs.lstat(fd, name) is not None for name in (config.STOP_FILE, config.UPDATING_FILE))
+    except (FleetError, OSError):
+        return None
+
+
+def event_lines(events: list) -> list:
+    """Each drained event's line. A stop event is marked cleared, ahead of its text so a cut line keeps the mark, when
+    no stop is in place now; the files are read once, and only when a stop event is listed. Never raises."""
+    cleared = None
+    lines = []
+    for event in events:
+        line = event["line"]
+        if event.get("kind") == STOPPED_KIND:
+            if cleared is None:
+                cleared = in_place() is False
+            if cleared:
+                line = f"{CLEARED_MARK} {line}"
+        lines.append(line)
+    return lines
 
 
 # Runs the stop held back

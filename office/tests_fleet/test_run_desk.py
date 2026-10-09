@@ -10,7 +10,7 @@ import time
 from pathlib import Path
 from unittest import mock
 
-from hogwarts import capacity, ids, owlery, pensieve
+from hogwarts import capacity, cli, ids, owlery, pensieve
 from tests.support import NOW
 
 from fleet import common, config, gitops, owl_post, review, run_desk, safefs, verify
@@ -668,6 +668,70 @@ class RunEndTests(RunDeskCase):
             result = run_desk.run(self.conn, "hermione", self.owl_id, now=NOW)
         self.assertEqual((result["exit_code"], result["cost_usd"], result.get("spend_unknown")),
                          (0, float(config.MAX_BUDGET_USD["hermione"]), True))
+
+
+class TaskShowTests(RunDeskCase):
+    """castle task show adds the task's newest run, as its launch row and its files in the office runs folder show it,
+    and its newest event, reading only."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        _, self.task_id = self.request("harry")
+        self.run_id = "run-" + "a" * 16
+        self.runs = self.office / "runs" / "harry"
+
+    def show(self, now: int = NOW + 60) -> dict:
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err), \
+                mock.patch.object(cli, "_clock", return_value=now):
+            code = cli.main(["task", "show", self.task_id], db_path=self.db_path)
+        self.assertEqual(code, 0, err.getvalue())
+        return json.loads(out.getvalue())["data"]
+
+    def launch(self) -> None:
+        capacity.record_launch(self.conn, "harry", self.run_id, "gpt-6.1-sol", task_id=self.task_id, now=NOW)
+        self.runs.mkdir(mode=0o700, parents=True)
+        os.utime(self.write_file(self.runs / f"{self.run_id}.out", "{}\n"), (NOW + 30, NOW + 30))
+
+    def test_a_task_with_no_run_shows_none_and_its_newest_event(self):
+        pensieve.add_event(self.conn, "harry", "go.confirmed", "routine", "go confirmed", task_id=self.task_id,
+                           now=NOW)
+        shown = self.show()
+        self.assertEqual((shown["id"], shown["run"], shown["session_id"]), (self.task_id, None, None))
+        self.assertEqual((shown["newest_event"]["kind"], shown["newest_event"]["ts"]), ("go.confirmed", NOW))
+
+    def test_a_run_going_then_ended_then_settled(self):
+        self.launch()
+        run = self.show()["run"]
+        self.assertEqual(run, {"run_id": self.run_id, "desk": "harry", "model": "gpt-6.1-sol", "launched_at": NOW,
+                               "usage_recorded": False, "end": None, "output_at": NOW + 30, "going": True})
+        self.assertFalse(self.show(NOW + config.RUNNING_WINDOW_SECONDS)["run"]["going"])  # past the window
+        self.write_file(self.runs / f"{self.run_id}.end", "{\n")
+        run = self.show()["run"]
+        self.assertEqual((run["end"], run["going"]), ("unreadable", True))  # left to the store's two signs
+        self.write_file(self.runs / f"{self.run_id}.end",
+                        json.dumps({"run_id": self.run_id, "exit_code": 0, "cap_source": None}) + "\n")
+        run = self.show()["run"]
+        self.assertEqual((run["end"], run["going"]), ({"exit_code": 0, "cap_source": None}, False))
+        os.unlink(self.runs / f"{self.run_id}.end")
+        capacity.record_launch_usage(self.conn, self.run_id, 1, 1, 0, 0.0, 1000, now=NOW + 90)
+        run = self.show()["run"]
+        self.assertEqual((run["usage_recorded"], run["going"]), (True, False))
+
+    def test_the_newest_launch_of_this_task_is_the_run_shown(self):
+        other = pensieve.create_task(self.conn, "harry", "another build", now=NOW)["id"]
+        capacity.record_launch(self.conn, "harry", "run-" + "b" * 16, "gpt-6.1-sol", task_id=self.task_id, now=NOW)
+        capacity.record_launch(self.conn, "harry", self.run_id, "gpt-6.1-sol", task_id=self.task_id, now=NOW)
+        capacity.record_launch(self.conn, "harry", "run-" + "c" * 16, "gpt-6.1-sol", task_id=other, now=NOW + 5)
+        # The later of two launched at one time, and never another task's.
+        self.assertEqual(self.show()["run"]["run_id"], self.run_id)
+
+    def test_task_show_writes_nothing(self):
+        self.launch()
+        before = list(self.conn.iterdump())
+        files = sorted(os.listdir(self.runs))
+        self.show()
+        self.assertEqual((list(self.conn.iterdump()), sorted(os.listdir(self.runs))), (before, files))
 
 
 class LockInheritanceTests(FleetCase):

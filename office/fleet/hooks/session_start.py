@@ -142,7 +142,7 @@ def _events(conn, candidates: Optional[list] = None) -> list:
         return head + ["Headmaster events: none unacked"]
     listed = drained["events"][: config.DIGEST_EVENT_LINES]
     more = drained["remaining"] + len(drained["events"]) - len(listed)
-    rows = [(event["id"], "- " + common.one_line(event["line"], 220)) for event in listed]
+    rows = [(event["id"], "- " + common.one_line(line, 220)) for event, line in zip(listed, stops.event_lines(listed))]
     if candidates is not None:
         candidates += rows
     return head + [f"Headmaster events, unacked ({len(listed)} shown, {more} more):"] + [line for _, line in rows]
