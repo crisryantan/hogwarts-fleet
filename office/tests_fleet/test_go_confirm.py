@@ -633,8 +633,23 @@ class InterruptedTests(ConfirmCase):
         go_confirm.sweep(self.conn)
         [event] = self.headmaster_events()
         self.assertIn(f"It was making the worktree {made['worktree']} on branch fix/widget in {self.repo}: if castle"
-                      " task show finds no Harry task with this worktree, remove that worktree and branch by hand,"
-                      " then type the go again.", event["summary"])
+                      " task show finds no Harry task with it, remove that worktree and branch by hand and type the go"
+                      " again.", event["summary"])
+
+    def test_a_summary_too_long_for_the_store_cuts_the_reason_and_keeps_the_worktree_line_whole(self):
+        self.deferred(f"go {TASK_ID}")
+        made = {"task_id": TASK_ID, "repo_dir": str(self.repo), "branch": "fix/widget",
+                "worktree": str(self.castle / "worktrees" / "tk_00000000000000bb")}
+        # A deep repo folder, so the whole summary is over the store's limit wherever the temp folders are.
+        short = len(go_confirm.interrupted_lines("go", TASK_ID, [made])[1])
+        made["repo_dir"] += "-" + "x" * max(0, pensieve.SUMMARY_LIMIT - 60 - short)
+        [_, line] = go_confirm.interrupted_lines("go", TASK_ID, [made])
+        self.pending(dead_pid(), self.old, [made])
+        go_confirm.sweep(self.conn)
+        [event] = self.headmaster_events()
+        self.assertLessEqual(len(event["summary"]), pensieve.SUMMARY_LIMIT)
+        self.assertTrue(event["summary"].startswith(f"The confirmation for {TASK_ID}"))
+        self.assertTrue(event["summary"].endswith(f"... {line}"))
 
     def test_a_live_confirmer_is_left_alone_and_a_second_one_refuses(self):
         path = self.later()

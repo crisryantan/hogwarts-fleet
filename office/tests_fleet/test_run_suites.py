@@ -340,6 +340,21 @@ class MainTests(unittest.TestCase):
         self.assertEqual(out, "run_suites.py: tests holds a test package, 'deeper', and this runner only runs "
                               "top-level modules\n")
 
+    def test_without_a_temp_root_a_shared_temp_it_may_not_write_stops_the_run_before_any_module(self):
+        self.assertTrue(run_suites.shared_temp_usable(str(temp_dir(self))))
+        self.assertFalse(run_suites.shared_temp_usable("/nonexistent/tmp"))
+        with mock.patch.object(run_suites, "temp_root", return_value=None), \
+                mock.patch.object(run_suites, "shared_temp_usable", return_value=False):
+            code, out = self.main()
+        self.assertEqual((code, self.ran), (1, []))
+        self.assertEqual(out, run_suites.NO_TEMP_ROOT)
+        self.assertIn("set TEST_TMP_ROOT to an absolute folder", out)
+        # Given a temp root, the runner never looks at the shared temp folder.
+        with mock.patch.object(run_suites, "temp_root", return_value=str(temp_dir(self))), \
+                mock.patch.object(run_suites, "shared_temp_usable", side_effect=AssertionError("looked")):
+            code, _ = self.main()
+        self.assertEqual(code, 0)
+
     def test_an_interrupt_keeps_the_failures_already_seen_and_reports_nothing_as_passed(self):
         failing = unittest_output(3, "FAILED (errors=1)")
         self.results["tests_fleet/test_c.py"] = (1, failing, None)

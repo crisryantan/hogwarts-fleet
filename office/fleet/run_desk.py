@@ -543,7 +543,7 @@ def _toml_env(env: dict) -> str:
     """An inline TOML table of plain environment values, refusing anything that needs quoting."""
     parts = []
     for key, value in sorted(env.items()):
-        if re.fullmatch(r"[A-Z][A-Z0-9_]{0,40}", key) is None or ENV_VALUE.fullmatch(value) is None:
+        if re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{0,40}", key) is None or ENV_VALUE.fullmatch(value) is None:
             raise FleetError("a toolchain environment value has an unsafe character")
         parts.append(f'{key}="{value}"')
     return "{" + ", ".join(parts) + "}"
@@ -584,6 +584,13 @@ def desk_temp_dir(name: str, slot: int = 0) -> str:
         raise FleetError("macOS reported no per-user temp folder, so no private temp folder can be made")
     folder = slot_name(f"{config.DESK_TEMP_PREFIX}{name}", slot)
     return gitops.check_safe_path(f"{base}/{folder}", "a private temp folder")
+
+
+def temp_env(temp: str) -> dict:
+    """The variables that keep every temp a sandboxed run makes in temp, its one writable temp folder: TMPDIR,
+    TEST_TMP_ROOT (the kit's own tests, tests/support.py) and xcrun's lookup cache (xcrun_db), which otherwise sits
+    in the per-user temp folder the sandbox only lets it read. A verify run and a Codex desk that writes both use it."""
+    return {"TMPDIR": temp, "TEST_TMP_ROOT": temp, "xcrun_db": f"{temp}/{config.XCRUN_CACHE}"}
 
 
 def fresh_temp(path: str) -> str:
@@ -652,7 +659,7 @@ def _codex_argv(desk: str, task: Optional[dict], brief: str, prompt: str, run_id
     temp = desk_temp_dir(desk, slot) if config.CODEX_ACCESS[desk] == "write" else None
     tools = toolchain.for_record(record, temp)
     if temp is not None:
-        tools["env"]["TMPDIR"] = temp
+        tools["env"].update(temp_env(temp))
     argv = [config.CODEX_BIN, "exec", "--ignore-user-config", "--ignore-rules"]
     overrides = parse_codex_profile(profile)
     selected, top = profile_models(overrides)

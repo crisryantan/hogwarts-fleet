@@ -31,6 +31,14 @@ WAIT = 15.0
 BACKGROUND_WAIT = 180.0
 
 
+def background_policy_allowed() -> bool:
+    """Whether this process may put a child under darwin's background policy. A Codex sandbox refuses the setpriority
+    call taskpolicy -b makes, and taskpolicy then exits 70 before the job starts."""
+    done = subprocess.run([*loops.PROCESS_TYPES["Background"], "/usr/bin/true"], stdin=subprocess.DEVNULL,
+                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env={}, timeout=WAIT)
+    return done.returncode == 0
+
+
 class FakeRun:
     """A run the supervisor started, ended by the test."""
 
@@ -526,7 +534,10 @@ def main():
     return 0
 """)
         # Background, as the kit's jobs are: darwin's background policy runs it slower on a busy Mac, never differently.
-        self.plist("switchy", "switchy", RunAtLoad=True, ProcessType="Background")
+        # Where that policy is refused (a sandbox, which never runs fleet loops), the job runs as Standard, so its
+        # switch, folder and umask are still checked; PlistTests checks the taskpolicy line itself.
+        kind = "Background" if background_policy_allowed() else "Standard"
+        self.plist("switchy", "switchy", RunAtLoad=True, ProcessType=kind)
         job = loops.load_job("switchy")
         for _ in range(2):
             run = loops.start_job(job)

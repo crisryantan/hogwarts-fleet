@@ -238,7 +238,10 @@ class CodexDeskTests(RunDeskCase):
         self.assertIn('"/private/var/folders/ab/cd/T/xcrun_db"="read"', table)
         self.assertNotIn('"/private/var/folders/ab/cd/T"=', table)
         policy = next(item for item in argv if item.startswith("shell_environment_policy.set="))
+        # Every temp the kit's own tests and xcrun make stays in his temp folder too, as in a verify run.
         self.assertIn('TMPDIR="/private/var/folders/ab/cd/T/hogwarts-harry"', policy)
+        self.assertIn('TEST_TMP_ROOT="/private/var/folders/ab/cd/T/hogwarts-harry"', policy)
+        self.assertIn('xcrun_db="/private/var/folders/ab/cd/T/hogwarts-harry/xcrun_db"', policy)
         self.assertIn('GIT_CONFIG_GLOBAL="/dev/null"', policy)
         self.assertIn('XDG_CONFIG_HOME="/dev/null"', policy)
         self.assertIn('GIT_NO_LAZY_FETCH="1"', policy)

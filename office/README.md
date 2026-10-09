@@ -509,6 +509,6 @@ cd ~/.hogwarts && /usr/bin/env -i /usr/bin/python3 -I -B -X pycache_prefix=/var/
 
 `discover -t .` puts the repo root on `sys.path`, which `-I` would otherwise drop. Discover is the only supported way to run a suite, and the runner uses it for every module. Running one module by dotted name fails under `-I`, so use `-p test_tasks.py` instead.
 
-Tests make their temporary directories under the constant `/private/tmp`, so `tempfile` never reads `TMPDIR`. They never touch `state/` and never read environment variables.
+Tests make their temporary directories under `/private/tmp`, or under the absolute folder `TEST_TMP_ROOT` names, the one environment variable they read, so `tempfile` never reads `TMPDIR`. The runner passes `TEST_TMP_ROOT` on to every module with `TMPDIR` and xcrun's cache (`xcrun_db`) inside it. A sandbox that denies `/private/tmp` sets it to a folder it may write: fleet verify and Harry's runs set all three to their run's own temp folder. Tests never touch `state/`.
 
 A clone of the kit can also run both suites against an installed copy whose private values are made up. `sh scripts/installed-office-check.sh` installs into a throwaway home, fills the GitHub account, watched repos, blocked models and MCP names with fake values, and runs the suites there, so a test that quietly depends on your own private values fails. It never reads or writes your real `~/.hogwarts` or `~/hogwarts`.

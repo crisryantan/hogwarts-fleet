@@ -192,8 +192,7 @@ def child_env(scratch: str, record: Optional[dict] = None) -> dict:
     xcrun's cache (xcrun_db), which otherwise sits in the per-user temp folder the sandbox only lets it read."""
     temp = f"{scratch}/tmp"
     tools = toolchain.for_record(record, temp)
-    return {"HOME": f"{scratch}/home", "TMPDIR": temp, "TEST_TMP_ROOT": temp,
-            "xcrun_db": f"{temp}/{config.XCRUN_CACHE}", "PATH": ":".join([*tools["path"], config.CHILD_PATH]),
+    return {"HOME": f"{scratch}/home", **run_desk.temp_env(temp), "PATH": ":".join([*tools["path"], config.CHILD_PATH]),
             "LANG": "en_US.UTF-8", "CI": "1", "RTK_DISABLED": "1", **config.GIT_NO_LAZY_FETCH_ENV, **tools["env"]}
 
 

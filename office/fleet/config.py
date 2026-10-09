@@ -263,9 +263,9 @@ DEFAULT_BASE = "origin/main"
 # The temp folder every user and app shares. Codex's ":minimal" set makes it writable, so every Codex
 # profile denies it outright: it holds other sessions' scratch files.
 SHARED_TEMP_ROOT = "/private/tmp"
-# Each Codex desk that writes, and each verify run, gets its own temp folder instead, set as TMPDIR,
-# inside the per-user temp folder: <user temp>/hogwarts-<name>, and hogwarts-<desk>.slot<n> for a desk's
-# run slot n. Nothing else in that folder is granted
+# Each Codex desk that writes, and each verify run, gets its own temp folder instead, set as TMPDIR and TEST_TMP_ROOT
+# with xcrun's cache in it (run_desk.temp_env), inside the per-user temp folder: <user temp>/hogwarts-<name>, and
+# hogwarts-<desk>.slot<n> for a desk's run slot n. Nothing else in that folder is granted
 # except xcrun's lookup cache, read-only, so /usr/bin shims resolve without trying to write it.
 DESK_TEMP_PREFIX = "hogwarts-"
 XCRUN_CACHE = "xcrun_db"

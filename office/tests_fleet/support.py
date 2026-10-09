@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import ast
 import contextlib
+import functools
 import io
 import json
 import os
@@ -131,6 +132,22 @@ def every_slot(desk: str):
         yield
 
 
+@functools.lru_cache(maxsize=None)
+def real_git() -> str:
+    """The git binary /usr/bin/git hands each call to, found once per test process, else config.GIT_BIN. xcrun, behind
+    every /usr/bin shim, keys its lookup cache by HOME, and every test has a HOME of its own: through the shim each
+    test's first git call runs xcodebuild's license check and lookup, a second or more, and adds an entry to the
+    user's own cache. In a sandbox that only lets it read that cache, every git call does."""
+    try:
+        done = subprocess.run(["/usr/bin/xcrun", "--find", "git"], env={}, stdin=subprocess.DEVNULL,
+                              capture_output=True, timeout=60)
+    except (OSError, subprocess.SubprocessError):
+        return config.GIT_BIN
+    path = done.stdout.decode("utf-8", "replace").strip()
+    found = done.returncode == 0 and path.startswith("/") and os.path.isfile(path) and os.access(path, os.X_OK)
+    return path if found else config.GIT_BIN
+
+
 class FleetCase(unittest.TestCase):
     # The desks granted many tasks at setUp. A test of a single-task desk passes a smaller set.
     many_task_desks = MANY_TASK_DESKS
@@ -200,6 +217,10 @@ class FleetCase(unittest.TestCase):
         temp = mock.patch.object(run_desk, "user_temp_dir", return_value=str(user_temp))
         temp.start()
         self.addCleanup(temp.stop)
+        # git runs as the binary the shim would run, so no git call pays xcrun's lookup for this test's own HOME.
+        git = mock.patch.object(config, "GIT_BIN", real_git())
+        git.start()
+        self.addCleanup(git.stop)
         # The cap day follows this Mac's time zone. Tests pin it to UTC unless they set their own.
         zone = mock.patch.object(capacity, "local_utc_offset", return_value=0)
         zone.start()

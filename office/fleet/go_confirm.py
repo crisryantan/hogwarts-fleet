@@ -52,6 +52,9 @@ INPUT_FIELDS = ("prompt", "prompt_id", "transcript_path", "session_id", "agent_t
 CLAIM_NAME = re.compile(r"[0-9a-f]{32}")
 TASK_ID = re.compile(r"tk_[0-9a-f]{16}")
 DIFFERENT = hook.DIFFERENT
+# The lines a summary keeps whole: a Fix line, and the worktree an interrupted go was making, which names what to
+# remove by hand. fitted cuts every other line first.
+KEPT_LINES = ("Fix:", "It was making the worktree ")
 
 
 def claim_key(prompt_id: str) -> str:
@@ -160,8 +163,8 @@ def interrupted_lines(kind: str, task_id: str, made: list = ()) -> list:
     left = [item for item in made if item["task_id"] == task_id]
     for item in left:
         lines.append(f"It was making the worktree {item['worktree']} on branch {item['branch']} in"
-                     f" {item['repo_dir']}: if castle task show finds no Harry task with this worktree, remove that"
-                     " worktree and branch by hand, then type the go again.")
+                     f" {item['repo_dir']}: if castle task show finds no Harry task with it, remove that worktree and"
+                     " branch by hand and type the go again.")
     if not left:
         lines.append("Type the go again if it is not registered.")
     return lines
@@ -265,16 +268,17 @@ def _read_input(raw: bytes) -> dict:
 
 
 def fitted(lines: list) -> str:
-    """The lines as one event summary within pensieve.SUMMARY_LIMIT. The first line is the reason, then the Fix lines,
-    then any manual steps. What does not fit is cut from the end of the manual steps first, and only then from the
-    reason (with an ellipsis), so a Fix line is never cut."""
+    """The lines as one event summary within pensieve.SUMMARY_LIMIT. The first line is the reason, then the kept lines
+    (KEPT_LINES: Fix lines, and the worktree an interrupted go was making), then any manual steps. What does not fit is
+    cut from the end of the manual steps first, and only then from the reason (with an ellipsis), so a kept line is
+    never cut while the kept lines fit with the first words of the reason."""
     limit = pensieve.SUMMARY_LIMIT
     whole = common.scrubbed_line(" ".join(lines), sys.maxsize)
     if len(whole) <= limit:
         return whole
-    fixes = common.scrubbed_line(" ".join(line for line in lines[1:] if line.startswith("Fix:")), sys.maxsize)
-    steps = [line for line in lines[1:] if not line.startswith("Fix:")]
-    if not fixes or len(fixes) > limit - 40:  # no Fix line, or one too long to keep whole: plain cut
+    fixes = common.scrubbed_line(" ".join(line for line in lines[1:] if line.startswith(KEPT_LINES)), sys.maxsize)
+    steps = [line for line in lines[1:] if not line.startswith(KEPT_LINES)]
+    if not fixes or len(fixes) > limit - 40:  # no kept line, or kept lines too long to keep whole: plain cut
         return common.scrubbed_line(" ".join(lines), limit)
     reason = common.scrubbed_line(lines[0], limit - len(fixes) - 1)
     head = f"{reason} {fixes}"

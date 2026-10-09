@@ -691,6 +691,8 @@ class SlotFolderTests(RunDeskCase):
                 self.assertEqual(plan["env"]["TMPDIR"], temps[index])
                 policy = next(item for item in argv if item.startswith("shell_environment_policy.set="))
                 self.assertIn(f'TMPDIR="{temps[index]}"', policy)
+                self.assertIn(f'TEST_TMP_ROOT="{temps[index]}"', policy)
+                self.assertIn(f'xcrun_db="{temps[index]}/xcrun_db"', policy)
         # The two profiles are the same but for the temp folder, so every deny is exactly as strict in both.
         self.assertEqual(tables[0].replace(temps[0], "TEMP"), tables[1].replace(temps[1], "TEMP"))
         self.assertIn(f'"{self.office}"="deny"', tables[1])

@@ -15,6 +15,8 @@ SUITE is tests or tests_fleet, and both run when none is named. --jobs is how ma
   A module's tests run together in one process as they do in a serial run, and no two modules share one.
 - Starts the slowest modules first, so the run ends soon after its slowest module does. The modules in
   SERIAL run one at a time after every other module has finished.
+- Without TEST_TMP_ROOT, first checks that it may make a folder in /private/tmp, where the tests make theirs, and
+  stops before any module when it may not (a sandbox that denies it), saying to set TEST_TMP_ROOT.
 - Prints the full output of every module that failed, then one line per suite, and exits 1 if any module
   failed, timed out, could not be started or printed no unittest summary, else 0. A module that ends
   without a summary counts as failed, never as passed with no tests.
@@ -31,6 +33,7 @@ import re
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -48,6 +51,11 @@ DISCOVER_PATTERN = "test*.py"
 # Where the tests make their temp folders, when the runner's own environment names one: a sandbox that denies the
 # default /private/tmp, such as fleet verify's, sets it to a folder it may write.
 TEMP_ROOT_ENV = "TEST_TMP_ROOT"
+# Where the tests make their temp folders without one (tests/support.py).
+SHARED_TEMP_ROOT = "/private/tmp"
+NO_TEMP_ROOT = (f"run_suites.py: this process may not make a folder in {SHARED_TEMP_ROOT}, where the tests make their temp"
+                f" folders, so every module would fail; set {TEMP_ROOT_ENV} to an absolute folder it may write, and"
+                " each module gets TMPDIR and xcrun's cache inside it too\n")
 MODULE_FILE = re.compile(r"test[A-Za-z0-9_]*\.py")
 # A module still running after this long is killed with everything it started, and counts as failed.
 MODULE_TIMEOUT_SECONDS = 600
@@ -193,6 +201,15 @@ def temp_root() -> Optional[str]:
     """TEST_TMP_ROOT from this runner's environment when it names an absolute folder, else None."""
     value = os.environ.get("TEST_TMP_ROOT")  # the kit's one allowed environment read (tests/test_security.py)
     return value if value and os.path.isabs(value) and os.path.isdir(value) and "=" not in value else None
+
+
+def shared_temp_usable(root: str = SHARED_TEMP_ROOT) -> bool:
+    """Whether a folder can be made, and removed, in root."""
+    try:
+        os.rmdir(tempfile.mkdtemp(prefix="hogwarts-test-", dir=root))
+    except OSError:
+        return False
+    return True
 
 
 # running
@@ -390,7 +407,11 @@ def main(argv: Optional[list] = None, out=None, office: Path = OFFICE,
     except RunnerError as error:
         out.write(f"run_suites.py: {error}\n")
         return 1
-    children = Children(office, temp_root=temp_root())
+    root = temp_root()
+    if root is None and not shared_temp_usable():
+        out.write(NO_TEMP_ROOT)
+        return 1
+    children = Children(office, temp_root=root)
     out.write(f"Running {len(modules)} test modules from {' and '.join(args.suites)}, {args.jobs} at a time.\n")
     out.flush()
     started = time.monotonic()

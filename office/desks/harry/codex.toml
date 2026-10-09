@@ -16,7 +16,8 @@
 #   - ~/hogwarts/desks/harry and ~/hogwarts/tasks, read
 #   - its own outbox, write (inside the readable desk folder; write beats read)
 #   - the repo's .git folder from the office worktree record, read
-#   - its own temp folder, <user temp>/hogwarts-harry, write, emptied before each run and set as TMPDIR
+#   - its own temp folder, <user temp>/hogwarts-harry, write, emptied before each run and set as TMPDIR and
+#     TEST_TMP_ROOT, with xcrun's cache (xcrun_db) inside it
 #   - xcrun's lookup cache, <user temp>/xcrun_db, read, so /usr/bin shims resolve quietly
 #   - /private/tmp, denied: it holds other sessions' files, and Codex's ":minimal" set would make it writable
 #   - ~/.hogwarts, denied by name; network off
