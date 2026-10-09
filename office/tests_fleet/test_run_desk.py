@@ -780,10 +780,14 @@ class RealRunTests(RunDeskCase):
         owl_id, _ = self.request("ron")
         for index in range(config.DAILY_RUN_CAP["ron"]):
             pensieve.add_metric(self.conn, "ron", f"run-{index}", "haiku", 1, 1, 0, 0.0, 10)
+        (self.office / "runs" / "ron").mkdir(parents=True, mode=0o700, exist_ok=True)
+        self.write_file(self.office / "runs" / "ron" / "run.brief", "a brief a killed run left")
         code, _, err, started = self.real_run("ron", owl_id, 0)
         self.assertEqual(code, 1)
         self.assertIn("daily run cap", err)
         started.assert_not_called()
+        # Holding the slot its process held, even a refused run removes the brief a killed run left there.
+        self.assertFalse((self.office / "runs" / "ron" / "run.brief").exists())
         self.assertEqual(len(self.events_of("rundesk.cap")), 1)
         self.assertEqual(self.events_of("rundesk.failed"), [])
 

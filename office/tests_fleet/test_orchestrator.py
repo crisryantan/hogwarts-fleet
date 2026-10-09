@@ -527,7 +527,7 @@ class TurnTests(OrchestratorCase):
         allowed = {"gitops": {"find_record", "rev"}, "push": {"auto_draft_pr_on", "push_draft_pr"},
                    "worktree": {"castle_path", "start_desk"},
                    "run_desk": {"Blocked", "Stopped", "check_report_launch", "launch_gate", "owl_report_argv",
-                                "ReportTurn", "run_report_turn", "spawn_review", "kill_report_turn", "task_lock",
+                                "ReportTurn", "brief_name", "drop_left_brief", "run_report_turn", "spawn_review", "kill_report_turn", "task_lock",
                                 "_detach"},
                    "owl_post": {"auto_review_running", "unfinished_afters", "handoff_problem", "_handoff_dir",
                                 "claim_handoff", "REVIEW_STARTED"}}
@@ -611,9 +611,13 @@ class SerialTests(OrchestratorCase):
         owl = self.land()
         with orchestrator._dir() as fd:
             markers.replace(fd, owl["id"], {**markers.read(fd, owl["id"]), "state": "woken"})
+        left = self.office / "runs" / "mcgonagall" / "orchestrator.brief"  # the killed turn's brief
+        left.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+        self.write_file(left, "a brief a killed turn left")
         self.assertEqual(self.run_once(), [])
         self.assertEqual(self.items()[owl["id"]]["outcome"], "interrupted")
         self.assertEqual(self.runs(), [])
+        self.assertFalse(left.exists())
 
     def test_a_stop_leaves_the_item_for_the_next_run_uncounted(self):
         owl = self.land()

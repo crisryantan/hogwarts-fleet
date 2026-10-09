@@ -2069,6 +2069,8 @@ def run(conn, desk: str, owl_id: str, mcp_job: Optional[str] = None, now: Option
         # First in the lock order: no review of a build desk's task runs from here until this run's process ends.
         task_fd = _hold_task_lock(held, early, task_lock_fd)
         slot = lock_held if lock_held is not None else held.enter_context(desk_lock(desk))
+        # A brief a killed run left in this slot goes now, whether or not this run gets to launch.
+        drop_left_brief(desk, brief_name("run", slot.index))
         # The process always inherits its slot, even from a caller that left the fd out of keep_fds.
         keep_fds = tuple(dict.fromkeys((*keep_fds, slot.fd, *(() if task_fd is None else (task_fd,)))))
         with launch_lock(desk):
@@ -2145,6 +2147,14 @@ def write_brief(dir_fd: int, name: str, brief: str) -> str:
 def drop_brief(dir_fd: int, name: str) -> None:
     with contextlib.suppress(FileNotFoundError):
         os.unlink(name, dir_fd=dir_fd)
+
+
+def drop_left_brief(desk: str, name: str) -> None:
+    """Remove a brief file a killed run left in runs/<desk>. Called only by a holder of the lock its run's process
+    inherited (its run slot, or its caller's reporter lock), so that process has ended. Never raises."""
+    with contextlib.suppress(FleetError, OSError):
+        with safefs.opened_dir(config.OFFICE_ROOT, "runs", desk) as run_fd:
+            drop_brief(run_fd, name)
 
 
 def feed_stdin(child: subprocess.Popen, data: bytes, timeout: Optional[float] = None) -> None:

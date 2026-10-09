@@ -178,6 +178,9 @@ class HappyPathTests(OwlReportCase):
     def test_a_brief_a_killed_reporter_left_is_replaced_and_removed(self):
         (self.office / "runs" / "mcgonagall").mkdir(parents=True, mode=0o700, exist_ok=True)
         self.write_file(self.office / "runs" / "mcgonagall" / "owl-report.brief", "stale brief")
+        owl_report.run(self.conn)  # nothing to report: the leftover goes all the same
+        self.assertFalse((self.office / "runs" / "mcgonagall" / "owl-report.brief").exists())
+        self.write_file(self.office / "runs" / "mcgonagall" / "owl-report.brief", "stale brief")
         self.send()
         owl_report.run(self.conn)
         [run] = self.runs()

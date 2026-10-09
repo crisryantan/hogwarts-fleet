@@ -777,6 +777,7 @@ def run(conn, now: Optional[int] = None) -> list:
         except safefs.Busy:
             return ["another run is going"]
         _clear_all()  # folders a killed run left
+        run_desk.drop_left_brief(config.HOOK_DESK, run_desk.brief_name("orchestrator"))  # and its turn's brief
         fd = held.enter_context(_dir(create=True))
         _recover(conn, fd, now)
         _prune(fd, now)

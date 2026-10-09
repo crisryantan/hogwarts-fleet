@@ -478,6 +478,7 @@ def run(conn) -> list:
         except safefs.Busy:
             return ["another reporter is running"]
         _clear_all()  # folders a killed run left
+        run_desk.drop_left_brief(config.HOOK_DESK, run_desk.brief_name("owl-report"))  # and its turn's brief
         fd = held.enter_context(_dir(create=True))
         _alert(conn, fd)
         for owl_id, marker in sorted(_markers(fd).items()):
