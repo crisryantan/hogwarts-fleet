@@ -411,7 +411,7 @@ class StdinTests(RunDeskCase):
         self.enable(desk)
         owl_id, _ = self.request(desk)
         if stale:  # a brief a killed run left in slot 0
-            self.runs_dir(desk).mkdir(mode=0o700, exist_ok=True)
+            self.runs_dir(desk).mkdir(parents=True, mode=0o700, exist_ok=True)
             self.write_file(self.runs_dir(desk) / "run.brief", "stale brief")
         seen = {}
 
