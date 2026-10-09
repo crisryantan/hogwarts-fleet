@@ -338,3 +338,40 @@ class GoWatchTests(PhoneCase):
         self.on()
         self.loud(self.go, "go.refused")
         self.assertEqual(self.deliver(), ["sent"])
+
+    def test_go_watch_on_an_escalation_to_ryan_pings_once_through_its_go_update(self):
+        from hogwarts import owlery
+
+        from fleet import go_watch
+
+        self.on()
+        go_watch.watch(self.conn)
+        pensieve.start_task(self.conn, self.build, now=NOW)
+        request = pensieve.get_task(self.conn, self.build)["request_id"]
+        # The live sequence: Harry's handoff reaches McGonagall, then her orchestrator turn tells Ryan to rule on
+        # scope and records that it did. Each pass runs go updates before phone.deliver, as the orchestrator does.
+        self.count += 1
+        owlery.send(self.conn, "harry", "mcgonagall", "result", "handoff", body="COMMIT MESSAGE\nwidget\n",
+                    task_id=self.build, request_id=request, now=NOW + self.count)
+        self.loud(self.build, "owl.to-mcgonagall")
+        self.assertEqual(go_watch.watch(self.conn), ["sent"])
+        self.assertEqual(self.deliver(), [])
+        notify = self.loud(self.build, "orchestrator.notify")
+        self.count += 1
+        pensieve.add_event(self.conn, "mcgonagall", "orchestrator.action", "routine", "told Ryan", task_id=self.build,
+                           dedupe_key=f"test:{self.count}", now=NOW + self.count)
+        self.assertEqual(go_watch.watch(self.conn), ["sent"])
+        self.assertEqual(self.deliver(), [])
+        self.assertEqual(self.marker(notify), {"state": "covered", "via": "go-watch"})
+        self.assertEqual(self.notified.call_count, 2)  # handed off, then the escalation's one ping
+        self.assertTrue(self.notified.call_args[0][0].endswith(go_watch.STATES["owner"][1]))
+        # Two escalations before one pass: the line is the newer one's, so the older one pings itself.
+        first, second = self.loud(self.build, "orchestrator.notify"), self.loud(self.go, "orchestrator.notify")
+        self.assertEqual(go_watch.watch(self.conn), ["sent"])
+        self.assertEqual(self.deliver(), ["sent"])
+        self.assertEqual((self.marker(first)["state"], self.marker(second)["state"]), ("sent", "covered"))
+        # An escalation whose line has not gone (a busy watcher, or no pass yet) pings itself, never dropped.
+        third = self.loud(self.build, "orchestrator.notify")
+        self.assertEqual(self.deliver(), ["sent"])
+        self.assertEqual(self.marker(third)["state"], "sent")
+        self.assertEqual(self.notified.call_count, 5)

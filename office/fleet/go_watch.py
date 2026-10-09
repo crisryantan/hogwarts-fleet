@@ -7,11 +7,14 @@ changes what any run may do.
   from store fields: its newest build, the state from the fixed table below (task status, the build's PR binding and
   proven close, its live review round and that round's verdict, the newest result owl from its desk, Ollivander's held
   runs, and the loud events a state stands for), the round and verdict that state is about, and the id of the event
-  a state is made of (a go refusal, a tooling block, a refused round). The one state read from a file is verify's:
-  once the build's newest office evidence (reviews/<build>/evidence-<sha>.md, which no desk can write) ran at or
-  after the handoff its round is for, the key holds the counts of that evidence's structured head (its RAN, SUMMARY
-  and STOPPED lines, each exactly once), never its free text. No timestamp or wording is in the key, so a cosmetic
-  change never pings.
+  a state is made of (a go refusal, a tooling block, a refused round, McGonagall's escalation to Ryan). An
+  escalation (orchestrator.notify) on the go task or its build after the newest handoff, round, verdict and PR is a
+  waiting on you state, each its own key, so each one pings once. Two states are read from files. Verify's: once the
+  build's newest office evidence (reviews/<build>/evidence-<sha>.md, which no desk can write) ran at or after the
+  handoff its round is for, the key holds the counts of that evidence's structured head (its RAN, SUMMARY and
+  STOPPED lines, each exactly once), never its free text. And a handoff with no round yet says review running only
+  while the review loop holds it (the Owl Post's auto-<owl>.pending record in that folder, with no .done); else it
+  is handed off with no review started. No timestamp or wording is in the key, so a cosmetic change never pings.
 - Kept: the last key sent for each go task, in one state file in the office folder GO_WATCH_DIR, read and written
   whole under its own lock. A pass compares the current keys with it: a go task whose key changed gets one line, one
   that left the open set gets one final line and its entry goes. A pass with no change sends and writes nothing. A
@@ -37,9 +40,12 @@ changes what any run may do.
   running, and past that ask it to run once more when it lets go (AGAIN), so their change goes out within about a
   minute; both run detached from Ryan's prompt.
 - No double ping: phone.deliver skips a loud event whose kind a state here stands for (COVERS) when it is on a go
-  task this file keeps, or its build, that go task stands in that state now, and that state's own line was sent
-  (watching, covers). Every other loud event, of these tasks or any other, pings as before, and so does every
-  one while the kept state or the store cannot be read, and every one of a go task past its end that moved on.
+  task this file keeps, or its build, that go task stands in that state now, that state's own line was sent, and a
+  state made of an event is made of this one (watching, covers). Every other loud event, of these tasks or any
+  other, pings as before, and so does every one while the kept state or the store cannot be read, and every one of
+  a go task past its end that moved on. Every caller runs a pass before phone.deliver, so an escalation's line goes
+  first and its loud event is marked covered; one whose line did not go (a busy watcher, a batch, a failed send)
+  pings itself, so it is never dropped.
 """
 from __future__ import annotations
 
@@ -80,6 +86,8 @@ STATES = {
     "confirmed": ("go confirmed, build started", "Nothing for you."),
     "refused": ("go refused", "Fix the TASK.md as the refusal says, then send the go again."),
     "handoff": ("Harry handed off, review running", "Nothing for you."),
+    "handed-off": ("Harry handed off, no review started yet", "Nothing for you yet; ask McGonagall if none starts."),
+    "owner": ("McGonagall asked you a question", "Waiting on you: answer McGonagall's question in her session."),
     "verify": ("verify ran {ran} of {total} checks, {passed} passed, {malformed} malformed", "Nothing for you."),
     "changes": ("review CHANGES, fix round started", "Nothing for you."),
     "pass": ("review PASS", "Nothing for you; the draft PR opens next if auto-draft-pr is on, otherwise push it"
@@ -94,11 +102,14 @@ STATES = {
     "closed": ("closed", "Nothing for you."),
 }
 # The loud events a state above stands for, and that state. phone.deliver leaves one to go updates while its go task
-# stands in that state; any other loud kind (a review that stopped, a failed push, the orchestrator, Ollivander's
-# stop) still pings itself.
+# stands in that state; any other loud kind (a review that stopped, a failed push, the orchestrator's other events,
+# Ollivander's stop) still pings itself.
 COVERS = {"go.refused": "refused", "review.headmaster": "headmaster", "review.round-cap": "round-cap",
           "review.loop-stopped": "round-cap", "review.blocked-on-tooling": "tooling", "review.ready-for-push": "pass",
-          "push.draft-pr": "draft-pr"}
+          "push.draft-pr": "draft-pr", "orchestrator.notify": "owner"}
+# The events that stop a build's review where it stands until the next handoff, and McGonagall's escalation to Ryan.
+STOPS = ("review.blocked-on-tooling", "review.round-cap", "review.loop-stopped")
+ASKS = ("orchestrator.notify",)
 # A go task's end: once its kept state is one of these, nothing more is sent for it (see the module notes).
 ENDS = ("pass", "draft-pr", "merged", "headmaster", "round-cap", "closed")
 
@@ -110,11 +121,12 @@ def on() -> bool:
 # Where each go task stands
 
 
-def _newest(conn, task_id: str, kinds: tuple) -> Optional[dict]:
-    """The newest loud event of these kinds on the task, or None."""
-    marks = ", ".join("?" for _ in kinds)
-    return db.fetch_one(conn, f"SELECT id, ts, kind FROM events WHERE task_id = ? AND verdict = 'headmaster'"
-                              f" AND kind IN ({marks}) ORDER BY id DESC LIMIT 1", (task_id, *kinds))
+def _newest(conn, task_ids: tuple, kinds: tuple) -> Optional[dict]:
+    """The newest loud event of these kinds on any of these tasks, or None."""
+    on_tasks, of_kinds = (", ".join("?" for _ in values) for values in (task_ids, kinds))
+    return db.fetch_one(conn, f"SELECT id, ts, kind FROM events WHERE task_id IN ({on_tasks})"
+                              f" AND verdict = 'headmaster' AND kind IN ({of_kinds}) ORDER BY id DESC LIMIT 1",
+                        (*task_ids, *kinds))
 
 
 def _key(build: Optional[str], state: str, round_no: int = 0, verdict: Optional[str] = None,
@@ -178,8 +190,20 @@ def _link(pr: Optional[dict]) -> Optional[str]:
     return url if isinstance(url, str) and phone.PR_LINK.fullmatch(url) else None
 
 
-def _build_state(conn, build: dict, held: set) -> tuple:
-    """(key, PR link) for a go task's newest build, from its store rows alone."""
+def _review_queued(build_id: str, owl_id: str) -> bool:
+    """Whether the review loop took this handoff and is not finished with it: the Owl Post's auto-<owl>.pending record
+    (owl_post.HANDOFF_RECORD) in the build's office reviews folder, which no desk can write, with no .done beside it.
+    Raises when that folder cannot be read."""
+    try:
+        with safefs.opened_dir(config.OFFICE_ROOT, "reviews", build_id) as fd:
+            pending, done = (safefs.lstat(fd, f"auto-{owl_id}.{end}") for end in ("pending", "done"))
+    except safefs.Missing:
+        return False
+    return pending is not None and stat.S_ISREG(pending.st_mode) and done is None
+
+
+def _build_state(conn, go_id: str, build: dict, held: set) -> tuple:
+    """(key, PR link) for a go task's newest build, from its store rows and the review loop's handoff records."""
     build_id = build["id"]
     pr = followups.pr_for_task(conn, build_id)
     if pensieve.task_closure(conn, build_id) is not None:
@@ -191,17 +215,28 @@ def _build_state(conn, build: dict, held: set) -> tuple:
     live = [row for row in capacity.review_rounds(conn, build_id) if row["superseded_by"] is None]
     latest = live[-1] if live else None
     round_no, round_at = (latest["round"], latest["created_at"]) if latest else (0, 0)
-    handoff = db.fetch_one(conn, "SELECT COALESCE(MAX(created_at), 0) AS at FROM owls WHERE task_id = ? AND sender = ?"
-                                 " AND kind = 'result'", (build_id, build["desk"]))["at"]
+    newest = db.fetch_one(conn, "SELECT id, created_at FROM owls WHERE task_id = ? AND sender = ? AND kind = 'result'"
+                                " ORDER BY created_at DESC, rowid DESC LIMIT 1", (build_id, build["desk"]))
+    handoff = 0 if newest is None else newest["created_at"]
     since = max(round_at, handoff)
-    # The newer of a tooling block and a refused or stopped round, by event id, after the newest handoff and round is
-    # where it stands until the next handoff.
-    stop = _newest(conn, build_id, ("review.blocked-on-tooling", "review.round-cap", "review.loop-stopped"))
-    if stop is not None and stop["ts"] >= since:
-        return _key(build_id, COVERS[stop["kind"]], round_no, event=stop), None
+    verdict_at = db.fetch_one(conn, "SELECT created_at FROM review_passes WHERE id = ?",
+                              (latest["review_id"],))["created_at"] if latest and latest["has_verdict"] else 0
+    # The newest, by event id, of a tooling block or a refused or stopped round after the newest handoff and round,
+    # and McGonagall's escalation to Ryan on the go task or the build after those, the build's start, its round's
+    # verdict and its PR, is where it stands until the next of them.
+    stop, ask = _newest(conn, (build_id,), STOPS), _newest(conn, (go_id, build_id), ASKS)
+    moved = max(since, int(build["created_at"]), verdict_at, pr["opened_at"] if pr is not None else 0)
+    found = [event for event, floor in ((stop, since), (ask, moved)) if event is not None and event["ts"] >= floor]
+    if found:
+        event = max(found, key=lambda row: row["id"])
+        return _key(build_id, COVERS[event["kind"]], round_no, event=event), None
     if handoff > round_at:  # the round this handoff opens next, once verify has run for it
         checks = _verified(build_id, handoff)
-        return _key(build_id, "handoff" if checks is None else "verify", round_no + 1, checks=checks), None
+        if checks is not None:
+            return _key(build_id, "verify", round_no + 1, checks=checks), None
+        # Review running only once the review loop has this handoff; else nothing has picked it up yet.
+        queued = _review_queued(build_id, newest["id"])
+        return _key(build_id, "handoff" if queued else "handed-off", round_no + 1), None
     if latest is None:
         return _key(build_id, "confirmed"), None
     if pr is not None and pr["opened_at"] >= round_at:
@@ -222,15 +257,18 @@ def _build_state(conn, build: dict, held: set) -> tuple:
 
 
 def _go_state(conn, item: dict) -> tuple:
-    """(key, PR link) for one open go task: its newest build's state, or its go's refusal when that is newer."""
+    """(key, PR link) for one open go task: its newest build's state, or its go's refusal when that is newer, or
+    McGonagall's escalation to Ryan when that is newer still."""
     go = item["task"]
     builds = [child for child in item["children"] if child["desk"] in config.WORKTREE_DESKS]
-    refusal = _newest(conn, go["id"], ("go.refused",))
-    if not builds:
-        return (_key(None, "refused", event=refusal) if refusal is not None else _key(None, "confirmed")), None
+    refusal = _newest(conn, (go["id"],), ("go.refused",))
+    if not builds:  # the newer of its refusal and McGonagall's escalation, else confirmed
+        event = _newest(conn, (go["id"],), ("go.refused", *ASKS))
+        return (_key(None, COVERS[event["kind"]], event=event) if event is not None else _key(None, "confirmed")), None
     build = builds[-1]
-    key, link = _build_state(conn, build, item["held"])
-    if refusal is not None and key["state"] != "merged" and refusal["ts"] >= _latest_at(conn, build):
+    key, link = _build_state(conn, go["id"], build, item["held"])
+    if refusal is not None and key["state"] != "merged" and refusal["ts"] >= _latest_at(conn, build) \
+            and not (key["state"] == "owner" and key["event"] > refusal["id"]):
         return _key(build["id"], "refused", event=refusal), None
     return key, link
 
@@ -532,10 +570,11 @@ def _open_log(dir_fd: int, name: str) -> int:
 
 
 def watching(conn) -> dict:
-    """{task id: the state its go task stands in now} for each go task the kept state names and its build, only where
-    that state's own line was sent (its marker says sent, not batched, sending or undelivered). Empty while the switch
-    is off, before the first pass, or when anything cannot be read whole: then phone.deliver pings everything as
-    before. A loud event that lands before its line is sent pings too. Never raises."""
+    """{task id: (the state its go task stands in now, the id of the event that state is made of or None)} for each go
+    task the kept state names and its build, only where that state's own line was sent (its marker says sent, not
+    batched, sending or undelivered). Empty while the switch is off, before the first pass, or when anything cannot
+    be read whole: then phone.deliver pings everything as before. A loud event that lands before its line is sent
+    pings too. Never raises."""
     try:
         if not on():
             return {}
@@ -552,7 +591,7 @@ def watching(conn) -> dict:
                     continue  # no line of its own reached Ryan yet for where it stands now
                 for task_id in (go_id, key["build"], kept["tasks"][go_id]["build"]):
                     if task_id is not None:
-                        states[task_id] = key["state"]
+                        states[task_id] = (key["state"], key["event"])
             return states
     except Exception:  # noqa: BLE001 - a go update that cannot be read never holds back a loud event
         return {}
@@ -560,7 +599,9 @@ def watching(conn) -> dict:
 
 def covers(event: dict, states: dict) -> bool:
     """Whether a go update stands for this loud event, so phone.deliver does not ping it too: its task's go task stands
-    now in the state the event's kind tells, and that line was sent. An event its go task has moved on from, or whose
-    line was not sent, pings as before."""
-    state = COVERS.get(event["kind"])
-    return state is not None and states.get(event["task_id"]) == state
+    now in the state the event's kind tells, that line was sent, and when that state is made of an event (a refusal,
+    a stop, an escalation to Ryan), it is this one. An event its go task has moved on from, an older one of the same
+    kind, or one whose line was not sent, pings as before."""
+    state, standing = COVERS.get(event["kind"]), states.get(event["task_id"])
+    return state is not None and standing is not None and standing[0] == state \
+        and standing[1] in (None, int(event["id"]))

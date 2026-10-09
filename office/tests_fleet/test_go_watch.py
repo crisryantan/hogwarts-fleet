@@ -13,7 +13,7 @@ from unittest import mock
 from hogwarts import capacity, followups, ids, owlery, pensieve
 from tests.support import NOW
 
-from fleet import common, config, go_watch, markers, phone, safefs, stops, verify
+from fleet import common, config, go_watch, markers, owl_post, phone, safefs, stops, verify
 from fleet.safefs import FleetError
 from tests_fleet.support import FleetCase
 
@@ -48,10 +48,14 @@ class GoWatchCase(FleetCase):
         task = pensieve.start_task(self.conn, opened["task"]["id"], now=self.clock)
         return {**task, "request": opened["request"]["id"], "owl": opened["owl"]["id"]}
 
-    def handoff(self, build: dict, body: str = "COMMIT MESSAGE\nwidget\n") -> None:
+    def handoff(self, build: dict, body: str = "COMMIT MESSAGE\nwidget\n", queued: bool = True) -> str:
+        """Harry's handoff, which the Owl Post hands to the review loop as it delivers it unless queued is False."""
         at = self.tick()
-        owlery.send(self.conn, "harry", "mcgonagall", "result", f"{build['id']} handoff at {at}", body=body,
-                    task_id=build["id"], request_id=build["request"], now=at)
+        owl = owlery.send(self.conn, "harry", "mcgonagall", "result", f"{build['id']} handoff at {at}", body=body,
+                          task_id=build["id"], request_id=build["request"], now=at)
+        if queued:
+            owl_post.claim_handoff(build["id"], owl["id"])
+        return owl["id"]
 
     def round(self, build: dict, sha: str, verdict: str = None) -> dict:
         pensieve.record_commit(self.conn, build["id"], REPO, sha, now=self.tick())
@@ -83,8 +87,8 @@ class GoWatchCase(FleetCase):
     def log(self):
         return self.office / "logs" / config.GO_UPDATES_LOG
 
-    def event(self, task_id: str, kind: str, summary: str = "something needs you") -> int:
-        return pensieve.add_event(self.conn, "mcgonagall", kind, "headmaster", summary, task_id=task_id,
+    def event(self, task_id: str, kind: str, summary: str = "something needs you", verdict: str = "headmaster") -> int:
+        return pensieve.add_event(self.conn, "mcgonagall", kind, verdict, summary, task_id=task_id,
                                   now=self.tick())["id"]
 
     def switch(self, value: str = "on") -> None:
@@ -281,11 +285,98 @@ class TableTests(GoWatchCase):
         self.expect("held", build)
 
     def test_table_every_state_has_its_fixed_action(self):
-        self.assertEqual(set(go_watch.STATES), {"confirmed", "refused", "handoff", "verify", "changes", "pass",
-                                                "headmaster", "tooling", "round-cap", "held", "draft-pr", "merged",
-                                                "closed"})
+        self.assertEqual(set(go_watch.STATES), {"confirmed", "refused", "handoff", "handed-off", "verify", "changes",
+                                                "pass", "headmaster", "tooling", "round-cap", "held", "draft-pr",
+                                                "merged", "closed", "owner"})
         self.assertEqual(go_watch.STATES["headmaster"][1], "Decide: read the review and tell McGonagall.")
         self.assertEqual(go_watch.STATES["held"][1], "Run castle ollivander clear once the CLI works.")
+        self.assertEqual(go_watch.STATES["owner"][1], "Waiting on you: answer McGonagall's question in her session.")
+
+    def test_table_a_handoff_says_review_running_only_once_the_review_loop_has_it(self):
+        build = self.build()
+        self.expect("confirmed", build)
+        owl = self.handoff(build, queued=False)
+        self.expect("handed-off", build)
+        owl_post.claim_handoff(build["id"], owl)  # the Owl Post hands it to the review loop
+        self.expect("handoff", build)
+        # The review loop finished with it and opened no round: nothing is running for it now. That line went
+        # already, so it is not sent twice.
+        owl_post.finish_handoff(build["id"], owl, "the review could not start")
+        self.assertEqual(self.watch(), [])
+        self.assertEqual(self.kept()["tasks"][self.go]["state"], "handed-off")
+
+    def replay(self, build: dict, watch_between: bool) -> list:
+        """The live sequence: Harry's handoff reaches McGonagall (owl.to-mcgonagall), then her orchestrator turn tells
+        Ryan to rule on scope (orchestrator.notify) and records that it did (orchestrator.action), with no review
+        round and no review loop record for that handoff."""
+        before = len(self.lines())
+        self.handoff(build, queued=False)
+        self.event(build["id"], "owl.to-mcgonagall", f"owl from harry to mcgonagall on {build['id']}: handoff: round 1"
+                                                     " handed off")
+        if watch_between:
+            self.watch()
+        notify = self.event(build["id"], "orchestrator.notify", f"McGonagall on {build['id']}: Please rule on scope:"
+                                                               f" allow that test to change. {SECRET}")
+        self.event(build["id"], "orchestrator.action", f"McGonagall chose notify_owner for {build['id']}: told Ryan",
+                   verdict="routine")
+        self.assertEqual(self.watch(), ["sent"])
+        self.assertEqual(self.kept()["tasks"][self.go]["event"], notify)
+        return self.lines()[before:]
+
+    def test_table_an_escalation_to_ryan_after_a_handoff_waits_on_him(self):
+        build = self.build()
+        self.expect("confirmed", build)
+        lines = self.replay(build, watch_between=True)
+        owner = self.sent(self.go, build["id"], "owner")
+        self.assertEqual(lines, [self.sent(self.go, build["id"], "handed-off"), owner])
+        self.assertTrue(owner.endswith("Waiting on you: answer McGonagall's question in her session."))
+        for line in lines:
+            self.assertNotIn("review running", line)
+            self.assertNotIn("rule on scope", line)
+            self.assertNotIn(SECRET, line)
+        self.quiet()  # one ping for the escalation
+        # Both in one pass: only the escalation goes.
+        other = self.go_task(1)
+        built = self.build(other)
+        self.expect("confirmed", built, go_id=other)
+        before = len(self.lines())
+        self.handoff(built, queued=False)
+        self.event(built["id"], "owl.to-mcgonagall")
+        self.event(built["id"], "orchestrator.notify")
+        self.event(built["id"], "orchestrator.action", verdict="routine")
+        self.assertEqual(self.watch(), ["sent"])
+        self.assertEqual(self.lines()[before:], [self.sent(other, built["id"], "owner")])
+
+    def test_table_each_escalation_is_its_own_change_until_the_build_moves_on(self):
+        build = self.build()
+        self.handoff(build)
+        self.expect("handoff", build)
+        first = self.event(build["id"], "orchestrator.notify")
+        self.expect("owner", build)
+        self.quiet()
+        second = self.event(self.go, "orchestrator.notify")  # on the go task itself
+        self.expect("owner", build)
+        self.assertEqual(self.kept()["tasks"][self.go]["event"], second)
+        self.assertGreater(second, first)
+        self.event(build["id"], "review.blocked-on-tooling")  # newer than the escalation, so it stands
+        self.expect("tooling", build)
+        self.event(build["id"], "orchestrator.notify")
+        self.expect("owner", build)
+        self.round(build, SHAS[0], "CHANGES")  # a round and its verdict after it move it on
+        self.expect("changes", build)
+        # With no build yet, and against a refusal, the newer one stands.
+        other = self.go_task(1)
+        self.expect("confirmed", go_id=other)
+        self.event(other, "go.refused")
+        self.expect("refused", go_id=other)
+        self.event(other, "orchestrator.notify")
+        self.expect("owner", go_id=other)
+        built = self.build(other)  # a build started after it: answered
+        self.expect("confirmed", built, go_id=other)
+        self.event(other, "go.refused")
+        self.expect("refused", built, go_id=other)
+        self.event(other, "orchestrator.notify")
+        self.expect("owner", built, go_id=other)
 
 
 class OnceTests(GoWatchCase):
@@ -760,7 +851,8 @@ class EndTests(GoWatchCase):
         build = self.build_row
         self.round(build, SHAS[0], "HEADMASTER")
         self.expect("headmaster", build)
-        self.assertEqual(go_watch.watching(self.conn), {self.go: "headmaster", build["id"]: "headmaster"})
+        self.assertEqual(go_watch.watching(self.conn), {self.go: ("headmaster", None),
+                                                        build["id"]: ("headmaster", None)})
         self.handoff(build)
         self.quiet()
         self.assertEqual(go_watch.watching(self.conn), {})  # moved on with no line, so phone.deliver pings its events
