@@ -17,7 +17,9 @@ changes what any run may do.
   is handed off with no review started. And a CHANGES round whose newest run since its verdict died without doing
   anything (run_desk.died_idle: the run's end record in the office runs folder, which no desk can write, and its
   recorded usage) says the fix round died: retrying while auto-orchestrate is on and fewer than
-  ORCHESTRATOR_DEAD_RUNS_IN_A_ROW of the build's newest runs in a row died that way, else waiting on you. No timestamp or wording is in the key, so a cosmetic change never pings.
+  ORCHESTRATOR_DEAD_RUNS_IN_A_ROW of the build's newest runs in a row died that way, else waiting on you. An end
+  record that cannot be read fails the pass, as unreadable evidence does. No timestamp or wording is in the key, so
+  a cosmetic change never pings.
 - Kept: the last key sent for each go task, in one state file in the office folder GO_WATCH_DIR, read and written
   whole under its own lock. A pass compares the current keys with it: a go task whose key changed gets one line, one
   that left the open set gets one final line and its entry goes. A pass with no change sends and writes nothing. A
@@ -264,7 +266,8 @@ def _build_state(conn, go_id: str, build: dict, held: set) -> tuple:
     if capacity.needs_allowance(conn, build_id, cap, followup_id=group):
         return _key(build_id, "round-cap", round_no, verdict), None
     after = [row for row in capacity.task_launches(conn, build_id) if row["launched_at"] >= verdict_at]
-    if after and run_desk.died_idle(after[-1]):
+    # Each read raises when a run's end record cannot be read, so no pass stands on a half read.
+    if after and run_desk.died_idle(conn, after[-1]):
         # Its newest fix round died without doing anything: McGonagall may start it again only while she is on and
         # under her bound of dead runs in a row; past that it waits on Ryan.
         retry = common.opt_in_on(config.ORCHESTRATOR_FILE) and group is None \

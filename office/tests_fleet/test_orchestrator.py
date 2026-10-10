@@ -542,7 +542,7 @@ class TurnTests(OrchestratorCase):
                    "worktree": {"castle_path", "start_desk"},
                    "run_desk": {"Blocked", "Stopped", "check_report_launch", "launch_gate", "owl_report_argv",
                                 "ReportTurn", "brief_name", "drop_left_brief", "run_report_turn", "spawn_review", "kill_report_turn", "task_lock",
-                                "_detach", "died_idle", "dead_streak", "run_end"},
+                                "_detach", "auth_failed", "died_idle", "dead_streak", "run_end"},
                    "owl_post": {"auto_review_running", "unfinished_afters", "handoff_problem", "_handoff_dir",
                                 "claim_handoff", "REVIEW_STARTED"}}
         tree = ast.parse((OFFICE / "fleet" / "orchestrator.py").read_text())
@@ -849,6 +849,33 @@ class DeadRunTests(OrchestratorCase):
         context = self.runs()[-1]["context"]
         self.assertEqual([entry["action"] for entry in context["legal_actions"]], ["none", "ask_snape", "notify_owner"])
         self.assertEqual(context["item"]["dead_runs_in_a_row"], 2)
+
+    def test_a_run_that_could_not_sign_in_or_hit_a_plan_limit_is_ryans(self):
+        request_id = self.verdict("CHANGES")
+        run_id = f"run-{self.tick():016x}"
+        capacity.record_launch(self.conn, "harry", run_id, "gpt", task_id=self.task["id"], now=self.clock)
+        with safefs.opened_dir(config.OFFICE_ROOT, "runs", "harry", create=True) as fd:
+            run_desk._keep_end(fd, run_id, 1, "codex_plan")
+        capacity.record_launch_usage(self.conn, run_id, 0, 0, 0, 0.0, 1000, now=self.tick())
+        with self.assertRaisesRegex(orchestrator.Invalid, "fix round already started"):  # a plan limit is no dead run
+            orchestrator.check_legal(self.conn, self.route(request_id))
+        request_id = self.verdict("CHANGES")
+        self.launch(1)
+        orchestrator.check_legal(self.conn, self.route(request_id))
+        pensieve.add_event(self.conn, "harry", "failover.auth", "headmaster", "harry's CLI could not sign in",
+                           dedupe_key=f"failover:auth:harry:codex:{orchestrator._day(self.clock)}", now=self.clock)
+        with self.assertRaisesRegex(orchestrator.Invalid, "could not sign in or bill, so starting it again is Ryan's"):
+            orchestrator.check_legal(self.conn, self.route(request_id))
+
+    def test_an_end_record_that_cannot_be_read_blocks_and_never_cuts_the_streak(self):
+        request_id = self.verdict("CHANGES")
+        first = self.launch(-1)
+        self.launch(-1)
+        self.write_file(self.office / "runs" / "harry" / run_desk.end_name(first), "not json\n")
+        with self.assertRaisesRegex(orchestrator.Invalid, "how a run of the task ended cannot be read"):
+            orchestrator.check_legal(self.conn, self.route(request_id))
+        with self.assertRaises(safefs.Unsafe):
+            run_desk.dead_streak(self.conn, self.task["id"])
 
     def test_a_dead_run_wakes_her_only_under_the_caps(self):
         orchestrator.kick(self.conn, self.clock)  # the switch is first seen on now

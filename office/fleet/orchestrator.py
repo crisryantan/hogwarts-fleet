@@ -142,6 +142,7 @@ def land(conn, fd: int, now: Optional[int] = None) -> int:
     # read. One a later launch of the task followed is moot, so it never lands.
     launches = db.fetch_all(conn, "SELECT run_launches.run_id, run_launches.desk, run_launches.task_id,"
                                   " run_launches.metric_id, metrics.input_tokens, metrics.output_tokens,"
+                                  " metrics.ts AS ended_at,"
                                   " COALESCE(metrics.ts, run_launches.launched_at) AS created_at FROM run_launches"
                                   " JOIN tasks ON tasks.id = run_launches.task_id"
                                   " LEFT JOIN metrics ON metrics.id = run_launches.metric_id"
@@ -160,13 +161,21 @@ def land(conn, fd: int, now: Optional[int] = None) -> int:
     found += [(f"verdict-{ids.check('request', row['request_id'])}", "verdict", row["request_id"], row)
               for row in verdicts]
     found += [(f"dead-{row['run_id']}", "dead-run", row["run_id"], row) for row in launches
-              if RUN_ID.fullmatch(row["run_id"]) and run_desk.died_idle(row)]
+              if RUN_ID.fullmatch(row["run_id"]) and _died_idle(conn, row)]
     new = 0
     for name, kind, ref, row in found:
         if markers.publish(fd, name, {"state": "pending", "kind": kind, "task_id": row["task_id"], "ref": ref,
                                       "at": int(row["created_at"])}):
             new += 1
     return new
+
+
+def _died_idle(conn, launch: dict) -> bool:
+    """run_desk.died_idle, with a run whose end cannot be read yet left to land on a later pass."""
+    try:
+        return run_desk.died_idle(conn, launch)
+    except (FleetError, StoreError, OSError):
+        return False
 
 
 def skip_owl(owl_id: str, task_id: Optional[str], why: str, now: Optional[int] = None) -> None:
@@ -359,12 +368,19 @@ def _why_not_route(conn, action: dict) -> Optional[str]:
     if _loop_busy(task["id"]):
         return "the review loop is still acting on this task"
     since = _verdict_at(conn, latest["request_id"])
+    after = [row for row in capacity.task_launches(conn, task["id"]) if row["launched_at"] >= since]
     # A launch since the verdict that is still going, ended cleanly or did any work is a started round; one that died
-    # idle is not, so its round can start again.
-    if any(row["launched_at"] >= since and not run_desk.died_idle(row)
-           for row in capacity.task_launches(conn, task["id"])):
+    # idle is not, so its round can start again. One whose end cannot be read counts as started.
+    try:
+        dead = [run_desk.died_idle(conn, row) for row in after]
+        streak = run_desk.dead_streak(conn, task["id"])
+    except (FleetError, StoreError, OSError):
+        return "how a run of the task ended cannot be read"
+    if any(run_desk.auth_failed(conn, row) for row in after):
+        return "a run since that verdict could not sign in or bill, so starting it again is Ryan's"
+    if not all(dead):
         return "a fix round already started after that verdict"
-    if run_desk.dead_streak(conn, task["id"]) >= config.ORCHESTRATOR_DEAD_RUNS_IN_A_ROW:
+    if streak >= config.ORCHESTRATOR_DEAD_RUNS_IN_A_ROW:
         return (f"the task's last {config.ORCHESTRATOR_DEAD_RUNS_IN_A_ROW} runs died without doing anything, so"
                 " starting it again is Ryan's")
     newest = review.latest_result_owl(conn, task)
@@ -528,14 +544,14 @@ def context(conn, item: dict) -> dict:
             raise FleetError("the run is not in the store")
         try:
             end = run_desk.run_end(launch["desk"], launch["run_id"]) or {}
-        except (FleetError, OSError):
-            end = {}
+            streak = run_desk.dead_streak(conn, task_id)
+        except (FleetError, StoreError, OSError):
+            end, streak = {}, None
         code = end.get("exit_code")
         how = ("unknown" if not end else "never started" if code is None else "timed out" if code == -1
                else f"exit code {code}")
         data["item"] = {"kind": "dead-run", "run_id": launch["run_id"], "task_id": task_id, "desk": launch["desk"],
-                        "how": how,
-                        "dead_runs_in_a_row": run_desk.dead_streak(conn, task_id),
+                        "how": how, "dead_runs_in_a_row": streak,
                         "dead_runs_allowed": config.ORCHESTRATOR_DEAD_RUNS_IN_A_ROW}
     else:
         row = capacity.request_round(conn, item["ref"])

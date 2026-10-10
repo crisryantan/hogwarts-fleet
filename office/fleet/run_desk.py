@@ -2288,28 +2288,40 @@ def run_seen(desk: str, run_id: str) -> dict:
     return {"end": end, "output_at": output_at}
 
 
-def died_idle(launch: dict) -> bool:
+def auth_failed(conn, launch: dict) -> bool:
+    """Whether Ryan was told its desk's CLI could not sign in or bill (failover.auth, one event a day per desk and
+    family) on the cap day the launch's run ended. The office keeps no sign-in failure per run, so a run that failed
+    on such a day is taken as one, and starting it again stays his. Read only."""
+    ended = launch.get("ended_at")
+    if ended is None:
+        return False
+    day = capacity.day_bounds(int(ended), config.CAP_RESET_UTC_SECONDS)[0]
+    rows = db.fetch_all(conn, "SELECT dedupe_key FROM events WHERE kind = 'failover.auth' AND desk = ?",
+                        (launch["desk"],))
+    return any(isinstance(row["dedupe_key"], str) and row["dedupe_key"].endswith(f":{day}") for row in rows)
+
+
+def died_idle(conn, launch: dict) -> bool:
     """Whether a launch (capacity.task_launches) is a run that died without doing anything: its end record says it
     never started, or it timed out, was killed or exited non zero with its usage recorded and no input or output
-    tokens in it. A run with no end record (still going, as far as the office can tell), one whose end record cannot
-    be read, one that ended cleanly and one that did any work are not. Never raises."""
-    try:
-        end = run_end(launch["desk"], launch["run_id"])
-    except (FleetError, StoreError, OSError):
-        return False
-    if end is None or end["exit_code"] == 0:
+    tokens in it. A run with no end record (still going, as far as the office can tell), one that ended cleanly, hit
+    a plan limit, failed to sign in (auth_failed) or did any work is not. Read only; raises FleetError, OSError or
+    StoreError when its end record or the store cannot be read, so no caller takes that for either answer."""
+    end = run_end(launch["desk"], launch["run_id"])
+    if end is None or end["exit_code"] == 0 or end["cap_source"] is not None:
         return False
     if end["exit_code"] is None:
         return True
     return launch.get("metric_id") is not None and launch.get("input_tokens") == 0 \
-        and launch.get("output_tokens") == 0
+        and launch.get("output_tokens") == 0 and not auth_failed(conn, launch)
 
 
 def dead_streak(conn, task_id: str) -> int:
-    """How many of the task's newest launches in a row died without doing anything (died_idle). Read only."""
+    """How many of the task's newest launches in a row died without doing anything (died_idle). Read only; raises as
+    died_idle does, so an end record that cannot be read never cuts the streak short."""
     streak = 0
     for launch in reversed(capacity.task_launches(conn, task_id)):
-        if not died_idle(launch):
+        if not died_idle(conn, launch):
             break
         streak += 1
     return streak

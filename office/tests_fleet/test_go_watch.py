@@ -203,6 +203,86 @@ class TableTests(GoWatchCase):
         self.expect("handoff", build)
         self.round(build, SHAS[1], "PASS")
         self.expect("pass", build)
+        pensieve.set_worktree(self.conn, build["id"], f"{ids.WORKTREES_ROOT}/{build['id']}")
+        pensieve.mark_awaiting_close(self.conn, build["id"], now=self.tick())
+        followups.bind_pr(self.conn, build["id"], REPO, 7, "fix/b0", "main", SHAS[1], PR, now=self.tick())
+        with mock.patch.object(phone, "send", wraps=phone.send) as send:
+            self.expect("draft-pr", build, link=PR)
+        self.assertEqual(send.call_args[0][0]["pr_link"], PR)
+
+    def test_table_merged_and_closed_before_any_end(self):
+        build = self.build()
+        self.expect("confirmed", build)
+        with mock.patch.object(pensieve, "task_closure", return_value={"kind": "proven"}):
+            self.expect("merged", build)
+        other = self.go_task(1)
+        self.expect("confirmed", go_id=other)
+        pensieve.close_task(self.conn, other, "abandoned", now=self.tick())
+        self.expect("closed", go_id=other)
+        self.assertEqual(set(self.kept()["tasks"]), {self.go})
+        self.quiet()
+
+    def test_table_a_refused_go(self):
+        build = self.build()
+        self.expect("confirmed", build)
+        self.event(self.go, "go.refused", "the go is refused: its branch exists")
+        self.expect("refused", build)
+        other = self.go_task(1)
+        self.expect("confirmed", go_id=other)
+        self.event(other, "go.refused")
+        self.expect("refused", go_id=other)
+
+    def test_table_blocked_on_tooling(self):
+        build = self.build()
+        self.handoff(build)
+        self.round(build, SHAS[0])
+        self.watch()
+        self.event(build["id"], "review.blocked-on-tooling")
+        self.expect("tooling", build)
+        self.handoff(build)  # Harry's next handoff after the fix moves it on
+        self.expect("handoff", build)
+
+    def test_table_round_cap_hit(self):
+        build = self.build()
+        self.handoff(build)
+        self.watch()
+        with mock.patch.object(config, "REVIEW_ROUND_CAP", 1):
+            self.round(build, SHAS[0], "CHANGES")
+            self.expect("round-cap", build)
+        # A refused next round tells it as an event of its own.
+        other = self.go_task(1)
+        capped = self.build(other)
+        self.handoff(capped)
+        self.expect("handoff", capped, go_id=other)
+        self.event(capped["id"], "review.round-cap")
+        self.expect("round-cap", capped, go_id=other)
+
+    def test_table_a_build_closed_by_hand_while_its_go_task_stays_open(self):
+        build = self.build()
+        self.handoff(build)
+        self.expect("handoff", build)
+        pensieve.close_task(self.conn, build["id"], "abandoned", now=self.tick())
+        self.expect("closed", build)
+        pensieve.close_task(self.conn, self.go, "abandoned", now=self.tick())
+        self.quiet()  # closed was its end, so the go's own close drops it with no line
+        self.assertEqual(self.kept()["tasks"], {})
+
+    def test_table_the_newer_of_a_tooling_block_and_a_round_cap_wins(self):
+        build = self.build()
+        self.handoff(build)
+        self.round(build, SHAS[0])
+        self.watch()
+        tooling = self.event(build["id"], "review.blocked-on-tooling")
+        self.expect("tooling", build)
+        self.event(build["id"], "review.round-cap")
+        self.expect("round-cap", build)
+        self.assertGreater(self.kept()["tasks"][self.go]["event"], tooling)
+
+    def test_table_ollivander_stop_holding_a_build(self):
+        build = self.build()
+        self.watch()
+        self.assertTrue(stops.hold("harry", build["owl"], build["id"]))
+        self.expect("held", build)
 
     def launch(self, build: dict) -> str:
         """A run of Harry on the build, still going."""
@@ -236,6 +316,20 @@ class TableTests(GoWatchCase):
         self.expect("fix-dead", build)
         self.assertEqual(go_watch.STATES["fix-dead"][1], "Waiting on you: read Harry's run log, then run fleet build"
                                                          " for this build.")
+
+    def test_table_an_unreadable_end_record_sends_nothing(self):
+        self.write_file(self.office / config.ORCHESTRATOR_FILE, "on\n")
+        build = self.build()
+        self.expect("confirmed", build)
+        self.round(build, SHAS[0], "CHANGES")
+        self.expect("changes", build)
+        run_id = self.launch(build)
+        with safefs.opened_dir(config.OFFICE_ROOT, "runs", "harry", create=True) as fd:
+            safefs.write_new(fd, run_desk.end_name(run_id), b"not json\n")
+        before = len(self.lines())
+        with self.assertRaises(FleetError):
+            self.watch()
+        self.assertEqual((len(self.lines()), self.kept()["tasks"][self.go]["state"]), (before, "changes"))
 
     def test_table_a_fix_round_that_died_with_the_orchestrator_off_waits_on_ryan(self):
         build = self.build()
