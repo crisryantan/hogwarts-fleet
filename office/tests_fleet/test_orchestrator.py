@@ -37,6 +37,9 @@ def result(text, error=False, **extra):
 if mode == "auth":
     result("Invalid API key", error=True)
     sys.exit(1)
+if mode == "forbidden":
+    result("Request failed", error=True, api_error_status=403)
+    sys.exit(1)
 if mode == "fail":
     sys.exit(2)
 result(open(os.path.join(state, "answer")).read())
@@ -133,14 +136,14 @@ class OrchestratorCase(FleetCase):
                 if orchestrator.OWL_ITEM.fullmatch(path.name) or orchestrator.VERDICT_ITEM.fullmatch(path.name)
                 or orchestrator.DEAD_ITEM.fullmatch(path.name)}
 
-    def launch(self, exit_code=0, tokens=(0, 0), ended=True) -> str:
+    def launch(self, exit_code=0, tokens=(0, 0), ended=True, cap_source=None, failure=None) -> str:
         """A run of Harry on the task, and once ended, its end record and usage as run_desk keeps them: exit_code None
         is a run that never started, which records no usage. Returns its run id."""
         run_id = f"run-{self.tick():016x}"
         capacity.record_launch(self.conn, "harry", run_id, "gpt", task_id=self.task["id"], now=self.clock)
         if ended:
             with safefs.opened_dir(config.OFFICE_ROOT, "runs", "harry", create=True) as fd:
-                run_desk._keep_end(fd, run_id, exit_code, None)
+                run_desk._keep_end(fd, run_id, exit_code, cap_source, failure)
             if exit_code is not None:
                 capacity.record_launch_usage(self.conn, run_id, tokens[0], tokens[1], 0, 0.0, 1000, now=self.tick())
         return run_id
@@ -542,7 +545,7 @@ class TurnTests(OrchestratorCase):
                    "worktree": {"castle_path", "start_desk"},
                    "run_desk": {"Blocked", "Stopped", "check_report_launch", "launch_gate", "owl_report_argv",
                                 "ReportTurn", "brief_name", "drop_left_brief", "run_report_turn", "spawn_review", "kill_report_turn", "task_lock",
-                                "_detach", "auth_failed", "died_idle", "dead_streak", "run_end"},
+                                "_detach", "run_outcome", "died_idle", "dead_streak", "run_end"},
                    "owl_post": {"auto_review_running", "unfinished_afters", "handoff_problem", "_handoff_dir",
                                 "claim_handoff", "REVIEW_STARTED"}}
         tree = ast.parse((OFFICE / "fleet" / "orchestrator.py").read_text())
@@ -850,21 +853,26 @@ class DeadRunTests(OrchestratorCase):
         self.assertEqual([entry["action"] for entry in context["legal_actions"]], ["none", "ask_snape", "notify_owner"])
         self.assertEqual(context["item"]["dead_runs_in_a_row"], 2)
 
-    def test_a_run_that_could_not_sign_in_or_hit_a_plan_limit_is_ryans(self):
+    def test_a_run_that_could_not_sign_in_hit_a_plan_limit_or_was_kept_unclassified_is_ryans(self):
         request_id = self.verdict("CHANGES")
-        run_id = f"run-{self.tick():016x}"
-        capacity.record_launch(self.conn, "harry", run_id, "gpt", task_id=self.task["id"], now=self.clock)
-        with safefs.opened_dir(config.OFFICE_ROOT, "runs", "harry", create=True) as fd:
-            run_desk._keep_end(fd, run_id, 1, "codex_plan")
-        capacity.record_launch_usage(self.conn, run_id, 0, 0, 0, 0.0, 1000, now=self.tick())
+        self.launch(1, cap_source="codex_plan")
         with self.assertRaisesRegex(orchestrator.Invalid, "fix round already started"):  # a plan limit is no dead run
             orchestrator.check_legal(self.conn, self.route(request_id))
         request_id = self.verdict("CHANGES")
-        self.launch(1)
+        self.launch(1, failure="rate_limit")  # a vendor cut it off before any work: the breaker has the model
         orchestrator.check_legal(self.conn, self.route(request_id))
-        pensieve.add_event(self.conn, "harry", "failover.auth", "headmaster", "harry's CLI could not sign in",
-                           dedupe_key=f"failover:auth:harry:codex:{orchestrator._day(self.clock)}", now=self.clock)
+        self.launch(1, failure="auth")
         with self.assertRaisesRegex(orchestrator.Invalid, "could not sign in or bill, so starting it again is Ryan's"):
+            orchestrator.check_legal(self.conn, self.route(request_id))
+        request_id = self.verdict("CHANGES")
+        capacity.allow_round(self.conn, self.task["id"], now=self.tick())  # its third round, at the cap
+        old = self.launch(ended=False)  # a failure kept before runs kept their failure class
+        with safefs.opened_dir(config.OFFICE_ROOT, "runs", "harry") as fd:
+            safefs.write_new(fd, run_desk.end_name(old), json.dumps(
+                {"run_id": old, "exit_code": -1, "cap_source": None}).encode("ascii"))
+        capacity.record_launch_usage(self.conn, old, 0, 0, 0, 0.0, 1000, now=self.tick())
+        self.assertEqual(run_desk.run_outcome(capacity.newest_launch(self.conn, self.task["id"])), "unknown")
+        with self.assertRaisesRegex(orchestrator.Invalid, "fix round already started"):
             orchestrator.check_legal(self.conn, self.route(request_id))
 
     def test_an_end_record_that_cannot_be_read_blocks_and_never_cuts_the_streak(self):
@@ -908,6 +916,13 @@ class DeadRunTests(OrchestratorCase):
         self.assertEqual(keys, [f"orchestrator:turn-failed:{owl['id']}", f"orchestrator:turn-failed:{owl['id']}:retry"])
         with orchestrator._dir() as fd:
             self.assertEqual(markers.read(fd, f"wakes-task-{self.task['id']}")["n"], 2)  # each wake counted
+
+    def test_a_turn_refused_for_its_account_is_auth_and_never_retried(self):
+        owl = self.land()
+        self.mode("forbidden")
+        self.assertEqual(self.run_once(), ["auth"])
+        self.assertEqual(self.items()[owl["id"]]["state"], "done")
+        self.assertEqual((len(self.events_of("orchestrator.auth")), len(self.events_of("orchestrator.failed"))), (1, 0))
 
     def test_a_retry_stays_under_the_wake_caps(self):
         self.land()

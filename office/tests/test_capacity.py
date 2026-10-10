@@ -527,8 +527,8 @@ class ManyTaskCapacityTests(RoundCase):
         capacity.record_launch(self.conn, "alpha", "run-other", "model-x", now=NOW - 30)
         capacity.record_launch_usage(self.conn, "run-old", 0, 0, 0, 0.0, 10, now=NOW)
         rows = capacity.task_launches(self.conn, self.author)
-        self.assertEqual([(row["run_id"], row["input_tokens"], row["output_tokens"], row["ended_at"]) for row in rows],
-                         [("run-old", 0, 0, NOW), ("run-new", None, None, None)])
+        self.assertEqual([(row["run_id"], row["input_tokens"], row["output_tokens"]) for row in rows],
+                         [("run-old", 0, 0), ("run-new", None, None)])
 
     def test_each_state_is_labelled(self):
         states = {}

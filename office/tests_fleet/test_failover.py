@@ -561,6 +561,8 @@ class PatrolFailureTests(tp.PatrolCase):
         woke = self.wake_ron({**CLAUDE_529, "api_error_status": 401}, returncode=1)
         owl_id = woke["owl_id"]
         self.assertTrue(self.pending()[owl_id]["auth_stop"])
+        run_id = capacity.list_launches(self.conn, "ron")[-1]["run_id"]
+        self.assertEqual(run_desk.run_end("ron", run_id)["failure_class"], "auth")  # kept with how the run ended
         with fake_children() as started:
             later = self.round(NOW + config.PATROL_RESEND_AFTER_SECONDS * 3)
         self.assertEqual((started.call_count, later["resent"]["resent"]), (0, []))

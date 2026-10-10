@@ -621,9 +621,10 @@ class RunEndTests(RunDeskCase):
                         mock.patch.object(run_desk, "plan_limit", return_value=limit), \
                         mock.patch.object(capacity, "record_launch_usage", side_effect=recorded):
                     run_desk.run(self.conn, "hermione", owl_id, now=NOW)
-                self.assertEqual(seen, [{"run_id": self.run_id(), "exit_code": exit_code, "cap_source": limit}])
+                self.assertEqual(seen, [{"run_id": self.run_id(), "exit_code": exit_code, "cap_source": limit,
+                                         "failure_class": None}])
                 self.assertEqual(run_desk.run_end("hermione", self.run_id()),
-                                 {"exit_code": exit_code, "cap_source": limit})
+                                 {"exit_code": exit_code, "cap_source": limit, "failure_class": None})
 
     def test_a_run_killed_here_or_never_started_keeps_that_too(self):
         def desk(argv, **kwargs):
@@ -637,7 +638,8 @@ class RunEndTests(RunDeskCase):
                 owl_id = self.deliver("mcgonagall", "hermione", subject=f"read this {type(raised).__name__}")
                 with mock.patch.object(run_desk, "start_child", side_effect=raised), self.assertRaises(type(raised)):
                     run_desk.run(self.conn, "hermione", owl_id, now=NOW)
-                self.assertEqual(run_desk.run_end("hermione", self.run_id()), {"exit_code": None, "cap_source": None})
+                self.assertEqual(run_desk.run_end("hermione", self.run_id()),
+                                 {"exit_code": None, "cap_source": None, "failure_class": None})
 
     def test_a_run_with_no_end_kept_reads_as_none_and_a_record_that_does_not_read_whole_is_refused(self):
         with fake_children(), mock.patch.object(run_desk, "_keep_end", side_effect=Killed()), \
@@ -647,7 +649,10 @@ class RunEndTests(RunDeskCase):
         path = self.end_file()
         for text in ("{", json.dumps({"run_id": "run-" + "0" * 16, "exit_code": 0, "cap_source": None}),
                      json.dumps({"run_id": self.run_id(), "exit_code": 0, "cap_source": "plan"}),
-                     json.dumps({"run_id": self.run_id(), "exit_code": True, "cap_source": None})):
+                     json.dumps({"run_id": self.run_id(), "exit_code": True, "cap_source": None}),
+                     json.dumps({"run_id": self.run_id(), "exit_code": 1, "cap_source": None, "failure_class": "x"}),
+                     json.dumps({"run_id": self.run_id(), "exit_code": 1, "cap_source": None,
+                                 "failure_class": "unknown"})):
             with self.subTest(text=text):
                 self.write_file(path, text + "\n")
                 with self.assertRaises(safefs.Unsafe):
@@ -710,9 +715,11 @@ class TaskShowTests(RunDeskCase):
         run = self.show()["run"]
         self.assertEqual((run["end"], run["going"]), ("unreadable", True))  # left to the store's two signs
         self.write_file(self.runs / f"{self.run_id}.end",
-                        json.dumps({"run_id": self.run_id, "exit_code": 0, "cap_source": None}) + "\n")
+                        json.dumps({"run_id": self.run_id, "exit_code": 0, "cap_source": None,
+                                    "failure_class": None}) + "\n")
         run = self.show()["run"]
-        self.assertEqual((run["end"], run["going"]), ({"exit_code": 0, "cap_source": None}, False))
+        self.assertEqual((run["end"], run["going"]),
+                         ({"exit_code": 0, "cap_source": None, "failure_class": None}, False))
         os.unlink(self.runs / f"{self.run_id}.end")
         capacity.record_launch_usage(self.conn, self.run_id, 1, 1, 0, 0.0, 1000, now=NOW + 90)
         run = self.show()["run"]

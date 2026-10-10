@@ -286,10 +286,9 @@ def newest_launch(conn: Conn, task_id: str) -> Optional[dict]:
 
 
 def task_launches(conn: Conn, task_id: str) -> list[dict]:
-    """The task's own run launches, oldest first, each with the input and output tokens its usage recorded and when
-    that was (ended_at), all None while it has none. Read only."""
-    return db.fetch_all(conn, "SELECT run_launches.*, metrics.input_tokens, metrics.output_tokens,"
-                              " metrics.ts AS ended_at FROM run_launches"
+    """The task's own run launches, oldest first, each with the input and output tokens its usage recorded (both None
+    while it has none). Read only."""
+    return db.fetch_all(conn, "SELECT run_launches.*, metrics.input_tokens, metrics.output_tokens FROM run_launches"
                               " LEFT JOIN metrics ON metrics.id = run_launches.metric_id WHERE run_launches.task_id = ?"
                               " ORDER BY run_launches.launched_at, run_launches.rowid", (ids.check("task", task_id),))
 

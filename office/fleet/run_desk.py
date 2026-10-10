@@ -181,6 +181,8 @@ MCP_JOB = re.compile(r"[a-z0-9][a-z0-9-]{0,39}")
 RUN_OUTPUT_MAX_BYTES = 32 * 1024 * 1024
 # A run's end record (end_name) is one short JSON line.
 END_RECORD_MAX_BYTES = 512
+# The failure class run_end gives a failed run whose end record was kept before runs kept their failure class.
+UNKNOWN_FAILURE = "unknown"
 # How long a starting process has to take its prompt from its stdin pipe (feed_stdin).
 STDIN_TIMEOUT_SECONDS = 30
 
@@ -1221,7 +1223,8 @@ def check_report_settings(raw: bytes) -> dict:
 
 
 # Exact messages the claude CLI gives when it cannot sign in. Only a run that failed (exit status or is_error) and
-# whose result is one of these, or whose API status is 401, counts as an auth failure.
+# whose result is one of these, or that failover.classify calls auth (a 401 or 403, an authentication or billing
+# error), counts as an auth failure.
 AUTH_MESSAGES = ("Invalid API key", "Not logged in", "OAuth token has expired", "OAuth token revoked",
                  "Please run /login", "Invalid bearer token")
 
@@ -1269,7 +1272,7 @@ def kill_report_turn(pid: int) -> bool:
 def run_report_turn(turn: ReportTurn, cwd: str, hand: tuple = (),
                     on_start: Optional[Callable[[int], None]] = None) -> tuple:
     """(outcome, text) for one owl-report turn. outcome is "ok" with the result text, "auth" when claude could not
-    sign in, or "failed". Its brief file is written just before it starts and removed once it has ended, replacing one
+    sign in or bill, or "failed". Its brief file is written just before it starts and removed once it has ended, replacing one
     a killed caller left (the caller's lock, held here and inherited by the turn, means no earlier turn of its kind
     still runs), and its prompt goes through a pipe on its stdin (feed_stdin), a dead or stuck reader counting as
     failed. stdout is read as
@@ -1340,8 +1343,8 @@ def _report_turn(turn: ReportTurn, cwd: str, hand: tuple, on_start: Optional[Cal
     text = result.get("result") if isinstance(result.get("result"), str) else ""
     failed = code != 0 or result.get("is_error") is True or result.get("subtype") not in (None, "success")
     if failed:
-        auth = result.get("api_error_status") == 401 or any(text.strip().startswith(message)
-                                                           for message in AUTH_MESSAGES)
+        auth = failover.classify("claude", b"".join(chunks), code, result) == "auth" \
+            or any(text.strip().startswith(message) for message in AUTH_MESSAGES)
         return ("auth" if auth else "failed"), ""
     return "ok", text
 
@@ -2238,21 +2241,23 @@ def end_name(run_id: str) -> str:
     return f"{safefs.check_component(run_id)}.end"
 
 
-def _keep_end(run_fd: int, run_id: str, exit_code: Optional[int], cap_source: Optional[str]) -> None:
-    """Keep how a run's process ended, exit_code None when it never started, through a temp file and a rename, before
-    anything else is done with the run, so a caller killed before it kept the run's result (the closer's judge) can
-    still tell how it ended (run_end). Never raises, so it cannot hide why a run unwinds: a run whose end could not be
-    kept reads as one whose end no process saw."""
-    data = {"run_id": run_id, "exit_code": exit_code, "cap_source": cap_source}
+def _keep_end(run_fd: int, run_id: str, exit_code: Optional[int], cap_source: Optional[str],
+              failure: Optional[str] = None) -> None:
+    """Keep how a run's process ended, exit_code None when it never started, with its failure class (failover.classify,
+    None for none), through a temp file and a rename, before anything else is done with the run, so a caller killed
+    before it kept the run's result (the closer's judge) can still tell how it ended (run_end). Never raises, so it
+    cannot hide why a run unwinds: a run whose end could not be kept reads as one whose end no process saw."""
+    data = {"run_id": run_id, "exit_code": exit_code, "cap_source": cap_source, "failure_class": failure}
     with contextlib.suppress(FleetError, OSError):
         safefs.write_new(run_fd, end_name(run_id), (json.dumps(data, sort_keys=True) + "\n").encode("ascii"))
 
 
 def run_end(desk: str, run_id: str) -> Optional[dict]:
-    """How a run's process ended, {exit_code, cap_source}, from the end record its run kept (exit_code None: its
-    process never started; below 0: killed or timed out), or None when there is none: the run has not ended, or ended
-    with no process left to see how. A read that fails raises FleetError or OSError, and a record that is there but
-    does not read whole raises safefs.Unsafe, so no reader takes either for a missing record."""
+    """How a run's process ended, {exit_code, cap_source, failure_class}, from the end record its run kept (exit_code
+    None: its process never started; below 0: killed or timed out; failure_class "unknown" in a record kept before
+    runs kept it), or None when there is none: the run has not ended, or ended with no process left to see how. A
+    read that fails raises FleetError or OSError, and a record that is there but does not read whole raises
+    safefs.Unsafe, so no reader takes either for a missing record."""
     run_id = safefs.check_component(run_id)
     try:
         with safefs.opened_dir(config.OFFICE_ROOT, "runs", ids.check("desk", desk)) as fd:
@@ -2264,11 +2269,14 @@ def run_end(desk: str, run_id: str) -> Optional[dict]:
     except (UnicodeDecodeError, ValueError):
         raise safefs.Unsafe("the run end record is not JSON") from None
     code = data.get("exit_code") if isinstance(data, dict) else None
-    if not isinstance(data, dict) or set(data) != {"run_id", "exit_code", "cap_source"} or data["run_id"] != run_id \
-            or not (code is None or (type(code) is int and -255 <= code <= 255)) \
-            or data["cap_source"] not in (None, *PLAN_NAMES):
+    failure = data.get("failure_class", UNKNOWN_FAILURE) if isinstance(data, dict) else None
+    if not isinstance(data, dict) or set(data) - {"failure_class"} != {"run_id", "exit_code", "cap_source"} \
+            or data["run_id"] != run_id or not (code is None or (type(code) is int and -255 <= code <= 255)) \
+            or data["cap_source"] not in (None, *PLAN_NAMES) \
+            or failure not in (None, UNKNOWN_FAILURE, "auth", *failover.OUTAGE_CLASSES) \
+            or data.get("failure_class") == UNKNOWN_FAILURE:
         raise safefs.Unsafe("the run end record does not read whole")
-    return {"exit_code": code, "cap_source": data["cap_source"]}
+    return {"exit_code": code, "cap_source": data["cap_source"], "failure_class": failure}
 
 
 def run_seen(desk: str, run_id: str) -> dict:
@@ -2288,32 +2296,31 @@ def run_seen(desk: str, run_id: str) -> dict:
     return {"end": end, "output_at": output_at}
 
 
-def auth_failed(conn, launch: dict) -> bool:
-    """Whether Ryan was told its desk's CLI could not sign in or bill (failover.auth, one event a day per desk and
-    family) on the cap day the launch's run ended. The office keeps no sign-in failure per run, so a run that failed
-    on such a day is taken as one, and starting it again stays his. Read only."""
-    ended = launch.get("ended_at")
-    if ended is None:
-        return False
-    day = capacity.day_bounds(int(ended), config.CAP_RESET_UTC_SECONDS)[0]
-    rows = db.fetch_all(conn, "SELECT dedupe_key FROM events WHERE kind = 'failover.auth' AND desk = ?",
-                        (launch["desk"],))
-    return any(isinstance(row["dedupe_key"], str) and row["dedupe_key"].endswith(f":{day}") for row in rows)
-
-
-def died_idle(conn, launch: dict) -> bool:
-    """Whether a launch (capacity.task_launches) is a run that died without doing anything: its end record says it
-    never started, or it timed out, was killed or exited non zero with its usage recorded and no input or output
-    tokens in it. A run with no end record (still going, as far as the office can tell), one that ended cleanly, hit
-    a plan limit, failed to sign in (auth_failed) or did any work is not. Read only; raises FleetError, OSError or
-    StoreError when its end record or the store cannot be read, so no caller takes that for either answer."""
+def run_outcome(launch: dict) -> str:
+    """How a launch (capacity.task_launches) ended, by its end record and its recorded usage: "going" (no end record,
+    or no usage recorded yet, as far as the office can tell), "clean", "limit" (a plan limit), "auth" (its CLI could
+    not sign in or bill), "unknown" (a failure kept before runs kept their failure class), "worked" (it used tokens)
+    or "dead" (it never started, or timed out, was killed or failed with no tokens used). Read only; raises
+    FleetError or OSError when its end record cannot be read, so no caller takes that for any of these."""
     end = run_end(launch["desk"], launch["run_id"])
-    if end is None or end["exit_code"] == 0 or end["cap_source"] is not None:
-        return False
+    if end is None:
+        return "going"
     if end["exit_code"] is None:
-        return True
-    return launch.get("metric_id") is not None and launch.get("input_tokens") == 0 \
-        and launch.get("output_tokens") == 0 and not auth_failed(conn, launch)
+        return "dead"
+    if end["exit_code"] == 0:
+        return "clean"
+    if end["cap_source"] is not None:
+        return "limit"
+    if end["failure_class"] in ("auth", UNKNOWN_FAILURE):
+        return end["failure_class"]
+    if launch.get("metric_id") is None:
+        return "going"
+    return "dead" if launch.get("input_tokens") == 0 and launch.get("output_tokens") == 0 else "worked"
+
+
+def died_idle(launch: dict) -> bool:
+    """Whether a launch is a run that died without doing anything (run_outcome "dead"). Raises as run_outcome does."""
+    return run_outcome(launch) == "dead"
 
 
 def dead_streak(conn, task_id: str) -> int:
@@ -2321,10 +2328,15 @@ def dead_streak(conn, task_id: str) -> int:
     died_idle does, so an end record that cannot be read never cuts the streak short."""
     streak = 0
     for launch in reversed(capacity.task_launches(conn, task_id)):
-        if not died_idle(conn, launch):
+        if not died_idle(launch):
             break
         streak += 1
     return streak
+
+
+def _failure_class(plan: dict, output: bytes, exit_code: int) -> Optional[str]:
+    claude = plan["family"] == "claude"
+    return failover.classify(plan["family"], output, exit_code, claude_result(output) if claude else None)
 
 
 def _ended(run_fd: int, plan: dict, exit_code: int) -> tuple:
@@ -2471,7 +2483,9 @@ def _launch(conn, plan: dict, now: Optional[int], keep_fds: tuple = (), own: Opt
                     stop_child(child)
                     if child.returncode is not None:
                         with contextlib.suppress(Exception):
-                            _keep_end(run_fd, run_id, child.returncode, _ended(run_fd, plan, child.returncode)[3])
+                            output, _, _, cap_source = _ended(run_fd, plan, child.returncode)
+                            _keep_end(run_fd, run_id, child.returncode, cap_source,
+                                      _failure_class(plan, output, child.returncode))
                 settled = _record_interrupted(conn, plan, run_fd, started, now)
             else:
                 # Whatever was raised before the process had a handle here, a refused or failed start or a signal
@@ -2489,8 +2503,9 @@ def _launch(conn, plan: dict, now: Optional[int], keep_fds: tuple = (), own: Opt
                 drop_brief(run_fd, brief)
         duration_ms = int((time.monotonic() - started) * 1000)
         output, whole, _, cap_source = _ended(run_fd, plan, exit_code)
+        failure = _failure_class(plan, output, exit_code)
         # Kept before anything else, so a caller killed from here on can still tell how the run ended (run_end).
-        _keep_end(run_fd, run_id, exit_code, cap_source)
+        _keep_end(run_fd, run_id, exit_code, cap_source, failure)
     claude = plan["family"] == "claude"
     usage = run_usage(plan, output, exit_code, whole)
     # A Claude run names its full model ids in modelUsage. One that does not (a timeout or crash) records
@@ -2515,7 +2530,6 @@ def _launch(conn, plan: dict, now: Optional[int], keep_fds: tuple = (), own: Opt
     if claude and wands.CLAUDE_ID.fullmatch(wands.base_alias(plan["model"])) is None:
         for full_id in full_ids(used):
             _record_resolution(conn, plan["model"], full_id, now)
-    failure = failover.classify(plan["family"], output, exit_code, claude_result(output) if claude else None)
     failover.record(conn, plan["family"], plan["model"], failure,
                     failover.clean(plan["family"], output, exit_code, whole, claude_result(output) if claude else None),
                     now, tell=not shadow)

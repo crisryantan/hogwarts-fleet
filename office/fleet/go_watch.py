@@ -267,7 +267,7 @@ def _build_state(conn, go_id: str, build: dict, held: set) -> tuple:
         return _key(build_id, "round-cap", round_no, verdict), None
     after = [row for row in capacity.task_launches(conn, build_id) if row["launched_at"] >= verdict_at]
     # Each read raises when a run's end record cannot be read, so no pass stands on a half read.
-    if after and run_desk.died_idle(conn, after[-1]):
+    if after and run_desk.died_idle(after[-1]):
         # Its newest fix round died without doing anything: McGonagall may start it again only while she is on and
         # under her bound of dead runs in a row; past that it waits on Ryan.
         retry = common.opt_in_on(config.ORCHESTRATOR_FILE) and group is None \
