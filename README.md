@@ -1,6 +1,8 @@
 # Hogwarts fleet
 
-A kit for running a small fleet of single-purpose AI coding agents on your Mac, with Claude Code and Codex. Each agent does one job. Before an agent's change can be pushed, a reviewer from the other model family has to pass that exact commit. Plain scripts move messages, watch your PRs, take backups and pick models without spending tokens. You stay in charge: merges, deploys, credentials and anything sent to a person always come back to you, apart from two things you can switch on: a draft PR for each passed task, and replies to teammates' review comments on those PRs.
+A kit for running a small fleet of single-purpose AI coding agents on your Mac, with Claude Code and Codex. Each agent does one job. Before an agent's change can be pushed, a reviewer from the other model family has to pass that exact commit. Plain scripts move messages, watch your PRs, take backups and pick models without spending tokens.
+
+You stay in charge. Merges, deploys, credentials and anything sent to a person come back to you. You can opt in to a few small automations, such as draft PRs for tasks that passed review, and each one is off until you switch it on.
 
 The agents are called desks. Each one is named after a Harry Potter character, with its job after the name, like Hermione - Staff Engineer. In the theme, you are the Headmaster.
 
@@ -25,22 +27,16 @@ It isn't a hosted service and it isn't multi-user. The fleet runs locally on one
 
 ## Requirements
 
-- macOS with the Command Line Tools, which bring `git` and `/usr/bin/python3` 3.9 or newer. The fleet runs on the system Python only.
-- SQLite with FTS5. The macOS build has it.
+- macOS with the Command Line Tools, which bring `git` and `/usr/bin/python3` 3.9 or newer. The fleet runs on the system Python only, and its SQLite needs FTS5, which the macOS build has.
 - Homebrew, and from it the Claude Code CLI, the Codex CLI, `jq`, `gh`, `ripgrep` and `shellcheck`.
 - `claude`, `codex` and `gh` signed in from your own terminal.
 - Your organization's approval before its code goes to OpenAI. Harry and Moody run on Codex, and both start switched off.
-- If your repos live in `~/Documents`, `~/Desktop`, `~/Downloads` or iCloud Drive, the background jobs run from a terminal window with `fleet loops` instead of launchd ([Terminal loops](docs/ONBOARDING.md#terminal-loops)). macOS keeps launchd jobs out of those folders, so under launchd alone a go on such a repo still applies, but warns that the build won't move on by itself.
 
-Optional:
-
-- MCP servers for a SQL warehouse, observability and team chat. Snape and McGonagall use them. Use the name `none` for any kind you don't have.
-- herdr, a third-party terminal workspace manager, for the live view.
-- RTK, a third-party tool that compresses Bash output.
+Optional: MCP servers for a SQL warehouse, observability and team chat (Snape and McGonagall use them), herdr for the live view, and RTK to compress Bash output. [Stage 0 of the onboarding guide](docs/ONBOARDING.md#stage-0-prerequisites) covers all of it.
 
 ## Quick start
 
-Install the prerequisites first, as in stage 0 of [docs/ONBOARDING.md](docs/ONBOARDING.md). Then clone the kit anywhere except `~/hogwarts` or `~/.hogwarts`, and run the installer:
+Install the prerequisites first, then clone the kit anywhere except `~/hogwarts` or `~/.hogwarts`, and run the installer:
 
 ```
 gh auth login
@@ -49,11 +45,13 @@ cd ~/hogwarts-fleet
 ./install.sh --terminal-loops
 ```
 
-`install.sh` copies the kit into two folders in your home, creates the database, registers the desks and runs both test suites. It refuses to touch an existing install. It never changes `~/.claude/settings.json`, `~/.codex` or launchd, and every headless desk starts switched off. `--terminal-loops` is the recommended runner: the Owl Post, the Map, the closer and the other jobs run in one Terminal window with `~/.hogwarts/bin/fleet loops`, which gives them that window's folder access, instead of under launchd. Leave the flag off to use launchd. Either way the jobs stay off until you switch them on.
+`install.sh` copies the kit into two folders in your home, creates the database, registers the desks and runs both test suites. It never changes `~/.claude/settings.json`, `~/.codex` or launchd, and every headless desk starts switched off.
 
-Start the jobs by running `~/.hogwarts/bin/fleet loops` in a Terminal window and leaving it open, or add `~/.hogwarts/bin/fleet-loops.command` as a Login Item. Once McGonagall is set up, open a session in `~/hogwarts`, ask for a change in your own words, read the TASK.md she writes, and type `go <task-id>` as the whole message. A go the hook refuses ends with a `Fix:` line saying what to change.
+The background jobs (the Owl Post, the Map, the closer and the rest) need a place to run. `--terminal-loops` is the recommended one: they run in a Terminal window with `~/.hogwarts/bin/fleet loops`, which hands them that window's folder access. That matters if your repos live in `~/Documents`, `~/Desktop`, `~/Downloads` or iCloud Drive, because macOS keeps launchd jobs out of those folders. Leave the flag off to use launchd. Either way the jobs stay off until you switch them on. [Terminal loops](docs/ONBOARDING.md#terminal-loops) has the details.
 
 From there, follow [docs/ONBOARDING.md](docs/ONBOARDING.md) from stage 2. You switch on one piece at a time, and each stage ends with a "You're done when" check. If you'd like Claude to walk you through it, paste the [setup prompt](prompts/setup-prompt.md) into a fresh Claude Code session in your clone.
+
+Once McGonagall is set up, open a session in `~/hogwarts`, ask for a change in your own words, read the TASK.md she writes, and type `go <task-id>` as the whole message.
 
 ## How it works
 
@@ -67,61 +65,59 @@ From there, follow [docs/ONBOARDING.md](docs/ONBOARDING.md) from stage 2. You sw
 | Moody - Security Reviewer | Codex | Read-only, security-first review of Claude-written code, including work from your own Claude sessions. |
 | Ron - Release Engineer | Claude | Sorts PR and CI changes into routine or for you, and writes the morning lineup and weekly scoreboard. |
 | Snape - Data Analyst | Claude | Read-only warehouse and observability queries, with the source of every number. |
-| Dumbledore - Knowledge Manager | Claude | Reviews the day each weeknight and proposes memory changes. You apply them, or switch on auto-portrait to let his additions apply themselves. His edits, retires and archive moves always wait for you. |
+| Dumbledore - Knowledge Manager | Claude | Reviews the day each weeknight and proposes memory changes for you to apply. |
 
-Each desk's role card asks for a tier (frontier, workhorse or fast), not a model. Ollivander - Model Keeper maps that tier to a model inside the desk's own family, so a desk never changes family and the review rule holds.
+Each desk's role card asks for a tier (frontier, workhorse or fast), not a model. Ollivander maps that tier to a model inside the desk's own family, so a desk never changes family and the review rule holds. If a model is down, the desk runs on the next one of its family. Every headless desk has a daily run cap, and the Claude desks a daily spend cap, to stop a runaway loop. See [Busy days and caps](docs/HANDBOOK.md#busy-days-and-caps) and [When a model is down](docs/HANDBOOK.md#when-a-model-is-down).
 
-Harry, Hermione, Moody, Ron and your own sessions can each keep many tasks open. A desk runs one model process at a time, or two for the reviewers, so a task waiting on fixes doesn't hold up the others. Every headless desk has a daily run cap, and the headless Claude desks a daily spend cap. The caps are there to stop a runaway loop. They're sized for a busy day and reset at local midnight.
-
-### The scripts
-
-None of these uses a model.
-
-| Script | Job |
-| --- | --- |
-| Owl Post - Message Router | Moves messages (owls) between desks and stamps each sender from the folder it came from. |
-| Marauder's Map - PR Watcher | Diffs PR and CI state every 15 minutes, weekdays 08:00 to 19:00, and wakes Ron only for a change that may need you. While you have follow-ups switched on and the patrol is out of shadow mode, each round also sends teammates' review comments on PRs the loop opened back to Harry, while you have auto-close switched on, it starts the closer, and while you have the worktree cleanup switched on, it removes the worktrees of build tasks closed at least three days ago. |
-| Gringotts - Backup | Takes a nightly local backup with credentials left out. `fleet gringotts --drill` tests a restore. |
-| Ollivander - Model Keeper | Each morning, maps every desk's role card to a model in its own family. |
+Four scripts round out the fleet, and none of them uses a model: the Owl Post moves messages between desks and stamps each sender from the folder it came from, the Marauder's Map diffs PR and CI state on weekdays and wakes Ron only when something may need you, Gringotts takes a nightly local backup with credentials left out, and Ollivander's daily job does the model mapping.
 
 ### How a task moves
 
-1. You ask McGonagall. She writes a TASK.md with your words as the Intent, plus numbered acceptance criteria, each with a check, and a Spec that opens with `repo:`, `branch:` and `base:` lines naming the repo, a new branch and its base. A check is either one backtick command, which a script runs, or plain words, which the reviewer judges. A check that mixes the two is malformed and never runs. A criterion labelled `| after merge:` instead of `| check:` is something only true once the change is merged, and waits until after the merge. You read it, ask for changes until you're happy, then type exactly `go <task-id>` in her session.
-2. The hook that reads your prompts checks you typed the go yourself, then registers the task, routes it to Harry, gives his task a fresh git worktree from the Spec and starts his run there when he's enabled. A go works only in McGonagall's session. A go the hook refuses changes nothing and says why. If TASK.md is the cause, McGonagall fixes it and you type the go again. Claude Code writes your prompt to the transcript only after the hook runs, so the hook usually confirms your typing a few seconds later in the background, and the result comes as a headmaster event on your next prompt. To start several drafted tasks at once, send one `go <task-id>` per line and nothing else, up to five. If your typing can't be confirmed, or the go still can't be applied, you register the task with `castle task create` instead, McGonagall routes it to Harry by owl, you give his task its worktree with `fleet worktree` (her task id works too), and `fleet adopt <task-id>` lets the closer take it. Work from your own Claude sessions joins at the next step, through `fleet review own`.
-3. `fleet verify` runs each acceptance check that is a command and records the command, exit code and output for that commit. It lists after-merge checks and never runs them.
-4. `fleet review` sends Codex-written work to Hermione and Claude-written work to Moody. A pass counts only for that exact commit, and only when the reviewer's family differs from the author's. Harry's handoff starts his review by itself, and CHANGES starts his fix round. The loop stops at PASS, at HEADMASTER or at the round cap of three review rounds, and tells you.
-5. You run `fleet push`, which pushes exactly the reviewed commit and prints the `gh` command for a draft PR. You open the PR yourself, unless you switch on draft PRs with `echo on > ~/.hogwarts/auto-draft-pr`: then the review loop does both after its own PASS, and the PR stays a draft. `rm ~/.hogwarts/auto-draft-pr` switches it off. The push gate blocks any agent's own `git push` that has no pass.
-6. The patrol (the Map, Ron and Hermione's bot pass) watches CI and review comments. The bot pass only writes drafts for you and posts nothing. If you switch on follow-ups with `echo on > ~/.hogwarts/pr-followup`, a review comment from someone with write access on a PR the loop opened goes back to Harry, who fixes the code or answers it. The other family reviews his fix and his replies, and on PASS the loop pushes to the same branch and posts each reply once with your `gh` login. Nothing resolves a thread. Follow-ups need draft PRs on and the patrol out of shadow mode, and `rm ~/.hogwarts/pr-followup` switches them off.
-7. You merge and deploy, then close the task by typing `Mischief managed <task-id>`, or `Mischief managed everything` to close every task that is ready and see each other open task refused by name, with a `Fix:` line. A go task closes once its last build has, while auto-close is on and one of its builds was closed by a proven close; otherwise close it with `castle task close <id> --reason superseded`. Or switch on auto-close with `echo on > ~/.hogwarts/auto-close`, and off with `rm ~/.hogwarts/auto-close`. While it's on, each Map round starts the closer. It closes a passed task once scripts prove the reviewed commit landed (a PR merged at exactly that commit, or the commit on its base), CI on the merge commit is green and every after-merge command passes, and the reviewer of the other family judges that every written after-merge check holds. You get one row for each close, naming what proved each check. It skips a task whose follow-up is still open, and a build you registered by hand stays yours to close until you run `fleet adopt` on it. Anything it can't prove stops that task and tells you once, and `fleet close <task-id>` tries it again. With auto-close on, typing `Mischief managed <task-id>` closes a task by hand too. When the closer closes one of Harry's builds, it removes that task's worktree in the same pass, but only when nothing in it is uncommitted, it holds no git-ignored files apart from the dependency links the fleet made, and its HEAD is the commit the close proved or one already on the base. The close row says the worktree is being removed, or names one it keeps and why, and a removal a kill cut short is finished on the next Map round.
-8. A closed task's worktree stays until you remove it with `fleet worktree-remove <task-id>`, or until you switch on the worktree cleanup with `echo on > ~/.hogwarts/worktree-cleanup` (`rm ~/.hogwarts/worktree-cleanup` switches it off). While it's on, each Map round removes the worktree of every build task closed at least three days ago, however it was closed, once it has no uncommitted changes, no git-ignored files apart from the dependency links the fleet made, and its HEAD is on the base or its branch on origin after a fetch. It never deletes a branch, it skips a worktree whose task is busy, and one it can't remove or can't read stays put and tells you once. A round's removals come to you as one row.
+1. **Ask.** You describe the change to McGonagall. She writes a TASK.md with your words as the Intent, numbered acceptance criteria with a check each, and a Spec that names the repo, a new branch and its base. The repo can be a main checkout or a linked git worktree. A check is either one backtick command, which a script runs, or plain words, which a reviewer judges.
+2. **Go.** You read the TASK.md, ask for changes until you're happy, then type exactly `go <task-id>` in her session. A hook confirms you typed it yourself, registers the task, routes it to Harry, makes him a fresh git worktree and, when he's enabled, starts his run. A go the hook refuses changes nothing and ends with a `Fix:` line saying what to change. After a go, McGonagall's session wakes when the task changes state, through a Stop hook (`office/fleet/hooks/stop.py`, using `fleet go-wait`), and she tells you in chat. With the `auto-go-updates` switch on, the same updates also reach your phone or notifications.
+3. **Verify.** `fleet verify` runs each command check and records the command, exit code and output for that commit.
+4. **Review.** Codex-written work goes to Hermione and Claude-written work goes to Moody. A pass counts only for that exact commit, and only when the reviewer's family differs from the author's. Harry's handoff starts his review, and CHANGES starts his fix round. The loop stops at PASS, at HEADMASTER or after three review rounds, and tells you.
+5. **Push.** You run `fleet push`, which pushes exactly the reviewed commit and prints the `gh` command for a draft PR. With `auto-draft-pr` on, the loop does both and the PR stays a draft. The push gate blocks any agent's own `git push` that has no pass.
+6. **Follow-ups.** The patrol watches CI and review comments. Hermione's bot pass only drafts replies and posts nothing. With `pr-followup` on, a review comment from a teammate with write access goes back to Harry, the other family reviews his fix, and the loop pushes it and posts his reply.
+7. **Close.** You merge and deploy, then type `Mischief managed <task-id>`. With `auto-close` on, a closer instead proves the reviewed commit landed, CI is green and every after-merge check holds, then closes the task and tells you. It removes a closed build's worktree only when nothing in it could be lost. With `worktree-cleanup` on, the Map also sweeps up worktrees of tasks closed for at least three days. Without it, `fleet worktree-remove <task-id>` does it by hand.
 
-### Staying up
+The full walk-through, with every edge case, is in [DESIGN.md](docs/DESIGN.md#how-a-task-moves) and the [handbook's daily rhythm](docs/HANDBOOK.md#daily-rhythm).
 
-When a model returns rate-limit, overload or outage errors, a breaker marks it down and its desk runs on the next model of its own family. If the whole family is down the desk waits, and the Owl Post starts its run, or an automatic review, once a model is back. Loud events, such as a PR opened, a review that needs you or a refused go, also reach your phone: through a command you set in your own overlay, or as a macOS notification. The headmaster queue stays quiet, since events the fleet already settled clear themselves.
+### Automations
+
+Every automation is one file in the office, off until you write `on` into it, and off again when you remove it. A switch counts only while it's a plain file you own that no one else can write. There are nine:
+
+- `auto-draft-pr`, `pr-followup`, `auto-close` and `worktree-cleanup`, described above.
+- `auto-portrait`, which lets Dumbledore's additions apply themselves. His edits, retires and archive moves always wait for you.
+- `owl-reports`, a one-line report from McGonagall on each owl another desk sends her.
+- `auto-orchestrate`, which lets her headless turn pick the next step from a fixed list of typed actions that a script checks and runs, under daily caps. One of those actions restarts a fix round that died before doing any work.
+- `auto-go-updates`, the phone and notification updates from step 2.
+- `cross-family-failover`, which lets a desk whose own family is down run on the other one, never a builder or a reviewer.
+
+[Customise](docs/CUSTOMISE.md#switch-the-automations-on-and-off) and the handbook's [What's on after stage 4](docs/HANDBOOK.md#whats-on-after-stage-4) give the exact rules for each.
 
 ### Two homes
 
-- `~/.hogwarts` is the office. It holds the store (a SQLite database and its `castle` CLI), the `fleet` command, the hooks and scripts, each desk's brief, role card and locked-down settings, the launchd templates and the pending settings snippets. It also holds one switch for each automation: `auto-draft-pr`, `pr-followup`, `auto-close`, `worktree-cleanup`, `auto-portrait`, `owl-reports`, `auto-orchestrate`, `cross-family-failover` and `auto-go-updates`. A switch is on only while it's a plain file you own, that no one else can write, holding exactly `on`, so all nine are off until you write them. With `owl-reports` on, a short read-only headless McGonagall turn reads each owl another desk sends her, and you get her one-line report as a notification. With `auto-orchestrate` on, an owl to her or a build's review verdict wakes the same kind of turn to pick the next step as one typed action, which a script checks and runs. With `auto-go-updates` on, you get one line each time one of her open go tasks changes where it stands, with what you do next, through the same path as phone pings. Those lines start the moment a go is confirmed, stop once the build reaches PASS (after one last draft PR line), HEADMASTER, the round cap or a close, and are also added to `~/.hogwarts/logs/go-updates.log`: `tail -F ~/.hogwarts/logs/go-updates.log` shows them live, and setting Script Editor's notification style to Persistent keeps the banners on screen. No desk can write here, and Claude desks can't read it.
-- `~/hogwarts` is the castle, where desks work. It holds the charter, the plan, your standing orders, each desk's scratchpad, inbox and outbox, the task folders and the git worktrees. It's a local git repo with no remote.
+- `~/.hogwarts` is the office. It holds the store (a SQLite database and its `castle` CLI), the `fleet` command, the hooks and scripts, each desk's brief, role card and locked-down settings, and the switches. No desk can write there, and Claude desks can't read it.
+- `~/hogwarts` is the castle, where desks work. It holds the charter, the plan, your standing orders, each desk's inbox and outbox, the task folders and the git worktrees. It's a local git repo with no remote.
 
 ## Safety model
 
 The design answers five ways a group of agents can go wrong. [DESIGN.md](docs/DESIGN.md#five-risks-and-what-closes-each-one) has the full table.
 
-1. One terminal pane driving another. No desk that can run commands lives in a terminal multiplexer. The only live sessions there are McGonagall and Snape, who have no shell tool, and that is checked before each one opens.
+1. One terminal pane driving another. No desk that can run commands lives in a terminal multiplexer.
 2. Desks inheriting your broad allow list. Headless Claude desks start with `--restricted` and their own settings. Codex desks ignore your Codex config and run under a fleet permission profile.
 3. A watchdog typing into sessions. Nothing in the fleet types into a session. It only warns.
 4. Faked identity. A desk can post only to its own outbox, and the Owl Post stamps the sender from the folder.
 5. Code loading from folders agents can write. The controls live in the office, and the store runs on the system Python with a cleared environment.
 
-Some things always come back to you: merges, deploys, prod changes, credentials and sign-ins, security settings, installs, anything sent to a person (opening a ready PR included, and replies to teammates unless you switch on follow-ups), closing a task unless you switch on auto-close, force pushes and deletions. The only pre-approvals are the standing orders you write yourself and the switches in the office, and none of them can include a merge or a deploy. No script parses the standing orders, so an automation runs only while its switch is on.
+Some things always come back to you: merges, deploys, prod changes, credentials and sign-ins, security settings, installs, force pushes, deletions and anything sent to a person. Marking a PR ready is yours, and so are replies to teammates unless you switch on follow-ups. The only pre-approvals are the standing orders you write and the switches in the office, and none of them can include a merge or a deploy.
 
 The push gate is a guardrail, not a wall. It reads an agent's Bash command as text and blocks a `git push` that has no pass, which stops a push made by habit or mistake. A desk's real boundary is its sandbox, where the network is off or limited to named hosts. Pushes you type in your own terminal never reach the gate.
 
 ## Docs
 
-[docs/ONBOARDING.md](docs/ONBOARDING.md) takes a fresh Mac to a working fleet, one stage at a time.
-
+- [Onboarding](docs/ONBOARDING.md): takes a fresh Mac to a working fleet, one stage at a time.
 - [Handbook](docs/HANDBOOK.md): daily use, which desk to ask, the cheat sheet and troubleshooting. There's also a [standalone HTML copy](docs/handbook.html) to open in a browser.
 - [Design](docs/DESIGN.md): how the fleet works, the five risks it closes and its known limits.
 - [Customise](docs/CUSTOMISE.md): change a desk's role card, pin or block models, add or retire a desk, and change caps, budgets and schedules.
@@ -132,31 +128,18 @@ The push gate is a guardrail, not a wall. It reads an agent's Bash command as te
 
 | Path | What it is | Installed to |
 | --- | --- | --- |
-| `office/` | The store, `bin/castle`, `bin/fleet`, `bin/hogwarts-spaces`, the fleet scripts and hooks, both test suites, desk briefs, role cards and settings, launchd templates, pending settings snippets and the avatars | `~/.hogwarts` |
+| `office/` | The store, `bin/castle`, `bin/fleet`, the fleet scripts and hooks, both test suites, desk briefs, role cards and settings, launchd templates, pending settings snippets and the avatars | `~/.hogwarts` |
 | `castle/` | The charter, an empty plan, standing orders, desk folders, McGonagall's settings and agent file, and a Codex config that keeps any Codex session opened there read-only | `~/hogwarts` |
 | `claude-agents/snape.md` | Snape's user-level agent file | `~/.claude/agents/snape.md`, only if absent |
-| `install.sh` | Installs the two homes, creates the database, registers the desks and runs the tests | |
-| `scripts/owlpost-setup.sh` | Switches on the Owl Post and sends a test owl (onboarding stage 3.2) | |
-| `scripts/patrol-setup.sh` | Switches on the patrol in shadow mode (onboarding stage 5.2). It checks gh, runs one Map round, a backup and a restore drill, enables Ron, and loads the Map, morning lineup, keeper's watch, scoreboard and Gringotts jobs | |
-| `scripts/portrait-setup.sh` | Switches on Dumbledore (onboarding stage 5.3). It checks his dry run and the export, enables his desk and loads his weekday job. Auto-portrait stays off | |
-| `scripts/codex-boundary-test.sh` | Proves the Codex desks' permission profile on your Mac: no office, no folder it isn't given, no network. Run it before enabling Harry or Moody, and after every Codex upgrade | |
-| `scripts/codex-exec-boundary-test.py` | Proves the boundary again under real `codex exec` runs for Harry and Moody, launched the way the desk launcher launches them. It checks the same folders and network, the temp folders, a `node_modules` link to a folder outside the task, that Xcode's Python and git run cleanly, and that none of your own Codex hooks or MCP servers start. Sends a short prompt to OpenAI and costs a few cents per desk | |
-| `scripts/installed-office-check.sh` | Installs the kit into a throwaway home, fills the GitHub account, watched repos, blocked models and MCP names with made-up values, and runs both suites there. A test that leans on your own private values fails. Never touches your real `~/.hogwarts` or `~/hogwarts` | |
-| `uninstall.sh` | A dry run by default. With `--yes` it removes the fleet and keeps an archive | |
+| `install.sh`, `uninstall.sh` | Install the two homes, or remove them. Uninstall is a dry run unless you pass `--yes`, and keeps an archive | |
+| `scripts/*-setup.sh` | Switch on the Owl Post, the patrol (in shadow mode), Dumbledore's nightly review and the terminal loops, one onboarding stage each | |
+| `scripts/codex-boundary-test.sh`, `scripts/codex-exec-boundary-test.py` | Prove the Codex desks' permission profile on your Mac, including under real `codex exec` runs. Run them before enabling Harry or Moody, and after every Codex upgrade | |
+| `scripts/installed-office-check.sh` | Installs the kit into a throwaway home with made-up values and runs both suites there, so a test that leans on your own private values fails | |
 
-`install.sh` never touches `~/.claude/settings.json`, `~/.codex` or launchd. Those changes are yours to apply, and the onboarding guide shows how.
+## Limits
 
-## Status and known limits
-
-Two test suites cover the kit: `tests` for the store and `tests_fleet` for the fleet. Both run on the system Python, and `install.sh` runs them on every install.
-
-- The review loop is tested against temporary git repos.
-- The closer is tested against a faked GitHub and temporary git repos. It reads GitHub only through the patrol's read-only queries and writes nothing to it.
-- The worktree cleanup is tested against temporary git repos: worktrees with uncommitted changes, with ignored files, with tracked files marked assume-unchanged or skip-worktree, with commits that are neither pushed nor merged, ones it can't read and ones in use are never removed, and a removal killed at any step, from just before the closer's close commits, is finished on a later round or reported, never left half done in silence or told twice. It runs only `git worktree remove`, never with `--force`, never `git worktree prune`, and never touches a branch.
-- The patrol is tested against a faked GitHub and faked desks. It starts in shadow mode: while `~/.hogwarts/patrol/shadow` exists, the patrol and Gringotts only write files under the office, and none of their findings reach you. The closer is not held by shadow mode: while `~/.hogwarts/auto-close` holds `on`, it closes tasks and tells you either way.
-- PR follow-ups are tested against a faked GitHub. They follow only PRs the review loop opened, and only while `~/.hogwarts/pr-followup` holds `on` and the patrol is out of shadow mode. In shadow mode with the switch on, each Map round only writes what it would have routed, under `~/.hogwarts/patrol/followup/`.
-- The weeknight memory review by Dumbledore - Knowledge Manager is tested against temporary stores. He only proposes changes, and nothing applies until you run `castle portrait apply`, unless you switch on auto-portrait with `echo on > ~/.hogwarts/auto-portrait` (`rm ~/.hogwarts/auto-portrait` switches it off). It applies only his additions and never removes anything: every retire, edit and archive move waits for you, and so does an addition the store refused. Each night with a patch ends in one row for you that says what applied and what waits, with the command for the rest. If the job is killed, the next weeknight job finishes that night from the copy it stored, or tells you once that it was cut off, and nothing applies twice. The [handbook](docs/HANDBOOK.md#daily-rhythm) has the details.
-- The Codex desks' read boundary rests on Codex permission profiles, which Codex marks as beta. Rerun `scripts/codex-boundary-test.sh` after every Codex upgrade.
 - The fleet runs on macOS only, for one person on one Mac.
+- The Codex desks' read boundary rests on Codex permission profiles, which Codex marks as beta. Rerun `scripts/codex-boundary-test.sh` after every Codex upgrade.
+- The review loop, closer, patrol and follow-ups are tested against temporary git repos and a faked GitHub. Try them on a small real task before you rely on them. The patrol starts in shadow mode, where it only writes files under the office, until you take it out.
 
-Tested with Claude Code 2.1.274, Codex 0.160.0 and herdr 0.9.3. [DESIGN.md](docs/DESIGN.md#known-limits) lists every known limit.
+Tested with Claude Code 2.1.295, Codex 0.162.0 and herdr 0.9.3. [DESIGN.md](docs/DESIGN.md#known-limits) lists every known limit.
