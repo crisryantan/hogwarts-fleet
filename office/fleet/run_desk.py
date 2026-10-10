@@ -2288,6 +2288,33 @@ def run_seen(desk: str, run_id: str) -> dict:
     return {"end": end, "output_at": output_at}
 
 
+def died_idle(launch: dict) -> bool:
+    """Whether a launch (capacity.task_launches) is a run that died without doing anything: its end record says it
+    never started, or it timed out, was killed or exited non zero with its usage recorded and no input or output
+    tokens in it. A run with no end record (still going, as far as the office can tell), one whose end record cannot
+    be read, one that ended cleanly and one that did any work are not. Never raises."""
+    try:
+        end = run_end(launch["desk"], launch["run_id"])
+    except (FleetError, StoreError, OSError):
+        return False
+    if end is None or end["exit_code"] == 0:
+        return False
+    if end["exit_code"] is None:
+        return True
+    return launch.get("metric_id") is not None and launch.get("input_tokens") == 0 \
+        and launch.get("output_tokens") == 0
+
+
+def dead_streak(conn, task_id: str) -> int:
+    """How many of the task's newest launches in a row died without doing anything (died_idle). Read only."""
+    streak = 0
+    for launch in reversed(capacity.task_launches(conn, task_id)):
+        if not died_idle(launch):
+            break
+        streak += 1
+    return streak
+
+
 def _ended(run_fd: int, plan: dict, exit_code: int) -> tuple:
     """(output, whole, errors, cap_source) of a run whose process has ended with exit_code."""
     output, whole = _run_output(run_fd, plan["run_id"])

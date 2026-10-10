@@ -1,17 +1,21 @@
 """McGonagall as the orchestrator after the go: a headless McGonagall turn picks the next step for each item that lands
 for her, as one typed action that this script checks and runs. Only while the office file auto-orchestrate holds "on".
 
-- Landing: each Owl Post pass ends with kick, which reads the store for owls to McGonagall (a build's handoff is one)
-  and review verdicts on build tasks stored since the switch was first seen on and within
-  ORCHESTRATOR_LAND_WINDOW_SECONDS. Each is one item, a marker in the office orchestrator-items folder published
-  create-exclusive, so the same item never wakes her twice and one a killed pass missed lands on the next. kick then
-  starts one detached run when any item is pending and no run holds the lock, and kills a turn a dead run left hanging.
+- Landing: each Owl Post pass ends with kick, which reads the store for owls to McGonagall (a build's handoff is one),
+  review verdicts on build tasks, and the newest run of an active build task when it died without doing anything
+  (run_desk.died_idle: its end record says it never started, or it timed out or failed with no tokens in its recorded
+  usage), stored since the switch was first seen on and within ORCHESTRATOR_LAND_WINDOW_SECONDS. Each is one item, a
+  marker in the office orchestrator-items folder published create-exclusive, so the same item never wakes her twice
+  (one dead run is one item, by its run id) and one a killed pass missed lands on the next. kick then starts one
+  detached run when any item is pending and no run holds the lock, and kills a turn a dead run left hanging.
 - A run takes the items oldest first, one turn each, at most ORCHESTRATOR_MAX_TURNS, under one lock that each turn's
   process is handed, so wakes never overlap, for one task or any. Once a turn is sure to launch (stop, update and
   blocked-model gates passed, launch gate held), its wake is counted in the office before it starts:
   ORCHESTRATOR_WAKES_PER_TASK per task and ORCHESTRATOR_WAKES_PER_DAY per cap day. An item over a cap is finished
-  without a turn, and Ryan hears once per cap. A turn a kill cut off is finished as interrupted by the next run, never
-  woken again; an action cut off part way is reported once as uncertain and never run again.
+  without a turn, and Ryan hears once per cap. A turn that failed or timed out (orchestrator.failed) goes back to
+  pending once, on the next pass with no run going, and is woken again under the same caps; a second failure finishes
+  it. A turn a kill cut off is finished as interrupted by the next run, never woken again; an action cut off part way
+  is reported once as uncertain and never run again.
 - The turn is the owl-report turn (run_desk.owl_report_argv and run_report_turn): claude -p with only Read, Grep and
   Glob confined to a private folder holding context.json, and every other tool, the network and all writes denied. She
   never gets a shell. context.json holds the item (its text untrusted, scrubbed, cut), the task's state and the
@@ -25,7 +29,9 @@ for her, as one typed action that this script checks and runs. Only while the of
 - The actions run only through the fleet's own paths and gates: a fix round through worktree.start_desk, a review
   through owl_post.claim_handoff and run_desk.spawn_review, a draft PR through push.push_draft_pr (which needs the
   auto-draft-pr switch and a recorded PASS for the task's current head), and Ryan's own headmaster events. No push
-  beyond that draft PR, merge, close or go is reachable.
+  beyond that draft PR, merge, close or go is reachable. A fix round is legal only while no launch of the task since
+  the CHANGES verdict is still going, ended cleanly or did any work, so one that died idle can be started again, and
+  never once ORCHESTRATOR_DEAD_RUNS_IN_A_ROW of the task's newest runs in a row died idle: from there it is Ryan's.
 """
 from __future__ import annotations
 
@@ -51,6 +57,8 @@ SINCE = "since"
 CONTEXT_FILE = "context.json"
 OWL_ITEM = re.compile(r"owl_[0-9a-f]{16}")
 VERDICT_ITEM = re.compile(r"verdict-(rq_[0-9a-f]{16})")
+RUN_ID = re.compile(r"run-[0-9a-f]{16}")
+DEAD_ITEM = re.compile(r"dead-(run-[0-9a-f]{16})")
 WORKDIR = re.compile(r"turn-[0-9a-f]{16}")
 REAP_MARGIN_SECONDS = 60
 ANSWER_MAX_BYTES = 4096
@@ -78,6 +86,8 @@ BRIEF = (
     "Pick at most one entry of legal_actions and copy its action and ids exactly. You fill only the text fields"
     " question (at most 300 characters, a read-only data question) and one_line (at most 200 characters, one line for"
     " Ryan). If no step is needed, answer {\"action\": \"none\"}.\n"
+    "An item of kind dead-run is a build desk's run that ended without doing anything. When route_findings_to_harry is"
+    " legal, it starts that fix round again; when it is not, unavailable says why.\n"
     "Answer with exactly one JSON object on one line and nothing else: no code fence, no other text."
 )
 
@@ -115,9 +125,9 @@ def _since(fd: int, now: Optional[int]) -> int:
 
 
 def land(conn, fd: int, now: Optional[int] = None) -> int:
-    """An item for each owl to McGonagall and each verdict on a build task stored since the switch came on and within
-    the window, read from the store, so one a killed pass missed lands on the next. Published create-exclusive, so an
-    item lands once. Returns how many are new."""
+    """An item for each owl to McGonagall, each verdict on a build task and the newest run of each active build task
+    when it died idle, stored since the switch came on and within the window, read from the store, so one a killed pass
+    missed lands on the next. Published create-exclusive, so an item lands once. Returns how many are new."""
     since = max(_since(fd, now), common.now_stamp(now) - config.ORCHESTRATOR_LAND_WINDOW_SECONDS)
     owls = db.fetch_all(conn, "SELECT id, task_id, created_at FROM owls WHERE recipient = ? AND created_at >= ?"
                               " ORDER BY created_at, rowid", (DESK, since))
@@ -128,9 +138,29 @@ def land(conn, fd: int, now: Optional[int] = None) -> int:
                                   f" WHERE review_passes.created_at >= ? AND tasks.desk IN ({desks})"
                                   " ORDER BY review_passes.created_at, review_rounds.rowid",
                             (since, *config.WORKTREE_DESKS))
+    # The newest launch of an active build task, with no usage yet or none of it in tokens, ended by the time it is
+    # read. One a later launch of the task followed is moot, so it never lands.
+    launches = db.fetch_all(conn, "SELECT run_launches.run_id, run_launches.desk, run_launches.task_id,"
+                                  " run_launches.metric_id, metrics.input_tokens, metrics.output_tokens,"
+                                  " COALESCE(metrics.ts, run_launches.launched_at) AS created_at FROM run_launches"
+                                  " JOIN tasks ON tasks.id = run_launches.task_id"
+                                  " LEFT JOIN metrics ON metrics.id = run_launches.metric_id"
+                                  f" WHERE tasks.status = 'active' AND tasks.desk IN ({desks})"
+                                  " AND COALESCE(metrics.ts, run_launches.launched_at) >= ?"
+                                  " AND (metrics.id IS NULL"
+                                  " OR (metrics.input_tokens = 0 AND metrics.output_tokens = 0))"
+                                  " AND NOT EXISTS (SELECT 1 FROM run_launches AS later"
+                                  " WHERE later.task_id = run_launches.task_id"
+                                  " AND (later.launched_at > run_launches.launched_at"
+                                  " OR (later.launched_at = run_launches.launched_at"
+                                  " AND later.rowid > run_launches.rowid)))"
+                                  " ORDER BY run_launches.launched_at, run_launches.rowid",
+                            (*config.WORKTREE_DESKS, since))
     found = [(ids.check("owl", row["id"]), "owl", row["id"], row) for row in owls]
     found += [(f"verdict-{ids.check('request', row['request_id'])}", "verdict", row["request_id"], row)
               for row in verdicts]
+    found += [(f"dead-{row['run_id']}", "dead-run", row["run_id"], row) for row in launches
+              if RUN_ID.fullmatch(row["run_id"]) and run_desk.died_idle(row)]
     new = 0
     for name, kind, ref, row in found:
         if markers.publish(fd, name, {"state": "pending", "kind": kind, "task_id": row["task_id"], "ref": ref,
@@ -155,7 +185,7 @@ def _items(fd: int, state: Optional[str] = None) -> list:
     """(name, marker) for each item, oldest first, in one state or all."""
     found = []
     for name in os.listdir(fd):
-        if OWL_ITEM.fullmatch(name) or VERDICT_ITEM.fullmatch(name):
+        if OWL_ITEM.fullmatch(name) or VERDICT_ITEM.fullmatch(name) or DEAD_ITEM.fullmatch(name):
             marker = markers.read(fd, name)
             if marker is not None and (state is None or marker.get("state") == state):
                 found.append((name, marker))
@@ -329,9 +359,14 @@ def _why_not_route(conn, action: dict) -> Optional[str]:
     if _loop_busy(task["id"]):
         return "the review loop is still acting on this task"
     since = _verdict_at(conn, latest["request_id"])
-    if any(row["task_id"] == task["id"] and row["launched_at"] >= since
-           for row in capacity.list_launches(conn, task["desk"])):
+    # A launch since the verdict that is still going, ended cleanly or did any work is a started round; one that died
+    # idle is not, so its round can start again.
+    if any(row["launched_at"] >= since and not run_desk.died_idle(row)
+           for row in capacity.task_launches(conn, task["id"])):
         return "a fix round already started after that verdict"
+    if run_desk.dead_streak(conn, task["id"]) >= config.ORCHESTRATOR_DEAD_RUNS_IN_A_ROW:
+        return (f"the task's last {config.ORCHESTRATOR_DEAD_RUNS_IN_A_ROW} runs died without doing anything, so"
+                " starting it again is Ryan's")
     newest = review.latest_result_owl(conn, task)
     if newest is not None and newest["created_at"] >= since:
         return "the build desk posted a handoff after that verdict"
@@ -485,6 +520,23 @@ def context(conn, item: dict) -> dict:
                         "subject": common.scrubbed_line(row["subject"], 200), "task_id": row["task_id"],
                         "request_id": row["request_id"],
                         "body": common.untrusted_text(row["body"] or "")[:config.ORCHESTRATOR_BODY_MAX]}
+    elif item["kind"] == "dead-run":
+        task_id = _known_task(conn, item.get("task_id"))
+        launch = None if task_id is None else next(
+            (row for row in capacity.task_launches(conn, task_id) if row["run_id"] == item["ref"]), None)
+        if launch is None:
+            raise FleetError("the run is not in the store")
+        try:
+            end = run_desk.run_end(launch["desk"], launch["run_id"]) or {}
+        except (FleetError, OSError):
+            end = {}
+        code = end.get("exit_code")
+        how = ("unknown" if not end else "never started" if code is None else "timed out" if code == -1
+               else f"exit code {code}")
+        data["item"] = {"kind": "dead-run", "run_id": launch["run_id"], "task_id": task_id, "desk": launch["desk"],
+                        "how": how,
+                        "dead_runs_in_a_row": run_desk.dead_streak(conn, task_id),
+                        "dead_runs_allowed": config.ORCHESTRATOR_DEAD_RUNS_IN_A_ROW}
     else:
         row = capacity.request_round(conn, item["ref"])
         rounds = {entry["request_id"]: entry for entry in capacity.review_rounds(conn, row["task_id"])} if row else {}
@@ -679,9 +731,14 @@ def _turn(conn, fd: int, name: str, item: dict, data: dict, turn: run_desk.Repor
                f"orchestrator:auth:{_day(now)}")
         return "auth"
     if outcome != "ok":
-        _event(conn, "orchestrator.failed", "headmaster", f"the orchestrator turn for {item.get('task_id') or '-'}"
-               " failed or timed out, so McGonagall took no step on what landed", item.get("task_id"),
-               f"orchestrator:turn-failed:{name}")
+        if item.get("retried") is True:
+            _event(conn, "orchestrator.failed", "headmaster", f"the orchestrator turn for {item.get('task_id') or '-'}"
+                   " failed or timed out again on its one retry, so McGonagall took no step on what landed",
+                   item.get("task_id"), f"orchestrator:turn-failed:{name}:retry")
+        else:
+            _event(conn, "orchestrator.failed", "headmaster", f"the orchestrator turn for {item.get('task_id') or '-'}"
+                   " failed or timed out, so McGonagall took no step on what landed yet; it is tried once more on the"
+                   " next pass", item.get("task_id"), f"orchestrator:turn-failed:{name}")
         return "failed"
     try:
         action = parse_action(text, item)
@@ -763,6 +820,10 @@ def _next(conn, fd: int, lock_fd: int, now: Optional[int]) -> Optional[str]:
             _bump(fd, f"wakes-task-{item['task_id']}")
         markers.replace(fd, name, {**item, "state": "woken"})
         outcome = _turn(conn, fd, name, item, data, turn, (lock_fd, gate_fd), now)
+    if outcome == "failed" and item.get("retried") is not True:
+        # Woken once more for the same item, from the next pass with no run going (_requeue), never twice.
+        markers.replace(fd, name, {**item, "state": "retry", "retried": True})
+        return "failed: tried once more on the next pass"
     _finish(fd, name, item, outcome, now)
     return f"stop: {outcome}" if outcome == "auth" else outcome
 
@@ -832,9 +893,16 @@ def spawn() -> None:
     run_desk._detach("orchestrator", [], "orchestrator.log")
 
 
+def _requeue(fd: int) -> None:
+    """Items whose turn failed or timed out go back to pending for their one retry, from a pass after that run."""
+    for name, item in _items(fd, "retry"):
+        markers.replace(fd, name, {**item, "state": "pending"})
+
+
 def kick(conn, now: Optional[int] = None) -> str:
     """At the end of an Owl Post pass: kill a turn a dead run left hanging, whatever the switch says; then, while it is
-    on, land what is new and start one run when an item is pending or was cut off, and no run holds the lock."""
+    on, land what is new and, when no run holds the lock, put each item whose turn failed back for its retry and start
+    one run when an item is pending or was cut off."""
     running = None
     with contextlib.suppress(safefs.Missing), _dir() as fd:
         if _running():
@@ -847,6 +915,7 @@ def kick(conn, now: Optional[int] = None) -> str:
         land(conn, fd, now)
         if running is not None:
             return running
+        _requeue(fd)
         if not any(_items(fd, state) for state in ("pending", "woken", "acting")):
             return "nothing pending"
     try:

@@ -285,6 +285,14 @@ def newest_launch(conn: Conn, task_id: str) -> Optional[dict]:
                               " LIMIT 1", (ids.check("task", task_id),))
 
 
+def task_launches(conn: Conn, task_id: str) -> list[dict]:
+    """The task's own run launches, oldest first, each with the input and output tokens its usage recorded (both None
+    while it has none). Read only."""
+    return db.fetch_all(conn, "SELECT run_launches.*, metrics.input_tokens, metrics.output_tokens FROM run_launches"
+                              " LEFT JOIN metrics ON metrics.id = run_launches.metric_id WHERE run_launches.task_id = ?"
+                              " ORDER BY run_launches.launched_at, run_launches.rowid", (ids.check("task", task_id),))
+
+
 def open_launches(conn: Conn, desk: str) -> list[dict]:
     """The desk's launches with no usage recorded yet, oldest first: runs still going, or ended before they could
     record it. A desk with several run slots holds their cost against its spend cap until it is recorded."""

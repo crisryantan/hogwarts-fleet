@@ -355,7 +355,7 @@ class GoWatchTests(unittest.TestCase):
                 "resume", "release"}
     IMPORTS = {"__future__", "calendar", "hashlib", "json", "os", "re", "secrets", "stat", "time", "typing", "hogwarts",
                "fleet"}
-    FROM_FLEET = {"common", "config", "go_status", "markers", "phone", "safefs", "FleetError"}
+    FROM_FLEET = {"common", "config", "go_status", "markers", "phone", "run_desk", "safefs", "FleetError"}
     FROM_STORE = {"capacity", "db", "followups", "ids", "pensieve"}
 
     def test_go_watch_imports_nothing_that_writes_the_store_or_starts_a_desk(self):
@@ -371,6 +371,10 @@ class GoWatchTests(unittest.TestCase):
         calls = {node.attr for node in ast.walk(tree) if isinstance(node, ast.Attribute)
                  and isinstance(node.value, ast.Name) and node.value.id == "phone"}
         self.assertEqual(calls, {"send", "PR_LINK", "PHONE_DIR"})
+        # And in run_desk.py only the two read-only checks of how a build's runs ended.
+        used = {node.attr for node in ast.walk(tree) if isinstance(node, ast.Attribute)
+                and isinstance(node.value, ast.Name) and node.value.id == "run_desk"}
+        self.assertEqual(used, {"died_idle", "dead_streak"})
 
 
 class LaunchdTests(unittest.TestCase):

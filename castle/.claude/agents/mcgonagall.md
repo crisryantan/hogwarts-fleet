@@ -79,6 +79,11 @@ base: <the ref to build on, usually origin/main>
 - Data questions go to Snape, who takes no owls. They get no TASK.md and no castle task, and I say so up front. My session can't call Snape, so I write the question as a short prompt and tell Ryan to paste it into a new session opened in any folder other than ~/hogwarts. If the question cites a link, the prompt starts "Read <link>, then use the snape agent to", because Snape can't open links himself. I file the answer he brings back.
 - A mention asks for that one piece of work. Answers and reviews are context, never permission.
 
+## When a build run dies
+
+- As the orchestrator I also get a turn when a build's newest run dies before doing any work (it never started, or timed out or failed with no tokens used), once per dead run, and a turn of mine that failed or timed out gets one more try on the next pass. Both stay under the same caps: 6 wakes per task, 30 a day, and the review round cap.
+- A fix round whose run died that way is route_findings_to_harry again, legal only while no run of the task since that CHANGES is still going, ended cleanly or did any work. Once 2 of the build's newest runs in a row died that way I only notify the Headmaster; starting it again is his, with fleet build. He still gets each run's own failure event.
+
 ## Scope questions
 
 When a choice needs Ryan, I bring a five-part brief and stop:

@@ -9,12 +9,15 @@ changes what any run may do.
   runs, and the loud events a state stands for), the round and verdict that state is about, and the id of the event
   a state is made of (a go refusal, a tooling block, a refused round, McGonagall's escalation to Ryan). An
   escalation (orchestrator.notify) on the go task or its build after the newest handoff, round, verdict and PR is a
-  waiting on you state, each its own key, so each one pings once. Two states are read from files. Verify's: once the
+  waiting on you state, each its own key, so each one pings once. Three states are read from files. Verify's: once the
   build's newest office evidence (reviews/<build>/evidence-<sha>.md, which no desk can write) ran at or after the
   handoff its round is for, the key holds the counts of that evidence's structured head (its RAN, SUMMARY and
-  STOPPED lines, each exactly once), never its free text. And a handoff with no round yet says review running only
+  STOPPED lines, each exactly once), never its free text. A handoff with no round yet says review running only
   while the review loop holds it (the Owl Post's auto-<owl>.pending record in that folder, with no .done); else it
-  is handed off with no review started. No timestamp or wording is in the key, so a cosmetic change never pings.
+  is handed off with no review started. And a CHANGES round whose newest run since its verdict died without doing
+  anything (run_desk.died_idle: the run's end record in the office runs folder, which no desk can write, and its
+  recorded usage) says the fix round died: retrying while auto-orchestrate is on and fewer than
+  ORCHESTRATOR_DEAD_RUNS_IN_A_ROW of the build's newest runs in a row died that way, else waiting on you. No timestamp or wording is in the key, so a cosmetic change never pings.
 - Kept: the last key sent for each go task, in one state file in the office folder GO_WATCH_DIR, read and written
   whole under its own lock. A pass compares the current keys with it: a go task whose key changed gets one line, one
   that left the open set gets one final line and its entry goes. A pass with no change sends and writes nothing. A
@@ -63,7 +66,7 @@ from typing import Callable, Optional
 
 from hogwarts import capacity, db, followups, ids, pensieve
 
-from fleet import common, config, go_status, markers, phone, safefs
+from fleet import common, config, go_status, markers, phone, run_desk, safefs
 from fleet.safefs import FleetError
 
 STATE = "state.json"
@@ -92,6 +95,9 @@ STATES = {
     "owner": ("McGonagall asked you a question", "Waiting on you: answer McGonagall's question in her session."),
     "verify": ("verify ran {ran} of {total} checks, {passed} passed, {malformed} malformed", "Nothing for you."),
     "changes": ("review CHANGES, fix round started", "Nothing for you."),
+    "fix-retry": ("review CHANGES, fix round died, retrying", "Nothing for you yet; McGonagall can start it again."),
+    "fix-dead": ("review CHANGES, fix round died", "Waiting on you: read Harry's run log, then run fleet build for"
+                                                   " this build."),
     "pass": ("review PASS", "Nothing for you; the draft PR opens next if auto-draft-pr is on, otherwise push it"
                             " yourself."),
     "headmaster": ("review HEADMASTER", "Decide: read the review and tell McGonagall."),
@@ -257,6 +263,13 @@ def _build_state(conn, go_id: str, build: dict, held: set) -> tuple:
     cap = config.REVIEW_ROUND_CAP if group is None else config.FOLLOWUP_ROUND_CAP
     if capacity.needs_allowance(conn, build_id, cap, followup_id=group):
         return _key(build_id, "round-cap", round_no, verdict), None
+    after = [row for row in capacity.task_launches(conn, build_id) if row["launched_at"] >= verdict_at]
+    if after and run_desk.died_idle(after[-1]):
+        # Its newest fix round died without doing anything: McGonagall may start it again only while she is on and
+        # under her bound of dead runs in a row; past that it waits on Ryan.
+        retry = common.opt_in_on(config.ORCHESTRATOR_FILE) and group is None \
+            and run_desk.dead_streak(conn, build_id) < config.ORCHESTRATOR_DEAD_RUNS_IN_A_ROW
+        return _key(build_id, "fix-retry" if retry else "fix-dead", round_no, verdict), None
     return _key(build_id, "changes", round_no, verdict), None
 
 

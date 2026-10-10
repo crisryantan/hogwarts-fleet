@@ -521,6 +521,15 @@ class ManyTaskCapacityTests(RoundCase):
         self.assertEqual(launch["task_id"], self.author)
         self.assertIsNone(capacity.record_launch(self.conn, "alpha", "run-2", "model-x", now=NOW)["task_id"])
 
+    def test_task_launches_are_the_tasks_own_oldest_first_with_their_tokens(self):
+        capacity.record_launch(self.conn, "alpha", "run-new", "model-x", task_id=self.author, now=NOW - 60)
+        capacity.record_launch(self.conn, "alpha", "run-old", "model-x", task_id=self.author, now=NOW - 7200)
+        capacity.record_launch(self.conn, "alpha", "run-other", "model-x", now=NOW - 30)
+        capacity.record_launch_usage(self.conn, "run-old", 0, 0, 0, 0.0, 10, now=NOW)
+        rows = capacity.task_launches(self.conn, self.author)
+        self.assertEqual([(row["run_id"], row["input_tokens"], row["output_tokens"]) for row in rows],
+                         [("run-old", 0, 0), ("run-new", None, None)])
+
     def test_each_state_is_labelled(self):
         states = {}
         states["working"] = self.author

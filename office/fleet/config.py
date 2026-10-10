@@ -394,7 +394,11 @@ ORCHESTRATOR_ROOT = "/Users/crisryantan/Library/Caches/hogwarts-orchestrator"
 ORCHESTRATOR_MAX_TURNS = 10
 ORCHESTRATOR_WAKES_PER_TASK = 6
 ORCHESTRATOR_WAKES_PER_DAY = 30
-# An owl or a verdict wakes her only when it was stored within this long, and after the switch was first seen on.
+# Once this many of a build task's newest runs in a row died without doing anything, she may tell Ryan but never start
+# another fix round on it.
+ORCHESTRATOR_DEAD_RUNS_IN_A_ROW = 2
+# An owl, a verdict or a dead run wakes her only when it was stored within this long, and after the switch was first
+# seen on.
 ORCHESTRATOR_LAND_WINDOW_SECONDS = 7 * 86400
 # Finished item records are kept this long, so the same item never wakes her twice.
 ORCHESTRATOR_KEEP_SECONDS = 14 * 86400

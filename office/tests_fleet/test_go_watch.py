@@ -13,7 +13,7 @@ from unittest import mock
 from hogwarts import capacity, followups, ids, owlery, pensieve
 from tests.support import NOW
 
-from fleet import common, config, go_watch, markers, owl_post, phone, safefs, stops, verify
+from fleet import common, config, go_watch, markers, owl_post, phone, run_desk, safefs, stops, verify
 from fleet.safefs import FleetError
 from tests_fleet.support import FleetCase
 
@@ -203,91 +203,52 @@ class TableTests(GoWatchCase):
         self.expect("handoff", build)
         self.round(build, SHAS[1], "PASS")
         self.expect("pass", build)
-        pensieve.set_worktree(self.conn, build["id"], f"{ids.WORKTREES_ROOT}/{build['id']}")
-        pensieve.mark_awaiting_close(self.conn, build["id"], now=self.tick())
-        followups.bind_pr(self.conn, build["id"], REPO, 7, "fix/b0", "main", SHAS[1], PR, now=self.tick())
-        with mock.patch.object(phone, "send", wraps=phone.send) as send:
-            self.expect("draft-pr", build, link=PR)
-        self.assertEqual(send.call_args[0][0]["pr_link"], PR)
 
-    def test_table_merged_and_closed_before_any_end(self):
+    def launch(self, build: dict) -> str:
+        """A run of Harry on the build, still going."""
+        run_id = f"run-{self.tick():016x}"
+        capacity.record_launch(self.conn, "harry", run_id, "gpt", task_id=build["id"], now=self.clock)
+        return run_id
+
+    def died(self, run_id: str, exit_code: int = -1) -> None:
+        """The run ended with exit_code and no tokens in its usage, or never started (exit_code None, no usage): dead
+        before any work."""
+        with safefs.opened_dir(config.OFFICE_ROOT, "runs", "harry", create=True) as fd:
+            run_desk._keep_end(fd, run_id, exit_code, None)
+        if exit_code is not None:
+            capacity.record_launch_usage(self.conn, run_id, 0, 0, 0, 0.0, 1000, now=self.tick())
+
+    def test_table_a_fix_round_that_died_says_retrying_then_waits_on_ryan(self):
+        self.write_file(self.office / config.ORCHESTRATOR_FILE, "on\n")
         build = self.build()
         self.expect("confirmed", build)
-        with mock.patch.object(pensieve, "task_closure", return_value={"kind": "proven"}):
-            self.expect("merged", build)
-        other = self.go_task(1)
-        self.expect("confirmed", go_id=other)
-        pensieve.close_task(self.conn, other, "abandoned", now=self.tick())
-        self.expect("closed", go_id=other)
-        self.assertEqual(set(self.kept()["tasks"]), {self.go})
-        self.quiet()
+        self.handoff(build)
+        self.expect("handoff", build)
+        self.round(build, SHAS[0], "CHANGES")
+        self.expect("changes", build)
+        first = self.launch(build)
+        self.quiet()  # the fix round is going
+        self.died(first)  # timed out with no usage: McGonagall may start it again
+        self.expect("fix-retry", build)
+        retry = self.launch(build)
+        self.quiet()  # her retry is going: back to the changes line already sent
+        self.died(retry, exit_code=1)  # and it died too: two in a row are Ryan's
+        self.expect("fix-dead", build)
+        self.assertEqual(go_watch.STATES["fix-dead"][1], "Waiting on you: read Harry's run log, then run fleet build"
+                                                         " for this build.")
 
-    def test_table_a_refused_go(self):
+    def test_table_a_fix_round_that_died_with_the_orchestrator_off_waits_on_ryan(self):
         build = self.build()
         self.expect("confirmed", build)
-        self.event(self.go, "go.refused", "the go is refused: its branch exists")
-        self.expect("refused", build)
-        other = self.go_task(1)
-        self.expect("confirmed", go_id=other)
-        self.event(other, "go.refused")
-        self.expect("refused", go_id=other)
-
-    def test_table_blocked_on_tooling(self):
-        build = self.build()
-        self.handoff(build)
-        self.round(build, SHAS[0])
-        self.watch()
-        self.event(build["id"], "review.blocked-on-tooling")
-        self.expect("tooling", build)
-        self.handoff(build)  # Harry's next handoff after the fix moves it on
-        self.expect("handoff", build)
-
-    def test_table_round_cap_hit(self):
-        build = self.build()
-        self.handoff(build)
-        self.watch()
-        with mock.patch.object(config, "REVIEW_ROUND_CAP", 1):
-            self.round(build, SHAS[0], "CHANGES")
-            self.expect("round-cap", build)
-        # A refused next round tells it as an event of its own.
-        other = self.go_task(1)
-        capped = self.build(other)
-        self.handoff(capped)
-        self.expect("handoff", capped, go_id=other)
-        self.event(capped["id"], "review.round-cap")
-        self.expect("round-cap", capped, go_id=other)
-
-    def test_table_a_build_closed_by_hand_while_its_go_task_stays_open(self):
-        build = self.build()
-        self.handoff(build)
-        self.expect("handoff", build)
-        pensieve.close_task(self.conn, build["id"], "abandoned", now=self.tick())
-        self.expect("closed", build)
-        pensieve.close_task(self.conn, self.go, "abandoned", now=self.tick())
-        self.quiet()  # closed was its end, so the go's own close drops it with no line
-        self.assertEqual(self.kept()["tasks"], {})
-
-    def test_table_the_newer_of_a_tooling_block_and_a_round_cap_wins(self):
-        build = self.build()
-        self.handoff(build)
-        self.round(build, SHAS[0])
-        self.watch()
-        tooling = self.event(build["id"], "review.blocked-on-tooling")
-        self.expect("tooling", build)
-        self.event(build["id"], "review.round-cap")
-        self.expect("round-cap", build)
-        self.assertGreater(self.kept()["tasks"][self.go]["event"], tooling)
-
-    def test_table_ollivander_stop_holding_a_build(self):
-        build = self.build()
-        self.watch()
-        self.assertTrue(stops.hold("harry", build["owl"], build["id"]))
-        self.expect("held", build)
+        self.round(build, SHAS[0], "CHANGES")
+        self.expect("changes", build)
+        self.died(self.launch(build), exit_code=None)  # it never started
+        self.expect("fix-dead", build)
 
     def test_table_every_state_has_its_fixed_action(self):
         self.assertEqual(set(go_watch.STATES), {"confirmed", "refused", "handoff", "handed-off", "verify", "changes",
-                                                "pass", "headmaster", "tooling", "round-cap", "held", "draft-pr",
-                                                "merged", "closed", "owner"})
+                                                "fix-retry", "fix-dead", "pass", "headmaster", "tooling", "round-cap",
+                                                "held", "draft-pr", "merged", "closed", "owner"})
         self.assertEqual(go_watch.STATES["headmaster"][1], "Decide: read the review and tell McGonagall.")
         self.assertEqual(go_watch.STATES["held"][1], "Run castle ollivander clear once the CLI works.")
         self.assertEqual(go_watch.STATES["owner"][1], "Waiting on you: answer McGonagall's question in her session.")

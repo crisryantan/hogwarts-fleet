@@ -41,6 +41,7 @@ if mode == "fail":
     sys.exit(2)
 result(open(os.path.join(state, "answer")).read())
 """
+RETRIED = "failed: tried once more on the next pass"
 FORBIDDEN = ("push", "merge", "close", "go", "shell", "bash", "run", "mark_ready", "force_push", "delete_branch",
              "allow_round", "open_pr")
 
@@ -129,7 +130,20 @@ class OrchestratorCase(FleetCase):
         if not folder.exists():
             return {}
         return {path.name: json.loads(path.read_text()) for path in folder.iterdir()
-                if orchestrator.OWL_ITEM.fullmatch(path.name) or orchestrator.VERDICT_ITEM.fullmatch(path.name)}
+                if orchestrator.OWL_ITEM.fullmatch(path.name) or orchestrator.VERDICT_ITEM.fullmatch(path.name)
+                or orchestrator.DEAD_ITEM.fullmatch(path.name)}
+
+    def launch(self, exit_code=0, tokens=(0, 0), ended=True) -> str:
+        """A run of Harry on the task, and once ended, its end record and usage as run_desk keeps them: exit_code None
+        is a run that never started, which records no usage. Returns its run id."""
+        run_id = f"run-{self.tick():016x}"
+        capacity.record_launch(self.conn, "harry", run_id, "gpt", task_id=self.task["id"], now=self.clock)
+        if ended:
+            with safefs.opened_dir(config.OFFICE_ROOT, "runs", "harry", create=True) as fd:
+                run_desk._keep_end(fd, run_id, exit_code, None)
+            if exit_code is not None:
+                capacity.record_launch_usage(self.conn, run_id, tokens[0], tokens[1], 0, 0.0, 1000, now=self.tick())
+        return run_id
 
     def events_of(self, kind: str) -> list:
         return [event for event in self.events() if event["kind"] == kind]
@@ -528,7 +542,7 @@ class TurnTests(OrchestratorCase):
                    "worktree": {"castle_path", "start_desk"},
                    "run_desk": {"Blocked", "Stopped", "check_report_launch", "launch_gate", "owl_report_argv",
                                 "ReportTurn", "brief_name", "drop_left_brief", "run_report_turn", "spawn_review", "kill_report_turn", "task_lock",
-                                "_detach"},
+                                "_detach", "died_idle", "dead_streak", "run_end"},
                    "owl_post": {"auto_review_running", "unfinished_afters", "handoff_problem", "_handoff_dir",
                                 "claim_handoff", "REVIEW_STARTED"}}
         tree = ast.parse((OFFICE / "fleet" / "orchestrator.py").read_text())
@@ -544,7 +558,9 @@ class TurnTests(OrchestratorCase):
     def test_a_failed_or_auth_turn_ends_its_item(self):
         self.land()
         self.mode("fail")
-        self.assertEqual(self.run_once(), ["failed"])
+        self.assertEqual(self.run_once(), [RETRIED])
+        self.assertEqual(orchestrator.kick(self.conn, self.clock), "started")
+        self.assertEqual(self.run_once(), ["failed"])  # its one retry failed too
         self.land()
         self.mode("auth")
         self.assertEqual(self.run_once(), ["auth"])
@@ -727,7 +743,7 @@ class HardeningTests(OrchestratorCase):
     def test_a_failed_turn_is_told_once(self):
         self.land()
         self.mode("fail")
-        self.assertEqual(self.run_once(), ["failed"])
+        self.assertEqual(self.run_once(), [RETRIED])
         self.assertEqual(len(self.events_of("orchestrator.failed")), 1)
 
     def test_an_owl_a_pass_missed_still_lands_from_the_store(self):
@@ -735,3 +751,142 @@ class HardeningTests(OrchestratorCase):
         owl = self.handoff()  # stored, but no pass landed it
         self.assertEqual(orchestrator.kick(self.conn, self.clock), "started")
         self.assertEqual(self.items()[owl["id"]]["state"], "pending")
+
+
+class DeadRunTests(OrchestratorCase):
+    def route(self, request_id: str) -> dict:
+        return {"action": "route_findings_to_harry", "task_id": self.task["id"], "findings_ref": request_id}
+
+    def test_a_fix_round_that_timed_out_with_no_usage_is_routed_again_after_her_failed_turn(self):
+        # The replay: CHANGES, the loop's fix round launched, her turn on the verdict failed, then the run timed out
+        # with no usage and Ryan got rundesk.failed.
+        orchestrator.kick(self.conn, self.clock)  # the switch is first seen on now
+        request_id = self.verdict("CHANGES")
+        self.assertEqual(orchestrator.kick(self.conn, self.clock), "started")
+        run_id = self.launch(ended=False)
+        self.mode("fail")
+        self.assertEqual(self.run_once(), [RETRIED])
+        self.assertEqual(self.items()[f"verdict-{request_id}"]["state"], "retry")
+        with self.assertRaisesRegex(orchestrator.Invalid, "fix round already started"):  # still going
+            orchestrator.check_legal(self.conn, self.route(request_id))
+        with safefs.opened_dir(config.OFFICE_ROOT, "runs", "harry", create=True) as fd:
+            run_desk._keep_end(fd, run_id, -1, None)  # timed out
+        capacity.record_launch_usage(self.conn, run_id, 0, 0, 0, 0.0, 1800000, now=self.tick())
+        self.assertTrue(run_desk.report_failure(self.conn, "harry", None, now=self.clock))
+        orchestrator.check_legal(self.conn, self.route(request_id))  # legal again
+        # The next pass puts her failed turn back once and lands the dead run as its own item.
+        self.assertEqual(orchestrator.kick(self.conn, self.tick()), "started")
+        items = self.items()
+        self.assertEqual((items[f"verdict-{request_id}"]["state"], items[f"dead-{run_id}"]["state"]),
+                         ("pending", "pending"))
+        self.mode("answer")
+        self.answer(self.route(request_id))
+
+        def start(conn, task, lock_fd):
+            self.launch(ended=False)  # the run it starts records its launch
+            return "started harry on owl x"
+
+        with mock.patch.object(worktree, "start_desk", side_effect=start) as started:
+            outcomes = self.run_once()
+        # Her retried turn starts the fix round again; the dead run's own turn then finds it going.
+        self.assertEqual(outcomes, ["route_findings_to_harry: started harry on owl x",
+                                    "rejected: route_findings_to_harry is not legal now: a fix round already started"
+                                    " after that verdict"])
+        started.assert_called_once()
+        dead = self.runs()[-1]["context"]
+        self.assertEqual((dead["item"]["kind"], dead["item"]["run_id"], dead["item"]["how"]),
+                         ("dead-run", run_id, "timed out"))
+        self.assertNotIn("route_findings_to_harry", [entry["action"] for entry in dead["legal_actions"]])
+        self.assertEqual(len(self.events_of("rundesk.failed")), 1)  # Ryan still has the run's own event
+        self.assertEqual(len(self.events_of("orchestrator.failed")), 1)
+        self.assertEqual({item["state"] for item in self.items().values()}, {"done"})
+        self.assertEqual(orchestrator.kick(self.conn, self.tick()), "nothing pending")  # one dead run, one item
+
+    def test_a_launch_still_running_or_one_that_ended_cleanly_or_did_work_still_blocks(self):
+        orchestrator.kick(self.conn, self.clock)  # the switch is first seen on now
+
+        def changes() -> str:  # a new CHANGES round for each case, past the cap by Ryan's allowance
+            request_id = self.verdict("CHANGES")
+            capacity.allow_round(self.conn, self.task["id"], now=self.tick())
+            return request_id
+
+        request_id = changes()
+        for ended, code, tokens in ((False, 0, (0, 0)), (True, 0, (0, 0)), (True, -1, (900, 40)), (True, 1, (0, 3))):
+            with self.subTest(ended=ended, code=code, tokens=tokens):
+                run_id = self.launch(code, tokens, ended)
+                with self.assertRaisesRegex(orchestrator.Invalid, "fix round already started"):
+                    orchestrator.check_legal(self.conn, self.route(request_id))
+                with orchestrator._dir(create=True) as fd:
+                    orchestrator.land(self.conn, fd, self.clock)
+                self.assertNotIn(f"dead-{run_id}", self.items())
+            request_id = changes()
+        run_id = self.launch(None)  # one that never started is no round
+        orchestrator.check_legal(self.conn, self.route(request_id))
+        with orchestrator._dir(create=True) as fd:
+            orchestrator.land(self.conn, fd, self.clock)
+        self.assertIn(f"dead-{run_id}", self.items())
+
+    def test_two_dead_runs_in_a_row_leave_only_telling_ryan(self):
+        orchestrator.kick(self.conn, self.clock)  # the switch is first seen on now
+        self.launch(-1)  # a dead run before a clean one does not count toward the bound
+        self.launch(0, (500, 20))
+        request_id = self.verdict("CHANGES")
+        first = self.launch(-1)
+        orchestrator.check_legal(self.conn, self.route(request_id))
+        second = self.launch(1)
+        self.assertEqual(config.ORCHESTRATOR_DEAD_RUNS_IN_A_ROW, 2)
+        with self.assertRaisesRegex(orchestrator.Invalid, "last 2 runs died without doing anything"):
+            orchestrator.check_legal(self.conn, self.route(request_id))
+        self.assertEqual(orchestrator.kick(self.conn, self.clock), "started")
+        self.assertIn(f"dead-{second}", self.items())
+        self.assertNotIn(f"dead-{first}", self.items())  # a later launch followed it, so it never lands
+        self.answer(self.route(request_id))
+        refused = ("rejected: route_findings_to_harry is not legal now: the task's last 2 runs died without doing"
+                   " anything, so starting it again is Ryan's")
+        with mock.patch.object(worktree, "start_desk") as started:
+            self.assertEqual(self.run_once(), [refused, refused])  # the verdict's turn, then the dead run's
+        started.assert_not_called()
+        context = self.runs()[-1]["context"]
+        self.assertEqual([entry["action"] for entry in context["legal_actions"]], ["none", "ask_snape", "notify_owner"])
+        self.assertEqual(context["item"]["dead_runs_in_a_row"], 2)
+
+    def test_a_dead_run_wakes_her_only_under_the_caps(self):
+        orchestrator.kick(self.conn, self.clock)  # the switch is first seen on now
+        for _ in range(config.REVIEW_ROUND_CAP):
+            request_id = self.verdict("CHANGES")
+        run_id = self.launch(-1)
+        with self.assertRaisesRegex(orchestrator.Invalid, "round cap"):
+            orchestrator.check_legal(self.conn, self.route(request_id))
+        with orchestrator._dir(create=True) as fd:
+            markers.replace(fd, f"wakes-task-{self.task['id']}", {"state": "count",
+                                                                  "n": config.ORCHESTRATOR_WAKES_PER_TASK})
+        self.assertEqual(orchestrator.kick(self.conn, self.clock), "started")
+        self.assertIn(f"dead-{run_id}", self.items())
+        self.assertEqual(set(self.run_once()), {"capped: wakes per task"})
+        self.assertEqual(self.runs(), [])
+        self.assertEqual({item["state"] for item in self.items().values()}, {"done"})
+
+    def test_a_failed_turn_is_woken_once_more_on_the_next_pass_only(self):
+        owl = self.land()
+        self.mode("fail")
+        self.assertEqual(self.run_once(), [RETRIED])
+        self.assertEqual(self.run_once(), [])  # not in the same pass
+        self.assertEqual(orchestrator.kick(self.conn, self.clock), "started")
+        self.assertEqual(self.run_once(), ["failed"])
+        self.assertEqual(self.items()[owl["id"]]["state"], "done")
+        self.assertEqual(orchestrator.kick(self.conn, self.clock), "nothing pending")
+        self.assertEqual(len(self.runs()), 2)
+        keys = [row["dedupe_key"] for row in self.conn.execute(
+            "SELECT dedupe_key FROM events WHERE kind = 'orchestrator.failed' ORDER BY id")]
+        self.assertEqual(keys, [f"orchestrator:turn-failed:{owl['id']}", f"orchestrator:turn-failed:{owl['id']}:retry"])
+        with orchestrator._dir() as fd:
+            self.assertEqual(markers.read(fd, f"wakes-task-{self.task['id']}")["n"], 2)  # each wake counted
+
+    def test_a_retry_stays_under_the_wake_caps(self):
+        self.land()
+        self.mode("fail")
+        with mock.patch.object(config, "ORCHESTRATOR_WAKES_PER_TASK", 1):
+            self.assertEqual(self.run_once(), [RETRIED])
+            orchestrator.kick(self.conn, self.clock)
+            self.assertEqual(self.run_once(), ["capped: wakes per task"])
+        self.assertEqual(len(self.runs()), 1)
