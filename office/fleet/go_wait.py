@@ -3,9 +3,10 @@ caller that runs it again with the key it printed hears each change of that go t
 
   fleet go-wait <go-task-id> [--since <key>]
 
-- Where it stands is go_watch's state key for that go task (go_watch.current, the reducer go updates use), so only
-  a real change ends a wait: no timestamp or wording is in the key. --since is the short digest of a key (KEY) that an
-  earlier wait printed. With no --since it prints where the go task stands now and exits at once.
+- Where it stands is go_watch's state key for that go task (go_watch._go_state, the reducer go updates use, run on
+  that go task alone), so only a real change ends a wait: no timestamp or wording is in the key. --since is the short
+  digest of a key (KEY) that an earlier wait printed. With no --since it prints where the go task stands now and
+  exits at once.
 - It opens the store with db.connect_readonly, reads it every config.GO_WAIT_POLL_SECONDS, and exits as soon as the
   key differs from --since, or after config.GO_WAIT_MAX_SECONDS with "still", so a session is never stuck on it.
   A read that fails part way is tried again at the next poll.
@@ -31,7 +32,7 @@ from typing import Callable, Optional
 from hogwarts import db, ids, pensieve
 from hogwarts.errors import NotFoundError, StoreError
 
-from fleet import common, config, go_watch
+from fleet import common, config, go_status, go_watch
 from fleet.safefs import FleetError
 
 KEY = re.compile(r"[0-9a-f]{16}")
@@ -51,20 +52,23 @@ def _newest_build(conn, go_id: str) -> Optional[str]:
 
 
 def standing(conn, go_id: str) -> tuple:
-    """(kind, key, text) for the go task now: kind is open, pending or closed, key go_watch's state key (or a pending
-    or closed one built the same way), text its line without the key. Raises when the store cannot be read whole."""
-    found = go_watch.current(conn)
-    if go_id in found:
-        key = found[go_id][0]
-        return "open", key, go_watch.line(go_id, key)
-    try:
-        task = pensieve.get_task(conn, go_id)
-    except NotFoundError:
-        task = None
-    if task is not None and task["status"] == "closed":
-        key = {"build": _newest_build(conn, go_id), "state": "closed", "round": 0, "verdict": None, "event": None}
-        text = f"{go_id} / {key['build'] or 'no build'}: closed ({task['close_reason']}). Nothing for you."
-        return "closed", key, common.scrubbed_line(text, config.GO_WATCH_LINE_CHARS)
+    """(kind, key, text) for the go task now, read in one store snapshot: kind is open, pending or closed, key
+    go_watch's state key for it (or a pending or closed one built the same way), text its line without the key. Only
+    this go task is reduced, so another go task's files never stand in its way. Raises when it cannot be read whole."""
+    with db.snapshot(conn):
+        try:
+            task = pensieve.get_task(conn, go_id)
+        except NotFoundError:
+            task = None
+        if task is not None and task["status"] == "closed":
+            key = {"build": _newest_build(conn, go_id), "state": "closed", "round": 0, "verdict": None, "event": None}
+            text = f"{go_id} / {key['build'] or 'no build'}: closed ({task['close_reason']}). Nothing for you."
+            return "closed", key, common.scrubbed_line(text, config.GO_WATCH_LINE_CHARS)
+        item = None if task is None else next(
+            (item for item in go_status.open_go_tasks(conn, strict=True) if item["task"]["id"] == go_id), None)
+        if item is not None:
+            key = go_watch._go_state(conn, item)[0]
+            return "open", key, go_watch.line(go_id, key)
     key = {"build": None, "state": "pending", "round": 0, "verdict": None, "event": None}
     text = f"{go_id} / no build: {PENDING[0]}. {PENDING[1]}"
     return "pending", key, common.scrubbed_line(text, config.GO_WATCH_LINE_CHARS)

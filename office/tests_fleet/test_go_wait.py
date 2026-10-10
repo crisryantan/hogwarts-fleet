@@ -106,19 +106,33 @@ class ReturnTests(GoWaitCase):
     def test_return_a_read_that_fails_mid_wait_is_tried_again(self):
         build = self.build()
         since = self.key_of(self.run_wait()[1])
-        real, calls = go_watch.current, []
+        real, calls = go_watch._go_state, []
 
-        def flaky(conn):
+        def flaky(conn, item):
             calls.append(1)
             if len(calls) == 2:
                 raise db.sqlite3.OperationalError("database is locked")
-            return real(conn)
+            return real(conn, item)
 
         clock = Clock({2: lambda: self.handoff(build)})
-        with mock.patch.object(go_watch, "current", side_effect=flaky):
+        with mock.patch.object(go_watch, "_go_state", side_effect=flaky):
             code, output, _ = self.run_wait(since=since, clock=clock)
         self.assertEqual(code, 0)
         self.assertTrue(output.startswith(self.expected("changed", "handoff", build)), output)
+
+
+    def test_return_another_go_task_it_cannot_read_never_stands_in_its_way(self):
+        build = self.build()
+        other = self.build(self.go_task(1))
+        since = self.key_of(self.run_wait()[1])
+        self.handoff(other)
+        evidence = self.office / "reviews" / other["id"]
+        evidence.chmod(0)  # the other build's review folder cannot be read
+        self.addCleanup(evidence.chmod, 0o700)
+        clock = Clock({2: lambda: pensieve.close_task(self.conn, self.go, "abandoned", now=self.tick())})
+        output = self.run_wait(since=since, clock=clock)[1]
+        self.assertEqual(output, f"closed {self.go} / {build['id']}: closed (abandoned). Nothing for you."
+                                 " The watch ends.\n")
 
 
 class EndTests(GoWaitCase):
