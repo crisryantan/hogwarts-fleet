@@ -451,6 +451,8 @@ GO_WAIT_MAX_SECONDS = 30 * 60
 GO_CHAT_HOOK_TIMEOUT_SECONDS = 3 * 3600
 GO_CHAT_MAX_SECONDS = GO_CHAT_HOOK_TIMEOUT_SECONDS - 300
 GO_CHAT_DIR = "go-chat"
+# A go typed in her session is waited for this long while it is confirmed, even with nothing open yet.
+GO_CHAT_EXPECT_SECONDS = 10 * 60
 # A seen marker a prompt hook left pending this long, or whose hook process is gone, is taken over by the next hook.
 SEEN_PENDING_SECONDS = 60
 

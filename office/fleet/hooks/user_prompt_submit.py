@@ -798,17 +798,19 @@ def events(conn, seen: Optional[tuple] = None) -> tuple:
 
 
 def _go_status(conn, data: dict, now: int) -> tuple:
-    """(lines, mark, told) of McGonagall's go status for this prompt (fleet/go_status.py), and the chat watch's start
-    while her session has none (fleet/hooks/stop.py), read before the block so it is never newer than what she is
-    shown. Never breaks the prompt."""
+    """(lines, mark, shown) of McGonagall's go status for this prompt (fleet/go_status.py), shown being what the chat
+    watch keeps as told once it is written (fleet/hooks/stop.py), with keys read before the block so none is newer
+    than what she is shown. Never breaks the prompt."""
     from fleet import go_status  # only her session pays for these imports
     from fleet.hooks import stop as chat_watch
 
-    told = chat_watch.seed_keys(conn, common.session_id(data))
+    keys = chat_watch.delivered_keys(conn)
     try:
-        return (*go_status.block(conn, now, go_status.last(common.session_id(data))), told)
+        seen = go_status.last(common.session_id(data))
+        lines, mark = go_status.block(conn, now, seen)
     except Exception:  # noqa: BLE001 - a status block never breaks the prompt
         return [], None, None
+    return lines, mark, chat_watch.delivered(keys, seen, mark)
 
 
 def tempus(data: dict) -> Optional[str]:
@@ -851,10 +853,10 @@ def _body(data: dict, desk: str, out, now: int) -> None:
         from fleet import go_status
 
         go_status.record(common.session_id(data), status[0])
-    if seeds:  # and the chat watch's start, once the block it matches is shown
+    if seeds:  # and what the chat watch keeps as told, once the block it matches is shown
         from fleet.hooks import stop as chat_watch
 
-        chat_watch.seed(common.session_id(data), seeds[0])
+        chat_watch.merge(common.session_id(data), seeds[0])
 
 
 def _output(data: dict, desk: str, now: int, made: list, seen: Optional[list] = None,
@@ -887,6 +889,9 @@ def _output(data: dict, desk: str, now: int, made: list, seen: Optional[list] = 
                 shown += [GO_TOO_MANY, GO_TOO_MANY_FIX]
                 context += [GO_TOO_MANY, GO_TOO_MANY_FIX]
             elif go_ids is not None:
+                from fleet.hooks import stop as chat_watch  # the chat watch waits for these while they are confirmed
+
+                chat_watch.expect(common.session_id(data), go_ids)
                 started, said = _starts(conn, data, desk, go_ids, now)
                 shown += started
                 context += said
@@ -904,7 +909,7 @@ def _output(data: dict, desk: str, now: int, made: list, seen: Optional[list] = 
                 if status is not None and mark is not None:
                     status.append(mark)  # recorded only once this output is written
                 if seeds is not None and told is not None:
-                    seeds.append(told)  # the same for the chat watch's start
+                    seeds.append(told)  # the same for what the chat watch keeps as told
             session = common.session_id(data)
             after = events_seen.last(session)
             pending, count, marked = events(conn, after)

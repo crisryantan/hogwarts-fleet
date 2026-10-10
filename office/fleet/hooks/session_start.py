@@ -273,7 +273,7 @@ def _store_body(data: dict, desk: str, out, now: int, source: object, rotated: l
             listed: list = []
             status: Optional[list] = [] if common.session_desk(data, desk) == config.HOOK_DESK else None
             # The chat watch's start, read before her go status block, so it is never newer than what she is shown.
-            told = None if status is None else chat_watch.seed_keys(conn, common.session_id(data))
+            told = None if status is None else chat_watch.delivered_keys(conn)
             lines = digest(conn, desk, now, listed, status)
             out.write("\n".join(lines + rotated) + "\n")
             wrote.append(True)
@@ -283,7 +283,7 @@ def _store_body(data: dict, desk: str, out, now: int, source: object, rotated: l
                     pensieve.shown_through(conn, listed, folded=True), listed))
             if status:  # and only her go tasks that changed since
                 go_status.record(common.session_id(data), status[0])
-                chat_watch.seed(common.session_id(data), told)
+                chat_watch.merge(common.session_id(data), chat_watch.delivered(told, None, status[0]))
             try:
                 ack_shown_owls(conn, desk, lines, now)
             except StoreError:
