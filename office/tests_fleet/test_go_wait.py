@@ -11,7 +11,8 @@ from unittest import mock
 
 from hogwarts import db, ids, pensieve
 
-from fleet import config, go_wait, go_watch, tools
+from fleet import config, go_wait, go_watch, stops, tools
+from fleet.safefs import FleetError
 from tests_fleet.test_go_watch import SHAS, GoWatchCase
 
 
@@ -135,6 +136,19 @@ class ReturnTests(GoWaitCase):
                                  " The watch ends.\n")
 
 
+    def test_return_a_held_run_marker_it_cannot_read_never_stands_in_its_way(self):
+        build = self.build()
+        since = self.key_of(self.run_wait()[1])
+        held = self.office / config.STATE_DIR / config.STOP_HELD_DIR
+        held.mkdir(parents=True, exist_ok=True)
+        (held / "ow_unreadable").write_text("{not json")
+        with self.assertRaises(FleetError):
+            stops.held(strict=True)
+        self.handoff(build)
+        output = self.run_wait(since=since)[1]
+        self.assertTrue(output.startswith(self.expected("changed", "handoff", build)), output)
+
+
 class EndTests(GoWaitCase):
     def test_end_a_closed_go_task_says_closed_and_the_watch_ends(self):
         build = self.build()
@@ -159,6 +173,24 @@ class EndTests(GoWaitCase):
         self.assertEqual(clock.now - 1000.0, config.GO_WAIT_MAX_SECONDS)
         self.assertEqual(clock.sleeps, config.GO_WAIT_MAX_SECONDS // config.GO_WAIT_POLL_SECONDS)
         self.assertEqual(config.GO_WAIT_MAX_SECONDS, 30 * 60)
+
+    def test_end_reads_that_keep_failing_to_the_deadline_are_an_error_never_a_stale_still(self):
+        self.build()
+        since = self.key_of(self.run_wait()[1])
+        real, calls = go_watch._go_state, []
+
+        def locked_after_the_first(conn, item):
+            calls.append(1)
+            if len(calls) > 1:
+                raise db.sqlite3.OperationalError("database is locked")
+            return real(conn, item)
+
+        with mock.patch.object(go_watch, "_go_state", side_effect=locked_after_the_first), \
+                mock.patch.object(config, "GO_WAIT_MAX_SECONDS", 20):
+            code, output, clock = self.run_wait(since=since)
+        self.assertEqual(code, 1)
+        self.assertTrue(output.startswith("error: the store cannot be read"), output)
+        self.assertEqual(clock.sleeps, 4)
 
     def test_end_a_go_not_applied_yet_is_pending_until_its_spec_lands(self):
         task_id = "tk_" + "e" * 16

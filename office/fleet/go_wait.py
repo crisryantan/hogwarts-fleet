@@ -9,7 +9,8 @@ caller that runs it again with the key it printed hears each change of that go t
   exits at once.
 - It opens the store with db.connect_readonly, reads it every config.GO_WAIT_POLL_SECONDS, and exits as soon as the
   key differs from --since, or after config.GO_WAIT_MAX_SECONDS with "still", so a session is never stuck on it.
-  A read that fails part way is tried again at the next poll.
+  A read that fails part way is tried again at the next poll, and "still" needs one more whole read at the deadline:
+  a wait that cannot read the store then is an error, never a stale "still".
 - A go task that is not open with a recorded go spec yet (its go is still being confirmed, or was refused before it
   was registered) stands as pending. One that closed prints closed, and the watch ends there.
 - One line, from fixed text only (go_watch.line, or PENDING here), scrubbed and cut to config.GO_WATCH_LINE_CHARS
@@ -51,6 +52,15 @@ def _newest_build(conn, go_id: str) -> Optional[str]:
     return builds[-1] if builds else None
 
 
+def _open_go_tasks(conn) -> list:
+    """go_status.open_go_tasks, strict about Ollivander's held runs when they can be read whole. A held run marker that
+    cannot be read names no task, so rather than let one stop every wait, the held runs that can be read stand."""
+    try:
+        return go_status.open_go_tasks(conn, strict=True)
+    except (FleetError, OSError):
+        return go_status.open_go_tasks(conn)
+
+
 def standing(conn, go_id: str) -> tuple:
     """(kind, key, text) for the go task now, read in one store snapshot: kind is open, pending or closed, key
     go_watch's state key for it (or a pending or closed one built the same way), text its line without the key. Only
@@ -64,8 +74,8 @@ def standing(conn, go_id: str) -> tuple:
             key = {"build": _newest_build(conn, go_id), "state": "closed", "round": 0, "verdict": None, "event": None}
             text = f"{go_id} / {key['build'] or 'no build'}: closed ({task['close_reason']}). Nothing for you."
             return "closed", key, common.scrubbed_line(text, config.GO_WATCH_LINE_CHARS)
-        item = None if task is None else next(
-            (item for item in go_status.open_go_tasks(conn, strict=True) if item["task"]["id"] == go_id), None)
+        item = None if task is None else next((item for item in _open_go_tasks(conn) if item["task"]["id"] == go_id),
+                                              None)
         if item is not None:
             key = go_watch._go_state(conn, item)[0]
             return "open", key, go_watch.line(go_id, key)
@@ -96,7 +106,9 @@ def wait(conn, go_id: str, since: Optional[str], clock: Callable = time.monotoni
             continue  # a store mid-write or a folder mid-move reads again next poll
         if kind == "closed" or digest(key) != since:
             return _said("changed", kind, key, text)
-    return _said("still", kind, key, text)
+    # The deadline: one last whole read stands for "still", so a wait whose reads kept failing never says it.
+    kind, key, text = standing(conn, go_id)
+    return _said("still" if kind != "closed" and digest(key) == since else "changed", kind, key, text)
 
 
 def main(go_id: str, since: Optional[str], out=None, clock: Callable = time.monotonic,
