@@ -106,9 +106,18 @@ def parse_checks(text: str) -> list:
     merge, never before it). command is set only for a check that is one backtick command and nothing else.
     malformed is the plain reason a criterion is neither a command nor plain words, and None otherwise; a
     malformed criterion never runs. A line that starts with AC-<n> and holds a pipe but is not a criterion (an
-    unknown label, a misspelt one) is malformed too, never prose, and so is every line of an id used twice."""
+    unknown label, a misspelt one) is malformed too, never prose, and so is every line of an id used twice.
+    With one stripped line equal to "## Acceptance criteria", only lines after it up to the next line starting
+    with "## " or the end of the text are read as criteria. With more than one such heading, every criterion in
+    the whole text is malformed. Without that heading, criteria are read from the whole text as before."""
+    lines = text.splitlines()
+    headings = [index for index, line in enumerate(lines) if line.strip() == "## Acceptance criteria"]
+    if len(headings) == 1:
+        start = headings[0] + 1
+        end = next((index for index in range(start, len(lines)) if lines[index].startswith("## ")), len(lines))
+        lines = lines[start:end]
     checks = []
-    for line in text.splitlines():
+    for line in lines:
         stripped = line.strip()
         match = AC_LINE.fullmatch(stripped)
         if match is None:
@@ -132,7 +141,9 @@ def parse_checks(text: str) -> list:
                        "malformed": malformed})
     used = [check["id"] for check in checks]
     for check in checks:
-        if used.count(check["id"]) > 1:
+        if len(headings) > 1:
+            check["command"], check["malformed"] = None, "the ## Acceptance criteria heading is used more than once"
+        elif used.count(check["id"]) > 1:
             check["command"], check["malformed"] = None, f"{check['id']} is used more than once"
     return checks
 

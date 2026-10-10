@@ -53,6 +53,80 @@ class VerifyChecksCase(LoopCase):
         return parent, result, (self.castle / "tasks" / parent / "evidence.md").read_text(), worktree
 
 
+class AcceptanceSectionTests(VerifyChecksCase):
+    CRITERIA = ("AC-1 the first marker is written | check: `touch first-ran.txt`\n"
+                "AC-2 the second marker is written | check: `touch second-ran.txt`\n"
+                "AC-3 the third marker is written | check: `touch third-ran.txt`\n")
+
+    def test_intent_repeating_criteria_does_not_prevent_the_section_commands_running(self):
+        text = ("# {task_id} Section checks\n\n## Intent\n" + self.CRITERIA +
+                "\n## Acceptance criteria\n" + self.CRITERIA)
+        self.assertEqual(verify.parse_checks(text), verify.parse_checks(self.CRITERIA))
+        _, result, evidence, worktree = self.checked(text)
+        self.assertEqual((result["checks"], result["failed"], result["malformed"]), (3, [], []))
+        self.assertIn("SUMMARY 3 of 3 commands exited 0, 0 malformed checks not run", evidence)
+        for name in ("first-ran.txt", "second-ran.txt", "third-ran.txt"):
+            self.assertTrue((worktree / name).exists(), name)
+
+    def test_lines_outside_the_section_are_never_criteria_even_when_malformed(self):
+        outside = ("AC-1 quoted duplicate | check: `touch outside-ran.txt`\n"
+                   "AC-4 malformed quote | chek: `touch malformed-ran.txt`\n"
+                   "AC-5 quoted after check | after merge: `touch after-ran.txt`\n")
+        for heading in ("Spec", "Out of scope"):
+            with self.subTest(heading=heading):
+                text = ("# {task_id} Section checks\n\n## Intent\n" + outside +
+                        "\n## Acceptance criteria\n" + self.CRITERIA + "\n## " + heading + "\n" + outside)
+                self.assertEqual(verify.parse_checks(text), verify.parse_checks(self.CRITERIA))
+        _, result, evidence, worktree = self.checked(text)
+        self.assertEqual((result["checks"], result["failed"], result["malformed"], result["after_merge"]),
+                         (3, [], [], []))
+        self.assertNotIn("quoted", evidence)
+        self.assertNotIn("malformed quote", evidence)
+        for name in ("outside-ran.txt", "malformed-ran.txt", "after-ran.txt"):
+            self.assertFalse((worktree / name).exists(), name)
+
+    def test_stripped_heading_and_subheading_keep_criteria_through_end_of_text(self):
+        text = "  ## Acceptance criteria  \n" + self.CRITERIA + "### More checks\nAC-4 a | check: `true`\n"
+        checks = verify.parse_checks(text)
+        self.assertEqual([check["id"] for check in checks], ["AC-1", "AC-2", "AC-3", "AC-4"])
+        self.assertTrue(all(check["malformed"] is None for check in checks))
+
+    def test_empty_section_does_not_fall_back_to_criteria_elsewhere(self):
+        text = self.CRITERIA + "## Acceptance criteria\n\n## Spec\n" + self.CRITERIA
+        self.assertEqual(verify.parse_checks(text), [])
+
+    def test_repeated_section_heading_makes_every_criterion_malformed_and_runs_nothing(self):
+        text = ("# {task_id} Repeated sections\n\n## Intent\n" + self.CRITERIA +
+                "\n## Acceptance criteria\nAC-4 a | check: `touch repeated-ran.txt`\n"
+                "## Spec\nAC-5 b | after merge: `touch after-ran.txt`\n"
+                "  ## Acceptance criteria  \nAC-6 c | later: `touch malformed-ran.txt`\n")
+        checks = verify.parse_checks(text)
+        self.assertEqual([check["id"] for check in checks], [f"AC-{n}" for n in range(1, 7)])
+        for check in checks:
+            self.assertIsNone(check["command"])
+            self.assertEqual(check["malformed"], "the ## Acceptance criteria heading is used more than once")
+        self.assertEqual(verify.after_merge(checks), [])
+        _, result, evidence, worktree = self.checked(text)
+        self.assertEqual((result["checks"], result["failed"], result["malformed"], result["after_merge"]),
+                         (6, [], [f"AC-{n}" for n in range(1, 7)], []))
+        self.assertEqual(evidence.count("the ## Acceptance criteria heading is used more than once"), 6)
+        for name in ("first-ran.txt", "second-ran.txt", "third-ran.txt", "repeated-ran.txt", "after-ran.txt",
+                     "malformed-ran.txt"):
+            self.assertFalse((worktree / name).exists(), name)
+
+    def test_duplicate_id_in_the_section_still_makes_both_copies_malformed(self):
+        text = ("# {task_id} Duplicate criteria\n\n## Acceptance criteria\n" + self.CRITERIA +
+                "AC-1 repeated | after merge: `touch duplicate-ran.txt`\n")
+        checks = verify.parse_checks(text)
+        self.assertEqual([(check["id"], check["command"], check["malformed"]) for check in checks],
+                         [("AC-1", None, "AC-1 is used more than once"), ("AC-2", "touch second-ran.txt", None),
+                          ("AC-3", "touch third-ran.txt", None), ("AC-1", None, "AC-1 is used more than once")])
+        _, result, _, worktree = self.checked(text)
+        self.assertEqual((result["malformed"], result["after_merge"]), (["AC-1", "AC-1"], []))
+        self.assertFalse((worktree / "first-ran.txt").exists())
+        self.assertFalse((worktree / "duplicate-ran.txt").exists())
+
+
 class MixedCheckTests(VerifyChecksCase):
     def test_mixed_check_is_flagged_malformed_with_a_plain_reason(self):
         _, result, text, _ = self.checked()
