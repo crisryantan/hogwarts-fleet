@@ -33,9 +33,10 @@ ACTIONS = {
 # review, a task's follow-ups (at most FOLLOWUP_MAX_PER_TASK), one patch file (at most PATCH_MAX_BYTES), the store's
 # own health checks.
 SINGLE = {"task show", "request show", "review check", "followup show", "portrait show", "doctor"}
-# Fleet commands: each acts on one task or job, and feed prints only what is new from the moment it starts.
+# Fleet commands: each acts on one task or job, feed prints only what is new from the moment it starts, and go-wait
+# prints one line about one go task.
 FLEET_COMMANDS = {
-    "worktree", "build", "worktree-remove", "worktree-rebuild", "verify", "review", "loops", "feed", "push",
+    "worktree", "build", "worktree-remove", "worktree-rebuild", "verify", "review", "loops", "feed", "go-wait", "push",
     "ollivander", "close", "patrol-restart", "adopt", "gringotts",
 }
 

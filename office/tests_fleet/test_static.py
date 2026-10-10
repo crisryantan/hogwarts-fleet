@@ -46,6 +46,8 @@ KNOWN_FLAGS = {
     "--task-lock-fd",
     # Claude's stream-json output, which print mode only writes with --verbose, and fleet feed --all
     "--verbose", "--all",
+    # fleet go-wait: the key an earlier wait printed
+    "--since",
     # git, run only through gitops with the hardening flags
     "--git-dir", "--work-tree", "--verify", "--end-of-options", "--get", "--porcelain", "--no-verify",
     "--no-ext-diff", "--no-textconv", "--detach", "--no-checkout", "-b", "-m", "-F", "--stdin", "--force", "-z",

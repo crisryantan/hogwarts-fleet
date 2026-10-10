@@ -13,6 +13,9 @@
       --intent-file on a fix round rewrites the task's TASK.md, and its approval, once you type the task id back
       in your own terminal (no --yes), before the round's checks read it.
   fleet feed --desk <name> | --all
+  fleet go-wait <go-task-id> [--since <key>]
+      Waits, read only, until that go task changes where it stands, then prints one line with the key for the next
+      wait (fleet/go_wait.py). Run it again with that key to hear each change of the go task until it closes.
   fleet push <task-id> [--yes]
   fleet ollivander [--dry-run]
   fleet gringotts [--drill [ARCHIVE]]
@@ -50,7 +53,7 @@ from hogwarts.errors import StoreError  # noqa: E402
 from fleet import adopt, closer, common, config, gitops, push, review, verify, worktree  # noqa: E402
 from fleet import gringotts, ollivander, patrol  # noqa: E402
 from fleet.safefs import FleetError  # noqa: E402
-from fleet import feed, loops  # noqa: E402
+from fleet import feed, go_wait, loops  # noqa: E402
 
 INTENT_MAX_BYTES = 16384
 
@@ -100,6 +103,9 @@ def build_parser() -> argparse.ArgumentParser:
     which = watched.add_mutually_exclusive_group(required=True)
     which.add_argument("--desk", help="one desk; owl-post shows every owl")
     which.add_argument("--all", action="store_true", help="every desk")
+    waited = commands.add_parser("go-wait", allow_abbrev=False)
+    waited.add_argument("task", help="a go task id")
+    waited.add_argument("--since", help="the key an earlier go-wait printed; omit it for where the go task stands now")
     pushed = commands.add_parser("push", allow_abbrev=False)
     pushed.add_argument("task")
     pushed.add_argument("--yes", action="store_true")
@@ -200,6 +206,8 @@ def main(argv: Optional[list] = None) -> int:
         return run_feed(None if args.all else args.desk)
     if args.command == "loops":
         return run_loops(args.dry_run)
+    if args.command == "go-wait":  # read only: it opens the store read-only itself, as the feed does
+        return go_wait.main(args.task, args.since)
     try:
         conn = common.connect()
     except StoreError as exc:

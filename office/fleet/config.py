@@ -440,6 +440,10 @@ GO_WATCH_DIR = "go-watch"
 GO_WATCH_WAIT_SECONDS = 20
 GO_UPDATES_LOG = "go-updates.log"
 GO_UPDATES_LOG_MAX_BYTES = 256 * 1024
+# McGonagall's chat watch (fleet/go_wait.py): fleet go-wait reads the store this often while it waits for a go task
+# to change where it stands, and gives up after GO_WAIT_MAX_SECONDS with "still", so her session is never stuck on it.
+GO_WAIT_POLL_SECONDS = 5
+GO_WAIT_MAX_SECONDS = 30 * 60
 # A seen marker a prompt hook left pending this long, or whose hook process is gone, is taken over by the next hook.
 SEEN_PENDING_SECONDS = 60
 

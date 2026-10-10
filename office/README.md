@@ -12,7 +12,7 @@ Nothing a desk runs can call the store, and desks (the agents) have no file acce
 - the patrol scripts: the Map, the morning lineup, keeper's watch and the scoreboard;
 - Gringotts and Ollivander;
 - the nightly Pensieve export, which runs Dumbledore after it;
-- the worktree, verify, review and push scripts, and `fleet feed`;
+- the worktree, verify, review and push scripts, `fleet feed` and `fleet go-wait`;
 - the push gate;
 - the castle's session hooks, including the go, close-token and SessionEnd hooks.
 
@@ -57,7 +57,8 @@ The store has none of these:
   hogwarts/watch.py                     read-only queries behind fleet feed
   hogwarts/cli.py                       argparse CLI, JSON output
   fleet/                                the fleet scripts: run_desk.py, worktree.py, verify.py, review.py, push.py,
-                                        owl_post.py, ollivander.py, feed.py, tools.py (the fleet command), the patrol
+                                        owl_post.py, ollivander.py, feed.py, go_wait.py (fleet go-wait, read-only),
+                                        tools.py (the fleet command), the patrol
                                         (patrol.py, map.py, morning.py, keeper.py, scoreboard.py), gringotts.py,
                                         portrait.py (the nightly export and Dumbledore's run), portrait_patch.py (his
                                         patches, behind castle portrait), go_confirm.py (finishes a go or a close

@@ -461,6 +461,7 @@ Everything `castle` prints is JSON. The installer links `castle` and `fleet` int
 | --- | --- |
 | `fleet feed --desk <name>` | Watch one desk, read-only |
 | `fleet feed --all` | Watch every desk, read-only |
+| `fleet go-wait <go-task-id> [--since <key>]` | Wait, read-only, until one go task changes where it stands, then print one line: the go task, its build, the new state, what you do next and the key for the next wait. With no `--since` it prints where it stands now. It ends with `closed` once the go task closes, or with `still` after 30 minutes with no change |
 | `fleet ollivander --dry-run` | See Ollivander's plan without changing anything |
 | `fleet gringotts` | Take a backup now |
 | `fleet gringotts --drill` | Restore the newest backup into a temp folder and check it |
