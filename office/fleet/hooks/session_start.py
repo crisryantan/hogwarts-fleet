@@ -39,6 +39,7 @@ from hogwarts import capacity, owlery, pensieve  # noqa: E402
 from hogwarts.errors import StoreError  # noqa: E402
 
 from fleet import common, config, events_seen, go_status, scratchpad, stops  # noqa: E402
+from fleet.hooks import stop as chat_watch  # noqa: E402
 from fleet.safefs import FleetError  # noqa: E402
 
 ONE_LINE_SOURCES = ("resume", "fork")
@@ -271,6 +272,8 @@ def _store_body(data: dict, desk: str, out, now: int, source: object, rotated: l
         else:
             listed: list = []
             status: Optional[list] = [] if common.session_desk(data, desk) == config.HOOK_DESK else None
+            # The chat watch's start, read before her go status block, so it is never newer than what she is shown.
+            told = None if status is None else chat_watch.seed_keys(conn, common.session_id(data))
             lines = digest(conn, desk, now, listed, status)
             out.write("\n".join(lines + rotated) + "\n")
             wrote.append(True)
@@ -280,6 +283,7 @@ def _store_body(data: dict, desk: str, out, now: int, source: object, rotated: l
                     pensieve.shown_through(conn, listed, folded=True), listed))
             if status:  # and only her go tasks that changed since
                 go_status.record(common.session_id(data), status[0])
+                chat_watch.seed(common.session_id(data), told)
             try:
                 ack_shown_owls(conn, desk, lines, now)
             except StoreError:

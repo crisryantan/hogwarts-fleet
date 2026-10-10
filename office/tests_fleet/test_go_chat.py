@@ -13,7 +13,7 @@ from unittest import mock
 from hogwarts import db, pensieve
 
 from fleet import config, safefs
-from fleet.hooks import stop
+from fleet.hooks import session_start, stop, user_prompt_submit
 from tests_fleet.test_go_wait import Clock
 from tests_fleet.support import IN_KIT, ONLY_IN_KIT
 from tests_fleet.test_go_watch import SHAS, GoWatchCase
@@ -152,15 +152,84 @@ class WakeTests(ChatCase):
         code, said, clock = self.stop()  # nothing left to watch
         self.assertEqual((code, said, clock.sleeps), (0, "", 0))
 
-    def test_wake_many_changes_are_capped_with_a_count(self):
+    def test_wake_many_changes_are_capped_and_the_rest_come_on_the_next_wake(self):
         self.baseline()
         others = [self.go_task(index) for index in range(1, config.GO_WATCH_MAX_PER_PASS + 3)]
+        pensieve.close_task(self.conn, self.go, "abandoned", now=self.tick())
         said = self.stop()[1].splitlines()
         self.assertEqual(said[0], stop.HEAD)
         self.assertEqual(said[1:-1], [self.sent(go_id, None, "confirmed")
                                       for go_id in others[:config.GO_WATCH_MAX_PER_PASS]])
-        self.assertEqual(said[-1], "2 more go tasks moved; your go status block shows each one.")
-        self.assertEqual(len(self.told()), len(others) + 1)
+        self.assertEqual(said[-1], "3 more go tasks moved; the next wake gives each one.")
+        code, said, clock = self.stop()
+        self.assertEqual((code, clock.sleeps), (stop.WAKE, 0))
+        self.assertEqual(said, self.woke(*[self.sent(go_id, None, "confirmed")
+                                           for go_id in others[config.GO_WATCH_MAX_PER_PASS:]],
+                                         f"{self.go} / no build: closed (abandoned). Nothing for you."
+                                         " The watch ends for it."))
+        self.assertEqual(set(self.told()), set(others))
+        self.assertEqual(self.stop()[:2], (0, ""))
+
+    def test_wake_a_line_that_never_went_out_is_never_kept_as_told(self):
+        build = self.build()
+        self.baseline()
+        before = self.told()
+        self.handoff(build)
+        broken = mock.Mock()
+        broken.write.side_effect = [OSError("pipe closed"), None]
+        raw = json.dumps(self.payload()).encode("utf-8")
+        with mock.patch.object(config, "GO_CHAT_MAX_SECONDS", 20):
+            code = stop.main(argv=[], stdin=io.BytesIO(raw), stdout=io.StringIO(), stderr=broken,
+                             clock=Clock(), sleep=Clock().sleep, parent=lambda: self.parent)
+        self.assertEqual(code, 1)
+        self.assertEqual(self.told(), before)
+        self.assertEqual(self.stop()[1], self.woke(self.sent(self.go, build["id"], "handoff")))
+
+    def test_wake_what_she_was_told_that_cannot_be_read_is_an_error_and_never_replaced(self):
+        self.baseline()
+        name = self.folder() / (hashlib.sha256(SESSION.encode("utf-8")).hexdigest()[:32] + stop.TOLD)
+        name.write_text('{"state": "told", "tasks": {"tk_nope": "x"}}\n')
+        self.handoff(self.build())
+        code, said, clock = self.stop()
+        self.assertEqual((code, clock.sleeps), (1, 0))
+        self.assertIn("cannot be read", said)
+        self.assertEqual(name.read_text(), '{"state": "told", "tasks": {"tk_nope": "x"}}\n')
+
+
+class SeedTests(ChatCase):
+    def prompt(self, module=None, **fields) -> None:
+        payload = {**self.payload(), "hook_event_name": "UserPromptSubmit", "prompt": "how is it going",
+                   "prompt_id": "5d0c9a3e-7777-4888-9999-0aaabbbcccdd", **fields}
+        code, _, err = self.run_hook(module or user_prompt_submit, payload)
+        self.assertEqual(code, 0, err)
+
+    def test_seed_her_prompt_hook_keeps_what_its_go_status_block_showed(self):
+        build = self.build()
+        self.prompt()
+        self.assertEqual(set(self.told()), {self.go})
+        # A handoff during her turn, after the block she was shown, wakes her at the first Stop.
+        self.handoff(build)
+        self.assertEqual(self.stop()[1], self.woke(self.sent(self.go, build["id"], "handoff")))
+
+    def test_seed_a_go_task_that_closes_before_the_first_stop_still_gets_its_closed_line(self):
+        self.prompt(module=session_start, hook_event_name="SessionStart", source="startup")
+        self.assertEqual(set(self.told()), {self.go})
+        pensieve.close_task(self.conn, self.go, "abandoned", now=self.tick())
+        self.assertEqual(self.stop()[1], self.woke(f"{self.go} / no build: closed (abandoned). Nothing for you."
+                                                   " The watch ends for it."))
+
+    def test_seed_never_replaces_what_a_wait_kept(self):
+        build = self.build()
+        self.prompt()
+        self.handoff(build)
+        self.assertEqual(self.stop()[0], stop.WAKE)
+        kept = self.told()
+        self.prompt()
+        self.assertEqual(self.told(), kept)
+
+    def test_seed_only_in_her_session(self):
+        self.prompt(agent_type=None)
+        self.assertFalse(self.folder().exists())
 
     def test_wake_one_go_task_it_cannot_read_never_holds_back_another(self):
         build = self.build()

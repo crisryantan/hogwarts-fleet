@@ -136,16 +136,26 @@ class ReturnTests(GoWaitCase):
                                  " The watch ends.\n")
 
 
-    def test_return_a_held_run_marker_it_cannot_read_never_stands_in_its_way(self):
+    def test_return_a_held_run_marker_it_cannot_read_is_never_read_as_not_held(self):
         build = self.build()
         since = self.key_of(self.run_wait()[1])
         held = self.office / config.STATE_DIR / config.STOP_HELD_DIR
         held.mkdir(parents=True, exist_ok=True)
-        (held / "ow_unreadable").write_text("{not json")
+        marker = held / "ow_unreadable"
+        marker.write_text("{not json")
         with self.assertRaises(FleetError):
             stops.held(strict=True)
-        self.handoff(build)
-        output = self.run_wait(since=since)[1]
+        marker.unlink()
+
+        def unreadable():
+            marker.write_text("{not json")
+            self.handoff(build)
+
+        # While it cannot be read, no state is reported; once it can, the change is.
+        clock = Clock({1: unreadable, 3: marker.unlink})
+        code, output, clock = self.run_wait(since=since, clock=clock)
+        self.assertEqual(code, 0)
+        self.assertEqual(clock.sleeps, 3)
         self.assertTrue(output.startswith(self.expected("changed", "handoff", build)), output)
 
 

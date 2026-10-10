@@ -798,13 +798,17 @@ def events(conn, seen: Optional[tuple] = None) -> tuple:
 
 
 def _go_status(conn, data: dict, now: int) -> tuple:
-    """(lines, mark) of McGonagall's go status for this prompt (fleet/go_status.py). Never breaks the prompt."""
-    from fleet import go_status  # only her session pays for this import
+    """(lines, mark, told) of McGonagall's go status for this prompt (fleet/go_status.py), and the chat watch's start
+    while her session has none (fleet/hooks/stop.py), read before the block so it is never newer than what she is
+    shown. Never breaks the prompt."""
+    from fleet import go_status  # only her session pays for these imports
+    from fleet.hooks import stop as chat_watch
 
+    told = chat_watch.seed_keys(conn, common.session_id(data))
     try:
-        return go_status.block(conn, now, go_status.last(common.session_id(data)))
+        return (*go_status.block(conn, now, go_status.last(common.session_id(data))), told)
     except Exception:  # noqa: BLE001 - a status block never breaks the prompt
-        return [], None
+        return [], None, None
 
 
 def tempus(data: dict) -> Optional[str]:
@@ -824,9 +828,10 @@ def _body(data: dict, desk: str, out, now: int) -> None:
     made: list = []
     seen: list = []
     status: list = []
+    seeds: list = []
     try:
         with common.ended_by_signals():  # SIGTERM or SIGHUP ends the hook through this cleanup too
-            text = _output(data, desk, now, made, seen, status)
+            text = _output(data, desk, now, made, seen, status, seeds)
             if text is not None:
                 out.write(text)
                 out.flush()  # a write still buffered fails here, not after the markers say shown
@@ -846,10 +851,14 @@ def _body(data: dict, desk: str, out, now: int) -> None:
         from fleet import go_status
 
         go_status.record(common.session_id(data), status[0])
+    if seeds:  # and the chat watch's start, once the block it matches is shown
+        from fleet.hooks import stop as chat_watch
+
+        chat_watch.seed(common.session_id(data), seeds[0])
 
 
 def _output(data: dict, desk: str, now: int, made: list, seen: Optional[list] = None,
-            status: Optional[list] = None) -> Optional[str]:
+            status: Optional[list] = None, seeds: Optional[list] = None) -> Optional[str]:
     shown, context, board = [], [], []
     prompt = data.get("prompt")
     # Read first, from its own file: a store that cannot be read never hides an active stop.
@@ -891,9 +900,11 @@ def _output(data: dict, desk: str, now: int, made: list, seen: Optional[list] = 
                 owls, _ = mcgonagall_inbox.safe_unseen(conn, made)  # marker ages are by the real clock
                 shown += owls
                 context += owls
-                board, mark = _go_status(conn, data, now)
+                board, mark, told = _go_status(conn, data, now)
                 if status is not None and mark is not None:
                     status.append(mark)  # recorded only once this output is written
+                if seeds is not None and told is not None:
+                    seeds.append(told)  # the same for the chat watch's start
             session = common.session_id(data)
             after = events_seen.last(session)
             pending, count, marked = events(conn, after)
@@ -905,6 +916,8 @@ def _output(data: dict, desk: str, now: int, made: list, seen: Optional[list] = 
         board = []  # what was gathered before the failure still shows, with the stop
         if status is not None:
             status.clear()
+        if seeds is not None:
+            seeds.clear()
     if stop is not None:  # first in the events part, on every prompt until the stop is cleared
         shown.append(stop)
         context.append(stop)

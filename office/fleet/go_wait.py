@@ -53,12 +53,9 @@ def _newest_build(conn, go_id: str) -> Optional[str]:
 
 
 def _open_go_tasks(conn) -> list:
-    """go_status.open_go_tasks, strict about Ollivander's held runs when they can be read whole. A held run marker that
-    cannot be read names no task, so rather than let one stop every wait, the held runs that can be read stand."""
-    try:
-        return go_status.open_go_tasks(conn, strict=True)
-    except (FleetError, OSError):
-        return go_status.open_go_tasks(conn)
+    """go_status.open_go_tasks, strict about Ollivander's held runs, as go updates are: a held run marker that cannot be
+    read names no task, so no build can be told apart from held then, and the read fails rather than say it is not."""
+    return go_status.open_go_tasks(conn, strict=True)
 
 
 def standing(conn, go_id: str) -> tuple:

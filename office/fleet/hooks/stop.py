@@ -12,11 +12,16 @@ Input fields read: session_id, agent_type and agent_id (common.session_desk), so
 - One waiter per session: an exclusive lock named by a digest of the session id in the office folder
   config.GO_CHAT_DIR, taken without waiting; a Stop that finds it held exits 0, and the waiter holding it goes on.
 - What she was told: one marker per session in that folder holding go_wait.digest of each go task's state key, the
-  key go updates use (go_wait.open_states, go_watch's reducer per go task), so wording and time never wake her. The
-  first wait of a session takes where things stand as told, since her go status block shows that. A go task that is
-  new, or whose key changed, is a change; one that closed gets its closed line and drops out.
-- A change: the marker is replaced first, so a wake is never repeated, then the fixed lines (go_watch.line, at most
-  config.GO_WATCH_MAX_PER_PASS and a count of the rest, each scrubbed and cut) go to stderr under HEAD and it exits 2.
+  key go updates use (go_wait.open_states, go_watch's reducer per go task), so wording and time never wake her. Her
+  SessionStart and prompt hooks seed it (seed_keys, seed) with where things stood as they built her go status block,
+  once its output is written and only while the session has none, so a change after that block is never taken as
+  told. A wait with none kept (a seed that failed) starts from where things stand. One kept that cannot be read is an
+  error every time, never replaced, until Ryan removes it. A go task that is new, or whose key changed, is a change;
+  one that closed gets its closed line and drops out.
+- A change: the fixed lines (go_watch.line, each scrubbed and cut) go to stderr under HEAD, at most
+  config.GO_WATCH_MAX_PER_PASS with a count of the rest, and only once they are flushed are those lines kept as told,
+  then it exits 2. The rest stay owed, so the wait at the end of her next turn gives them at once. A line that never
+  went out is never kept; one kept that could not be marked comes again, the safe side.
 - No change within config.GO_CHAT_MAX_SECONDS, a margin under the hook's timeout: it exits 0 and nothing wakes her.
   The watch starts again at the end of her next turn. It also exits 0 once the session that started it is gone (its
   parent process changed), so a wait outliving her session never records a line no one saw.
@@ -56,13 +61,17 @@ def _name(session_id: str) -> str:
 
 
 def _told(fd: int, name: str) -> Optional[dict]:
-    """{go task id: digest} this session was last told, or None when none was kept or it cannot be read."""
+    """{go task id: digest} this session was last told, or None when none was kept. Raises when one was kept but cannot
+    be read, so it is never replaced by a new start that would drop what it still owes her."""
     marker = markers.read(fd, name + TOLD)
-    tasks = None if marker is None else marker.get("tasks")
-    if not isinstance(tasks, dict) or not all(isinstance(go_id, str) and ids.PATTERNS["task"].fullmatch(go_id)
-                                              and isinstance(key, str) and DIGEST.fullmatch(key)
-                                              for go_id, key in tasks.items()):
+    if marker is None:
         return None
+    tasks = marker.get("tasks")
+    if marker.get("state") != "told" or not isinstance(tasks, dict) or not all(
+            isinstance(go_id, str) and ids.PATTERNS["task"].fullmatch(go_id) and isinstance(key, str)
+            and DIGEST.fullmatch(key) for go_id, key in tasks.items()):
+        raise FleetError(f"what this session was told, in the office's {config.GO_CHAT_DIR} folder, cannot be read, so"
+                         " the chat watch waits for nothing until that file is removed")
     return tasks
 
 
@@ -88,18 +97,51 @@ def _prune(fd: int, name: str) -> None:
             continue
 
 
-def changes(conn, told: dict) -> tuple:
-    """(lines, told after): the line of each open go task that is new or whose key changed, and the closed line of each
-    told one that closed, which drops out. A go task that cannot be read now keeps what it was told."""
+# What her session hooks showed her
+
+
+def seed_keys(conn, session_id: Optional[str]) -> Optional[dict]:
+    """Where her open go tasks stand, as told keys, read right after her SessionStart or prompt hook built her go
+    status block, when this session has nothing kept yet; else None. Never raises."""
+    if session_id is None:
+        return None
+    try:
+        try:
+            with safefs.opened_dir(config.OFFICE_ROOT, config.GO_CHAT_DIR) as fd:
+                if markers.read(fd, _name(session_id) + TOLD) is not None:
+                    return None
+        except safefs.Missing:
+            pass
+        return {go_id: go_wait.digest(state[0]) for go_id, state in go_wait.open_states(conn).items()
+                if state is not None}
+    except Exception:  # noqa: BLE001 - a seed never breaks her hook; the first wait then starts from where things stand
+        return None
+
+
+def seed(session_id: Optional[str], keys: Optional[dict]) -> None:
+    """Keep seed_keys' keys as what this session was told, once the hook's output is written. Published
+    create-exclusive, so it never replaces what a wait kept since. Never raises."""
+    if session_id is None or keys is None:
+        return
+    try:
+        with safefs.opened_dir(config.OFFICE_ROOT, config.GO_CHAT_DIR, create=True) as fd:
+            markers.publish(fd, _name(session_id) + TOLD, {"state": "told", "tasks": keys})
+    except (FleetError, OSError):
+        pass
+
+
+# A wait
+
+
+def changes(conn, told: dict) -> list:
+    """[(go task id, its line or None, its new digest or None)]: each open go task that is new or whose key changed, and
+    each told one that left the open set, which drops out (digest None), with its closed line when it closed. A go task
+    that cannot be read now keeps what it was told."""
     states = go_wait.open_states(conn)
-    lines, after = [], dict(told)
+    found = []
     for go_id, state in states.items():
-        if state is None:
-            continue
-        key, text = state
-        if told.get(go_id) != go_wait.digest(key):
-            lines.append(text)
-            after[go_id] = go_wait.digest(key)
+        if state is not None and told.get(go_id) != go_wait.digest(state[0]):
+            found.append((go_id, state[1], go_wait.digest(state[0])))
     for go_id in told:
         if go_id in states:
             continue
@@ -107,43 +149,51 @@ def changes(conn, told: dict) -> tuple:
             kind, _, text = go_wait.standing(conn, go_id)
         except go_wait.READ_ERRORS:
             continue
-        if kind == "open":
-            continue  # opened again between the two reads: the next poll has it
-        del after[go_id]
-        if kind == "closed":
-            lines.append(f"{text} The watch ends for it.")
-    return lines, after
+        if kind != "open":  # one opened again between the two reads is in the next poll
+            found.append((go_id, f"{text} The watch ends for it." if kind == "closed" else None, None))
+    return found
 
 
-def _capped(lines: list) -> list:
-    cap = config.GO_WATCH_MAX_PER_PASS
-    if len(lines) <= cap:
-        return lines
-    return lines[:cap] + [f"{len(lines) - cap} more go tasks moved; your go status block shows each one."]
+def _after(told: dict, entries: list) -> dict:
+    after = dict(told)
+    for go_id, _, key in entries:
+        if key is None:
+            after.pop(go_id, None)
+        else:
+            after[go_id] = key
+    return after
 
 
 def _wait(conn, fd: int, name: str, err, clock: Callable, sleep: Callable, parent: Callable) -> int:
+    _prune(fd, name)
     told = _told(fd, name)
-    if told is None:  # the first wait of this session: her go status block showed where things stand
-        _, told = changes(conn, {})
+    if told is None:  # only when her hooks could not keep what they showed her: start from where things stand
+        told = _after({}, changes(conn, {}))
         _record(fd, name, told)
-        _prune(fd, name)
     started, ends = parent(), clock() + config.GO_CHAT_MAX_SECONDS
     while True:
-        if parent() != started:  # her session is gone: a line now would be recorded as told with no one to tell
+        if parent() != started:  # her session is gone: a line now would be kept as told with no one to tell
             return 0
         try:
-            lines, after = changes(conn, told)
+            entries = changes(conn, told)
         except go_wait.READ_ERRORS:
-            lines, after = [], told  # a store mid-write reads again next poll
-        if lines:
-            _record(fd, name, after)  # first, so this wake is never repeated
-            err.write("\n".join([HEAD] + _capped(lines)) + "\n")
-            err.flush()
+            entries = []  # a store mid-write reads again next poll
+        silent = [entry for entry in entries if entry[1] is None]
+        if silent:  # a told go task that left the open set with no line of its own
+            told = _after(told, silent)
+            _record(fd, name, told)
+        spoken = [entry for entry in entries if entry[1] is not None]
+        if spoken:
+            shown, more = spoken[:config.GO_WATCH_MAX_PER_PASS], len(spoken) - config.GO_WATCH_MAX_PER_PASS
+            lines = [HEAD] + [text for _, text, _ in shown]
+            lines += [f"{more} more go tasks moved; the next wake gives each one."] if more > 0 else []
+            err.write("\n".join(lines) + "\n")
+            err.flush()  # a line that never went out is never kept as told
+            try:
+                _record(fd, name, _after(told, shown))  # the rest stay owed, so her next turn's wait gives them
+            except (FleetError, OSError):
+                pass  # the next wait gives these again: telling her twice is the safe side
             return WAKE
-        if after != told:  # a told go task left without a line of its own
-            _record(fd, name, after)
-            told = after
         if clock() >= ends:
             return 0
         sleep(max(0.0, min(config.GO_WAIT_POLL_SECONDS, ends - clock())))
