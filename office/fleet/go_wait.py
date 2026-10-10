@@ -84,6 +84,23 @@ def standing(conn, go_id: str) -> tuple:
     return "pending", key, common.scrubbed_line(text, config.GO_WATCH_LINE_CHARS)
 
 
+def open_states(conn) -> dict:
+    """{go task id: (key, text)} for every open go task, oldest first, read in one store snapshot, for the chat watch
+    (fleet/hooks/stop.py). A go task whose own rows or files cannot be read maps to None, so it never stands in the
+    others' way. Raises when the open go tasks themselves cannot be read."""
+    with db.snapshot(conn):
+        found = {}
+        for item in reversed(_open_go_tasks(conn)):
+            go_id = item["task"]["id"]
+            try:
+                key = go_watch._go_state(conn, item)[0]
+            except READ_ERRORS:
+                found[go_id] = None
+                continue
+            found[go_id] = (key, go_watch.line(go_id, key))
+        return found
+
+
 def _said(word: str, kind: str, key: dict, text: str) -> str:
     if kind == "closed":
         return f"closed {text} The watch ends."

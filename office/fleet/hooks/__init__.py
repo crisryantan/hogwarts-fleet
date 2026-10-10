@@ -8,6 +8,8 @@ A missing or mistyped field is treated as absent.
 
 A hook never exits 2, so a fleet failure can never block Ryan's prompt. Failures
 exit 1 with one line on stderr, which Claude Code shows as a non-blocking error.
+The one exception is the Stop hook (stop.py), which runs in the background with
+asyncRewake: its exit 2 blocks nothing and only wakes McGonagall with its lines.
 
 The castle settings use the import form, so a missing fleet package also exits 1:
 /usr/bin/env -i /usr/bin/python3 -I -B -X pycache_prefix=/var/empty -c 'import sys; sys.path.insert(0, "/Users/crisryantan/.hogwarts"); from fleet.hooks.session_start import main; sys.exit(main())'

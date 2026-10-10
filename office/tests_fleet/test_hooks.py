@@ -613,7 +613,7 @@ class ScriptPathTests(HookCase):
 
     def test_every_hook_has_a_script_entry_point(self):
         folder = Path(__file__).resolve().parents[1] / "fleet" / "hooks"
-        for name in ("session_start", "user_prompt_submit", "pre_compact", "session_end"):
+        for name in ("session_start", "user_prompt_submit", "pre_compact", "session_end", "stop"):
             with self.subTest(hook=name):
                 text = (folder / f"{name}.py").read_text()
                 self.assertIn('if __name__ == "__main__" and "/Users/crisryantan/.hogwarts" not in sys.path:', text)

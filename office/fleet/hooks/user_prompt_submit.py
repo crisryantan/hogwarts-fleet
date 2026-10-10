@@ -200,6 +200,9 @@ SPEC_BLOCK = ("the ## Spec section must open with the lines repo: <folder>, bran
               " in that order")
 GO_CONTEXT = ("The go registered and routed this task already, so it needs no castle task create command and no"
               " request owl.")
+# Once a go is applied or being confirmed: the chat watch (fleet/hooks/stop.py) picks its go task up when her turn ends.
+GO_WATCH_CONTEXT = ("The chat watch is on for it: when each of your turns ends, a hook waits on it and wakes you with a"
+                    " line each time it moves, until it closes. Tell Ryan the watch is on.")
 
 
 class Refused(FleetError):
@@ -692,6 +695,8 @@ def _deferred(conn, data: dict, desk: str, kind: str, task_ids: list) -> tuple:
                                                  " ".join(f"castle task show {task_id}" for task_id in task_ids) + ".")
     context = [line, f"Until that event comes, nothing is applied for {named}: write no castle task create command"
                      f" and no request owl for it. {check}"]
+    if kind == "go" and started:
+        context.append(GO_WATCH_CONTEXT)
     return [line], context
 
 
@@ -764,7 +769,7 @@ def _starts(conn, data: dict, desk: str, task_ids: list, now: int) -> tuple:
         shown += lines
         context += lines
         any_started = any_started or started
-    return shown, context + ([GO_CONTEXT] if any_started else [])
+    return shown, context + ([GO_CONTEXT, GO_WATCH_CONTEXT] if any_started else [])
 
 
 def events(conn, seen: Optional[tuple] = None) -> tuple:

@@ -444,6 +444,13 @@ GO_UPDATES_LOG_MAX_BYTES = 256 * 1024
 # to change where it stands, and gives up after GO_WAIT_MAX_SECONDS with "still", so her session is never stuck on it.
 GO_WAIT_POLL_SECONDS = 5
 GO_WAIT_MAX_SECONDS = 30 * 60
+# McGonagall's chat watch, the Stop hook (fleet/hooks/stop.py): Claude Code runs it in the background at the end of each
+# of her turns (asyncRewake) and stops it after GO_CHAT_HOOK_TIMEOUT_SECONDS, the timeout castle/.claude/settings.json
+# gives it, so it waits at most GO_CHAT_MAX_SECONDS, a margin below that. What each session was last told is kept in
+# the office folder GO_CHAT_DIR, one file per session, removed after EVENTS_SEEN_KEEP_SECONDS.
+GO_CHAT_HOOK_TIMEOUT_SECONDS = 3 * 3600
+GO_CHAT_MAX_SECONDS = GO_CHAT_HOOK_TIMEOUT_SECONDS - 300
+GO_CHAT_DIR = "go-chat"
 # A seen marker a prompt hook left pending this long, or whose hook process is gone, is taken over by the next hook.
 SEEN_PENDING_SECONDS = 60
 

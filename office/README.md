@@ -14,7 +14,7 @@ Nothing a desk runs can call the store, and desks (the agents) have no file acce
 - the nightly Pensieve export, which runs Dumbledore after it;
 - the worktree, verify, review and push scripts, `fleet feed` and `fleet go-wait`;
 - the push gate;
-- the castle's session hooks, including the go, close-token and SessionEnd hooks.
+- the castle's session hooks, including the go, close-token, SessionEnd and Stop (the chat watch) hooks.
 
 Sender identity is a parameter that the calling script supplies. The Owl Post derives it from the desk outbox directory a file came from. The store still validates every input strictly, as defence in depth.
 
@@ -69,7 +69,8 @@ The store has none of these:
                                         next step), owl_report.py (her one-line owl reports), phone.py (loud events to
                                         the phone), scratchpad.py (keeps each scratchpad and task pad to its latest
                                         Checkpoint, older ones archived) and their helpers
-  fleet/hooks/                          the castle's session hooks and the push gate, push_gate.py
+  fleet/hooks/                          the castle's session hooks and the push gate, push_gate.py; stop.py is
+                                        McGonagall's chat watch, which wakes her with a go task's line when it moves
   launchd/                              the launchd plist templates, one per background job; fleet loops reads them too
   loops/jobs                            only with terminal loops: the jobs fleet loops runs instead of launchd, one per line
   loops/running.json                    while fleet loops runs: its pid and the jobs it runs
