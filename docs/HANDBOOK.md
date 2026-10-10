@@ -547,4 +547,4 @@ rm -f ~/.hogwarts/auto-draft-pr ~/.hogwarts/pr-followup ~/.hogwarts/auto-close ~
 
 From your clone of the repo, run `./uninstall.sh` to see every step it would take. It changes nothing. Then run `./uninstall.sh --yes` to do it. It stops the background jobs, archives both folders to `~/hogwarts-fleet-archive-<timestamp>.tar.gz` before it removes them, and never edits your Claude or Codex settings. If your settings still mention the fleet, it shows the lines and the backup to restore. [UNINSTALL.md](UNINSTALL.md) has the same steps by hand, and how to restore from the archive.
 
-Commands in this handbook are tested with Claude Code 2.1.274, Codex 0.160.0 and herdr 0.9.3.
+Commands in this handbook are tested with Claude Code 2.1.295, Codex 0.162.0 and herdr 0.9.3.
