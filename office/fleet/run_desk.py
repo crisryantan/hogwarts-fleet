@@ -1162,14 +1162,15 @@ class ReportTurn(NamedTuple):
 
 
 def owl_report_argv(brief: str, prompt: str, model: str = None, budget: str = None,
-                    kind: str = "owl-report") -> ReportTurn:
+                    kind: str = "owl-report", schema: Optional[str] = None) -> ReportTurn:
     """One headless McGonagall owl-report turn on the one owl in its working folder: claude -p --restricted (file
     tools confined to the working folder) under the report-only settings file, no MCP, only Read, Grep and Glob, the
     fixed brief in its own brief file and the fixed prompt on stdin, and JSON output so a failure is told apart from a
     report. The settings file is checked first (check_report_settings). model and budget default to the owl report's
     own. kind names the brief file (<kind>.brief): one per caller, the owl reporter or the orchestrator, each of which
-    runs one turn at a time under a lock its turn inherits. run_report_turn writes the brief file and removes it
-    after."""
+    runs one turn at a time under a lock its turn inherits. schema, a fixed JSON Schema of the caller's own, makes the
+    CLI hold the answer to it (--json-schema), and run_report_turn then reads its structured output. run_report_turn
+    writes the brief file and removes it after."""
     desk = config.HOOK_DESK
     check_report_settings(_read_office(desk, config.OWL_REPORT_SETTINGS_FILE, config.SETTINGS_MAX_BYTES,
                                        "owl report settings"))
@@ -1179,6 +1180,8 @@ def owl_report_argv(brief: str, prompt: str, model: str = None, budget: str = No
             "--tools", config.OWL_REPORT_TOOLS, "--permission-mode", "dontAsk", "--model", model or config.OWL_REPORT_MODEL,
             "--append-system-prompt-file", f"{config.runs_dir()}/{desk}/{name}", "--output-format", "json",
             "--max-budget-usd", budget or config.OWL_REPORT_MAX_BUDGET_USD]
+    if schema is not None:
+        argv += ["--json-schema", schema]
     return ReportTurn(argv, name, brief, prompt)
 
 
@@ -1341,6 +1344,8 @@ def _report_turn(turn: ReportTurn, cwd: str, hand: tuple, on_start: Optional[Cal
         child.stdout.close()
     result = claude_result(b"".join(chunks))
     text = result.get("result") if isinstance(result.get("result"), str) else ""
+    if "--json-schema" in turn.argv and isinstance(result.get("structured_output"), dict):
+        text = json.dumps(result["structured_output"], ensure_ascii=True)  # the object the CLI checked, as JSON text
     failed = code != 0 or result.get("is_error") is True or result.get("subtype") not in (None, "success")
     if failed:
         auth = failover.classify("claude", b"".join(chunks), code, result) == "auth" \

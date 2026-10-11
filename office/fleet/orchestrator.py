@@ -24,8 +24,11 @@ for her, as one typed action that this script checks and runs. Only while the of
   the item's own task, ids must have their shape, free text is stripped of control characters and refused when too
   long, and the action must still be legal, with the switch still on, when it is checked again just before it runs
   (under the task's lock for a fix round or a draft PR). Anything else is refused, recorded on the item and in the
-  run's log, and Ryan hears once (orchestrator.rejected). Nothing she writes is ever run, used as a path or put in
-  argv.
+  run's log, and Ryan hears once (orchestrator.rejected). An answer parse_action refuses is kept on its item, scrubbed
+  and cut, so why can be read. One that is not a JSON object at all is woken once more in the same pass with a fixed
+  reminder after the prompt, under the same caps as any wake and using up the item's one retry. The turn passes the
+  CLI a JSON Schema of the answer's shape (--json-schema), so the CLI holds her to one object; parse_action still
+  checks it whole. Nothing she writes is ever run, used as a path or put in argv.
 - The actions run only through the fleet's own paths and gates: a fix round through worktree.start_desk, a review
   through owl_post.claim_handoff and run_desk.spawn_review, a draft PR through push.push_draft_pr (which needs the
   auto-draft-pr switch and a recorded PASS for the task's current head), and Ryan's own headmaster events. No push
@@ -90,10 +93,26 @@ BRIEF = (
     " legal, it starts that fix round again; when it is not, unavailable says why.\n"
     "Answer with exactly one JSON object on one line and nothing else: no code fence, no other text."
 )
+# Added after the prompt when a turn is woken again because its answer was not one JSON object.
+REMINDER = "Answer with exactly one JSON object and nothing else."
+# How much of a refused answer is kept on its item, scrubbed and on one line, so why it was refused can be read.
+ANSWER_KEPT_CHARS = 800
+# The shape the CLI holds her answer to (--json-schema): one object naming an action, with no field outside ACTIONS.
+# The CLI refuses anyOf at the top of a schema, so which fields go with which action is still parse_action's check.
+ANSWER_SCHEMA = json.dumps({
+    "type": "object", "required": ["action"], "additionalProperties": False,
+    "properties": {"action": {"type": "string", "enum": sorted(ACTIONS)}, "task_id": {"type": ["string", "null"]},
+                   "findings_ref": {"type": "string"},
+                   **{field: {"type": "string", "maxLength": limit} for field, limit in TEXT_LIMITS.items()}},
+}, sort_keys=True, separators=(",", ":"))
 
 
 class Invalid(Exception):
     """Her answer is refused. The reason is fixed text, never a quote of what she wrote."""
+
+
+class NotOneObject(Invalid):
+    """Her answer is not one JSON object at all: the one refusal a turn is woken again for (_reformat)."""
 
 
 def on() -> bool:
@@ -280,7 +299,7 @@ def _clean_text(value: object, field: str) -> str:
 def parse_action(text: object, item: dict) -> dict:
     """Her answer as one typed action bound to the item's task, or Invalid. Legality is checked apart (check_legal)."""
     if not isinstance(text, str) or len(text.encode("utf-8", "replace")) > ANSWER_MAX_BYTES:
-        raise Invalid("the answer is missing or too long")
+        raise NotOneObject("the answer is missing or too long")
     body = text.strip()
     fenced = FENCE.fullmatch(body)
     if fenced is not None:
@@ -288,9 +307,9 @@ def parse_action(text: object, item: dict) -> dict:
     try:
         data = common.strict_json(body.encode("utf-8"))
     except (UnicodeDecodeError, ValueError, RecursionError):
-        raise Invalid("the answer is not exactly one JSON object") from None
+        raise NotOneObject("the answer is not exactly one JSON object") from None
     if not isinstance(data, dict):
-        raise Invalid("the answer is not exactly one JSON object")
+        raise NotOneObject("the answer is not exactly one JSON object")
     name = data.get("action")
     if not isinstance(name, str) or name not in ACTIONS:
         raise Invalid("the answer names no known action")
@@ -719,16 +738,30 @@ def _workdir(data: dict):
 
 
 def _reject(conn, name: str, item: dict, reason: str) -> str:
+    kept = f"; her answer is kept on {ITEM_DIR}/{name} in the office" if item.get("refused_answers") else ""
     _event(conn, "orchestrator.rejected", "headmaster",
-           f"McGonagall's next step for {item.get('task_id') or '-'} was refused and nothing ran: {reason}",
+           f"McGonagall's next step for {item.get('task_id') or '-'} was refused and nothing ran: {reason}{kept}",
            item.get("task_id"), f"orchestrator:rejected:{name}")
     return f"rejected: {reason}"
+
+
+class Reformat(Exception):
+    """Her answer was not one JSON object and the item has its one retry left (_reformat). Holds why it was refused."""
+
+
+def _keep_answer(fd: int, name: str, item: dict, text: object) -> None:
+    """Keep a refused answer on its item, and on the item dict the run finishes it from: normalized, scrubbed of
+    anything shaped like a credential and cut, like any model text the office logs. It is never parsed or run again."""
+    kept = common.scrubbed_line(text if isinstance(text, str) else "", ANSWER_KEPT_CHARS)
+    item["refused_answers"] = [*(item.get("refused_answers") or [])[-1:], kept]
+    markers.replace(fd, name, {**item, "state": "woken"})
 
 
 def _turn(conn, fd: int, name: str, item: dict, data: dict, turn: run_desk.ReportTurn, hand: tuple,
           now: Optional[int]) -> str:
     """One headless turn on one item, its wake already counted, then its action checked and run. hand holds the run's
-    lock and the launch gate, handed to the turn's process. Returns what came of it."""
+    lock and the launch gate, handed to the turn's process. Returns what came of it, or raises Reformat when the answer
+    was not one JSON object and the item may be woken once more for it."""
 
     def started(pid: int) -> None:
         markers.replace(fd, TURN, {**markers.pending(), "state": "running", "pid": pid})
@@ -758,6 +791,9 @@ def _turn(conn, fd: int, name: str, item: dict, data: dict, turn: run_desk.Repor
     try:
         action = parse_action(text, item)
     except Invalid as exc:
+        _keep_answer(fd, name, item, text)
+        if isinstance(exc, NotOneObject) and item.get("retried") is not True:
+            raise Reformat(str(exc)) from None
         return _reject(conn, name, item, str(exc))
     if action["action"] != "none":
         # Recorded before anything runs, so a kill part way is reported as uncertain, never run again.
@@ -792,6 +828,31 @@ def _recover(conn, fd: int, now: Optional[int]) -> None:
         _finish(fd, name, item, f"interrupted during {action}", now)
 
 
+def _wake(fd: int, name: str, item: dict, now: Optional[int]) -> None:
+    """Count a wake of the item against the day's and its task's caps, and mark it woken."""
+    _bump(fd, f"wakes-day-{_day(now)}")
+    if item.get("task_id") is not None:
+        _bump(fd, f"wakes-task-{item['task_id']}")
+    markers.replace(fd, name, {**item, "state": "woken"})
+
+
+def _reformat(conn, fd: int, name: str, item: dict, data: dict, turn: run_desk.ReportTurn, hand: tuple,
+              now: Optional[int], reason: str) -> str:
+    """The one retry of a turn whose answer was not one JSON object: woken again in the same pass with REMINDER after
+    its prompt, under the same caps and launch gates as any wake, and using up the item's one retry, so a turn that
+    then fails is not tried again and a second such answer is refused and told as any other. Returns what came of it.
+    """
+    item["retried"] = True
+    try:
+        run_desk.check_report_launch(conn, config.ORCHESTRATOR_MODEL)
+    except (run_desk.Blocked, run_desk.Stopped):
+        return _reject(conn, name, item, reason)
+    if _capped(conn, fd, item, now) is not None:
+        return _reject(conn, name, item, reason)
+    _wake(fd, name, item, now)
+    return _turn(conn, fd, name, item, data, turn._replace(prompt=f"{turn.prompt}\n{REMINDER}"), hand, now)
+
+
 def _next(conn, fd: int, lock_fd: int, now: Optional[int]) -> Optional[str]:
     """Wake her for the oldest pending item, or say why not. None when nothing is pending; a result starting with
     "stop" ends the run."""
@@ -814,7 +875,7 @@ def _next(conn, fd: int, lock_fd: int, now: Optional[int]) -> Optional[str]:
         return "skipped"
     try:
         turn = run_desk.owl_report_argv(BRIEF, PROMPT, config.ORCHESTRATOR_MODEL, config.ORCHESTRATOR_MAX_BUDGET_USD,
-                                        "orchestrator")
+                                        "orchestrator", ANSWER_SCHEMA)
     except (FleetError, OSError) as exc:
         _event(conn, "orchestrator.failed", "headmaster", "the orchestrator turn cannot start, since its settings"
                f" file is refused ({common.one_line(exc, 200)}); items wait until it is in place", None,
@@ -830,11 +891,11 @@ def _next(conn, fd: int, lock_fd: int, now: Optional[int]) -> Optional[str]:
         except run_desk.Stopped:
             return "stop: stopped"  # a stop or an update: the item waits, uncounted, for the next run
         # Counted only once the turn is sure to launch, and before it does, so a killed turn counts too.
-        _bump(fd, f"wakes-day-{_day(now)}")
-        if item.get("task_id") is not None:
-            _bump(fd, f"wakes-task-{item['task_id']}")
-        markers.replace(fd, name, {**item, "state": "woken"})
-        outcome = _turn(conn, fd, name, item, data, turn, (lock_fd, gate_fd), now)
+        _wake(fd, name, item, now)
+        try:
+            outcome = _turn(conn, fd, name, item, data, turn, (lock_fd, gate_fd), now)
+        except Reformat as exc:
+            outcome = _reformat(conn, fd, name, item, data, turn, (lock_fd, gate_fd), now, str(exc))
     if outcome == "failed" and item.get("retried") is not True:
         # Woken once more for the same item, from the next pass with no run going (_requeue), never twice.
         markers.replace(fd, name, {**item, "state": "retry", "retried": True})

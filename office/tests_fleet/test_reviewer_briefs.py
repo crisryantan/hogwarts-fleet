@@ -86,6 +86,76 @@ class ReviewerBriefTest(unittest.TestCase):
                     self.assertTrue(any(rule_matches(rule, line) for rule in deny))
 
 
+RTK = "RTK_DISABLED=1 "
+INPUT = "/Users/crisryantan/hogwarts/tasks/t-0001/review-input-aaaaaaaaaaaa.txt"
+
+
+def git_rules(settings: dict) -> set:
+    """Each Bash rule Hermione's settings allow, as its command pattern without the RTK_DISABLED=1 prefix."""
+    rules = [re.fullmatch(r"Bash\((.*)\)", rule) for rule in settings["permissions"]["allow"]]
+    found = {rule.group(1) for rule in rules if rule is not None}
+    plain = {rule for rule in found if not rule.startswith(RTK)}
+    if found != plain | {RTK + rule for rule in plain}:
+        raise AssertionError("each allowed git form is not allowed both with and without RTK_DISABLED=1")
+    return plain
+
+
+def backticked_git(text: str) -> set:
+    return set(re.findall(r"`(git -C [^`]*)`", text))
+
+
+@unittest.skipUnless(IN_KIT, ONLY_IN_KIT)
+class ReviewerShellTest(unittest.TestCase):
+    """Hermione's settings, her brief and the request a review sends her name the same git commands, and nothing else
+    for her shell, so she never opens with a compound command the settings deny and calls that a tooling failure."""
+
+    def setUp(self) -> None:
+        self.allowed = git_rules(json.loads((KIT / "desks" / "hermione" / "settings.json").read_text()))
+        self.brief = (KIT / "desks" / "hermione" / "BRIEF.md").read_text()
+
+    def request(self, reviewer: str, base: str = STACKED_BASE) -> str:
+        return review._request_body({"id": "t-0001", "desk": "harry"}, "a" * 40, {"path": WORKTREE, "base": base},
+                                    "t-0001", False, review_input=INPUT, reviewer=reviewer)
+
+    def test_the_settings_brief_and_request_name_exactly_the_same_git_forms(self):
+        forms = {form.format(worktree="*", base="*") for form in review.REVIEWER_GIT_FORMS}
+        self.assertEqual(forms, self.allowed)
+        named = {line.replace("<worktree>", "*").replace("<base>", "*") for line in backticked_git(self.brief)}
+        self.assertEqual(named, self.allowed)
+        self.assertIn(f"`{RTK}`", self.brief)
+        for base in ("origin/main", STACKED_BASE):
+            commands = backticked_git(self.request("hermione", base))
+            expected = {form.format(worktree=WORKTREE, base=base) for form in review.REVIEWER_GIT_FORMS}
+            self.assertEqual(commands, expected)
+            for command in commands:
+                with self.subTest(command=command):
+                    self.assertTrue(any(rule_matches(f"Bash({rule})", command) for rule in self.allowed))
+
+    def test_the_brief_and_request_say_one_command_alone_and_what_tooling_means(self):
+        for phrase in ("I run each alone as one whole Bash call", "no `;`, `&&`, pipes, `cd`, variables or loops",
+                       "Every other shell command is denied, and that denial is not a tooling failure.",
+                       "I read files, pads and task folders with Read, Grep and Glob.", "So I need no git to review.",
+                       "BLOCKED-ON-TOOLING is only for when one of those exact git commands itself fails, or a file I"
+                       " need can't be read with Read."):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, self.brief)
+        body = self.request("hermione")
+        for phrase in ("Run each alone as one whole Bash call", "no ;, &&, pipes, cd, variables or loops",
+                       "a denial of any other command is not a tooling failure", "with Read, Grep and Glob",
+                       "the review needs no git of yours",
+                       "only when one of those exact git commands itself fails, or a file you need cannot be read"):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, body)
+        self.assertNotIn(review.TOOLING_REQUEST_LINE, body)
+        self.assertTrue(body.rstrip().splitlines()[-1].startswith("End with your review block."))
+
+    def test_a_codex_reviewer_gets_the_general_tooling_line_and_no_shell_rules(self):
+        body = self.request("moody")
+        self.assertIn(review.TOOLING_REQUEST_LINE, body)
+        self.assertEqual(backticked_git(body), set())
+        self.assertNotIn("Your shell runs only", body)
+
+
 FOLLOWUP_BASE = "c" * 40
 EM_DASHES = ("\u2014", "\u2015", "\u2e3a", "\u2e3b")
 

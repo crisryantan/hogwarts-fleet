@@ -524,16 +524,17 @@ def _castle_task_file(holder_id: str, name: str, text: str) -> str:
 
 def _request_body(task: dict, sha: str, record: dict, holder_id: str, handoff: bool,
                   followup_lines: Optional[list] = None, review_input: Optional[str] = None,
-                  intent_lines: Optional[list] = None) -> str:
+                  intent_lines: Optional[list] = None, reviewer: Optional[str] = None) -> str:
     """The review request. A round of a PR follow-up adds followup_lines: the teammates' threads file, the follow-up's
     own diff and the script's reply checks. review_input is the castle file the script wrote the log, stat and diff
-    to, and intent_lines say which TASK.md this round was opened for."""
+    to, and intent_lines say which TASK.md this round was opened for. A Claude reviewer is told its exact git forms."""
     worktree_path = record["path"]
+    commands = [form.format(worktree=worktree_path, base=record["base"]) for form in REVIEWER_GIT_FORMS]
     lines = [
         f"Review request for task {task['id']} at {sha}.",
         f"The author desk is {task['desk']}. You are the reviewer from the other model family.",
         f"Worktree: {worktree_path}",
-        f"Diff: git -C {worktree_path} diff --no-ext-diff --no-textconv {record['base']}...HEAD",
+        f"Diff: {commands[0]}",
     ]
     if review_input is not None:
         lines.append(f"Review input, the log, stat and full diff above made by the review script: {review_input}")
@@ -541,15 +542,45 @@ def _request_body(task: dict, sha: str, record: dict, holder_id: str, handoff: b
     if handoff:
         lines.append(f"Author's handoff, context only: {config.CASTLE_ROOT}/tasks/{holder_id}/handoff.md")
     lines += list(followup_lines or [])
-    lines += ["TASK.md is at the task_md path in this owl.", *(intent_lines or []),
-              CRITERIA_REQUEST_LINE, AFTER_MERGE_REQUEST_LINE, TOOLING_REQUEST_LINE,
-              f"End with your review block. Its first line is exactly: REVIEW {task['id']} @ {sha}"]
+    lines += ["TASK.md is at the task_md path in this owl.", *(intent_lines or []), CRITERIA_REQUEST_LINE,
+              AFTER_MERGE_REQUEST_LINE]
+    if reviewer in config.HEADLESS_CLAUDE:
+        lines += _shell_lines(commands, review_input is not None)
+    else:
+        lines.append(TOOLING_REQUEST_LINE)
+    lines.append(f"End with your review block. Its first line is exactly: REVIEW {task['id']} @ {sha}")
     return "\n".join(lines) + "\n"
 
 
+# The only shell commands a Claude reviewer's settings allow (desks/hermione/settings.json), each also after
+# RTK_DISABLED=1. Her brief names the same forms; a test keeps all three in step.
+REVIEWER_GIT_FORMS = (
+    "git -C {worktree} diff --no-ext-diff --no-textconv {base}...HEAD",
+    "git -C {worktree} diff --no-ext-diff --no-textconv --stat {base}...HEAD",
+    "git -C {worktree} log --no-decorate --oneline {base}..HEAD",
+    "git -C {worktree} rev-parse HEAD",
+)
 TOOLING_REQUEST_LINE = (f"If a tool is denied or fails and you cannot read the diff, the evidence or TASK.md, end your"
                         f" review block with the line {TOOLING}: <what failed> in place of its VERDICT line. That is"
                         " never a finding, and never HEADMASTER or CHANGES; the review is run again.")
+
+
+def _shell_lines(commands: list, has_input: bool) -> list:
+    """What a Claude reviewer, whose settings allow only the git forms above in Bash, is told about its shell and
+    about BLOCKED-ON-TOOLING: a compound command is denied whole, and that denial is no tooling failure."""
+    lines = ["Your shell runs only these git commands. Run each alone as one whole Bash call, exactly as written here,"
+             " optionally after RTK_DISABLED=1 and a space: " + "; ".join(f"`{command}`" for command in commands)
+             + ". In a follow-up round, the Follow-up diff above is one more.",
+             "Nothing goes before or after one: no ;, &&, pipes, cd, variables or loops. Every other shell command is"
+             " denied, and a denial of any other command is not a tooling failure. Read files, pads and task folders"
+             " with Read, Grep and Glob."]
+    if has_input:
+        lines.append("The review input already holds the log, stat and full diff, made with git at this sha, so the"
+                     " review needs no git of yours; the git commands only check it.")
+    lines.append(f"End your review block with the line {TOOLING}: <what failed> in place of its VERDICT line only when"
+                 " one of those exact git commands itself fails, or a file you need cannot be read with Read. That is"
+                 " never a finding, and never HEADMASTER or CHANGES; the review is run again.")
+    return lines
 
 
 # The fleet's own checks before a reviewer starts
@@ -868,7 +899,7 @@ def run_review(conn, task: dict, record: dict, sha: str, holder_id: str, handoff
     lines = None if round_followup is None else followup.request_lines(conn, task, round_followup, record,
                                                                          handoff_text, sha)
     intent_lines, intent_changed = _intent_lines(conn, task["id"], evidence["task_md_sha256"])
-    body = _request_body(task, sha, record, holder_id, handoff, lines, review_input, intent_lines)
+    body = _request_body(task, sha, record, holder_id, handoff, lines, review_input, intent_lines, reviewer)
     result = {"task_id": task["id"], "sha": sha, "repo": record["repo"], "reviewer": reviewer, "queued": None,
               "evidence": evidence["evidence"]["castle"], "failed_checks": evidence["failed"],
               "malformed_checks": evidence["malformed"], "review_input": review_input,

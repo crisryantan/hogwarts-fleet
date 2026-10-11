@@ -29,9 +29,10 @@ state = {state!r}
 mode = open(os.path.join(state, "mode")).read().strip()
 context = json.load(open("context.json"))
 brief = sys.argv[sys.argv.index("--append-system-prompt-file") + 1]
+stdin = sys.stdin.read()
 with open(os.path.join(state, "runs.jsonl"), "a") as handle:
     handle.write(json.dumps({{"argv": sys.argv, "cwd": os.getcwd(), "files": sorted(os.listdir(".")),
-                             "context": context, "stdin": sys.stdin.read(), "brief": open(brief).read()}}) + "\\n")
+                             "context": context, "stdin": stdin, "brief": open(brief).read()}}) + "\\n")
 def result(text, error=False, **extra):
     print(json.dumps({{"type": "result", "subtype": "success", "is_error": error, "result": text, **extra}}))
 if mode == "auth":
@@ -42,7 +43,13 @@ if mode == "forbidden":
     sys.exit(1)
 if mode == "fail":
     sys.exit(2)
-result(open(os.path.join(state, "answer")).read())
+reminded = os.path.join(state, "reminded")
+if mode == "structured":
+    result("Here is my answer.", structured_output=json.load(open(os.path.join(state, "answer"))))
+elif os.path.exists(reminded) and stdin.endswith({reminder!r}):
+    result(open(reminded).read())
+else:
+    result(open(os.path.join(state, "answer")).read())
 """
 RETRIED = "failed: tried once more on the next pass"
 FORBIDDEN = ("push", "merge", "close", "go", "shell", "bash", "run", "mark_ready", "force_push", "delete_branch",
@@ -61,7 +68,8 @@ class OrchestratorCase(FleetCase):
         self.state.mkdir(mode=0o700)
         self.mode("answer")
         self.answer({"action": "none"})
-        binary = self.write_file(self.state / "claude", FAKE.format(state=str(self.state)), mode=0o700)
+        binary = self.write_file(self.state / "claude",
+                                 FAKE.format(state=str(self.state), reminder=orchestrator.REMINDER), mode=0o700)
         os.chmod(binary, stat.S_IRWXU)
         self.root = self.tmp / "orchestrator-root"
         for name, value in (("CLAUDE_BIN", str(binary)), ("ORCHESTRATOR_ROOT", str(self.root))):
@@ -923,6 +931,80 @@ class DeadRunTests(OrchestratorCase):
         self.assertEqual(self.run_once(), ["auth"])
         self.assertEqual(self.items()[owl["id"]]["state"], "done")
         self.assertEqual((len(self.events_of("orchestrator.auth")), len(self.events_of("orchestrator.failed"))), (1, 0))
+
+    def test_a_turn_whose_answer_is_not_one_object_is_woken_once_more_with_the_reminder(self):
+        owl = self.land()
+        token = "sk-ant-" + "abcdefghijklmnopqrstuvwxyz0123456789"
+        self.answer(f"Sure, here is the step with key {token}: {{\"action\": \"none\"}}")
+        self.write_file(self.state / "reminded", json.dumps({"action": "none"}))
+        self.assertEqual(self.run_once(), ["none: no step needed"])
+        first, second = self.runs()
+        self.assertEqual(first["stdin"], orchestrator.PROMPT)
+        self.assertEqual(second["stdin"], f"{orchestrator.PROMPT}\n{orchestrator.REMINDER}")
+        self.assertEqual(self.events_of("orchestrator.rejected"), [])
+        item = self.items()[owl["id"]]
+        self.assertEqual((item["state"], item["retried"]), ("done", True))
+        [kept] = item["refused_answers"]
+        self.assertIn("Sure, here is the step", kept)
+        self.assertNotIn(token, kept)
+        with orchestrator._dir() as fd:
+            self.assertEqual(markers.read(fd, f"wakes-task-{self.task['id']}")["n"], 2)  # the retry is a wake too
+
+    def test_a_second_answer_that_is_not_one_object_is_refused_kept_and_told_once(self):
+        owl = self.land()
+        self.answer("I would route the findings.")
+        self.write_file(self.state / "reminded", "x" * 5000)
+        self.assertEqual(self.run_once(), ["rejected: the answer is missing or too long"])
+        self.assertEqual(len(self.runs()), 2)
+        [refused] = self.events_of("orchestrator.rejected")
+        self.assertIn(f"kept on {orchestrator.ITEM_DIR}/{owl['id']}", refused["summary"])
+        item = self.items()[owl["id"]]
+        self.assertEqual(item["state"], "done")
+        self.assertEqual(item["refused_answers"][0], "I would route the findings.")
+        self.assertEqual(len(item["refused_answers"][1]), orchestrator.ANSWER_KEPT_CHARS)
+        self.assertEqual(orchestrator.kick(self.conn, self.clock), "nothing pending")
+        self.assertEqual(self.run_once(), [])
+
+    def test_only_an_answer_that_is_not_one_object_is_retried(self):
+        owl = self.land()
+        self.answer({"action": "merge", "task_id": self.task["id"]})
+        self.assertEqual(self.run_once(), ["rejected: the answer names no known action"])
+        self.assertEqual(len(self.runs()), 1)
+        self.assertEqual(self.items()[owl["id"]]["refused_answers"],
+                         [json.dumps({"action": "merge", "task_id": self.task["id"]})])
+
+    def test_the_format_retry_shares_the_one_retry_and_the_wake_caps(self):
+        self.land()
+        self.mode("fail")
+        self.assertEqual(self.run_once(), [RETRIED])
+        self.mode("answer")
+        self.answer("not json")
+        self.write_file(self.state / "reminded", json.dumps({"action": "none"}))
+        orchestrator.kick(self.conn, self.clock)
+        self.assertEqual(self.run_once(), ["rejected: the answer is not exactly one JSON object"])
+        self.assertEqual(len(self.runs()), 2)  # its one retry went to the failed turn
+        self.land()
+        with mock.patch.object(config, "ORCHESTRATOR_WAKES_PER_TASK", 3):
+            self.assertEqual(self.run_once(), ["rejected: the answer is not exactly one JSON object"])
+        self.assertEqual(len(self.runs()), 3)  # the third wake was the task's last
+        self.assertEqual(len(self.events_of("orchestrator.cap")), 1)
+
+    def test_the_turn_gives_the_cli_the_answer_shape_and_reads_its_structured_output(self):
+        self.land()
+        self.mode("structured")
+        self.answer({"action": "none"})
+        self.assertEqual(self.run_once(), ["none: no step needed"])
+        [run] = self.runs()
+        schema = json.loads(run["argv"][run["argv"].index("--json-schema") + 1])
+        self.assertEqual(schema, json.loads(orchestrator.ANSWER_SCHEMA))
+        self.assertEqual(set(schema["properties"]), {"action", *(field for fields in orchestrator.ACTIONS.values()
+                                                                 for field in fields)})
+        self.assertEqual(schema["properties"]["action"]["enum"], sorted(orchestrator.ACTIONS))
+        self.assertFalse(schema["additionalProperties"])
+        self.assertNotIn("anyOf", schema)  # the CLI refuses anyOf at the top of a schema
+
+    def test_the_owl_report_turn_gets_no_schema(self):
+        self.assertNotIn("--json-schema", run_desk.owl_report_argv("brief", "prompt").argv)
 
     def test_a_retry_stays_under_the_wake_caps(self):
         self.land()

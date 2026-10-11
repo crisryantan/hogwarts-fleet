@@ -67,6 +67,8 @@ KNOWN_FLAGS = {
     "--effort", "--version", "--help", "--cask",
     # Gringotts' restore drill
     "--drill",
+    # the orchestrator turn: claude --json-schema with the fixed shape of her answer
+    "--json-schema",
     # the review loop's draft PR, gh pr create --draft with its body on stdin (gitops.draft_pr_argv)
     "--draft", "--repo", "--head", "--body-file",
     # a PR follow-up's replies, gh api --method POST with their JSON on stdin (gitops.reply_argv, pr_comment_argv)
