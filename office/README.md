@@ -70,7 +70,10 @@ The store has none of these:
                                         the phone), scratchpad.py (keeps each scratchpad and task pad to its latest
                                         Checkpoint, older ones archived) and their helpers
   fleet/hooks/                          the castle's session hooks and the push gate, push_gate.py; stop.py is
-                                        McGonagall's chat watch, which wakes her with a go task's line when it moves
+                                        McGonagall's chat watch, which wakes her with a go task's line when it moves,
+                                        in the session that typed its go (go_owners.py keeps which session watches
+                                        which go task; a session that starts takes over those of one that ended,
+                                        and a whole message "watch <task-id>" moves one to that session)
   launchd/                              the launchd plist templates, one per background job; fleet loops reads them too
   loops/jobs                            only with terminal loops: the jobs fleet loops runs instead of launchd, one per line
   loops/running.json                    while fleet loops runs: its pid and the jobs it runs

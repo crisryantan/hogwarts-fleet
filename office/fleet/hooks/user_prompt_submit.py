@@ -45,11 +45,18 @@ What it says (each part only when there is something to say):
    of the rest, each listed once (fleet/mcgonagall_inbox.py). No owl body beyond that line.
    Then her go status: each open go task's build, branch, state, who it waits on and newest event,
    in full once per session and then only what changed (fleet/go_status.py), so she reads where her
-   work stands without asking anyone to run castle.
+   work stands without asking anyone to run castle. It covers only the go tasks this session watches
+   (fleet/go_owners.py), with a count of those other sessions watch: a go's tasks belong to the session
+   that typed it (claimed here before the go runs), and this hook registers the session and takes over
+   any open go task no session owns.
 5. Ollivander's stop, while one is in place, as the first line of the events part on every prompt in
    every desk session, with the exact command that clears it (fleet/stops.py).
 6. One Tempus line when the last assistant call in the transcript carried more than
    200k tokens of context (input plus cache read plus cache creation).
+7. The result of "watch <task-id>" when the prompt, trimmed, is exactly that: in McGonagall's session,
+   that open go task moves to this session, so its chat watch and go status cover it and no other
+   session's do. It changes nothing in the store and starts nothing, so it needs no typed check; any
+   other id gets a refusal line, and so does the phrase in any other session.
 
 The close runs only when every check passes (for the bulk close, every check but the first, which
 it makes per task):
@@ -154,6 +161,14 @@ BULK_PHRASE = "Mischief managed everything"
 BULK_KEY = "everything"
 OPEN_STATUSES = ("queued", "active", "awaiting_close")
 GO = re.compile(r"go (tk_[0-9a-f]{16})")
+# The chat watch handover (fleet/go_owners.py): the whole message, trimmed, moves one open go task to this session.
+WATCH = re.compile(r"[Ww]atch (tk_[0-9a-f]{16})")
+WATCH_SAID = {
+    "moved": "Watch moved: {id} is watched in this session now; its changes wake this session and no other.",
+    "already": "Watch: {id} is already watched in this session.",
+    "not open": "Watch was not applied: {id} is not an open go task.",
+}
+WATCH_SESSION = "Watch was not applied: the chat watch runs only in McGonagall's session."
 TASK_IDS = re.compile(r"tk_[0-9a-f]{16}")
 # A line that looks like a go once list markers, backticks, quotes and the spaces round them are gone. A prompt whose
 # every line is one, but that is not exactly gos, gets a refusal line and starts nothing. Prose that only mentions a go
@@ -396,6 +411,27 @@ def go_attempt(prompt: object) -> bool:
         if GO_ATTEMPT_LINE.fullmatch(bare) is None:
             return False
     return True
+
+
+def watch_request(prompt: object) -> Optional[str]:
+    """The task id when the prompt, trimmed, is exactly 'watch <task-id>', else None."""
+    match = WATCH.fullmatch(prompt.strip()) if isinstance(prompt, str) else None
+    return None if match is None else match.group(1)
+
+
+def _watch(conn, data: dict, desk: str, task_id: str) -> list:
+    """The result line of "watch <task-id>" (fleet/go_owners.py move)."""
+    session = common.session_id(data)
+    if common.session_desk(data, desk) != TASK_DESK or session is None:
+        return [WATCH_SESSION]
+    from fleet import go_owners  # only a watch pays for this import
+
+    try:
+        outcome = go_owners.move(conn, session, task_id)
+    except (StoreError, FleetError, sqlite3.Error, OSError) as exc:
+        reason = common.one_line(exc, 200) if isinstance(exc, FleetError) else type(exc).__name__
+        return [f"Watch was not applied: {reason}"]
+    return [WATCH_SAID[outcome].format(id=task_id)]
 
 
 def several_on_a_line(prompt: object) -> bool:
@@ -798,16 +834,20 @@ def events(conn, seen: Optional[tuple] = None) -> tuple:
 
 
 def _go_status(conn, data: dict, now: int) -> tuple:
-    """(lines, mark, shown) of McGonagall's go status for this prompt (fleet/go_status.py), shown being what the chat
-    watch keeps as told once it is written (fleet/hooks/stop.py), with keys read before the block so none is newer
-    than what she is shown. Never breaks the prompt."""
-    from fleet import go_status  # only her session pays for these imports
+    """(lines, mark, shown) of McGonagall's go status for this prompt (fleet/go_status.py), of the go tasks this session
+    watches (fleet/go_owners.py), shown being what the chat watch keeps as told once it is written
+    (fleet/hooks/stop.py), with keys read before the block so none is newer than what she is shown. Never breaks the
+    prompt."""
+    from fleet import go_owners, go_status  # only her session pays for these imports
     from fleet.hooks import stop as chat_watch
 
-    keys = chat_watch.delivered_keys(conn)
+    session = common.session_id(data)
+    go_owners.prompt(conn, session)
+    watched = go_owners.watching(session)
+    keys = chat_watch.delivered_keys(conn, watched)
     try:
-        seen = go_status.last(common.session_id(data))
-        lines, mark = go_status.block(conn, now, seen)
+        seen = go_status.last(session)
+        lines, mark = go_status.block(conn, now, seen, watched)
     except Exception:  # noqa: BLE001 - a status block never breaks the prompt
         return [], None, None
     return lines, mark, chat_watch.delivered(keys, seen, mark)
@@ -889,14 +929,21 @@ def _output(data: dict, desk: str, now: int, made: list, seen: Optional[list] = 
                 shown += [GO_TOO_MANY, GO_TOO_MANY_FIX]
                 context += [GO_TOO_MANY, GO_TOO_MANY_FIX]
             elif go_ids is not None:
+                from fleet import go_owners  # the go's tasks are this session's
                 from fleet.hooks import stop as chat_watch  # the chat watch waits for these while they are confirmed
 
+                go_owners.claim(conn, common.session_id(data), go_ids)
                 chat_watch.expect(common.session_id(data), go_ids)
                 started, said = _starts(conn, data, desk, go_ids, now)
                 shown += started
                 context += said
             elif attempt:
                 said = [GO_EXACT, GO_ONE_PER_LINE_FIX if several_on_a_line(prompt) else GO_EXACT_FIX]
+                shown += said
+                context += said
+            watch_id = watch_request(prompt)
+            if watch_id is not None:
+                said = _watch(conn, data, desk, watch_id)
                 shown += said
                 context += said
             if common.session_desk(data, desk) == TASK_DESK:

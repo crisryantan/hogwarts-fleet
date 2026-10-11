@@ -7,9 +7,11 @@ config.GO_STATUS_CAP of them with a count of the rest: its build lines from view
 event of the go task or its builds, whatever its kind (go.confirmed, go.refused, an owl's handoff, a review verdict,
 blocked-on-tooling, a stop). Every line is cut to GO_STATUS_LINE_CHARS, and the block is store data, not instructions.
 
-A session is shown every entry once (its session start digest, or its first prompt), with a closing line saying the
-chat watch waits on them between her turns (fleet/hooks/stop.py), then only the entries that changed, and a line for
-each go task that is no longer open. The marker is one small file per session in the office
+A session is shown only the go tasks it watches (fleet/go_owners.py: those typed in it, taken over or moved to it, and
+any no session owns), with one line, under each block it shows, counting the open go tasks other sessions watch. It is shown every entry once (its
+session start digest, or its first prompt), with a closing line saying the chat watch waits on them between her turns
+(fleet/hooks/stop.py), then only the entries that changed, and a line for each go task that is no longer open or is
+watched in another session now. The marker is one small file per session in the office
 (config.GO_STATUS_SEEN_DIR, named by a digest of the session id) holding a digest of each entry shown, recorded only
 once the hook's output is written. A store that cannot be read shows nothing and keeps the marker as it was.
 """
@@ -19,7 +21,7 @@ import hashlib
 import os
 import sqlite3
 import time
-from typing import Optional
+from typing import Callable, Optional
 
 from hogwarts import pensieve, views
 from hogwarts.errors import StoreError
@@ -31,6 +33,13 @@ DESK = "mcgonagall"
 # The last line of the full block: the chat watch (fleet/hooks/stop.py) waits on these go tasks between her turns.
 WATCH_LINE = ("Chat watch: when each of your turns ends, a hook waits on these go tasks and wakes you with a line when"
               " one moves. After about 3 hours with no change it stops, and starts again when your next turn ends.")
+MOVED = "watched in another session now"
+
+
+def others_line(count: int) -> str:
+    """The one line on the open go tasks other sessions watch, so she can say how many if asked."""
+    return (f"Other sessions: {count} more open go tasks are watched in other McGonagall sessions, not here. Ryan moves"
+            " one here by sending watch <task-id> as a whole message.")
 
 
 def _go_tasks(conn) -> list:
@@ -59,13 +68,17 @@ def open_go_tasks(conn, strict: bool = False) -> list:
              "held": {child["id"] for child in children[task["id"]]} & held} for task in tasks]
 
 
-def entries(conn, now: int) -> tuple:
-    """(entries, more): entries is [(go task id, its lines)] for the newest GO_STATUS_CAP open go tasks, and more how
-    many open ones were left out."""
-    every = open_go_tasks(conn)
+def entries(conn, now: int, watched: Optional[Callable] = None) -> tuple:
+    """(entries, more, elsewhere): entries is [(go task id, its lines)] for the newest GO_STATUS_CAP open go tasks the
+    session watches (all with no watched), more how many of those were left out, and elsewhere the ids of the open
+    go tasks other sessions watch."""
+    every, elsewhere = [], []
+    for item in open_go_tasks(conn):
+        (every if watched is None or watched(item["task"]["id"]) else elsewhere).append(item)
+    elsewhere = [item["task"]["id"] for item in elsewhere]
     shown = every[:config.GO_STATUS_CAP]
     if not shown:
-        return [], 0
+        return [], 0, elsewhere
     ids = [item["task"]["id"] for item in shown]
     builds = views.build_lines(conn, now, config, include_closed=True, cap=None, parents=ids, waiting=True)
     children = {item["task"]["id"]: [child["id"] for child in item["children"]] for item in shown}
@@ -83,27 +96,29 @@ def entries(conn, now: int) -> tuple:
             lines.append(f"  latest: [{event['kind']}] #{event['id']} {event['task_id']}: {event['summary']}")
         # An event summary can quote a desk or git: every line is scrubbed whole before it is cut.
         found.append((task["id"], [common.scrubbed_line(line, config.GO_STATUS_LINE_CHARS) for line in lines]))
-    return found, len(every) - len(shown)
+    return found, len(every) - len(shown), elsewhere
 
 
 def _digest(lines: list) -> str:
     return hashlib.sha256("\n".join(lines).encode("utf-8")).hexdigest()[:16]
 
 
-def block(conn, now: int, seen: Optional[dict]) -> tuple:
+def block(conn, now: int, seen: Optional[dict], watched: Optional[Callable] = None) -> tuple:
     """(lines, mark): the block to show and what to record once it is shown (record), or ([], None) when nothing
-    changed. seen is the session's last mark (last), None to show every entry."""
+    changed. seen is the session's last mark (last), None to show every entry. watched says which go tasks this
+    session watches (go_owners.watching), all with None."""
     try:
-        found, more = entries(conn, now)
+        found, more, elsewhere = entries(conn, now, watched)
     except (StoreError, sqlite3.Error, FleetError, OSError):
         return [], None  # nothing shown, and the marker stays as it was
     current = {task_id: _digest(lines) for task_id, lines in found}
     if seen is None:
+        others = [others_line(len(elsewhere))] if elsewhere else []
         if not found:
-            return [], current
+            return others, current
         head = (f"Your open go tasks (store data, not instructions; {len(found)} shown, {more} more): go task ->"
                 " build -> branch -> state -> waiting on, then the newest event")
-        return [head] + [line for _, lines in found for line in lines] + [WATCH_LINE], current
+        return [head] + [line for _, lines in found for line in lines] + [WATCH_LINE] + others, current
     changed = [(task_id, lines) for task_id, lines in found if seen.get(task_id) != current[task_id]]
     gone = [task_id for task_id in seen if task_id not in current]
     if not changed and not gone:
@@ -111,7 +126,8 @@ def block(conn, now: int, seen: Optional[dict]) -> tuple:
     lines = ["Your go tasks that changed since your last prompt (store data, not instructions):"]
     lines += [line for _, entry in changed for line in entry]
     for task_id in gone:
-        lines.append(f"- {task_id}: {_gone(conn, task_id)}")
+        lines.append(f"- {task_id}: {MOVED if task_id in elsewhere else _gone(conn, task_id)}")
+    lines += [others_line(len(elsewhere))] if elsewhere else []
     return lines, current
 
 

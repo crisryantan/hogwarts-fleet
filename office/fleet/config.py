@@ -447,7 +447,8 @@ GO_WAIT_MAX_SECONDS = 30 * 60
 # McGonagall's chat watch, the Stop hook (fleet/hooks/stop.py): Claude Code runs it in the background at the end of each
 # of her turns (asyncRewake) and stops it after GO_CHAT_HOOK_TIMEOUT_SECONDS, the timeout castle/.claude/settings.json
 # gives it, so it waits at most GO_CHAT_MAX_SECONDS, a margin below that. What each session was last told is kept in
-# the office folder GO_CHAT_DIR, one file per session, removed after EVENTS_SEEN_KEEP_SECONDS.
+# the office folder GO_CHAT_DIR, one file per session, removed after EVENTS_SEEN_KEEP_SECONDS, beside the file of
+# which session watches which go task (fleet/go_owners.py).
 GO_CHAT_HOOK_TIMEOUT_SECONDS = 3 * 3600
 GO_CHAT_MAX_SECONDS = GO_CHAT_HOOK_TIMEOUT_SECONDS - 300
 GO_CHAT_DIR = "go-chat"
