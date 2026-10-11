@@ -750,10 +750,10 @@ class Reformat(Exception):
 
 
 def _unescaped(text: str) -> str:
-    r"""JSON string escapes undone, leniently and in any text, so a \u or \/ escape cannot hide a credential from the
-    scrub: each \uXXXX becomes its character and every other backslash goes."""
+    r"""JSON string escapes undone, leniently and in any text, so an escape cannot hide a credential from the scrub:
+    each \uXXXX becomes its character, \n, \t, \r, \b and \f a space, and every other backslash goes."""
     text = re.sub(r"\\u([0-9a-fA-F]{4})", lambda match: chr(int(match.group(1), 16)), text)
-    return re.sub(r"\\(.)", r"\1", text, flags=re.DOTALL)
+    return re.sub(r"\\(.)", lambda match: " " if match.group(1) in "ntrbf" else match.group(1), text, flags=re.DOTALL)
 
 
 def _keep_answer(fd: int, name: str, item: dict, text: object) -> None:

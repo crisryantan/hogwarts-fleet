@@ -1024,6 +1024,13 @@ class DeadRunTests(OrchestratorCase):
         for answer in kept:
             self.assertNotIn(token[7:], answer)
             self.assertNotIn("\\u", answer)
+        owl = self.land()
+        secret = "Zq8xW2mN4pL6vR9tY3"
+        self.answer(f'{{"one_line": "Bearer\\t{secret}"}} plus')
+        self.write_file(self.state / "reminded", f'again password\\t={secret}')
+        self.run_once()
+        for answer in self.items()[owl["id"]]["refused_answers"]:
+            self.assertNotIn(secret, answer)
 
     def test_the_format_retry_waits_for_the_switch_and_the_runs_turn_limit(self):
         owl = self.land()
