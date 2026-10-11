@@ -47,7 +47,8 @@ reminded = os.path.join(state, "reminded")
 if mode == "structured":
     result("Here is my answer.", structured_output=json.load(open(os.path.join(state, "answer"))))
 elif mode == "repeated":
-    print('{{"type": "result", "subtype": "success", "is_error": false, "result": "{{\\\\"action\\\\": \\\\"none\\\\"}}",'
+    print('{{"type": "result", "subtype": "success", "is_error": false,'
+          ' "result": "{{\\\\"action\\\\": \\\\"none\\\\"}}",'
           ' "structured_output": {{"action": "none", "action": "open_draft_pr"}}}}')
 elif os.path.exists(reminded) and stdin.endswith({reminder!r}):
     result(open(reminded).read())
