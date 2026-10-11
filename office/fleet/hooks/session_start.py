@@ -229,16 +229,6 @@ def ack_shown_owls(conn, desk: str, lines: list, now: int) -> int:
     return acked
 
 
-def taken_line(taken: list) -> list:
-    """The one line saying which go tasks this session took over at its start, if any."""
-    if not taken:
-        return []
-    named = ", ".join(taken[:config.GO_STATUS_CAP])
-    more = f" and {len(taken) - config.GO_STATUS_CAP} more" if len(taken) > config.GO_STATUS_CAP else ""
-    return [f"Chat watch: this session took over {len(taken)} open go tasks whose session ended or that no session"
-            f" watched: {named}{more}. Their changes wake this session now."]
-
-
 def resume_line(conn, desk: str, now: Optional[int] = None) -> str:
     _settle(conn)
     inflight = _flight(conn, desk, now)["tasks"]
@@ -282,27 +272,27 @@ def _store_body(data: dict, desk: str, out, now: int, source: object, rotated: l
     try:
         hers = common.session_desk(data, desk) == config.HOOK_DESK
         session = common.session_id(data)
-        # The go tasks of sessions that ended, which her session takes over once this output saying so is written.
-        taking = go_owners.start(conn, session) if hers else []
-        taken = taken_line(taking)
+        # Her session takes over the go tasks of sessions that ended before anything shows them.
+        taken = go_owners.handover_line(go_owners.start(conn, session)) if hers else []
         if source in ONE_LINE_SOURCES:
             stop = stops.active_line()  # a resumed or forked session is told of an active stop too
             out.write("\n".join([resume_line(conn, desk, now)] + ([] if stop is None else [stop]) + taken) + "\n")
             wrote.append(True)
             out.flush()
-            go_owners.take(conn, session, taking)
+            if taken:  # said: a notice whose output never went out is said by her next prompt
+                go_owners.said(session)
         else:
             listed: list = []
             status: Optional[list] = [] if hers else None
-            mine = go_owners.watching(session)
-            watched = (lambda go_id: go_id in taking or mine(go_id)) if hers else None
+            watched = go_owners.watching(session) if hers else None
             # The chat watch's start, read before her go status block, so it is never newer than what she is shown.
             told = None if status is None else chat_watch.delivered_keys(conn, watched)
             lines = digest(conn, desk, now, listed, status, watched)
             out.write("\n".join(lines + taken + rotated) + "\n")
             wrote.append(True)
             out.flush()
-            go_owners.take(conn, session, taking)
+            if taken:
+                go_owners.said(session)
             if listed:  # the prompt hook then lists only what the digest did not show
                 events_seen.record(common.session_id(data), events_seen.mark(
                     pensieve.shown_through(conn, listed, folded=True), listed))

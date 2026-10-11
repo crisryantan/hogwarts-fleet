@@ -14,11 +14,11 @@ watch, go status and go-changed blocks cover only the go tasks typed there.
 - A session is gone once its SESSION marker is missing or its process has ended. A session that starts in a process
   another session used (a clear) ends that one, since one process runs one session.
 - Handover: her SessionStart takes over each open go task whose owner is gone or that no one owns, and the digest says
-  so once (start, then take once that digest is written). Her prompt hook takes over only those no one owns, silently (prompt). Ryan's whole message
+  so once (start; a notice whose output never went out is said by her next prompt, owed and said). Her prompt hook takes over only those no one owns, silently (prompt). Ryan's whole message
   "watch <go task id>" in her session moves that one open go task to that session (move), and nothing else.
 - A reader that cannot read OWNERS treats every go task as no one's, the old behaviour, and the next write starts it
-  again. Entries for go tasks no longer open are dropped once older than config.GO_CHAT_EXPECT_SECONDS, so a go still
-  being confirmed keeps its owner. Nothing here writes the store.
+  again. An open go task always keeps its owner; one not open (a go still being confirmed, or one closed or moved)
+  keeps it for a week, at most MAX_OWNERS of them. Nothing here writes the store.
 """
 from __future__ import annotations
 
@@ -40,8 +40,11 @@ OWNERS = "owners"
 OWNERS_LOCK = ".owners.lock"
 SESSION = ".session"
 LOCK_SECONDS = 5
-# At most this many go tasks are kept, the newest, so OWNERS stays well under markers.MAX_BYTES.
-MAX_OWNERS = 64
+HANDOVER = ".handover"
+# Go tasks no longer open keep their owner for config.EVENTS_SEEN_KEEP_SECONDS, as long as a session's told marker
+# can still name them, at most this many, the newest, so OWNERS stays well under markers.MAX_BYTES. An open go task
+# always keeps its owner.
+MAX_OWNERS = 48
 NAME = re.compile(r"[0-9a-f]{32}")
 ERRORS = (StoreError, sqlite3.Error, FleetError, OSError)
 
@@ -111,9 +114,11 @@ def _open_ids(conn) -> list:
 
 def _write(fd: int, owned: dict, open_ids: Iterable[str]) -> None:
     now, still = int(time.time()), set(open_ids)
-    kept = sorted(((at, go_id, session) for go_id, (session, at) in owned.items()
-                   if go_id in still or now - at <= config.GO_CHAT_EXPECT_SECONDS), reverse=True)[:MAX_OWNERS]
-    markers.replace(fd, OWNERS, {"state": "owners", "tasks": {go_id: [session, at] for at, go_id, session in kept}})
+    done = sorted(((at, go_id) for go_id, (_, at) in owned.items()
+                   if go_id not in still and now - at <= config.EVENTS_SEEN_KEEP_SECONDS), reverse=True)[:MAX_OWNERS]
+    kept = still | {go_id for _, go_id in done}
+    markers.replace(fd, OWNERS, {"state": "owners", "tasks": {go_id: [session, at] for go_id, (session, at)
+                                                              in owned.items() if go_id in kept}})
 
 
 def _locked(fd: int):
@@ -135,11 +140,10 @@ def register(fd: int, session_id: str, pid: int) -> None:
     markers.replace(fd, me + SESSION, {"state": "session", "pid": pid, "at": int(time.time())})
 
 
-def _adopt(fd: int, me: str, open_ids: list, gone_too: bool, only: Optional[list] = None, write: bool = True) -> list:
-    """The open go tasks this session takes over (of only, when given): those no one owns, and with gone_too those
-    whose owner is gone. Kept as this session's when write."""
+def _adopt(fd: int, me: str, open_ids: list, gone_too: bool) -> list:
+    """The open go tasks this session takes over: those no one owns, and with gone_too those whose owner is gone."""
     owned, now, taken, lives = _read(fd), int(time.time()), [], {}
-    for go_id in open_ids if only is None else [go_id for go_id in open_ids if go_id in only]:
+    for go_id in open_ids:
         owner = owned.get(go_id)
         if owner is not None and (owner[0] == me or not gone_too):
             continue
@@ -150,36 +154,68 @@ def _adopt(fd: int, me: str, open_ids: list, gone_too: bool, only: Optional[list
                 continue
         owned[go_id] = (me, now)
         taken.append(go_id)
-    if taken and write:
+    if taken:
         _write(fd, owned, open_ids)
     return taken
 
 
 def start(conn, session_id: Optional[str], pid: Optional[int] = None) -> list:
-    """Her SessionStart: register this session, then the open go tasks it is to take over, whose owner is gone or
-    that no one owns, oldest first. Nothing is taken yet: take keeps them once the digest saying so is written, so a
-    digest that never went out leaves them for the next start to take and say. Never raises."""
+    """Her SessionStart: register this session and take over every open go task whose owner is gone or that no one
+    owns, under OWNERS_LOCK, so two starts never take the same one. The ids to say, oldest first: those taken now and
+    any a hook of this session took but never said, kept in its HANDOVER marker until said clears it. Never raises."""
     if session_id is None:
         return []
     try:
         open_ids = _open_ids(conn)
         with safefs.opened_dir(config.OFFICE_ROOT, config.GO_CHAT_DIR, create=True) as fd, _locked(fd):
             register(fd, session_id, session_pid() if pid is None else pid)
-            return _adopt(fd, name(session_id), open_ids, True, write=False)
+            me = name(session_id)
+            taken = _adopt(fd, me, open_ids, True)
+            owed = list(dict.fromkeys(_owed(fd, me) + taken))
+            if taken:
+                markers.replace(fd, me + HANDOVER, {"state": "handover", "tasks": owed})
+            return owed
     except ERRORS:
         return []  # every go task stays watched where it was, or by every session when no one owns it
 
 
-def take(conn, session_id: Optional[str], go_ids: list) -> None:
-    """Keep as this session's those of go_ids (start's) that are still open with no owner or a gone one. Never
-    raises."""
-    if session_id is None or not go_ids:
+def _owed(fd: int, me: str) -> list:
+    marker = markers.read(fd, me + HANDOVER)
+    tasks = None if marker is None else marker.get("tasks")
+    if not isinstance(tasks, list):
+        return []
+    return [go_id for go_id in tasks if isinstance(go_id, str) and ids.PATTERNS["task"].fullmatch(go_id)]
+
+
+def handover_line(taken: list) -> list:
+    """The one line saying which go tasks this session took over at its start, if any, said once."""
+    if not taken:
+        return []
+    named = ", ".join(taken[:config.GO_STATUS_CAP])
+    more = f" and {len(taken) - config.GO_STATUS_CAP} more" if len(taken) > config.GO_STATUS_CAP else ""
+    return [f"Chat watch: this session took over {len(taken)} open go tasks whose session ended or that no session"
+            f" watched: {named}{more}. Their changes wake this session now."]
+
+
+def owed(session_id: Optional[str]) -> list:
+    """The go tasks this session took over at a start whose output never went out, to say now. Never raises."""
+    if session_id is None:
+        return []
+    try:
+        with safefs.opened_dir(config.OFFICE_ROOT, config.GO_CHAT_DIR) as fd:
+            return _owed(fd, name(session_id))
+    except (FleetError, OSError):
+        return []
+
+
+def said(session_id: Optional[str]) -> None:
+    """The handover was said, once its output is written: clear what this session owed. Never raises."""
+    if session_id is None:
         return
     try:
-        open_ids = _open_ids(conn)
-        with safefs.opened_dir(config.OFFICE_ROOT, config.GO_CHAT_DIR, create=True) as fd, _locked(fd):
-            _adopt(fd, name(session_id), open_ids, True, only=go_ids)
-    except ERRORS:
+        with safefs.opened_dir(config.OFFICE_ROOT, config.GO_CHAT_DIR) as fd:
+            os.unlink(name(session_id) + HANDOVER, dir_fd=fd)
+    except (FleetError, OSError):
         pass
 
 

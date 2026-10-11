@@ -97,13 +97,13 @@ def _record(fd: int, name: str, told: dict) -> None:
     markers.replace(fd, name + TOLD, {"state": "told", "tasks": told})
 
 
-def _expected(fd: int, name: str, told: dict, watched: Optional[Callable] = None) -> bool:
-    """Whether a go typed in this session is still being confirmed: one it named is not told yet, nor watched in
-    another session now, and it is recent."""
+def _expected(fd: int, name: str, told: dict, elsewhere: Iterable = ()) -> bool:
+    """Whether a go typed in this session is still being confirmed: one it named is not told yet, nor open and
+    watched in another session (elsewhere), and it is recent."""
     marker = markers.read(fd, name + EXPECT)
     tasks, at = (None, None) if marker is None else (marker.get("tasks"), marker.get("at"))
     return isinstance(tasks, list) and type(at) is int and time.time() - at < config.GO_CHAT_EXPECT_SECONDS \
-        and any(isinstance(go_id, str) and go_id not in told and (watched is None or watched(go_id)) for go_id in tasks)
+        and any(isinstance(go_id, str) and go_id not in told and go_id not in elsewhere for go_id in tasks)
 
 
 def _prune(fd: int, name: str) -> None:
@@ -122,7 +122,7 @@ def _prune(fd: int, name: str) -> None:
             elif entry.endswith(go_owners.SESSION):
                 if markers.gone(markers.read(fd, entry) or {}):  # a live session keeps its marker however idle
                     os.unlink(entry, dir_fd=fd)
-            elif entry.endswith((TOLD, EXPECT)):
+            elif entry.endswith((TOLD, EXPECT, go_owners.HANDOVER)):
                 os.unlink(entry, dir_fd=fd)
         except (FleetError, OSError):
             continue
@@ -224,7 +224,11 @@ def _after(told: dict, entries: list) -> dict:
 
 def _idle(conn, fd: int, name: str, told: dict, watched: Callable) -> bool:
     """Nothing to wait for: no open go task this session watches, nothing told still to close and no go expected."""
-    return not told and not _expected(fd, name, told, watched) and not any(watched(go_id) for go_id in go_wait.open_states(conn))
+    if told:
+        return False
+    states = go_wait.open_states(conn)
+    return not any(watched(go_id) for go_id in states) \
+        and not _expected(fd, name, told, [go_id for go_id in states if not watched(go_id)])
 
 
 def _poll(conn, fd: int, name: str, err) -> Optional[int]:

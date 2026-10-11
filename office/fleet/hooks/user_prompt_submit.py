@@ -878,9 +878,10 @@ def _body(data: dict, desk: str, out, now: int) -> None:
     seen: list = []
     status: list = []
     seeds: list = []
+    handover: list = []
     try:
         with common.ended_by_signals():  # SIGTERM or SIGHUP ends the hook through this cleanup too
-            text = _output(data, desk, now, made, seen, status, seeds)
+            text = _output(data, desk, now, made, seen, status, seeds, handover)
             if text is not None:
                 out.write(text)
                 out.flush()  # a write still buffered fails here, not after the markers say shown
@@ -904,10 +905,15 @@ def _body(data: dict, desk: str, out, now: int) -> None:
         from fleet.hooks import stop as chat_watch
 
         chat_watch.merge(common.session_id(data), seeds[0])
+    if handover:  # and a takeover her session start took but never said
+        from fleet import go_owners
+
+        go_owners.said(common.session_id(data))
 
 
 def _output(data: dict, desk: str, now: int, made: list, seen: Optional[list] = None,
-            status: Optional[list] = None, seeds: Optional[list] = None) -> Optional[str]:
+            status: Optional[list] = None, seeds: Optional[list] = None,
+            handover: Optional[list] = None) -> Optional[str]:
     shown, context, board = [], [], []
     prompt = data.get("prompt")
     # Read first, from its own file: a store that cannot be read never hides an active stop.
@@ -959,6 +965,13 @@ def _output(data: dict, desk: str, now: int, made: list, seen: Optional[list] = 
                 owls, _ = mcgonagall_inbox.safe_unseen(conn, made)  # marker ages are by the real clock
                 shown += owls
                 context += owls
+                from fleet import go_owners  # a takeover line her session start owes when its output never went out
+
+                owed = go_owners.handover_line(go_owners.owed(common.session_id(data)))
+                shown += owed
+                context += owed
+                if handover is not None and owed:
+                    handover.append(True)  # cleared only once this output is written
                 board, mark, told = _go_status(conn, data, now)
                 if status is not None and mark is not None:
                     status.append(mark)  # recorded only once this output is written
@@ -977,6 +990,8 @@ def _output(data: dict, desk: str, now: int, made: list, seen: Optional[list] = 
             status.clear()
         if seeds is not None:
             seeds.clear()
+        if handover is not None:
+            handover.clear()
     if stop is not None:  # first in the events part, on every prompt until the stop is cleared
         shown.append(stop)
         context.append(stop)

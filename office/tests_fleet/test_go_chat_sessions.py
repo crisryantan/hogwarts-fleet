@@ -134,7 +134,7 @@ class HandoverTests(SessionsCase):
         gone = self.typed_go(SESSIONS[0], 1, pid=dead_pid())[0]
         kept = self.typed_go(SESSIONS[1], 2)[0]
         out = self.start(SESSIONS[2])
-        self.assertIn("\n" + session_start.taken_line([gone])[0] + "\n", out)
+        self.assertIn("\n" + go_owners.handover_line([gone])[0] + "\n", out)
         self.assertNotIn(f"- {kept} ->", out)  # its go status stays in its own session
         self.assertEqual(self.owner(gone), go_owners.name(SESSIONS[2]))
         self.assertEqual(self.owner(kept), go_owners.name(SESSIONS[1]))
@@ -147,7 +147,7 @@ class HandoverTests(SessionsCase):
     def test_handover_a_clear_in_the_same_process_keeps_its_go_tasks(self):
         go_id = self.typed_go(SESSIONS[0], 1, pid=4242)[0]
         out = self.start(SESSIONS[1], source="clear", pid=4242)
-        self.assertIn(session_start.taken_line([go_id])[0], out)
+        self.assertIn(go_owners.handover_line([go_id])[0], out)
         self.assertEqual(self.owner(go_id), go_owners.name(SESSIONS[1]))
 
     def test_handover_watch_moves_one_open_go_task(self):
@@ -210,7 +210,7 @@ class RaceTests(SessionsCase):
         self.assertIn(go_id, self.prompt(SESSIONS[0]))
         self.prompt(SESSIONS[1], f"watch {go_id}")
         pensieve.close_task(self.conn, go_id, "abandoned", now=self.tick())
-        self.assertEqual(self.stop_in(SESSIONS[0]), (0, "", 0))  # no closed line here: it was moved
+        self.assertEqual(self.stop_in(SESSIONS[0])[:2], (0, ""))  # no closed line here: it was moved
         self.assertIn(f"{go_id} / no build: closed (abandoned).", self.stop_in(SESSIONS[1])[1])
         self.assertIn(f"- {go_id}: {go_status.MOVED}", self.prompt(SESSIONS[0]))
 
@@ -224,12 +224,14 @@ class RaceTests(SessionsCase):
         go_owners.claim(self.conn, SESSIONS[1], [go_id])  # too late: the store knows it, so it keeps its owner
         self.assertEqual(self.owner(go_id), go_owners.name(SESSIONS[0]))
 
-    def test_race_a_start_whose_digest_never_went_out_takes_nothing(self):
+    def test_race_a_start_whose_digest_never_went_out_says_so_at_the_next_prompt(self):
         go_id = self.typed_go(SESSIONS[0], 1, pid=dead_pid())[0]
         with mock.patch.object(go_owners, "session_pid", return_value=self.alive(SESSIONS[1])):
-            self.assertEqual(go_owners.start(self.conn, SESSIONS[1]), [go_id])
-        self.assertEqual(self.owner(go_id), go_owners.name(SESSIONS[0]))
-        self.assertIn(session_start.taken_line([go_id])[0], self.start(SESSIONS[2]))
+            self.assertEqual(go_owners.start(self.conn, SESSIONS[1]), [go_id])  # its output never went out
+        self.assertEqual(self.owner(go_id), go_owners.name(SESSIONS[1]))
+        self.assertNotIn("Chat watch:", self.start(SESSIONS[2]))  # taken already: a second start takes nothing
+        self.assertIn(go_owners.handover_line([go_id])[0], self.prompt(SESSIONS[1]))
+        self.assertNotIn("took over", self.prompt(SESSIONS[1]))  # said once
 
     def test_race_a_live_sessions_marker_outlives_the_cleanup(self):
         self.typed_go(SESSIONS[0], 1)
@@ -244,7 +246,19 @@ class RaceTests(SessionsCase):
         self.assertNotIn(go_owners.name(SESSIONS[1]) + go_owners.SESSION, names)
         self.assertIn(go_owners.OWNERS_LOCK, names)
 
-    def test_race_owners_are_bounded(self):
-        go_owners.claim(self.conn, SESSIONS[0], [f"tk_{index:016x}" for index in range(go_owners.MAX_OWNERS + 6)])
+    def test_race_owners_are_bounded_but_an_open_go_task_keeps_its_owner(self):
+        go_id = self.typed_go(SESSIONS[0], 1)[0]
+        go_owners.claim(self.conn, SESSIONS[1], [f"tk_{index:016x}" for index in range(go_owners.MAX_OWNERS + 6)])
         with open(self.folder() / go_owners.OWNERS) as handle:
-            self.assertEqual(len(json.load(handle)["tasks"]), go_owners.MAX_OWNERS)
+            self.assertEqual(len(json.load(handle)["tasks"]), go_owners.MAX_OWNERS + 1)
+        self.assertEqual(self.owner(go_id), go_owners.name(SESSIONS[0]))
+
+    def test_race_a_moved_go_task_that_closed_keeps_its_owner_past_the_go_window(self):
+        go_id = self.typed_go(SESSIONS[0], 1)[0]
+        self.stop_in(SESSIONS[0])
+        self.prompt(SESSIONS[1], f"watch {go_id}")
+        pensieve.close_task(self.conn, go_id, "abandoned", now=self.tick())
+        with mock.patch.object(config, "GO_CHAT_EXPECT_SECONDS", -1):
+            go_owners.claim(self.conn, SESSIONS[2], ["tk_" + "e" * 16])  # another write
+        self.assertEqual(self.owner(go_id), go_owners.name(SESSIONS[1]))
+        self.assertEqual(self.stop_in(SESSIONS[0])[:2], (0, ""))
