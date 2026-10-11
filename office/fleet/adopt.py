@@ -24,9 +24,13 @@ from fleet import common, config, gitops, safefs, verify, worktree
 from fleet.hooks import user_prompt_submit as hook
 from fleet.safefs import FleetError
 
+def _has_terminal() -> bool:
+    return sys.stdin.isatty() and sys.stdout.isatty()
+
+
 def ask_terminal(prompt: str) -> str:
     """Ask on Ryan's terminal. Refused when stdin or stdout is not one, so no script or pipe can answer."""
-    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+    if not _has_terminal():
         raise FleetError("fleet adopt asks you to type the task id back, so it runs only in your own terminal")
     sys.stdout.write(prompt)
     sys.stdout.flush()
@@ -104,6 +108,8 @@ def adopt(conn, parent_id: str, confirm: Optional[Callable[[str], str]]) -> dict
             raise FleetError("the build task under it changed, so nothing was recorded")
         if _task_md(parent_id) != raw:
             raise FleetError("TASK.md changed while you were reading it, so nothing was recorded; run adopt again")
+        if not _has_terminal():
+            raise FleetError("fleet adopt asks you to type the task id back, so it runs only in your own terminal")
         pensieve.record_spec(conn, parent_id, spec["repo_dir"], spec["branch"], spec["base"],
                              hashlib.sha256(raw).hexdigest())
     return {"task_id": parent_id, "build_task_id": child["id"], "repo_dir": spec["repo_dir"],

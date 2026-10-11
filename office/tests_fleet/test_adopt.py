@@ -44,7 +44,8 @@ class AdoptTests(GoCase):
 
     def test_a_matching_spec_typed_back_records_it_and_the_closer_takes_the_build(self):
         child = self.built()
-        made, [asked] = self.adopt()
+        with mock.patch.object(adopt, "_has_terminal", return_value=True):
+            made, [asked] = self.adopt()
         spec = pensieve.task_spec(self.conn, TASK_ID)
         self.assertEqual((spec["repo_dir"], spec["branch"], spec["base"], spec["intent_sha256"]),
                          (str(self.repo), BRANCH, "origin/main", hashlib.sha256(self.raw).hexdigest()))
@@ -77,6 +78,13 @@ class AdoptTests(GoCase):
                 self.adopt(answer=answer)
         self.assertIsNone(pensieve.task_spec(self.conn, TASK_ID))
 
+    def test_a_matching_typed_id_without_a_terminal_records_nothing(self):
+        self.built()
+        with mock.patch.object(adopt, "_has_terminal", return_value=False), \
+                self.assertRaisesRegex(FleetError, "runs only in your own terminal"):
+            adopt.adopt(self.conn, TASK_ID, lambda prompt: TASK_ID)
+        self.assertIsNone(pensieve.task_spec(self.conn, TASK_ID))
+
     def test_a_task_md_edited_while_asking_records_nothing(self):
         self.built()
 
@@ -89,7 +97,8 @@ class AdoptTests(GoCase):
 
     def test_a_parent_that_already_has_its_spec_is_refused(self):
         self.built()
-        self.adopt()
+        with mock.patch.object(adopt, "_has_terminal", return_value=True):
+            self.adopt()
         with self.assertRaisesRegex(FleetError, "already has its spec"):
             self.adopt()
 
@@ -115,8 +124,7 @@ class AdoptTests(GoCase):
         with self.assertRaises(SystemExit), mock.patch("sys.stderr", io.StringIO()):
             tools.build_parser().parse_args(["adopt", TASK_ID, "--yes"])
         args = tools.build_parser().parse_args(["adopt", TASK_ID])
-        piped = io.StringIO(TASK_ID + "\n")
-        with mock.patch("sys.stdin", piped), mock.patch("sys.stdout", io.StringIO()), \
+        with mock.patch.object(adopt, "_has_terminal", return_value=False), \
                 self.assertRaisesRegex(FleetError, "runs only in your own terminal"):
             tools.run(self.conn, args)
         self.assertIsNone(pensieve.task_spec(self.conn, TASK_ID))
