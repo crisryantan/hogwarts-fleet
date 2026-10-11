@@ -749,10 +749,17 @@ class Reformat(Exception):
     """Her answer was not one JSON object and the item has its one retry left (_reformat). Holds why it was refused."""
 
 
+def _unescaped(text: str) -> str:
+    r"""JSON string escapes undone, leniently and in any text, so a \u or \/ escape cannot hide a credential from the
+    scrub: each \uXXXX becomes its character and every other backslash goes."""
+    text = re.sub(r"\\u([0-9a-fA-F]{4})", lambda match: chr(int(match.group(1), 16)), text)
+    return re.sub(r"\\(.)", r"\1", text, flags=re.DOTALL)
+
+
 def _keep_answer(fd: int, name: str, item: dict, text: object) -> None:
     """Keep a refused answer on its item, and on the item dict the run finishes it from: normalized, scrubbed of
     anything shaped like a credential and cut, like any model text the office logs. It is never parsed or run again."""
-    kept = common.scrubbed_line(text if isinstance(text, str) else "", ANSWER_KEPT_CHARS)
+    kept = common.scrubbed_line(_unescaped(text) if isinstance(text, str) else "", ANSWER_KEPT_CHARS)
     item["refused_answers"] = [*(item.get("refused_answers") or [])[-1:], kept]
     markers.replace(fd, name, {**item, "state": "woken"})
 
@@ -837,25 +844,27 @@ def _wake(fd: int, name: str, item: dict, now: Optional[int]) -> None:
 
 
 def _reformat(conn, fd: int, name: str, item: dict, data: dict, turn: run_desk.ReportTurn, hand: tuple,
-              now: Optional[int], reason: str) -> str:
+              now: Optional[int], reason: str, turns_left: int) -> tuple:
     """The one retry of a turn whose answer was not one JSON object: woken again in the same pass with REMINDER after
-    its prompt, under the same caps and launch gates as any wake, and using up the item's one retry, so a turn that
-    then fails is not tried again and a second such answer is refused and told as any other. Returns what came of it.
-    """
+    its prompt, under the same switch, caps, launch gates and run's turn limit as any wake, and using up the item's one
+    retry, so a turn that then fails is not tried again and a second such answer is refused and told as any other.
+    (what came of it, 1 when the retry launched else 0)."""
     item["retried"] = True
+    if not on() or turns_left < 1:
+        return _reject(conn, name, item, reason), 0
     try:
         run_desk.check_report_launch(conn, config.ORCHESTRATOR_MODEL)
     except (run_desk.Blocked, run_desk.Stopped):
-        return _reject(conn, name, item, reason)
+        return _reject(conn, name, item, reason), 0
     if _capped(conn, fd, item, now) is not None:
-        return _reject(conn, name, item, reason)
+        return _reject(conn, name, item, reason), 0
     _wake(fd, name, item, now)
-    return _turn(conn, fd, name, item, data, turn._replace(prompt=f"{turn.prompt}\n{REMINDER}"), hand, now)
+    return _turn(conn, fd, name, item, data, turn._replace(prompt=f"{turn.prompt}\n{REMINDER}"), hand, now), 1
 
 
-def _next(conn, fd: int, lock_fd: int, now: Optional[int]) -> Optional[str]:
-    """Wake her for the oldest pending item, or say why not. None when nothing is pending; a result starting with
-    "stop" ends the run."""
+def _next(conn, fd: int, lock_fd: int, now: Optional[int], turns_left: int = 1) -> Optional[tuple]:
+    """Wake her for the oldest pending item, or say why not: (what came of it, how many turns launched), with at most
+    turns_left turns. None when nothing is pending; a result starting with "stop" ends the run."""
     pending = _items(fd, "pending")
     if not pending:
         return None
@@ -864,15 +873,15 @@ def _next(conn, fd: int, lock_fd: int, now: Optional[int]) -> Optional[str]:
     if cap == "day":
         for other, waiting in pending:
             _finish(fd, other, waiting, "capped: wakes per day", now)
-        return "stop: capped: wakes per day"
+        return "stop: capped: wakes per day", 0
     if cap == "task":
         _finish(fd, name, item, "capped: wakes per task", now)
-        return "capped: wakes per task"
+        return "capped: wakes per task", 0
     try:
         data = context(conn, item)
     except (FleetError, StoreError) as exc:
         _finish(fd, name, item, f"skipped: {common.one_line(exc, 200)}", now)
-        return "skipped"
+        return "skipped", 0
     try:
         turn = run_desk.owl_report_argv(BRIEF, PROMPT, config.ORCHESTRATOR_MODEL, config.ORCHESTRATOR_MAX_BUDGET_USD,
                                         "orchestrator", ANSWER_SCHEMA)
@@ -880,28 +889,31 @@ def _next(conn, fd: int, lock_fd: int, now: Optional[int]) -> Optional[str]:
         _event(conn, "orchestrator.failed", "headmaster", "the orchestrator turn cannot start, since its settings"
                f" file is refused ({common.one_line(exc, 200)}); items wait until it is in place", None,
                f"orchestrator:settings:{_day(now)}")
-        return "stop: the turn's settings are refused"
+        return "stop: the turn's settings are refused", 0
     with contextlib.ExitStack() as gate:
         try:
             gate_fd = gate.enter_context(run_desk.launch_gate())
             run_desk.check_report_launch(conn, config.ORCHESTRATOR_MODEL)  # under the gate, so no stop or update comes in between
         except run_desk.Blocked:
             _finish(fd, name, item, "blocked: the model is blocked here", now)
-            return "stop: blocked"
+            return "stop: blocked", 0
         except run_desk.Stopped:
-            return "stop: stopped"  # a stop or an update: the item waits, uncounted, for the next run
+            return "stop: stopped", 0  # a stop or an update: the item waits, uncounted, for the next run
         # Counted only once the turn is sure to launch, and before it does, so a killed turn counts too.
         _wake(fd, name, item, now)
+        launched = 1
         try:
             outcome = _turn(conn, fd, name, item, data, turn, (lock_fd, gate_fd), now)
         except Reformat as exc:
-            outcome = _reformat(conn, fd, name, item, data, turn, (lock_fd, gate_fd), now, str(exc))
+            outcome, again = _reformat(conn, fd, name, item, data, turn, (lock_fd, gate_fd), now, str(exc),
+                                       turns_left - launched)
+            launched += again
     if outcome == "failed" and item.get("retried") is not True:
         # Woken once more for the same item, from the next pass with no run going (_requeue), never twice.
         markers.replace(fd, name, {**item, "state": "retry", "retried": True})
-        return "failed: tried once more on the next pass"
+        return "failed: tried once more on the next pass", launched
     _finish(fd, name, item, outcome, now)
-    return f"stop: {outcome}" if outcome == "auth" else outcome
+    return (f"stop: {outcome}" if outcome == "auth" else outcome), launched
 
 
 def run(conn, now: Optional[int] = None) -> list:
@@ -920,14 +932,14 @@ def run(conn, now: Optional[int] = None) -> list:
         _prune(fd, now)
         turns = 0
         while turns < config.ORCHESTRATOR_MAX_TURNS and on():
-            outcome = _next(conn, fd, lock_fd, now)
-            if outcome is None:
+            found = _next(conn, fd, lock_fd, now, config.ORCHESTRATOR_MAX_TURNS - turns)
+            if found is None:
                 break
+            outcome, launched = found
             outcomes.append(outcome[len("stop: "):] if outcome.startswith("stop: ") else outcome)
             if outcome.startswith("stop: "):
                 break
-            if outcome not in ("capped: wakes per task", "skipped"):  # every item finished, so this always ends
-                turns += 1
+            turns += launched  # a capped or skipped item launches none, but is finished, so this always ends
     try:
         go_watch.watch(conn)
     except Exception:  # noqa: BLE001 - a go update that fails never stops the run

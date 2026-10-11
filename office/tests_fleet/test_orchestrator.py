@@ -46,6 +46,9 @@ if mode == "fail":
 reminded = os.path.join(state, "reminded")
 if mode == "structured":
     result("Here is my answer.", structured_output=json.load(open(os.path.join(state, "answer"))))
+elif mode == "repeated":
+    print('{{"type": "result", "subtype": "success", "is_error": false, "result": "{{\\\\"action\\\\": \\\\"none\\\\"}}",'
+          ' "structured_output": {{"action": "none", "action": "open_draft_pr"}}}}')
 elif os.path.exists(reminded) and stdin.endswith({reminder!r}):
     result(open(reminded).read())
 else:
@@ -1002,6 +1005,42 @@ class DeadRunTests(OrchestratorCase):
         self.assertEqual(schema["properties"]["action"]["enum"], sorted(orchestrator.ACTIONS))
         self.assertFalse(schema["additionalProperties"])
         self.assertNotIn("anyOf", schema)  # the CLI refuses anyOf at the top of a schema
+
+    def test_structured_output_with_a_repeated_key_is_never_collapsed_into_an_action(self):
+        self.land()
+        self.mode("repeated")
+        self.assertEqual(self.run_once(), ["none: no step needed"])  # the result text, read strictly as before
+
+    def test_a_kept_answer_is_scrubbed_through_json_escapes(self):
+        owl = self.land()
+        token = "sk-ant-" + "abcdefghijklmnopqrstuvwxyz0123456789"
+        hidden = "".join(f"\\u{ord(char):04x}" for char in token[:3]) + token[3:]
+        self.answer(f'note {{"one_line": "{hidden}"}} and more')
+        self.write_file(self.state / "reminded", f"again {hidden}")
+        self.run_once()
+        kept = self.items()[owl["id"]]["refused_answers"]
+        self.assertEqual(len(kept), 2)
+        for answer in kept:
+            self.assertNotIn(token[7:], answer)
+            self.assertNotIn("\\u", answer)
+
+    def test_the_format_retry_waits_for_the_switch_and_the_runs_turn_limit(self):
+        owl = self.land()
+        self.answer("not json")
+        self.write_file(self.state / "reminded", json.dumps({"action": "none"}))
+        with mock.patch.object(orchestrator, "on", side_effect=[True, False, False]):
+            self.assertEqual(self.run_once(), ["rejected: the answer is not exactly one JSON object"])
+        self.assertEqual(len(self.runs()), 1)  # switched off during the first turn
+        self.assertEqual(self.items()[owl["id"]]["state"], "done")
+        first, second = self.land(), self.land(self.handoff())
+        with mock.patch.object(config, "ORCHESTRATOR_MAX_TURNS", 2):
+            self.assertEqual(self.run_once(), ["none: no step needed"])
+        self.assertEqual(len(self.runs()), 3)  # the retry took the run's second turn
+        self.assertEqual(self.items()[second["id"]]["state"], "pending")
+        with mock.patch.object(config, "ORCHESTRATOR_MAX_TURNS", 1):
+            self.assertEqual(self.run_once(), ["rejected: the answer is not exactly one JSON object"])
+        self.assertEqual(len(self.runs()), 4)  # no turn left for its retry
+        self.assertEqual({self.items()[first["id"]]["state"], self.items()[second["id"]]["state"]}, {"done"})
 
     def test_the_owl_report_turn_gets_no_schema(self):
         self.assertNotIn("--json-schema", run_desk.owl_report_argv("brief", "prompt").argv)

@@ -1344,14 +1344,26 @@ def _report_turn(turn: ReportTurn, cwd: str, hand: tuple, on_start: Optional[Cal
         child.stdout.close()
     result = claude_result(b"".join(chunks))
     text = result.get("result") if isinstance(result.get("result"), str) else ""
-    if "--json-schema" in turn.argv and isinstance(result.get("structured_output"), dict):
-        text = json.dumps(result["structured_output"], ensure_ascii=True)  # the object the CLI checked, as JSON text
+    if "--json-schema" in turn.argv:
+        text = _structured_text(b"".join(chunks), text)
     failed = code != 0 or result.get("is_error") is True or result.get("subtype") not in (None, "success")
     if failed:
         auth = failover.classify("claude", b"".join(chunks), code, result) == "auth" \
             or any(text.strip().startswith(message) for message in AUTH_MESSAGES)
         return ("auth" if auth else "failed"), ""
     return "ok", text
+
+
+def _structured_text(raw: bytes, text: str) -> str:
+    """The structured output of a turn run with --json-schema, the object the CLI checked, as JSON text; else text. The
+    output is read strictly (common.strict_json), so an object with a repeated key is never collapsed into one that
+    parses: the result text then goes to the caller's own strict parse as it is."""
+    try:
+        envelope = common.strict_json(raw)
+    except (UnicodeDecodeError, ValueError, RecursionError):
+        return text
+    structured = envelope.get("structured_output") if isinstance(envelope, dict) else None
+    return json.dumps(structured, ensure_ascii=True) if isinstance(structured, dict) else text
 
 
 def spawn_owl_report() -> None:
