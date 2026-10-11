@@ -18,6 +18,7 @@ from fleet.safefs import FleetError
 from tests_fleet.support import FleetCase
 
 SHAS = ("1" * 40, "2" * 40, "3" * 40)
+FAILED = "{failed} of {ran} commands failed; review follows. If a check is wrong, ask McGonagall to fix it."
 REPO = "acme/web-app"
 PR = "https://github.com/acme/web-app/pull/7"
 SECRET = "sk-ant-" + "b" * 40
@@ -788,9 +789,34 @@ class VerifyTests(GoWatchCase):
         self.build_row = self.build()
         self.expect("confirmed", self.build_row)
 
-    def counted(self, ran: int, total: int, passed: int, malformed: int) -> str:
+    def counted(self, ran: int, total: int, passed: int, malformed: int, action: str = "Nothing for you.") -> str:
         return (f"{self.go} / {self.build_row['id']}: verify ran {ran} of {total} checks, {passed} passed,"
-                f" {malformed} malformed. Nothing for you.")
+                f" {malformed} malformed. {action}")
+
+    def test_verify_line_says_when_verify_proved_nothing_or_a_command_failed(self):
+        build = self.build_row
+        self.handoff(build)
+        self.expect("handoff", build)
+        self.verified(build, SHAS[0], exits=(), malformed=6)
+        self.assertEqual(self.watch(), ["sent"])
+        self.assertEqual(self.lines()[-1], self.counted(0, 0, 0, 6, "Verify proved nothing: 6 malformed checks. Ask"
+                                                                    " McGonagall to fix the TASK.md criteria."))
+        self.verified(build, SHAS[1], exits=(0, 1, 2), malformed=1)
+        self.assertEqual(self.watch(), ["sent"])
+        self.assertEqual(self.lines()[-1], self.counted(3, 3, 1, 1, "2 of 3 commands failed; review follows. If a"
+                                                                    " check is wrong, ask McGonagall to fix it."))
+        self.verified(build, SHAS[2], exits=(0,), malformed=2)  # a command ran and passed: nothing for Ryan
+        self.assertEqual(self.watch(), ["sent"])
+        self.assertEqual(self.lines()[-1], self.counted(1, 1, 1, 2))
+        self.verified(build, "4" * 40, exits=())  # no checks at all is not a failure either
+        self.assertEqual(self.watch(), ["sent"])
+        self.assertEqual(self.lines()[-1], self.counted(0, 0, 0, 0))
+        go_id, build_id = "tk_" + "a" * 16, "tk_" + "b" * 16
+        for checks in ([9999, 9999, 0, 9999], [0, 9999, 0, 9999]):
+            with self.subTest(checks=checks):
+                key = {"build": build_id, "state": "verify", "round": 1, "verdict": None, "event": None,
+                       "checks": checks}
+                self.assertTrue(go_watch.line(go_id, key).endswith(" to fix it." if checks[0] else " criteria."))
 
     def test_verify_line_counts_the_evidence_summary_malformed_and_stopped_checks(self):
         build = self.build_row
@@ -798,7 +824,7 @@ class VerifyTests(GoWatchCase):
         self.expect("handoff", build)
         self.verified(build, SHAS[0], exits=(0, 1), malformed=1, stopped=1)
         self.assertEqual(self.watch(), ["sent"])
-        self.assertEqual(self.lines()[-1], self.counted(2, 3, 1, 1))
+        self.assertEqual(self.lines()[-1], self.counted(2, 3, 1, 1, FAILED.format(failed=1, ran=2)))
         opened = self.round(build, SHAS[0])
         self.quiet()  # the round its verify ran for is the same state
         capacity.record_round_verdict(self.conn, opened["request"]["id"], REPO, "CHANGES", now=self.tick())
@@ -841,7 +867,7 @@ class VerifyTests(GoWatchCase):
                    self.office / "reviews" / build["id"] / f"evidence-{SHAS[0]}.md")
         self.verified(build, SHAS[2], exits=(1,))  # newer than the link, so it is the one read
         self.assertEqual(self.watch(), ["sent"])
-        self.assertEqual(self.lines()[-1], self.counted(1, 1, 0, 0))
+        self.assertEqual(self.lines()[-1], self.counted(1, 1, 0, 0, FAILED.format(failed=1, ran=1)))
 
     def test_verify_counts_on_a_kept_state_that_is_not_verify_are_unreadable(self):
         with safefs.opened_dir(config.OFFICE_ROOT, config.GO_WATCH_DIR) as fd:

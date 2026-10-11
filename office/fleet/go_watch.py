@@ -30,8 +30,10 @@ changes what any run may do.
   still goes, since that is Ryan's cue to merge, and is then the last. When such a go task closes, its entry is
   dropped with no line. A go task that closes before its end still gets its closed line.
 - The line is `<go id> / <build id or "no build">: <state>. <action>`, both from the fixed table (STATES), never from
-  an owl or a model, scrubbed and cut to GO_WATCH_LINE_CHARS. It goes through phone.send: the overlay's command when
-  one is configured, else the macOS notification. Each line is also appended, with a local timestamp, to
+  an owl or a model, scrubbed and cut to GO_WATCH_LINE_CHARS. A verify line whose evidence proved nothing (no command
+  ran and a check is malformed) or shows a failed command takes its action from VERIFY_ACTIONS instead, filled in
+  with its counts only. It goes through phone.send: the overlay's command when one is configured, else the macOS
+  notification. Each line is also appended, with a local timestamp, to
   logs/GO_UPDATES_LOG in the office (_log), which no desk can write, before it is sent, so a tail -F shows it after
   the banner has gone. Its marker says logging, with the record and where it goes, until then: a record a kill cut
   short is logged by the next pass (_relog) unless it is where its marker says it went.
@@ -110,6 +112,11 @@ STATES = {
     "draft-pr": ("draft PR opened", "Review and merge the PR when you're happy."),
     "merged": ("merged", "Nothing for you; auto-close checks it."),
     "closed": ("closed", "Nothing for you."),
+}
+# A verify line's action in place of "Nothing for you." when its counts prove nothing or show a failed command.
+VERIFY_ACTIONS = {
+    "nothing": "Verify proved nothing: {malformed} malformed checks. Ask McGonagall to fix the TASK.md criteria.",
+    "failed": "{failed} of {ran} commands failed; review follows. If a check is wrong, ask McGonagall to fix it.",
 }
 # The loud events a state above stands for, and that state. phone.deliver leaves one to go updates while its go task
 # stands in that state; any other loud kind (a review that stopped, a failed push, the orchestrator's other events,
@@ -315,7 +322,13 @@ def current(conn) -> dict:
 def line(go_id: str, key: dict) -> str:
     label, action = STATES[key["state"]]
     if key["state"] == "verify":
-        label = label.format(**dict(zip(("ran", "total", "passed", "malformed"), key[CHECKS])))
+        counts = dict(zip(("ran", "total", "passed", "malformed"), key[CHECKS]))
+        label = label.format(**counts)
+        failed = counts["ran"] - counts["passed"]
+        if counts["ran"] == 0 and counts["malformed"] > 0:
+            action = VERIFY_ACTIONS["nothing"].format(**counts)
+        elif failed > 0:
+            action = VERIFY_ACTIONS["failed"].format(failed=failed, ran=counts["ran"])
     return common.scrubbed_line(f"{go_id} / {key['build'] or 'no build'}: {label}. {action}",
                                 config.GO_WATCH_LINE_CHARS)
 
