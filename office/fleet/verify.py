@@ -3,9 +3,10 @@
   fleet verify <task-id>
 
 - Finds TASK.md up the task chain (the nearest task with one) and the task's worktree record.
-- Reads lines shaped "AC-<n> <what must be true> | check: <check>". A check that is one backtick command
-  and nothing else is a command. A check with no backticks is an observation for the reviewer to judge,
-  recorded as not run. A check that holds backticks any other way, such as a backtick command plus other
+- Reads lines shaped "AC-<n> <what must be true> | check: <check>", only under TASK.md's "## Acceptance criteria"
+  heading when it has one (criteria_lines), so criteria quoted in Intent are never read twice. A check that is one
+  backtick command and nothing else is a command. A check with no backticks is an observation for the reviewer to
+  judge, recorded as not run. A check that holds backticks any other way, such as a backtick command plus other
   text, is malformed: it is not run, the evidence gives the plain reason, and SUMMARY counts it on its own.
 - Refuses to run on a worktree with uncommitted changes, so the evidence belongs to one commit.
   Then removes every git-ignored path except the dependency links, and the evidence names each one,
@@ -67,6 +68,10 @@ AC_LINE = re.compile(r"AC-(\d{1,3})\s+(.+?)\s*\|\s*(check|after merge):\s*(.+?)\
 COMMAND = re.compile(r"`([^`\x00-\x1f]{1,1000})`")
 # A line that starts like a criterion and holds a pipe, but is not one, is a malformed criterion: never prose.
 CRITERION_START = re.compile(r"AC-(\d+)\s+(.*)")
+# Criteria are read only under this heading, up to the next # or ## heading (criteria_lines).
+ACCEPTANCE_HEADING = "## acceptance criteria"
+SECTION_END = re.compile(r"#{1,2}(?:\s|$)")
+REPEATED_HEADING = "the ## Acceptance criteria heading is used more than once"
 # Anything shaped like a label, a pipe then a few words and a colon, inside what must be true or inside a check outside
 # its backticks, known label or not ("| check:", "| later:"): a criterion has one label.
 LABEL_SHAPED = re.compile(r"\|\s*\w[\w -]{0,40}:")
@@ -100,6 +105,36 @@ def read_task_md(holder_id: str) -> bytes:
         return safefs.read_regular(fd, "TASK.md", TASK_MD_MAX_BYTES, "TASK.md")
 
 
+def acceptance_heading(line: str) -> bool:
+    """Whether a line is the "## Acceptance criteria" heading, read stripped and in any case."""
+    return line.strip().casefold() == ACCEPTANCE_HEADING
+
+
+def criterion_shaped(stripped: str) -> bool:
+    """Whether parse_checks reads a stripped line as a criterion: one, or one it calls malformed."""
+    if AC_LINE.fullmatch(stripped):
+        return True
+    start = CRITERION_START.fullmatch(stripped)
+    return start is not None and "|" in common.normalized(start.group(2))
+
+
+def criteria_lines(text: str) -> tuple:
+    """(lines, repeated): the lines of TASK.md that may hold criteria, and whether the heading is used more than once.
+    With the Acceptance criteria heading on one line, they are the lines after it up to the next # or ## heading or
+    the end of the text, so an empty section never falls back to criteria quoted elsewhere. With no such heading they
+    are the whole text, and with more than one they are the whole text and repeated is True. A fenced code block is
+    not special: a heading line inside one counts, which only ever ends the section early or repeats the heading,
+    so it fails closed. verify, the closer and the own-session TASK.md all read criteria through this, so none of
+    them disagrees on which lines count."""
+    lines = text.splitlines()
+    headings = [index for index, line in enumerate(lines) if acceptance_heading(line)]
+    if len(headings) != 1:
+        return lines, len(headings) > 1
+    start = headings[0] + 1
+    end = next((index for index in range(start, len(lines)) if SECTION_END.match(lines[index].strip())), len(lines))
+    return lines[start:end], False
+
+
 def parse_checks(text: str) -> list:
     """Each acceptance criterion as {id, what, label, when, check, command, malformed}, in file order. label is
     "check" (when "before": run or judged before the merge) or "after merge" (when "after": judged after the
@@ -107,23 +142,17 @@ def parse_checks(text: str) -> list:
     malformed is the plain reason a criterion is neither a command nor plain words, and None otherwise; a
     malformed criterion never runs. A line that starts with AC-<n> and holds a pipe but is not a criterion (an
     unknown label, a misspelt one) is malformed too, never prose, and so is every line of an id used twice.
-    With one stripped line equal to "## Acceptance criteria", only lines after it up to the next line starting
-    with "## " or the end of the text are read as criteria. With more than one such heading, every criterion in
-    the whole text is malformed. Without that heading, criteria are read from the whole text as before."""
-    lines = text.splitlines()
-    headings = [index for index, line in enumerate(lines) if line.strip() == "## Acceptance criteria"]
-    if len(headings) == 1:
-        start = headings[0] + 1
-        end = next((index for index in range(start, len(lines)) if lines[index].startswith("## ")), len(lines))
-        lines = lines[start:end]
+    Only the lines criteria_lines gives are read, so an AC line quoted in Intent or Spec is never a criterion; with
+    the Acceptance criteria heading on more than one line, every criterion in the whole text is malformed."""
+    lines, repeated = criteria_lines(text)
     checks = []
     for line in lines:
         stripped = line.strip()
+        if not criterion_shaped(stripped):
+            continue
         match = AC_LINE.fullmatch(stripped)
         if match is None:
             start = CRITERION_START.fullmatch(stripped)
-            if start is None or "|" not in common.normalized(start.group(2)):
-                continue
             what, _, rest = start.group(2).partition("|")
             checks.append({"id": f"AC-{start.group(1)}", "what": what.strip(), "label": None, "when": "before",
                            "check": rest.strip(), "command": None, "malformed": UNKNOWN_LABEL})
@@ -141,8 +170,8 @@ def parse_checks(text: str) -> list:
                        "malformed": malformed})
     used = [check["id"] for check in checks]
     for check in checks:
-        if len(headings) > 1:
-            check["command"], check["malformed"] = None, "the ## Acceptance criteria heading is used more than once"
+        if repeated:
+            check["command"], check["malformed"] = None, REPEATED_HEADING
         elif used.count(check["id"]) > 1:
             check["command"], check["malformed"] = None, f"{check['id']} is used more than once"
     return checks

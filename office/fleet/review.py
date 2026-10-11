@@ -542,7 +542,7 @@ def _request_body(task: dict, sha: str, record: dict, holder_id: str, handoff: b
         lines.append(f"Author's handoff, context only: {config.CASTLE_ROOT}/tasks/{holder_id}/handoff.md")
     lines += list(followup_lines or [])
     lines += ["TASK.md is at the task_md path in this owl.", *(intent_lines or []),
-              AFTER_MERGE_REQUEST_LINE, TOOLING_REQUEST_LINE,
+              CRITERIA_REQUEST_LINE, AFTER_MERGE_REQUEST_LINE, TOOLING_REQUEST_LINE,
               f"End with your review block. Its first line is exactly: REVIEW {task['id']} @ {sha}"]
     return "\n".join(lines) + "\n"
 
@@ -616,6 +616,9 @@ def _intent_lines(conn, task_id: str, digest: str) -> tuple:
     return lines, False
 
 
+CRITERIA_REQUEST_LINE = ("The criteria are the AC lines under TASK.md's ## Acceptance criteria heading, or in the whole"
+                         " TASK.md when it has none, as verify reads them. With that heading, an AC line quoted anywhere"
+                         " else, such as in Intent, is context, never a criterion.")
 AFTER_MERGE_REQUEST_LINE = ("Criteria marked after merge are judged after the merge, not in this review: list each as"
                             " AC-n AFTER MERGE, and never hold a PASS back for one. A finding that an after-merge"
                             " check cannot prove its criterion is still a finding.")
@@ -1538,8 +1541,11 @@ def _write_own_task_md(task_id: str, title: str, intent: str) -> str:
 
 
 def _own_task_md(task_id: str, title: str, intent: str) -> bytes:
-    lines = intent.strip().splitlines()
-    criteria = [line.strip() for line in lines if verify.AC_LINE.fullmatch(line.strip())]
+    """Every line verify reads as a criterion, malformed ones too (verify.criterion_shaped), moves under the one
+    Acceptance criteria heading, and an Acceptance criteria heading in the intent is dropped, so verify reads each
+    criterion once and none is left behind in Intent."""
+    lines = [line for line in intent.strip().splitlines() if not verify.acceptance_heading(line)]
+    criteria = [line.strip() for line in lines if verify.criterion_shaped(line.strip())]
     words = "\n".join(line for line in lines if line.strip() not in criteria).strip() or title
     checks = "\n".join(criteria) if criteria else "None given. The reviewer judges the diff against the Intent."
     text = (f"# {task_id} {title}\n\n## Intent\n{words}\n\n## Acceptance criteria\n{checks}\n\n## Spec\n"

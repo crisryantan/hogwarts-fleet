@@ -374,6 +374,17 @@ class VerifyTests(LoopCase):
         task_md = (self.castle / "tasks" / result["task_id"] / "TASK.md").read_text()
         self.assertIn("## Intent\nFix it.\n\n## Acceptance criteria\nAC-1 the fix file is there", task_md)
 
+    def test_own_session_task_md_moves_every_criterion_verify_reads_under_its_one_heading(self):
+        intent = ("Fix it.\n## Acceptance criteria\nAC-1 it works | check: `true`\nAC-2 typo | chek: `true`\n"
+                  "More words.\n")
+        text = review._own_task_md("t-0001", "my fix", intent).decode()
+        self.assertEqual(text.count("## Acceptance criteria"), 1)
+        self.assertIn("## Intent\nFix it.\nMore words.\n\n## Acceptance criteria\nAC-1 it works | check: `true`\n"
+                      "AC-2 typo | chek: `true`\n\n## Spec\n", text)
+        checks = verify.parse_checks(text)
+        self.assertEqual([(c["id"], c["command"], c["malformed"]) for c in checks],
+                         [("AC-1", "true", None), ("AC-2", None, verify.UNKNOWN_LABEL)])
+
     def test_parse_checks(self):
         checks = verify.parse_checks("AC-1 a | check: `x`\nnoise\nAC-12 b | check: look at it\nAC-x c | check: `y`\n")
         self.assertEqual([(c["id"], c["command"]) for c in checks], [("AC-1", "x"), ("AC-12", None)])

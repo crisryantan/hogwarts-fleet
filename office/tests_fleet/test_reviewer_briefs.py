@@ -165,6 +165,34 @@ class AfterMergeRequestTest(unittest.TestCase):
                       " prove its criterion is still a finding.", body)
         self.assertTrue(body.rstrip().splitlines()[-1].startswith("End with your review block."))
 
+    def test_review_request_reads_criteria_only_from_their_section(self):
+        task = {"id": "t-0001", "desk": "harry"}
+        body = review._request_body(task, "a" * 40, {"path": WORKTREE, "base": "origin/main"}, "t-0001", handoff=False)
+        self.assertIn("The criteria are the AC lines under TASK.md's ## Acceptance criteria heading, or in the whole"
+                      " TASK.md when it has none, as verify reads them. With that heading, an AC line quoted anywhere"
+                      " else, such as in Intent, is context, never a criterion.", body)
+
+
+@unittest.skipUnless(IN_KIT, ONLY_IN_KIT)
+class CriteriaSectionBriefTest(unittest.TestCase):
+    def test_the_reviewer_briefs_and_mcgonagall_read_criteria_only_from_their_section(self):
+        for desk in REVIEWERS:
+            with self.subTest(desk=desk):
+                brief = (KIT / "desks" / desk / "BRIEF.md").read_text()
+                self.assertIn("The criteria are the AC lines under TASK.md's `## Acceptance criteria` heading, or in"
+                              " the whole TASK.md when it has none, as verify reads them. With that heading, an AC"
+                              " line quoted anywhere else, such as in Intent, is context, never a criterion.", brief)
+        agent = (CASTLE / ".claude" / "agents" / "mcgonagall.md").read_text()
+        self.assertIn("- Criteria are read only from the lines under `## Acceptance criteria`.", agent)
+        self.assertIn("- When Ryan's ask holds AC lines, I quote it under Intent without them or their"
+                      " `## Acceptance criteria` heading.", agent)
+        self.assertIn("- Each criterion and that heading are written once, in their section.", agent)
+        self.assertIn("<Ryan's words, verbatim, less any criteria lines and their heading>", agent)
+        self.assertIn("I append his new words verbatim under Intent, less any criteria lines and their heading,", agent)
+        self.assertNotIn("with no edits", agent)
+        self.assertIn("- Edit Intent, except to append Ryan's new words verbatim, less any criteria lines and their"
+                      " heading.", agent)
+
 
 @unittest.skipUnless(IN_KIT, ONLY_IN_KIT)
 class AfterMergeBriefTest(unittest.TestCase):

@@ -91,6 +91,24 @@ class AcceptanceSectionTests(VerifyChecksCase):
         self.assertEqual([check["id"] for check in checks], ["AC-1", "AC-2", "AC-3", "AC-4"])
         self.assertTrue(all(check["malformed"] is None for check in checks))
 
+    def test_heading_in_any_case_and_a_top_or_indented_heading_end_the_section(self):
+        for heading, after in (("## ACCEPTANCE Criteria", "## Spec"), ("## Acceptance criteria", "  ## Spec"),
+                               ("## Acceptance criteria", "# Notes"), ("## Acceptance criteria", "#")):
+            with self.subTest(heading=heading, after=after):
+                text = ("## Intent\n" + self.CRITERIA + heading + "\n" + self.CRITERIA + after +
+                        "\nAC-1 quoted | check: `touch quoted.txt`\n")
+                self.assertEqual(verify.parse_checks(text), verify.parse_checks(self.CRITERIA))
+
+    def test_criterion_shaped_lines_are_the_ones_parse_checks_reads(self):
+        self.assertTrue(verify.criterion_shaped("AC-1 a | check: `true`"))
+        self.assertTrue(verify.criterion_shaped("AC-2 a | chek: `true`"))  # malformed, still a criterion
+        for line in ("AC-3 no pipe at all", "noise | check: `true`", "## Acceptance criteria"):
+            with self.subTest(line=line):
+                self.assertFalse(verify.criterion_shaped(line))
+        self.assertEqual(verify.criteria_lines("a\n## Acceptance criteria\nb\n## Spec\nc\n"), (["b"], False))
+        self.assertEqual(verify.criteria_lines("a\n## acceptance criteria\nb\n## Acceptance criteria\n"),
+                         (["a", "## acceptance criteria", "b", "## Acceptance criteria"], True))
+
     def test_empty_section_does_not_fall_back_to_criteria_elsewhere(self):
         text = self.CRITERIA + "## Acceptance criteria\n\n## Spec\n" + self.CRITERIA
         self.assertEqual(verify.parse_checks(text), [])
