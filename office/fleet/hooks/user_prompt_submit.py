@@ -630,12 +630,19 @@ def _go(conn, task_id: str, now: int, note: Optional[Callable[[dict], None]] = N
     return lines + loops.build_notice(spec["repo_dir"]), True
 
 
-def run_go(conn, task_id: str, now: int, note: Optional[Callable[[dict], None]] = None) -> tuple:
+def run_go(conn, task_id: str, now: int, note: Optional[Callable[[dict], None]] = None,
+           session: Optional[str] = None) -> tuple:
     """(lines, started) for one go whose typing is confirmed: the go above, ended by SIGTERM or SIGHUP through its
-    take-back, with every refusal said in one line."""
+    take-back, with every refusal said in one line. A go that applied is the typing session's to watch
+    (fleet/go_owners.py)."""
     try:
         with common.ended_by_signals():
-            return _go(conn, task_id, now) if note is None else _go(conn, task_id, now, note)
+            lines, started = _go(conn, task_id, now) if note is None else _go(conn, task_id, now, note)
+        if started and session is not None:
+            from fleet import go_owners  # only an applied go pays for this import
+
+            go_owners.applied(conn, session, task_id)
+        return lines, started
     except (FleetError, StoreError) as exc:
         lines = [f"Go was not applied to {task_id}: {common.one_line(exc, 600)}"]
         if getattr(exc, "fix", None):
@@ -799,7 +806,7 @@ def _starts(conn, data: dict, desk: str, task_ids: list, now: int) -> tuple:
         if refusal is not None:
             lines, started = not_confirmed("go", task_id, refusal), False
         else:
-            lines, started = run_go(conn, task_id, now)
+            lines, started = run_go(conn, task_id, now, session=common.session_id(data))
         if len(task_ids) > 1:
             lines = [" ".join(lines)]
         shown += lines

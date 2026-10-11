@@ -282,22 +282,27 @@ def _store_body(data: dict, desk: str, out, now: int, source: object, rotated: l
     try:
         hers = common.session_desk(data, desk) == config.HOOK_DESK
         session = common.session_id(data)
-        # Her session takes over the go tasks of sessions that ended before anything shows them.
-        taken = taken_line(go_owners.start(conn, session)) if hers else []
+        # The go tasks of sessions that ended, which her session takes over once this output saying so is written.
+        taking = go_owners.start(conn, session) if hers else []
+        taken = taken_line(taking)
         if source in ONE_LINE_SOURCES:
             stop = stops.active_line()  # a resumed or forked session is told of an active stop too
             out.write("\n".join([resume_line(conn, desk, now)] + ([] if stop is None else [stop]) + taken) + "\n")
             wrote.append(True)
+            out.flush()
+            go_owners.take(conn, session, taking)
         else:
             listed: list = []
             status: Optional[list] = [] if hers else None
-            watched = go_owners.watching(session) if hers else None
+            mine = go_owners.watching(session)
+            watched = (lambda go_id: go_id in taking or mine(go_id)) if hers else None
             # The chat watch's start, read before her go status block, so it is never newer than what she is shown.
             told = None if status is None else chat_watch.delivered_keys(conn, watched)
             lines = digest(conn, desk, now, listed, status, watched)
             out.write("\n".join(lines + taken + rotated) + "\n")
             wrote.append(True)
             out.flush()
+            go_owners.take(conn, session, taking)
             if listed:  # the prompt hook then lists only what the digest did not show
                 events_seen.record(common.session_id(data), events_seen.mark(
                     pensieve.shown_through(conn, listed, folded=True), listed))

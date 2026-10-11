@@ -97,16 +97,18 @@ def _record(fd: int, name: str, told: dict) -> None:
     markers.replace(fd, name + TOLD, {"state": "told", "tasks": told})
 
 
-def _expected(fd: int, name: str, told: dict) -> bool:
-    """Whether a go typed in this session is still being confirmed: one it named is not told yet, and it is recent."""
+def _expected(fd: int, name: str, told: dict, watched: Optional[Callable] = None) -> bool:
+    """Whether a go typed in this session is still being confirmed: one it named is not told yet, nor watched in
+    another session now, and it is recent."""
     marker = markers.read(fd, name + EXPECT)
     tasks, at = (None, None) if marker is None else (marker.get("tasks"), marker.get("at"))
     return isinstance(tasks, list) and type(at) is int and time.time() - at < config.GO_CHAT_EXPECT_SECONDS \
-        and any(isinstance(go_id, str) and go_id not in told for go_id in tasks)
+        and any(isinstance(go_id, str) and go_id not in told and (watched is None or watched(go_id)) for go_id in tasks)
 
 
 def _prune(fd: int, name: str) -> None:
-    """Drop what long-gone sessions left: a marker past EVENTS_SEEN_KEEP_SECONDS, and a lock once no one holds it."""
+    """Drop what long-gone sessions left: a marker past EVENTS_SEEN_KEEP_SECONDS (a session marker only once its
+    process has ended), and a lock once no one holds it."""
     now = time.time()
     for entry in os.listdir(fd):
         if entry.startswith(name) or entry.startswith("."):
@@ -117,7 +119,10 @@ def _prune(fd: int, name: str) -> None:
             if entry.endswith((LOCK, STATE_LOCK)):
                 with safefs.held_lock(fd, entry, blocking=False):
                     os.unlink(entry, dir_fd=fd)
-            elif entry.endswith((TOLD, EXPECT, go_owners.SESSION)):
+            elif entry.endswith(go_owners.SESSION):
+                if markers.gone(markers.read(fd, entry) or {}):  # a live session keeps its marker however idle
+                    os.unlink(entry, dir_fd=fd)
+            elif entry.endswith((TOLD, EXPECT)):
                 os.unlink(entry, dir_fd=fd)
         except (FleetError, OSError):
             continue
@@ -184,8 +189,8 @@ def expect(session_id: Optional[str], task_ids: Iterable[str]) -> None:
 def changes(conn, told: dict, watched: Optional[Callable] = None) -> list:
     """[(go task id, its line or None, its new digest or None)]: each open go task watched (all with no watched) that is
     new or whose key changed, and each told one that left the watched open set, which drops out (digest None), with
-    its closed line when it closed and no line when another session watches it now. A go task that cannot be read now
-    keeps what it was told."""
+    no line when another session watches it now, else its closed line when it closed. A go task that cannot be read
+    now keeps what it was told."""
     every = go_wait.open_states(conn)
     states = {go_id: state for go_id, state in every.items() if watched is None or watched(go_id)}
     found = []
@@ -195,7 +200,7 @@ def changes(conn, told: dict, watched: Optional[Callable] = None) -> list:
     for go_id in told:
         if go_id in states:
             continue
-        if go_id in every:  # open, and watched in another session now
+        if go_id in every or (watched is not None and not watched(go_id)):  # another session watches it now
             found.append((go_id, None, None))
             continue
         try:
@@ -219,7 +224,7 @@ def _after(told: dict, entries: list) -> dict:
 
 def _idle(conn, fd: int, name: str, told: dict, watched: Callable) -> bool:
     """Nothing to wait for: no open go task this session watches, nothing told still to close and no go expected."""
-    return not told and not _expected(fd, name, told) and not any(watched(go_id) for go_id in go_wait.open_states(conn))
+    return not told and not _expected(fd, name, told, watched) and not any(watched(go_id) for go_id in go_wait.open_states(conn))
 
 
 def _poll(conn, fd: int, name: str, err) -> Optional[int]:

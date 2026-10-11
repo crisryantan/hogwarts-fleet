@@ -384,7 +384,7 @@ def _confirmed(data: dict, conn, key: str, clock: Callable[[], float], sleep: Ca
                 lines = hook.close_confirmed(conn, task_id, int(clock()))
                 ok = lines[0].startswith("Mischief managed:")
             else:
-                lines, ok = hook.run_go(conn, task_id, int(clock()), note=_noter(key))
+                lines, ok = hook.run_go(conn, task_id, int(clock()), note=_noter(key), session=common.session_id(data))
             report(task_id, lines, ok)
             done.append(task_id)
     except SystemExit:

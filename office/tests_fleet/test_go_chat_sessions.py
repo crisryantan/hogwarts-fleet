@@ -5,12 +5,14 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import subprocess
+import time
 from unittest import mock
 
 from hogwarts import pensieve
 
-from fleet import config, go_owners, go_status
+from fleet import config, go_owners, go_status, safefs
 from fleet.hooks import session_start, stop, user_prompt_submit
 from tests_fleet.test_go_chat import ChatCase
 from tests_fleet.test_go_wait import Clock
@@ -199,3 +201,50 @@ class PrivacyTests(SessionsCase):
             for session in SESSIONS:
                 self.assertNotIn(session, path.name)
                 self.assertNotIn(session, path.read_text(errors="replace"))
+
+
+class RaceTests(SessionsCase):
+    def test_race_a_go_task_moved_then_closed_drops_out_of_the_old_session_quietly(self):
+        go_id = self.typed_go(SESSIONS[0], 1)[0]
+        self.stop_in(SESSIONS[0])
+        self.assertIn(go_id, self.prompt(SESSIONS[0]))
+        self.prompt(SESSIONS[1], f"watch {go_id}")
+        pensieve.close_task(self.conn, go_id, "abandoned", now=self.tick())
+        self.assertEqual(self.stop_in(SESSIONS[0]), (0, "", 0))  # no closed line here: it was moved
+        self.assertIn(f"{go_id} / no build: closed (abandoned).", self.stop_in(SESSIONS[1])[1])
+        self.assertIn(f"- {go_id}: {go_status.MOVED}", self.prompt(SESSIONS[0]))
+
+    def test_race_the_session_whose_go_applied_owns_it(self):
+        go_id = f"tk_{1 + 0xa0:016x}"
+        go_owners.claim(self.conn, SESSIONS[0], [go_id])
+        go_owners.claim(self.conn, SESSIONS[1], [go_id])  # typed again elsewhere while the first is confirmed
+        self.assertEqual(self.owner(go_id), go_owners.name(SESSIONS[1]))
+        self.go_task(1)
+        go_owners.applied(self.conn, SESSIONS[0], go_id)  # the first go committed
+        go_owners.claim(self.conn, SESSIONS[1], [go_id])  # too late: the store knows it, so it keeps its owner
+        self.assertEqual(self.owner(go_id), go_owners.name(SESSIONS[0]))
+
+    def test_race_a_start_whose_digest_never_went_out_takes_nothing(self):
+        go_id = self.typed_go(SESSIONS[0], 1, pid=dead_pid())[0]
+        with mock.patch.object(go_owners, "session_pid", return_value=self.alive(SESSIONS[1])):
+            self.assertEqual(go_owners.start(self.conn, SESSIONS[1]), [go_id])
+        self.assertEqual(self.owner(go_id), go_owners.name(SESSIONS[0]))
+        self.assertIn(session_start.taken_line([go_id])[0], self.start(SESSIONS[2]))
+
+    def test_race_a_live_sessions_marker_outlives_the_cleanup(self):
+        self.typed_go(SESSIONS[0], 1)
+        self.typed_go(SESSIONS[1], 2, pid=dead_pid())
+        old = time.time() - config.EVENTS_SEEN_KEEP_SECONDS - 60
+        for session in SESSIONS[:2]:
+            os.utime(self.folder() / (go_owners.name(session) + go_owners.SESSION), (old, old))
+        with safefs.opened_dir(config.OFFICE_ROOT, config.GO_CHAT_DIR) as fd:
+            stop._prune(fd, go_owners.name(SESSIONS[2]))
+        names = {path.name for path in self.folder().iterdir()}
+        self.assertIn(go_owners.name(SESSIONS[0]) + go_owners.SESSION, names)
+        self.assertNotIn(go_owners.name(SESSIONS[1]) + go_owners.SESSION, names)
+        self.assertIn(go_owners.OWNERS_LOCK, names)
+
+    def test_race_owners_are_bounded(self):
+        go_owners.claim(self.conn, SESSIONS[0], [f"tk_{index:016x}" for index in range(go_owners.MAX_OWNERS + 6)])
+        with open(self.folder() / go_owners.OWNERS) as handle:
+            self.assertEqual(len(json.load(handle)["tasks"]), go_owners.MAX_OWNERS)
