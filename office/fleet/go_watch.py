@@ -9,7 +9,7 @@ changes what any run may do.
   runs, and the loud events a state stands for), the round and verdict that state is about, and the id of the event
   a state is made of (a go refusal, a tooling block, a refused round, McGonagall's escalation to Ryan). An
   escalation (orchestrator.notify) on the go task or its build after the newest handoff, round, verdict and PR is a
-  waiting on you state, each its own key, so each one pings once. Three states are read from files. Verify's: once the
+  waiting on you state, each its own key, so each one pings once. Four states are read from files. Verify's: once the
   build's newest office evidence (reviews/<build>/evidence-<sha>.md, which no desk can write) ran at or after the
   handoff its round is for, the key holds the counts of that evidence's structured head (its RAN, SUMMARY and
   STOPPED lines, each exactly once), never its free text. Checks halted by the stop, or a queued verify held before
@@ -18,9 +18,11 @@ changes what any run may do.
   is handed off with no review started. And a CHANGES round whose newest run since its verdict died without doing
   anything (run_desk.died_idle: the run's end record in the office runs folder, which no desk can write, and its
   recorded usage) says the fix round died: retrying while auto-orchestrate is on and fewer than
-  ORCHESTRATOR_DEAD_RUNS_IN_A_ROW of the build's newest runs in a row died that way, else waiting on you. An end
-  record that cannot be read fails the pass, as unreadable evidence does. No timestamp or wording is in the key, so
-  a cosmetic change never pings.
+  ORCHESTRATOR_DEAD_RUNS_IN_A_ROW of the build's newest runs in a row died that way, else waiting on you. A CHANGES
+  round with no run since its verdict, told by its review.fix-round event, that the review loop did not open (no
+  after-<request>.json in that folder naming the handoff it was for) was run by hand, so no fix round started: it
+  waits on you to run fleet build. An end record or an after record that cannot be read fails the pass, as
+  unreadable evidence does. No timestamp or wording is in the key, so a cosmetic change never pings.
 - Kept: the last key sent for each go task, in one state file in the office folder GO_WATCH_DIR, read and written
   whole under its own lock. A pass compares the current keys with it: a go task whose key changed gets one line, one
   that left the open set gets one final line and its entry goes. A pass with no change sends and writes nothing. A
@@ -86,6 +88,8 @@ KEY_FIELDS = ("build", "state", "round", "verdict", "event")
 CHECKS = "checks"
 EVIDENCE_NAME = re.compile(r"evidence-([0-9a-f]{40})\.md")
 EVIDENCE_HEAD_BYTES = 1 << 17
+# The most a review round's after record holds (owl_post.AFTER_MAX_BYTES).
+AFTER_MAX_BYTES = 1024
 HEAD_RAN = re.compile(r"RAN (\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ) (?:under|without) .+")
 HEAD_SUMMARY = re.compile(r"SUMMARY (\d{1,4}) of (\d{1,4}) commands exited 0, (\d{1,4}) malformed checks not run,"
                           r" \d{1,4} observations for the reviewer")
@@ -115,6 +119,8 @@ STATES = {
     "closed": ("closed", "Nothing for you."),
     "verify-held": ("verify held by Ollivander's stop", "The stop is holding verify; run castle ollivander clear"
                                                      " once the boundary checks pass."),
+    "changes-hand": ("review CHANGES, no fix round started because the review was run by hand",
+                     "Waiting on you: run fleet build for this build to start the fix round."),
 }
 # A verify line's action in place of "Nothing for you." when its counts prove nothing or show a failed command.
 VERIFY_ACTIONS = {
@@ -222,6 +228,27 @@ def _review_queued(build_id: str, owl_id: str) -> bool:
     return pending is not None and stat.S_ISREG(pending.st_mode) and done is None
 
 
+def _loop_round(build_id: str, request_id: str) -> bool:
+    """Whether the review loop opened this round: its after record (owl_post.AFTER_RECORD) in the build's office
+    reviews folder, which no desk can write, names the handoff it was opened for. A round run by hand has none, or one
+    in its own "hand" state, or one naming no handoff once it is done. Raises when that folder or record cannot be read
+    whole."""
+    try:
+        with safefs.opened_dir(config.OFFICE_ROOT, "reviews", build_id) as fd:
+            raw = safefs.read_regular(fd, f"after-{ids.check('request', request_id)}.json", AFTER_MAX_BYTES,
+                                      "after record")
+    except safefs.Missing:
+        return False
+    try:
+        data = common.strict_json(raw)
+    except (UnicodeDecodeError, ValueError):
+        data = None
+    if not isinstance(data, dict) or not isinstance(data.get("state"), str) \
+            or not isinstance(data.get("owl_id"), (str, type(None))):
+        raise FleetError("an after record cannot be read whole")
+    return data["state"] != "hand" and data["owl_id"] is not None
+
+
 def _verify_key(build_id: str, round_no: int, checks: Optional[list]) -> dict:
     """A verify's fixed state: interrupted checks, completed evidence, or pending checks held by the stop.
     An unreadable stop folder raises, so it never replaces a good kept state."""
@@ -299,6 +326,14 @@ def _build_state(conn, go_id: str, build: dict, held: set) -> tuple:
         retry = common.opt_in_on(config.ORCHESTRATOR_FILE) and group is None \
             and run_desk.dead_streak(conn, build_id) < config.ORCHESTRATOR_DEAD_RUNS_IN_A_ROW
         return _key(build_id, "fix-retry" if retry else "fix-dead", round_no, verdict), None
+    if not after:
+        # A review run by hand tells its CHANGES as this event and starts no fix round; the loop's own round tells
+        # it only when its fix round failed to start, and that stays the changes line.
+        told = db.fetch_one(conn, "SELECT id FROM events WHERE task_id = ? AND kind = 'review.fix-round'"
+                                  " AND dedupe_key = ? AND ts >= ?",
+                            (build_id, f"review:fix-round:{build_id}:{round_no}", verdict_at))
+        if told is not None and not _loop_round(build_id, latest["request_id"]):
+            return _key(build_id, "changes-hand", round_no, verdict, event=told), None
     return _key(build_id, "changes", round_no, verdict), None
 
 

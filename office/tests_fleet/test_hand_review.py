@@ -251,3 +251,15 @@ class HandGoUpdatesTests(HandReviewCase):
         [(go_id, lines)], _, _ = go_status.entries(self.conn, 0)
         self.assertEqual(go_id, self.parent)
         self.assertIn("latest: [review.ready-for-push]", lines[-1])
+
+    def test_go_updates_say_a_hand_run_changes_started_no_fix_round(self):
+        self.write_file(self.office / config.GO_UPDATES_FILE, "on\n")
+        go_watch.watch(self.conn)  # the baseline
+        self.post(1, "widget")
+        self.by_hand("CHANGES")
+        self.harry_runs.assert_not_called()
+        key, _ = go_watch.current(self.conn)[self.parent]
+        self.assertEqual((key["build"], key["state"], key["verdict"]), (self.task["id"], "changes-hand", "CHANGES"))
+        self.assertEqual(self.notified.call_args_list[-1][0][0],
+                         f"{self.parent} / {self.task['id']}: review CHANGES, no fix round started because the review"
+                         " was run by hand. Waiting on you: run fleet build for this build to start the fix round.")
