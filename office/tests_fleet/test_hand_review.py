@@ -9,9 +9,10 @@ from __future__ import annotations
 
 from unittest import mock
 
-from hogwarts import capacity, followups, ids, pensieve
+from hogwarts import capacity, followups, ids, owlery, pensieve
 
 from fleet import config, gitops, go_status, go_watch, orchestrator, owl_post, push, review
+from fleet.safefs import FleetError
 from tests_fleet.test_auto_push import PR_URL, AutoPushCase
 from tests_fleet.test_review_chain import Killed
 from tests_fleet.test_review_loop import HANDOFF, REPO_ID, TASK_MD
@@ -213,6 +214,22 @@ class HandChangesAndHeadmasterTests(HandReviewCase):
         self.assertEqual(result["next"], "stopped at the review round cap")
         self.harry_runs.assert_not_called()
         self.assertEqual(self.told(), [("review.loop-stopped", f"review:loop-stopped:{self.task['id']}:1")])
+
+    def test_a_hand_review_of_a_task_that_is_not_active_names_its_status_and_what_to_do(self):
+        task_id = self.task["id"]
+        queued = owlery.open_request(self.conn, "mcgonagall", "harry", "build it", parent_task_id=self.parent)["task"]
+        with self.assertRaisesRegex(FleetError, rf"^task {queued['id']} is queued: its build has not started, so"
+                                                r" there is nothing to review yet; fleet worktree starts it"):
+            review.review_build(self.conn, queued["id"])
+        pensieve.mark_awaiting_close(self.conn, task_id)
+        with self.assertRaisesRegex(FleetError, rf"^task {task_id} is awaiting close: it already passed review, so"
+                                                rf" there is nothing to review; .* fleet close {task_id} tries"):
+            review.review_build(self.conn, task_id)
+        pensieve.close_task(self.conn, task_id, "abandoned")
+        with self.assertRaisesRegex(FleetError, rf"^task {task_id} is closed and a closed task never reopens, so"
+                                                r" there is nothing to review; more work on it is a new task$"):
+            review.review_build(self.conn, task_id)
+        self.assertEqual(self.told(), [])
 
     def test_a_hand_headmaster_records_its_event_and_starts_nothing(self):
         self.opt_in()

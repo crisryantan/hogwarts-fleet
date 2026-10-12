@@ -1015,6 +1015,19 @@ def _checked_handoff(conn, task_id: str) -> Optional[str]:
     return None if newest is None or owl_post.handoff_problem(conn, newest) is not None else newest["id"]
 
 
+def _not_active(task: dict) -> str:
+    """Why a build desk's task that is not active has nothing to review, named by its status, with what to do."""
+    task_id = task["id"]
+    return {
+        "queued": f"task {task_id} is queued: its build has not started, so there is nothing to review yet; fleet"
+                  f" worktree starts it, and fleet review {task_id} reviews it once its desk has handed off",
+        "awaiting_close": f"task {task_id} is awaiting close: it already passed review, so there is nothing to review;"
+                          f" the closer closes it once its PR merges, and fleet close {task_id} tries that now",
+        "closed": f"task {task_id} is closed and a closed task never reopens, so there is nothing to review; more work"
+                  " on it is a new task",
+    }.get(task["status"], f"task {task_id} is {task['status']}, and only an active task can be reviewed")
+
+
 def _review_build(conn, task_id: str, lock_fd: int, handoff_owl: Optional[str] = None, by_hand: bool = False,
                   checked_owl: Optional[str] = None) -> dict:
     """The review of a build desk's task under its review lock (lock_fd). Its handoff is the desk's newest result
@@ -1025,7 +1038,7 @@ def _review_build(conn, task_id: str, lock_fd: int, handoff_owl: Optional[str] =
     if task["desk"] not in config.WORKTREE_DESKS:
         raise FleetError("use 'fleet review own' for your own sessions; this is for a build desk's task")
     if task["status"] != "active":
-        raise FleetError("the task must be active (a passed task is already awaiting close)")
+        raise FleetError(_not_active(task))
     round_followup = _round_followup(conn, task)  # a follow-up still starting refuses here, before anything changes
     if _author_running(conn, task, None):
         # Its run holds this lock until its process ends; a launch with no usage yet is checked too, for a run whose
