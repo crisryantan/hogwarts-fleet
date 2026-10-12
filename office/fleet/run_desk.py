@@ -109,7 +109,9 @@ for its role in the same family, or waits with one owner event when the whole fa
 author's run used the reviewer's family waits too. The launch row records the model that ran, and a
 run whose CLI said an outage, overload or rate limit cut it off counts toward its model's breaker, never toward a
 trial, and is started again from its checkpoint by main, at most FAILOVER_RETRIES times. An auth failure tells the
-owner and never fails over.
+owner and never fails over. A Claude run that ended as auth within AUTH_MISS_MAX_SECONDS having used nothing, a
+one-off sign-in read miss as often as a sign-out, is first tried once more under the same launch (_launch), and
+only a retry that fails as auth too tells the owner.
 
 --dry-run prints the argv, and what would go on stdin, as JSON and runs nothing. A real run needs the desk to be
 enabled (a plain file named "enabled" in its office folder, made by Ryan), stays under
@@ -2131,7 +2133,7 @@ def run(conn, desk: str, owl_id: str, mcp_job: Optional[str] = None, now: Option
                 failover.note_run(plan["run_id"], desk, plan["family"], plan["failover_from"])
         result = _launch(conn, plan, now, keep_fds, own, on_told, shadow)
     if result["failure_class"] == "auth":
-        summary, key = failover.auth_note(plan["desk"], plan["family"], now)
+        summary, key = failover.auth_note(conn, plan["desk"], plan["family"], now)
         if notes is not None:
             notes.append(summary)
         else:
@@ -2259,12 +2261,15 @@ def end_name(run_id: str) -> str:
 
 
 def _keep_end(run_fd: int, run_id: str, exit_code: Optional[int], cap_source: Optional[str],
-              failure: Optional[str] = None) -> None:
+              failure: Optional[str] = None, auth_miss_retried: bool = False) -> None:
     """Keep how a run's process ended, exit_code None when it never started, with its failure class (failover.classify,
     None for none), through a temp file and a rename, before anything else is done with the run, so a caller killed
-    before it kept the run's result (the closer's judge) can still tell how it ended (run_end). Never raises, so it
+    before it kept the run's result (the closer's judge) can still tell how it ended (run_end). auth_miss_retried adds
+    that its first try was a sign-in miss and this is how its one retry ended (see _launch). Never raises, so it
     cannot hide why a run unwinds: a run whose end could not be kept reads as one whose end no process saw."""
     data = {"run_id": run_id, "exit_code": exit_code, "cap_source": cap_source, "failure_class": failure}
+    if auth_miss_retried:
+        data["auth_miss_retried"] = True
     with contextlib.suppress(FleetError, OSError):
         safefs.write_new(run_fd, end_name(run_id), (json.dumps(data, sort_keys=True) + "\n").encode("ascii"))
 
@@ -2272,7 +2277,8 @@ def _keep_end(run_fd: int, run_id: str, exit_code: Optional[int], cap_source: Op
 def run_end(desk: str, run_id: str) -> Optional[dict]:
     """How a run's process ended, {exit_code, cap_source, failure_class}, from the end record its run kept (exit_code
     None: its process never started; below 0: killed or timed out; failure_class "unknown" in a record kept before
-    runs kept it), or None when there is none: the run has not ended, or ended with no process left to see how. A
+    runs kept it), with auth_miss_retried True when its first try was a sign-in miss and this is its retry's end, or
+    None when there is none: the run has not ended, or ended with no process left to see how. A
     read that fails raises FleetError or OSError, and a record that is there but does not read whole raises
     safefs.Unsafe, so no reader takes either for a missing record."""
     run_id = safefs.check_component(run_id)
@@ -2287,13 +2293,17 @@ def run_end(desk: str, run_id: str) -> Optional[dict]:
         raise safefs.Unsafe("the run end record is not JSON") from None
     code = data.get("exit_code") if isinstance(data, dict) else None
     failure = data.get("failure_class", UNKNOWN_FAILURE) if isinstance(data, dict) else None
-    if not isinstance(data, dict) or set(data) - {"failure_class"} != {"run_id", "exit_code", "cap_source"} \
+    if not isinstance(data, dict) or set(data) - {"failure_class", "auth_miss_retried"} \
+            != {"run_id", "exit_code", "cap_source"} \
             or data["run_id"] != run_id or not (code is None or (type(code) is int and -255 <= code <= 255)) \
             or data["cap_source"] not in (None, *PLAN_NAMES) \
             or failure not in (None, UNKNOWN_FAILURE, "auth", *failover.OUTAGE_CLASSES) \
-            or data.get("failure_class") == UNKNOWN_FAILURE:
+            or data.get("failure_class") == UNKNOWN_FAILURE or data.get("auth_miss_retried", True) is not True:
         raise safefs.Unsafe("the run end record does not read whole")
-    return {"exit_code": code, "cap_source": data["cap_source"], "failure_class": failure}
+    end = {"exit_code": code, "cap_source": data["cap_source"], "failure_class": failure}
+    if "auth_miss_retried" in data:
+        end["auth_miss_retried"] = True
+    return end
 
 
 def run_seen(desk: str, run_id: str) -> dict:
@@ -2461,6 +2471,46 @@ def _record_orphan(conn, plan: dict, run_fd: int, row: dict, now: Optional[int])
                                  spend_unknown=usage.get("spend_unknown") is True)
 
 
+def _auth_miss(run_fd: int, plan: dict, exit_code: int, seconds: float) -> bool:
+    """Whether a run that just ended looks like a one-off sign-in read miss, not a sign-out: a Claude run whose CLI
+    said auth within AUTH_MISS_MAX_SECONDS, its output read whole with a result event that reports no tokens and no
+    cost. A run that used anything, ran longer, failed any other way or is not Claude is never one."""
+    if plan["family"] != "claude" or seconds >= config.AUTH_MISS_MAX_SECONDS:
+        return False
+    output, whole, _, cap_source = _ended(run_fd, plan, exit_code)
+    if not whole or cap_source is not None or not claude_result(output) \
+            or _failure_class(plan, output, exit_code) != "auth":
+        return False
+    usage = run_usage(plan, output, exit_code, whole)
+    return usage.get("spend_unknown") is not True and usage["cost_usd"] == 0 \
+        and usage["input_tokens"] == usage["output_tokens"] == usage["cache_read_tokens"] == 0
+
+
+def auth_miss_wait() -> None:
+    """The pause before a sign-in miss is tried again, so a one-off miss has passed."""
+    time.sleep(config.AUTH_MISS_RETRY_WAIT_SECONDS)
+
+
+def _keep_aside(run_fd: int, run_id: str) -> bool:
+    """Copy a sign-in miss's output and errors to <run_id>.auth-miss.out and .err, so the run's own files can take its
+    retry. False, with the run's files as they were, when they could not be copied: the run is then not retried."""
+    try:
+        for kind, limit in (("out", RUN_OUTPUT_MAX_BYTES), ("err", config.RUN_ERROR_MAX_BYTES)):
+            data = safefs.read_regular(run_fd, f"{run_id}.{kind}", limit, "run output")
+            safefs.write_new(run_fd, f"{run_id}.auth-miss.{kind}", data)
+    except (FleetError, OSError):
+        return False
+    return True
+
+
+def _empty_run_files(out_fd: int, err_fd: int) -> None:
+    """Empty the run's output and errors for its retry, which writes them from the start. The output goes last, so
+    a run that unwinds part way still reads its first try's output."""
+    for fd in (err_fd, out_fd):
+        os.ftruncate(fd, 0)
+        os.lseek(fd, 0, os.SEEK_SET)
+
+
 def _launch(conn, plan: dict, now: Optional[int], keep_fds: tuple = (), own: Optional[RunLock] = None,
             on_told: Optional[OnTold] = None, shadow: bool = False) -> dict:
     """Start the planned run, whose launch run() has recorded, and record what it did. The process inherits every
@@ -2468,10 +2518,15 @@ def _launch(conn, plan: dict, now: Optional[int], keep_fds: tuple = (), own: Opt
     process starts until the run's usage is recorded, so a run that unwinds without recording it leaves its lock
     for reconcile_launches. on_told commits with the note of a run that called a blocked model (see after_run). How the
     process ended is kept in the run's end record (run_end) before anything else is done with it: its exit code and
-    vendor limit once it has ended, or killed here, and no exit code when an error kept it from starting at all."""
+    vendor limit once it has ended, or killed here, and no exit code when an error kept it from starting at all.
+    A Claude run that ended as a sign-in miss (auth_miss) is started once more, after AUTH_MISS_RETRY_WAIT_SECONDS,
+    with the same argv and stdin, under the same slot, locks, launch gate and launch row: the first try used nothing,
+    so the run counts once against the caps. Its output and errors are kept beside the run's as
+    <run_id>.auth-miss.out and .err, the retry writes the run's own files, and the end record says auth_miss_retried."""
     desk, run_id = plan["desk"], plan["run_id"]
     with safefs.opened_dir(config.OFFICE_ROOT, "runs", desk, create=True) as run_fd:
         out_fd = err_fd = child = brief = None
+        retried = False
         started = time.monotonic()
         try:
             if plan.get("temp"):
@@ -2491,6 +2546,19 @@ def _launch(conn, plan: dict, now: Optional[int], keep_fds: tuple = (), own: Opt
                                     input=plan["stdin"].encode("utf-8"), stdout=out_fd, stderr=err_fd,
                                     pass_fds=tuple(keep_fds))
             exit_code = wait_child(child, config.RUN_TIMEOUT_SECONDS)
+            if _auth_miss(run_fd, plan, exit_code, time.monotonic() - started) and not stop_requested():
+                # Until the retry starts, the first try's files stay the run's, so an unwinding here ends it as that.
+                auth_miss_wait()
+                if not stop_requested() and _keep_aside(run_fd, run_id):
+                    with common.signals_held():
+                        _empty_run_files(out_fd, err_fd)
+                        # From here the run's files are the retry's: one that fails to start ends as never started.
+                        retried, child = True, None
+                        started = time.monotonic()
+                        child = start_child(plan["argv"], cwd=plan["cwd"], env=plan.get("env") or child_env(),
+                                            input=plan["stdin"].encode("utf-8"), stdout=out_fd, stderr=err_fd,
+                                            pass_fds=tuple(keep_fds))
+                    exit_code = wait_child(child, config.RUN_TIMEOUT_SECONDS)
         except BaseException:
             settled = child is None  # it never started, so it spent nothing
             if child is not None:
@@ -2502,13 +2570,13 @@ def _launch(conn, plan: dict, now: Optional[int], keep_fds: tuple = (), own: Opt
                         with contextlib.suppress(Exception):
                             output, _, _, cap_source = _ended(run_fd, plan, child.returncode)
                             _keep_end(run_fd, run_id, child.returncode, cap_source,
-                                      _failure_class(plan, output, child.returncode))
+                                      _failure_class(plan, output, child.returncode), retried)
                 settled = _record_interrupted(conn, plan, run_fd, started, now)
             else:
                 # Whatever was raised before the process had a handle here, a refused or failed start or a signal
                 # before it, none started: start_child returns once the binary runs and has its whole prompt (one
                 # that did not get it is killed there), and signals are held around it.
-                _keep_end(run_fd, run_id, None, None)
+                _keep_end(run_fd, run_id, None, None, auth_miss_retried=retried)
             if own is not None and settled:
                 own.keep = False
             raise
@@ -2522,7 +2590,7 @@ def _launch(conn, plan: dict, now: Optional[int], keep_fds: tuple = (), own: Opt
         output, whole, _, cap_source = _ended(run_fd, plan, exit_code)
         failure = _failure_class(plan, output, exit_code)
         # Kept before anything else, so a caller killed from here on can still tell how the run ended (run_end).
-        _keep_end(run_fd, run_id, exit_code, cap_source, failure)
+        _keep_end(run_fd, run_id, exit_code, cap_source, failure, retried)
     claude = plan["family"] == "claude"
     usage = run_usage(plan, output, exit_code, whole)
     # A Claude run names its full model ids in modelUsage. One that does not (a timeout or crash) records
@@ -2556,6 +2624,8 @@ def _launch(conn, plan: dict, now: Optional[int], keep_fds: tuple = (), own: Opt
     found = {"desk": desk, "run_id": run_id, "exit_code": exit_code, "timed_out": exit_code == -1,
              "cap_source": cap_source, "model": plan["model"], "family": plan["family"],
              "failover_from": plan.get("failover_from"), "failure_class": failure, **usage}
+    if retried:
+        found["auth_miss_retried"] = True
     blocked = _blocked_used(used)
     if blocked is not None:
         # after_run told Ryan, unless the store or the blocklist refused it; a caller that acts on the output can

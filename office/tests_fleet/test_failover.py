@@ -11,7 +11,7 @@ import subprocess
 import time
 from unittest import mock
 
-from hogwarts import capacity, owlery, wands
+from hogwarts import capacity, owlery, pensieve, wands
 from tests.support import NOW
 
 from fleet import config, failover, ollivander, owl_post, patrol, run_desk
@@ -413,11 +413,118 @@ class RetryAndAuthTests(FailoverCase):
         owl_id, _ = self.request("hermione")
         with self.fake({"opus": claude_failed(401)}, {"opus": 1}) as started:
             code, _, _ = self.main("hermione", "--owl", owl_id)
-        self.assertEqual((code, started.call_count), (1, 1))
+        self.assertEqual((code, started.call_count), (1, 2))  # a sign-in miss is tried once more first
         [auth] = self.events_of("failover.auth")
         self.assertEqual((auth["desk"], auth["verdict"]), ("hermione", "headmaster"))
         self.assertEqual(len(self.events_of("rundesk.failed")), 1)
         self.assertEqual(failover.read_state()["models"], {})
+
+
+class AuthMissTests(FailoverCase):
+    """A fast Claude auth failure that used nothing is tried once more, under the same launch, before it tells anyone."""
+
+    MISS = claude_failed(error="authentication_failed", text="Not logged in")
+    WORKED = lines([{"type": "result", "subtype": "success", "is_error": False, "result": "done",
+                     "total_cost_usd": 0.1, "usage": {"input_tokens": 10, "output_tokens": 5}}])
+
+    def tries(self, *ends):
+        """A desk process that writes each (output, exit code) in turn, one per start."""
+        left = list(ends)
+
+        def run(argv, **kwargs):
+            output, code = left.pop(0)
+            os.write(kwargs["stdout"], output)
+            return subprocess.CompletedProcess(args=argv, returncode=code)
+        return fake_children(run)
+
+    def run_ron(self, *ends, now: int = NOW) -> tuple:
+        """One run of ron on a new request as of now, and the mock that counted its process starts."""
+        with mock.patch.object(run_desk, "spawn"):
+            owl_id = self.deliver("mcgonagall", "ron", kind="request", subject="build it", body=f"as of {now}")
+        with self.tries(*ends) as started:
+            result = run_desk.run(self.conn, "ron", owl_id, now=now)
+        return result, started
+
+    def file(self, run_id: str, name: str) -> bytes:
+        return (self.office / "runs" / "ron" / f"{run_id}{name}").read_bytes()
+
+    def test_a_fast_miss_then_a_good_try_records_one_run_and_tells_no_one(self):
+        self.enable("ron")
+        owl_id, _ = self.request("ron")
+        with self.tries((self.MISS, 1), (self.WORKED, 0)) as started:
+            code, out, err = self.main("ron", "--owl", owl_id)
+        self.assertEqual(code, 0, err)
+        first, second = started.call_args_list
+        self.assertEqual(first.args, second.args)  # the same argv
+        self.assertEqual(first.kwargs["input"], second.kwargs["input"])  # and the same stdin
+        self.assertEqual(self.auth_miss_waits.call_count, 1)
+        [launch] = capacity.list_launches(self.conn, "ron")
+        result = json.loads(out)
+        self.assertEqual((result["run_id"], result["auth_miss_retried"], result["input_tokens"]),
+                         (launch["run_id"], True, 10))
+        self.assertEqual(run_desk.run_end("ron", launch["run_id"]),
+                         {"exit_code": 0, "cap_source": None, "failure_class": None, "auth_miss_retried": True})
+        self.assertEqual(self.file(launch["run_id"], ".out"), self.WORKED)
+        self.assertEqual(self.file(launch["run_id"], ".auth-miss.out"), self.MISS)
+        self.assertEqual(self.events_of("failover.auth") + self.events_of("rundesk.failed"), [])
+        self.assertEqual(owlery.inbox(self.conn, "ron"), [])
+
+    def test_two_misses_in_a_row_tell_the_owner_once(self):
+        self.enable("ron")
+        result, started = self.run_ron((self.MISS, 1), (self.MISS, 1))
+        self.assertEqual((started.call_count, result["failure_class"], result["auth_miss_retried"]), (2, "auth", True))
+        self.assertEqual(len(self.events_of("failover.auth")), 1)
+        end = run_desk.run_end("ron", result["run_id"])
+        self.assertEqual((end["failure_class"], end["auth_miss_retried"]), ("auth", True))
+        self.assertEqual(len(capacity.list_launches(self.conn, "ron")), 1)
+
+    def test_a_slow_spending_or_other_failure_is_never_retried(self):
+        self.enable("ron")
+        spent = lines([{"type": "system", "subtype": "init"},
+                       {"type": "result", "subtype": "success", "is_error": True, "result": "Not logged in",
+                        "api_error_status": 401, "total_cost_usd": 0.02, "usage": {"input_tokens": 40}}])
+        no_result = lines([{"type": "assistant", "message": {"id": "m1"}, "error": "authentication_failed"}])
+        for label, output, limit in (("slow", self.MISS, 0), ("used tokens", spent, 3),
+                                     ("not auth", claude_failed(), 3), ("no result event", no_result, 3)):
+            with self.subTest(label), mock.patch.object(config, "AUTH_MISS_MAX_SECONDS", limit):
+                result, started = self.run_ron((output, 1))
+                self.assertEqual(started.call_count, 1)
+                self.assertNotIn("auth_miss_retried", result)
+                self.assertNotIn("auth_miss_retried", run_desk.run_end("ron", result["run_id"]))
+        self.assertEqual(self.auth_miss_waits.call_count, 0)
+
+    def test_a_codex_auth_failure_is_never_retried(self):
+        self.enable("moody")
+        owl_id, _ = self.request("moody")
+        with self.tries((codex_failed("unexpected status 401 Unauthorized"), 1)) as started:
+            result = run_desk.run(self.conn, "moody", owl_id, now=NOW)
+        self.assertEqual((started.call_count, result["failure_class"]), (1, "auth"))
+        self.assertEqual(len(self.events_of("failover.auth")), 1)
+
+    def test_the_retry_is_not_a_second_run_against_the_cap(self):
+        self.enable("ron")
+        with mock.patch.dict(config.DAILY_RUN_CAP, {"ron": 1}):
+            result, started = self.run_ron((self.MISS, 1), (self.WORKED, 0))
+            self.assertEqual((started.call_count, result["exit_code"]), (2, 0))
+            status = run_desk.cap_status(self.conn, "ron", NOW)
+            self.assertEqual((status["runs_used"], status["spend_used_usd"], status["reached"]), (1, 0.1, "runs"))
+            with self.assertRaises(run_desk.Capped):
+                self.run_ron((self.WORKED, 0), now=NOW + 60)
+
+    def test_a_new_failure_after_an_ack_or_a_good_run_tells_the_owner_again(self):
+        self.enable("ron")
+        self.run_ron((self.MISS, 1), (self.MISS, 1), now=NOW)
+        self.run_ron((self.MISS, 1), (self.MISS, 1), now=NOW + 60)  # the same burst
+        self.assertEqual(len(self.events_of("failover.auth")), 1)
+        [told] = self.conn.execute("SELECT id FROM events WHERE kind = 'failover.auth'").fetchall()
+        pensieve.ack(self.conn, told["id"], now=NOW + 120)
+        self.run_ron((self.MISS, 1), (self.MISS, 1), now=NOW + 180)  # after the ack
+        self.run_ron((self.MISS, 1), (self.MISS, 1), now=NOW + 240)
+        self.assertEqual(len(self.events_of("failover.auth")), 2)
+        self.run_ron((self.WORKED, 0), now=NOW + 300)  # signed in again
+        self.run_ron((self.MISS, 1), (self.MISS, 1), now=NOW + 360)
+        self.run_ron((self.MISS, 1), (self.MISS, 1), now=NOW + 420)
+        self.assertEqual([event["acked_at"] for event in self.events_of("failover.auth")], [NOW + 120, None, None])
 
 
 class CrossFamilyTests(FailoverCase):

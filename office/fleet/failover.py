@@ -4,7 +4,8 @@ A run's failure is classed only from the CLI's own structured output, never from
 result event (api_error_status) and the error field of its assistant events, and the error that ended a Codex run
 (a status field, or the HTTP status the CLI put in its error message). 429 is a rate limit, 529 an overload, 5xx an
 outage (FAILOVER_STATUS_CLASSES). 401 and 403, and Claude's authentication and billing errors, are auth: the owner
-is told and nothing fails over, since another model of the same account would fail the same way.
+is told, once per burst (auth_note), and nothing fails over, since another model of the same account would fail the
+same way. A fast Claude auth failure that used nothing is tried once more by run_desk before it counts as one.
 
 The breaker: FAILOVER_TRIP_FAILURES outage-class failures in a row mark a model down for FAILOVER_DOWN_SECONDS.
 After that it is half-open: the next launch that wants it takes it as the one probe, and every other launch sees it
@@ -592,12 +593,33 @@ def _still_waiting(conn, owl_id: str, item: dict, now: int) -> bool:
     return False
 
 
-def auth_note(desk: str, family: str, now: Optional[int] = None) -> tuple:
-    """(summary, dedupe key) of the owner's one event a day per desk and family for a run its CLI could not sign in or
-    bill for. Nothing fails over: another model of the same account fails the same way."""
+def auth_note(conn, desk: str, family: str, now: Optional[int] = None) -> tuple:
+    """(summary, dedupe key) of the owner's event for a run its CLI could not sign in or bill for. Nothing fails over:
+    another model of the same account fails the same way. One burst of such runs tells the owner once: the key is the
+    newest such event's of the day, per desk and family, until the owner acks that event or a run of the desk on the
+    family uses tokens after it. Then the key is a new one, so a later failure the same day tells the owner again."""
     day_start, _ = capacity.day_bounds(common.now_stamp(now), config.CAP_RESET_UTC_SECONDS)
+    base = f"failover:auth:{desk}:{family}:{day_start}"
+    key = base
+    told = [event for event in pensieve.events_with_key_prefix(conn, base)
+            if event["dedupe_key"] == base or event["dedupe_key"].startswith(f"{base}:")]
+    if told:
+        last = told[-1]
+        key = last["dedupe_key"]
+        if last["acked_at"] is not None or _signed_in_since(conn, desk, family, last["ts"]):
+            key = f"{base}:after-{last['id']}"
     return (f"{desk}'s {family} CLI could not sign in or bill its run. No other model is tried, since they share the"
-            " account: sign the CLI in again, then send the owl again.", f"failover:auth:{desk}:{family}:{day_start}")
+            " account: sign the CLI in again, then send the owl again.", key)
+
+
+def _signed_in_since(conn, desk: str, family: str, since: int) -> bool:
+    """Whether a run of the desk on the family recorded tokens after since, so its CLI was signed in then. A model
+    whose family the store cannot tell counts, so a doubt tells the owner again rather than not at all."""
+    rows = db.fetch_all(conn, "SELECT metrics.model FROM run_launches"
+                              " JOIN metrics ON metrics.id = run_launches.metric_id WHERE run_launches.desk = ?"
+                              " AND metrics.ts > ?"
+                              " AND (metrics.input_tokens > 0 OR metrics.output_tokens > 0)", (desk, since))
+    return any(model_family(conn, row["model"]) in (family, None) for row in rows)
 
 
 def clean(family: str, raw: bytes, exit_code: int, whole: bool, result: Optional[dict] = None) -> bool:

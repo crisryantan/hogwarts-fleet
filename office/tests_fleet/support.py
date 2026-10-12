@@ -186,6 +186,10 @@ class FleetCase(unittest.TestCase):
         never = mock.patch.object(run_desk, "start_child", side_effect=AssertionError("no desk process may start"))
         never.start()
         self.addCleanup(never.stop)
+        # A run's retry after a sign-in miss never waits; a test that counts the waits reads this mock's calls.
+        waits = mock.patch.object(run_desk, "auth_miss_wait")
+        self.auth_miss_waits = waits.start()
+        self.addCleanup(waits.stop)
         # No automatic review process ever starts either. The Owl Post's starts are recorded here, and a test that
         # wants the review runs review.auto_review itself.
         reviews = mock.patch.object(run_desk, "spawn_review")

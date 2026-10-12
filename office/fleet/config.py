@@ -541,6 +541,10 @@ FAILOVER_TRIP_FAILURES = 2
 FAILOVER_DOWN_SECONDS = 15 * 60
 # A run that an outage cut off is started again from its checkpoint at most this many times, each under the caps.
 FAILOVER_RETRIES = 2
+# A Claude run whose CLI said auth within this many seconds, having used nothing, is tried once more under the same
+# launch after this wait: a one-off sign-in read miss passes, and a real sign-out still reaches the owner.
+AUTH_MISS_MAX_SECONDS = 3
+AUTH_MISS_RETRY_WAIT_SECONDS = 5
 # A run that waited because every model it may run was down is started again by the Owl Post, once per wait, for at
 # most this long after it first waited.
 FAILOVER_WAIT_LIMIT_SECONDS = 4 * 3600
