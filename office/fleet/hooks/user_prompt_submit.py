@@ -1,5 +1,5 @@
 """UserPromptSubmit hook: show headmaster events, warn at 200k context, start a build on "go", close on
-"Mischief managed".
+"Mischief managed", "close" or "drop".
 
 Input fields read:
 - prompt: the text Ryan submitted (the documented UserPromptSubmit field).
@@ -22,9 +22,12 @@ What it says (each part only when there is something to say):
    fleet/closer.py advance_parents), and what to type next. The token is never printed.
    "Mischief managed everything", exactly that once trimmed, is a gate of its own with the
    same checks: every task in a closeable state closes through that same close, and every
-   other open task is refused by name with its reason (fleet/bulk_close.py). Every refused
-   close ends with a Fix: line saying exactly what to type next. Any other text never
-   closes anything.
+   other open task is refused by name with its reason (fleet/bulk_close.py). "close <task-id>"
+   and "drop <task-id>", each exactly that once trimmed, are gates of their own with the same
+   checks: close is Mischief managed <task-id> under a plain name, and takes a go task with its
+   builds; drop closes a task that is not going to land as superseded, with what is open under it
+   (fleet/plain_close.py). Every refused close ends with a Fix: line saying exactly what to type
+   next. Any other text never closes anything.
 2. The result of each go when every non-empty line of the prompt, trimmed, is exactly
    "go <task-id>": at most config.GO_MAX_PER_PROMPT distinct ids, repeats counted once,
    each started in order and on its own, so one refused never stops the others, with one
@@ -156,6 +159,12 @@ from fleet import common, config, events_seen, safefs, stops, transcript  # noqa
 from fleet.safefs import FleetError  # noqa: E402
 
 MISCHIEF = re.compile(r"Mischief managed (tk_[0-9a-f]{16})")
+MISCHIEF_WORDS = "Mischief managed"
+# The plain close phrases, each a gate of its own like Mischief managed (fleet/plain_close.py): the whole message,
+# trimmed, closes or drops exactly that one task.
+PLAIN_CLOSE = re.compile(r"[Cc]lose (tk_[0-9a-f]{16})")
+PLAIN_DROP = re.compile(r"[Dd]rop (tk_[0-9a-f]{16})")
+PLAIN_WORDS = {"plain": "close", "drop": "drop"}
 # The bulk close, a gate of its own: the whole message, trimmed, is exactly this (fleet/bulk_close.py).
 BULK_PHRASE = "Mischief managed everything"
 BULK_KEY = "everything"
@@ -236,6 +245,14 @@ def close_request(prompt: object) -> Optional[str]:
     return None if match is None else match.group(1)
 
 
+def plain_request(kind: str, prompt: object) -> Optional[str]:
+    """The task id when the prompt, trimmed, is exactly 'close <task-id>' (kind plain) or 'drop <task-id>' (kind
+    drop), else None."""
+    pattern = PLAIN_CLOSE if kind == "plain" else PLAIN_DROP
+    match = pattern.fullmatch(prompt.strip()) if isinstance(prompt, str) else None
+    return None if match is None else match.group(1)
+
+
 def bulk_request(prompt: object) -> bool:
     """Whether the prompt is exactly 'Mischief managed everything' once surrounding whitespace is trimmed."""
     return isinstance(prompt, str) and prompt.strip() == BULK_PHRASE
@@ -246,20 +263,26 @@ def terminal_close(task_id: str) -> str:
             f"castle task close {task_id} --reason complete --token-stdin.")
 
 
-def close_fix(task_id: str, status: Optional[str] = None) -> str:
-    """The Fix line of a refused close: exactly what to type next, by where the task stands."""
+def close_fix(task_id: str, status: Optional[str] = None, words: str = MISCHIEF_WORDS) -> str:
+    """The Fix line of a refused close: exactly what to type next, by where the task stands. words is the phrase
+    that was typed, Mischief managed or close."""
     if status == "closed":
         return f"Fix: nothing to type; it is closed already, and castle task show {task_id} says how it closed."
     if status in ("queued", "active"):
-        return (f"Fix: type Mischief managed {task_id} again once its review passes and it awaits close, or close it"
+        return (f"Fix: type {words} {task_id} again once its review passes and it awaits close, or close it"
                 f" now from your terminal: castle token mint {task_id}, then paste that token into castle task close"
                 f" {task_id} --reason complete --token-stdin.")
     if status == "busy":
-        return f"Fix: type Mischief managed {task_id} again once that ends; castle task show {task_id} says where it is."
+        return f"Fix: type {words} {task_id} again once that ends; castle task show {task_id} says where it is."
     if status == "missing":
-        return "Fix: find the id with castle task list --open, then type Mischief managed <task-id> with it."
-    return (f"Fix: type Mischief managed {task_id} again; if it fails the same way, castle token mint {task_id}, then"
+        return f"Fix: find the id with castle task list --open, then type {words} <task-id> with it."
+    return (f"Fix: type {words} {task_id} again; if it fails the same way, castle token mint {task_id}, then"
             f" paste that token into castle task close {task_id} --reason complete --token-stdin.")
+
+
+def head(words: str) -> str:
+    """The first word of a close's result lines: Mischief managed, or Close."""
+    return words[:1].upper() + words[1:]
 
 
 def typing_entry(data: dict, now: int) -> tuple:
@@ -307,40 +330,41 @@ def _open_descendants(conn, task_id: str) -> list:
     return found
 
 
-def close_checked(conn, task_id: str) -> Optional[list]:
+def close_checked(conn, task_id: str, words: str = MISCHIEF_WORDS) -> Optional[list]:
     """The refusal lines, the last one its Fix line, when task_id is not a task awaiting close, else None."""
+    said = head(words)
     try:
         status = pensieve.get_task(conn, task_id)["status"]
     except NotFoundError as exc:
-        return [f"Mischief managed failed for {task_id}: {common.one_line(exc, 200)}", close_fix(task_id, "missing")]
+        return [f"{said} failed for {task_id}: {common.one_line(exc, 200)}", close_fix(task_id, "missing", words)]
     except StoreError as exc:
-        return [f"Mischief managed failed for {task_id}: {common.one_line(exc, 200)}", close_fix(task_id)]
+        return [f"{said} failed for {task_id}: {common.one_line(exc, 200)}", close_fix(task_id, words=words)]
     if status != "awaiting_close":
-        return [f"Mischief managed was not applied to {task_id}: the task is {status}, and the hook only "
-                "closes a task that is awaiting close.", close_fix(task_id, status)]
+        return [f"{said} was not applied to {task_id}: the task is {status}, and the hook only "
+                "closes a task that is awaiting close.", close_fix(task_id, status, words)]
     return None
 
 
-def close_confirmed(conn, task_id: str, now: int) -> list:
+def close_confirmed(conn, task_id: str, now: int, words: str = MISCHIEF_WORDS) -> list:
     """Close a task awaiting close once Ryan's typing is confirmed, under its review lock taken without waiting, which
-    every review, build run and auto-close attempt of it holds: Mischief managed and Mischief managed everything both
-    close through here (close_locked)."""
+    every review, build run and auto-close attempt of it holds: Mischief managed, Mischief managed everything and close
+    all close through here (close_locked)."""
     from fleet import run_desk  # only a close pays for this import
 
     try:
         with run_desk.task_lock(task_id):
-            return close_locked(conn, task_id, now)
+            return close_locked(conn, task_id, now, words=words)
     except safefs.Busy:
-        return [f"Mischief managed was not applied to {task_id}: a review, a run or auto-close is working on it right"
-                " now.", close_fix(task_id, "busy")]
+        return [f"{head(words)} was not applied to {task_id}: a review, a run or auto-close is working on it right"
+                " now.", close_fix(task_id, "busy", words)]
 
 
-def close_locked(conn, task_id: str, now: int, settled: bool = False) -> list:
+def close_locked(conn, task_id: str, now: int, settled: bool = False, words: str = MISCHIEF_WORDS) -> list:
     """The close itself, under the task's review lock: mint a hook token and close in the same run, then name each
     task the close cascaded to, a go task that moved on with it, and what to type next. settled (the bulk close)
     closes only while nothing is open under the task and no desk's question about it waits, checked in the close's
     own transaction (pensieve.close_settled), so it never cascades."""
-    refused = close_checked(conn, task_id)
+    refused = close_checked(conn, task_id, words)
     if refused is not None:
         return refused
     descendants = _open_descendants(conn, task_id)
@@ -351,10 +375,10 @@ def close_locked(conn, task_id: str, now: int, settled: bool = False) -> list:
         else:
             pensieve.close_task(conn, task_id, "complete", token, now=now)
     except StoreError as exc:
-        return [f"Mischief managed failed for {task_id}: {common.one_line(exc, 200)}", close_fix(task_id)]
+        return [f"{head(words)} failed for {task_id}: {common.one_line(exc, 200)}", close_fix(task_id, words=words)]
     finally:
         token = None
-    lines = [f"Mischief managed: task {task_id} is closed as complete."]
+    lines = [f"{head(words)}: task {task_id} is closed as complete."]
     for child_id in descendants:
         child = pensieve.get_task(conn, child_id)
         lines.append(f"- cascaded: {child['id']} ({child['desk']}) closed as {child['close_reason']}")
@@ -662,11 +686,15 @@ def not_confirmed(kind: str, task_id: str, reason: str) -> list:
                                             " typing into."]),
                 "Close one by hand from your terminal: castle token mint <task-id>, then paste that token into castle"
                 " task close <task-id> --reason complete --token-stdin."]
-    if kind == "close":
+    if kind in ("close", "plain"):
         fix = retry or [f"Fix: close it from your terminal: castle token mint {task_id}, then paste that token into"
                         f" castle task close {task_id} --reason complete --token-stdin."]
-        return [f"Mischief managed was not applied to {task_id}: this hook could not confirm Ryan's own typing"
-                f" ({reason}).", *fix, *([terminal_close(task_id)] if retry else [])]
+        return [f"{'Mischief managed' if kind == 'close' else 'Close'} was not applied to {task_id}: this hook could"
+                f" not confirm Ryan's own typing ({reason}).", *fix, *([terminal_close(task_id)] if retry else [])]
+    if kind == "drop":
+        by_hand = f"drop it from your terminal: castle task close {task_id} --reason superseded."
+        return [f"Drop was not applied to {task_id}: this hook could not confirm Ryan's own typing ({reason}).",
+                *(retry or [f"Fix: {by_hand}"]), *([by_hand[0].upper() + by_hand[1:]] if retry else [])]
     return [f"Go was not applied to {task_id}: this hook could not confirm Ryan's own typing ({reason}).", *retry,
             terminal_go(task_id)]
 
@@ -680,10 +708,13 @@ def retry_fix(reason: str) -> list:
 
 
 def requests_in(kind: str, text: object) -> Optional[list]:
-    """The task ids a prompt's text asks for: one for an exact Mischief managed, one to GO_MAX_PER_PROMPT for gos, and
-    [BULK_KEY] for an exact Mischief managed everything."""
+    """The task ids a prompt's text asks for: one for an exact Mischief managed, close or drop, one to
+    GO_MAX_PER_PROMPT for gos, and [BULK_KEY] for an exact Mischief managed everything."""
     if kind == "bulk":
         return [BULK_KEY] if bulk_request(text) else None
+    if kind in PLAIN_WORDS:
+        task_id = plain_request(kind, text)
+        return None if task_id is None else [task_id]
     if kind == "close":
         task_id = close_request(text)
         return None if task_id is None else [task_id]
@@ -708,7 +739,7 @@ def _deferred(conn, data: dict, desk: str, kind: str, task_ids: list) -> tuple:
     from fleet import go_confirm  # only a deferred request pays for this import
 
     named = ", ".join(task_ids)
-    what = {"close": "Mischief managed", "bulk": BULK_PHRASE}.get(kind, "Go")
+    what = {"close": "Mischief managed", "bulk": BULK_PHRASE, "plain": "Close", "drop": "Drop"}.get(kind, "Go")
     if kind == "bulk":
         named = "every closeable task"
     try:
@@ -743,22 +774,27 @@ def _deferred(conn, data: dict, desk: str, kind: str, task_ids: list) -> tuple:
     return [line], context
 
 
-def _close(conn, data: dict, desk: str, task_id: str, now: int) -> tuple:
-    """(shown, context) for Mischief managed <task-id>."""
-    refused = close_checked(conn, task_id)
+def _close(conn, data: dict, desk: str, kind: str, task_id: str, now: int) -> tuple:
+    """(shown, context) for Mischief managed <task-id> (kind close), close <task-id> (plain) or drop <task-id>."""
+    from fleet import plain_close  # only a close pays for this import
+
+    refused = close_checked(conn, task_id) if kind == "close" else plain_close.checked(conn, kind, task_id)
     if refused is not None:
         return refused, refused
     refusal, entry = typing_entry(data, now)
     if refusal == NOT_YET:
-        return _deferred(conn, data, desk, "close", [task_id])
+        return _deferred(conn, data, desk, kind, [task_id])
     if refusal is None:
-        verified, refusal = verified_requests("close", data.get("prompt"), entry)
+        verified, refusal = verified_requests(kind, data.get("prompt"), entry)
     if refusal is not None:
-        lines = not_confirmed("close", task_id, refusal)
+        lines = not_confirmed(kind, task_id, refusal)
         return lines, lines
     if _claimed(data):
-        return _deferred(conn, data, desk, "close", [task_id])
-    lines = close_confirmed(conn, verified[0], now)
+        return _deferred(conn, data, desk, kind, [task_id])
+    if kind == "close":
+        lines = close_confirmed(conn, verified[0], now)
+    else:
+        lines, _ = plain_close.applied(conn, kind, verified[0], now)
     return lines, lines
 
 
@@ -924,9 +960,15 @@ def _output(data: dict, desk: str, now: int, made: list, seen: Optional[list] = 
         try:
             task_id = close_request(prompt)
             if task_id is not None:
-                closed, said = _close(conn, data, desk, task_id, now)
+                closed, said = _close(conn, data, desk, "close", task_id, now)
                 shown += closed
                 context += said
+            for kind in PLAIN_WORDS:  # close <task-id> and drop <task-id>
+                task_id = plain_request(kind, prompt)
+                if task_id is not None:
+                    closed, said = _close(conn, data, desk, kind, task_id, now)
+                    shown += closed
+                    context += said
             if bulk_request(prompt):
                 closed, said = _bulk(conn, data, desk, now)
                 shown += closed

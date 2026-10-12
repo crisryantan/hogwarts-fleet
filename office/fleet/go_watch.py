@@ -29,9 +29,11 @@ changes what any run may do.
   state file, a store, a held-runs folder or an evidence folder that cannot be read whole sends nothing and keeps the
   file as it was.
 - The end: once a go task's kept state is PASS, HEADMASTER, round cap or closed (ENDS), that line was its last. Nothing
-  more is sent for it, and its kept key stays as it was, with one exception: after PASS, the draft PR opened line
-  still goes, since that is Ryan's cue to merge, and is then the last. When such a go task closes, its entry is
-  dropped with no line. A go task that closes before its end still gets its closed line.
+  more is sent for it, and its kept key stays as it was, with two exceptions: after PASS, the draft PR opened line
+  still goes, since that is Ryan's cue to merge, and is then the last; and when such a go task closes by hand (a
+  close or a drop Ryan typed, or castle task close), its closed line goes. One whose last line was merged or closed,
+  or that closed on a build's proof (whose close.proven event pings), is dropped with no line. A go task that closes
+  before its end always gets its closed line.
 - The line is `<go id> / <build id or "no build">: <state>. <action>`, both from the fixed table (STATES), never from
   an owl or a model, scrubbed and cut to GO_WATCH_LINE_CHARS. A verify line whose evidence proved nothing (no command
   ran and a check is malformed) or shows a failed command takes its action from VERIFY_ACTIONS instead, filled in
@@ -536,9 +538,10 @@ def _watch(conn, fd: int) -> list:
         keys[go_id] = key
         if old != key:
             changed.append((go_id, key, link))
-    # One that left the open set gets its closed line, unless it had ended: then its entry goes with no line.
+    # One that left the open set gets its closed line, unless it closed quietly (_quiet_close): then its entry goes
+    # with no line.
     changed += [(go_id, _key(key["build"], "closed"), None) for go_id, key in before.items()
-                if go_id not in found and key["state"] not in ENDS]
+                if go_id not in found and not _quiet_close(conn, go_id, key)]
     if keys == before:
         return []
     outcomes, batched, covered = [], [], 0
@@ -595,6 +598,14 @@ def _claim_event(key: dict) -> bool:
     except (FleetError, OSError):
         return True
     return taken is None or taken.get("state") not in ("sent", "covered")
+
+
+def _quiet_close(conn, go_id: str, kept: dict) -> bool:
+    """Whether a go task that left the open set goes with no closed line: only past its end, and then only when its
+    build's merged or closed line was its last, or it closed on a build's proof, whose own close event pings."""
+    if kept["state"] not in ENDS:
+        return False
+    return kept["state"] in ("merged", "closed") or pensieve.task_closure(conn, go_id) is not None
 
 
 def _ended(kept: dict, key: dict) -> bool:

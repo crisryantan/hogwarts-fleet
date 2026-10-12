@@ -63,7 +63,8 @@ The store has none of these:
                                         portrait.py (the nightly export and Dumbledore's run), portrait_patch.py (his
                                         patches, behind castle portrait), go_confirm.py (finishes a go or a close
                                         the prompt hook could not confirm yet), bulk_close.py (Mischief managed
-                                        everything), adopt.py (fleet adopt), loops.py
+                                        everything), plain_close.py (close <task-id> and drop <task-id>),
+                                        adopt.py (fleet adopt), loops.py
                                         (fleet loops, the background jobs run from a terminal), failover.py (the
                                         model breaker and in-family fallback), orchestrator.py (McGonagall's typed
                                         next step), owl_report.py (her one-line owl reports), phone.py (loud events to

@@ -1,5 +1,5 @@
-"""The go confirmer: finish a go, a Mischief managed or a Mischief managed everything whose transcript entry Claude
-Code had not written yet.
+"""The go confirmer: finish a go, a Mischief managed, a Mischief managed everything, a close or a drop whose
+transcript entry Claude Code had not written yet.
 
 Claude Code writes a prompt's own transcript entry only after the UserPromptSubmit hook returns, so at hook time the
 hook cannot see that Ryan typed the prompt. When that entry is the only thing missing (no agent_id, a prompt_id, and
@@ -20,13 +20,16 @@ module as one detached process (run_desk.spawn_go_confirm), with its input on a 
   CLOSE_PROMPT_MAX_AGE seconds old);
 - it takes the gos or the close from the entry's own text, never from its input, and refuses when they differ from
   what the hook saw. So the most a forged call could do is replay what Ryan typed in the last half minute;
-- it runs each go through user_prompt_submit.run_go, the hook's own code, the close through close_confirmed, or the
-  bulk close through bulk_close.close_everything, which closes each task through that same close;
-- it reports each outcome as one headmaster event on McGonagall's desk, so it shows on the next prompt, and writes
+- it runs each go through user_prompt_submit.run_go, the hook's own code, the close through close_confirmed, the
+  bulk close through bulk_close.close_everything, which closes each task through that same close, or a close
+  <task-id> or drop <task-id> through plain_close.applied;
+- it reports each outcome as one headmaster event on McGonagall's desk (a close event for every kind of close), so
+  it shows on the next prompt, and writes
   the same line to logs/go-confirm.log. A bulk close reports one close event per task it closed or refused as soon as that
   task is done, each refusal with its Fix line, then its head line. Neither carries the prompt id, a token or the TASK.md hash;
-- after a go's outcomes are recorded it runs one go updates pass (fleet/go_watch.py) and, while those are on, one
-  phone.deliver, so the go's new state or its refusal reaches Ryan right away rather than at the next Owl Post pass;
+- after a go's, a close's or a drop's outcomes are recorded it runs one go updates pass (fleet/go_watch.py) and,
+  while those are on, one phone.deliver, so the go's new state, a go task's close or a refusal reaches Ryan right
+  away rather than at the next Owl Post pass;
   a pass that fails changes nothing here.
 SIGTERM or SIGHUP ends a go through its take-back, as in the hook, and the event says the confirmer was stopped.
 """
@@ -47,7 +50,9 @@ from fleet import common, config, markers, run_desk, safefs, transcript
 from fleet.hooks import user_prompt_submit as hook
 from fleet.safefs import FleetError
 
-KINDS = ("go", "close", "bulk")
+KINDS = ("go", "close", "bulk", "plain", "drop")
+# What each kind is called in its lines.
+WHAT = {"close": "Mischief managed", "bulk": hook.BULK_PHRASE, "plain": "Close", "drop": "Drop"}
 INPUT_FIELDS = ("prompt", "prompt_id", "transcript_path", "session_id", "agent_type")
 CLAIM_NAME = re.compile(r"[0-9a-f]{32}")
 TASK_ID = re.compile(r"tk_[0-9a-f]{16}")
@@ -159,6 +164,9 @@ def interrupted_lines(kind: str, task_id: str, made: list = ()) -> list:
     if kind == "close":
         return [f"The confirmation of Mischief managed for {task_id} was interrupted; check castle task show {task_id}"
                 " and type Mischief managed again if it is not closed."]
+    if kind in hook.PLAIN_WORDS:
+        return [f"The confirmation of {hook.PLAIN_WORDS[kind]} {task_id} was interrupted; check castle task show"
+                f" {task_id} and type {hook.PLAIN_WORDS[kind]} {task_id} again if it is not closed."]
     lines = [f"The confirmation for {task_id} was interrupted; check castle task show {task_id}."]
     left = [item for item in made if item["task_id"] == task_id]
     for item in left:
@@ -291,7 +299,7 @@ def _report(conn, kind: str, task_id: str, key: str, lines: list, ok: bool) -> t
     """Record one outcome as a headmaster event on McGonagall's desk, once per prompt and task. Returns (its line,
     whether the event is in the store)."""
     summary = fitted(lines)
-    kind = "close" if kind == "bulk" else kind  # a bulk close's events are close events, settled like any other
+    kind = "go" if kind == "go" else "close"  # every kind of close's events are close events, settled like any other
     if conn is None:
         return f"{summary} (its headmaster event could not be written: no store)", False
     try:
@@ -383,12 +391,16 @@ def _confirmed(data: dict, conn, key: str, clock: Callable[[], float], sleep: Ca
             if kind == "close":
                 lines = hook.close_confirmed(conn, task_id, int(clock()))
                 ok = lines[0].startswith("Mischief managed:")
+            elif kind in hook.PLAIN_WORDS:
+                from fleet import plain_close  # only a close or a drop pays for this import
+
+                lines, ok = plain_close.applied(conn, kind, task_id, int(clock()))
             else:
                 lines, ok = hook.run_go(conn, task_id, int(clock()), note=_noter(key), session=common.session_id(data))
             report(task_id, lines, ok)
             done.append(task_id)
     except SystemExit:
-        what = {"close": "Mischief managed", "bulk": hook.BULK_PHRASE}.get(kind, "Go")
+        what = WHAT.get(kind, "Go")
         for task_id in expected:
             if task_id in done:
                 continue
@@ -475,7 +487,7 @@ def confirm(raw: bytes, clock: Callable[[], float] = time.time,
         else:
             lines, recorded = _confirmed(data, conn, key, clock, sleep)
             _done_if(key, recorded)
-        if data["kind"] == "go" and conn is not None:  # an interrupted go's report too
+        if data["kind"] in ("go", "plain", "drop") and conn is not None:  # an interrupted go's report too
             _tell(conn)
         return lines
     finally:

@@ -1097,7 +1097,7 @@ class EndTests(GoWatchCase):
         self.assertEqual(self.kept()["tasks"], {})
         self.assertEqual(len(self.lines()), 4)  # confirmed, handoff, pass, draft PR
 
-    def test_end_after_headmaster_or_a_round_cap_nothing_more_until_its_close(self):
+    def test_end_after_headmaster_or_a_round_cap_nothing_more_until_its_close_by_hand_says_closed(self):
         build = self.build_row
         self.round(build, SHAS[0], "HEADMASTER")
         self.expect("headmaster", build)
@@ -1124,8 +1124,9 @@ class EndTests(GoWatchCase):
             pensieve.close_task(self.conn, built["id"], "abandoned", now=self.tick())
             self.quiet()
             pensieve.close_task(self.conn, go_id, "abandoned", now=self.tick())
+            self.expect("closed", built, go_id=go_id)  # a close by hand after the end still says so, once
             self.quiet()
-        self.assertEqual(len(self.lines()), sent)
+        self.assertEqual(len(self.lines()), sent + 2)
         self.assertEqual(self.kept()["tasks"], {})
 
     def test_end_a_loud_event_after_the_end_still_pings_through_phone(self):
