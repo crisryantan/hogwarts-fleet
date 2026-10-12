@@ -12,7 +12,8 @@ changes what any run may do.
   waiting on you state, each its own key, so each one pings once. Three states are read from files. Verify's: once the
   build's newest office evidence (reviews/<build>/evidence-<sha>.md, which no desk can write) ran at or after the
   handoff its round is for, the key holds the counts of that evidence's structured head (its RAN, SUMMARY and
-  STOPPED lines, each exactly once), never its free text. A handoff with no round yet says review running only
+  STOPPED lines, each exactly once), never its free text. Checks halted by the stop, or a queued verify held before
+  evidence exists, use their own fixed state. A handoff with no round yet says review running only
   while the review loop holds it (the Owl Post's auto-<owl>.pending record in that folder, with no .done); else it
   is handed off with no review started. And a CHANGES round whose newest run since its verdict died without doing
   anything (run_desk.died_idle: the run's end record in the office runs folder, which no desk can write, and its
@@ -112,6 +113,8 @@ STATES = {
     "draft-pr": ("draft PR opened", "Review and merge the PR when you're happy."),
     "merged": ("merged", "Nothing for you; auto-close checks it."),
     "closed": ("closed", "Nothing for you."),
+    "verify-held": ("verify held by Ollivander's stop", "The stop is holding verify; run castle ollivander clear"
+                                                     " once the boundary checks pass."),
 }
 # A verify line's action in place of "Nothing for you." when its counts prove nothing or show a failed command.
 VERIFY_ACTIONS = {
@@ -219,6 +222,21 @@ def _review_queued(build_id: str, owl_id: str) -> bool:
     return pending is not None and stat.S_ISREG(pending.st_mode) and done is None
 
 
+def _verify_key(build_id: str, round_no: int, checks: Optional[list]) -> dict:
+    """A verify's fixed state: interrupted checks, completed evidence, or pending checks held by the stop.
+    An unreadable stop folder raises, so it never replaces a good kept state."""
+    if checks is not None:
+        if checks[0] < checks[1]:
+            return _key(build_id, "verify-held", round_no)
+        return _key(build_id, "verify", round_no, checks=checks)
+    try:
+        with safefs.opened_dir(config.OFFICE_ROOT, config.STATE_DIR) as fd:
+            stopped = any(safefs.lstat(fd, name) is not None for name in (config.STOP_FILE, config.UPDATING_FILE))
+    except safefs.Missing:
+        stopped = False
+    return _key(build_id, "verify-held" if stopped else "handoff", round_no)
+
+
 def _build_state(conn, go_id: str, build: dict, held: set) -> tuple:
     """(key, PR link) for a go task's newest build, from its store rows and the review loop's handoff records."""
     build_id = build["id"]
@@ -252,17 +270,18 @@ def _build_state(conn, go_id: str, build: dict, held: set) -> tuple:
     if handoff > round_at:  # the round this handoff opens next, once verify has run for it
         checks = _verified(build_id, handoff)
         if checks is not None:
-            return _key(build_id, "verify", round_no + 1, checks=checks), None
+            return _verify_key(build_id, round_no + 1, checks), None
         # Review running only once the review loop has this handoff; else nothing has picked it up yet.
         queued = _review_queued(build_id, newest["id"])
-        return _key(build_id, "handoff" if queued else "handed-off", round_no + 1), None
+        return (_verify_key(build_id, round_no + 1, None) if queued
+                else _key(build_id, "handed-off", round_no + 1)), None
     if latest is None:
         return _key(build_id, "confirmed"), None
     if pr is not None and pr["opened_at"] >= round_at:
         return _key(build_id, "draft-pr", round_no, latest["verdict"]), _link(pr)
     if not latest["has_verdict"]:  # its verify ran after the handoff and the round before it
         checks = _verified(build_id, max(handoff, live[-2]["created_at"] if len(live) > 1 else 0))
-        return _key(build_id, "handoff" if checks is None else "verify", round_no, checks=checks), None
+        return _verify_key(build_id, round_no, checks), None
     verdict = latest["verdict"]
     if verdict == "PASS":
         return _key(build_id, "pass", round_no, verdict), None
