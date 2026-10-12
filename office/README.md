@@ -103,8 +103,9 @@ The store has none of these:
   reviews/<task>/                       review files and verify evidence, which no desk can write, what each review
                                         round was opened for (round-<request>.json), the review loop's record of
                                         each handoff (auto-<owl>.pending, .try<n>, .done) and of what follows each
-                                        verdict of its own rounds (after-<request>.json), and each PR follow-up's
-                                        threads file (followup-<id>.md), which the castle copy is written from.
+                                        verdict of its own rounds and each PASS you run by hand that pushes
+                                        (after-<request>.json), and each PR follow-up's threads file
+                                        (followup-<id>.md), which the castle copy is written from.
                                         Every TASK.md a verify read (task-md-<sha256>.md), and for your own sessions'
                                         tasks the digest fleet review own approved (task-md-approved). The closer's
                                         record (close.json), its O_EXCL try and clear markers (one per after-merge
@@ -115,7 +116,8 @@ The store has none of these:
                                         after-merge-evidence-<sha>.md, after-merge-pack-<sha>.md,
                                         after-merge-review-<sha>-<desk>-<run>.md, close-evidence-<sha>.md)
   auto-draft-pr                         while it holds exactly "on", the review loop pushes and opens a draft PR after
-                                        its PASS (off when missing)
+                                        its PASS, and after a PASS of fleet review <task-id> of the newest handoff
+                                        (off when missing)
   auto-portrait                         while it holds exactly "on", Dumbledore's weeknight job applies the additions
                                         in the patch his run wrote that night (off when missing, so removing it
                                         switches it off)

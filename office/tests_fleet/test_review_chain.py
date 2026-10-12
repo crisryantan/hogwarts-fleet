@@ -950,10 +950,16 @@ class NewerVerdictTests(ChainCase):
         self.spawned_reviews.side_effect = None  # the first review is run, and killed, by each test
 
     def manual_round(self, verdict: str) -> None:
-        """A review Ryan runs by hand on a new commit, which stops at its verdict."""
+        """A review Ryan runs by hand on a new commit: CHANGES and HEADMASTER start nothing, only their event."""
         self.write_file(self.wt / "widget.txt", "widget by hand\n")
         with self.fake_reviewer(verdict):
             review.review_build(self.conn, self.task["id"])
+
+    def assert_only_the_hand_round_told(self) -> None:
+        """The new headmaster events are only the hand round's own, never one of the older round's recovery."""
+        self.assertEqual([event["kind"] for event in self.new_events()], ["review.fix-round"])
+        key = f"review:fix-round:{self.task['id']}:2"
+        self.assertEqual([event["dedupe_key"] for event in pensieve.events_with_key_prefix(self.conn, key)], [key])
 
     def test_an_older_changes_starts_no_fix_round_after_a_newer_headmaster(self):
         self.post(1, "widget")
@@ -973,7 +979,7 @@ class NewerVerdictTests(ChainCase):
         self.manual_round("CHANGES")
         self.next_pass()
         self.assertEqual(pensieve.get_task(self.conn, self.task["id"])["status"], "active")
-        self.assertEqual([event["kind"] for event in self.new_events()], [])
+        self.assert_only_the_hand_round_told()
         self.harry_runs.assert_not_called()
         self.assertEqual(owl_post.unfinished_afters(self.task["id"]), [])
 
@@ -992,7 +998,7 @@ class NewerVerdictTests(ChainCase):
         self.manual_round("CHANGES")
         newer = self.latest_review()
         self.next_pass()
-        self.assertEqual([event["kind"] for event in self.new_events()], [])
+        self.assert_only_the_hand_round_told()
         self.assertEqual(self.latest_review(), newer)
         first = capacity.review_rounds(self.conn, self.task["id"])[0]
         self.assertEqual(owlery.get_request(self.conn, first["request_id"])["phase"], "cleaned")

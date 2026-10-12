@@ -31,7 +31,9 @@ for her, as one typed action that this script checks and runs. Only while the of
   checks it whole. Nothing she writes is ever run, used as a path or put in argv.
 - The actions run only through the fleet's own paths and gates: a fix round through worktree.start_desk, a review
   through owl_post.claim_handoff and run_desk.spawn_review, a draft PR through push.push_draft_pr (which needs the
-  auto-draft-pr switch and a recorded PASS for the task's current head), and Ryan's own headmaster events. No push
+  auto-draft-pr switch and a recorded PASS for the task's current head, under the task's review lock, never for a
+  task bound to a PR or a commit whose draft PR the review loop or a review run by hand opened, tried or was cut off
+  in), and Ryan's own headmaster events. No push
   beyond that draft PR, merge, close or go is reachable. A fix round is legal only while no launch of the task since
   the CHANGES verdict is still going, ended cleanly or did any work, so one that died idle can be started again, and
   never once ORCHESTRATOR_DEAD_RUNS_IN_A_ROW of the task's newest runs in a row died idle: from there it is Ryan's.
@@ -464,8 +466,11 @@ def _pr_plan(conn, action: dict) -> tuple:
         return common.one_line(exc, 200), None
     if sha != latest["sha"] or not owlery.has_pass(conn, record["repo"], sha):
         return "the PASS is not for the task's current head", None
-    tried = db.fetch_one(conn, "SELECT id FROM events WHERE dedupe_key IN (?, ?)",
-                         (f"push:draft-pr:{task['id']}:{sha}", f"push:auto-failed:{task['id']}:{sha}"))
+    # A push or PR the review loop, or a review run by hand, began and a kill cut off may have happened, so it is
+    # never begun again from here either.
+    tried = db.fetch_one(conn, "SELECT id FROM events WHERE dedupe_key IN (?, ?, ?)",
+                         (f"push:draft-pr:{task['id']}:{sha}", f"push:auto-failed:{task['id']}:{sha}",
+                          f"review:interrupted:{latest['request_id']}"))
     if tried is not None:
         return "a draft PR for this commit was already tried", None
     inputs = review.round_inputs(task["id"], latest["request_id"])
