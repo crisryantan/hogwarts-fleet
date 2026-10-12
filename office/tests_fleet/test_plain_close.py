@@ -6,6 +6,7 @@ written yet. Tasks are put in each state straight through the store; no desk or 
 from __future__ import annotations
 
 import json
+from unittest import mock
 
 from hogwarts import capacity, pensieve
 from tests.support import NOW, SHA
@@ -85,6 +86,25 @@ class PlainCloseTests(CloseCase):
             shown, _ = self.said(f"close {go_id}")
         self.assertIn(f"Close was not applied to {go_id}: a review, a run or auto-close is working on its build"
                       f" {second['id']} right now, so nothing was closed.", shown)
+        self.assertEqual([self.status(task_id) for task_id in (first["id"], second["id"], go_id)],
+                         ["awaiting_close", "awaiting_close", "queued"])
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM close_tokens").fetchone()[0], 0)
+
+    def test_a_go_close_whose_second_build_cannot_close_rolls_the_first_back(self):
+        go_id = self.go_task()
+        first = self.passed(parent=go_id, title="first")
+        second = self.passed(parent=go_id, title="second")
+        real = hook.close_locked
+
+        def close_locked(conn, task_id, now, settled=False, words=hook.MISCHIEF_WORDS):
+            if task_id == second["id"]:
+                return [f"Close failed for {task_id}: the store refused it", hook.close_fix(task_id, words=words)]
+            return real(conn, task_id, now, settled, words)
+
+        with mock.patch.object(hook, "close_locked", side_effect=close_locked):
+            shown, _ = self.said(f"close {go_id}")
+        self.assertIn(f"Close was not applied to {go_id}, so nothing was closed: its build {second['id']} could not"
+                      " close.", shown)
         self.assertEqual([self.status(task_id) for task_id in (first["id"], second["id"], go_id)],
                          ["awaiting_close", "awaiting_close", "queued"])
         self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM close_tokens").fetchone()[0], 0)

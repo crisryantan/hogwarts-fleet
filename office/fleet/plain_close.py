@@ -8,8 +8,9 @@ does. The outcome is the hook's reply and her context, or the confirmer's headma
   its lines saying close: a task awaiting close (reviewed, dropped, or merged and proven) closes as complete with
   every open task under it, and one in flight is refused by name with its Fix line. For a go task, every open build
   under it must await close and no review lock of one may be held, or the whole close is refused before anything
-  closes; then, with every build's lock held, each closes through that same close (close_locked), its review tasks
-  with it, and the go task moves on, on a build's proof (closer.advance_parents), or else closes as superseded under
+  closes; then, with every build's lock held, its builds are read again and each closes through that same close
+  (close_locked), its review tasks with it, all in one store transaction, so a build that opens or cannot close
+  meanwhile closes nothing; then the go task moves on, on a build's proof (closer.advance_parents), or else closes as superseded under
   its own review lock, since a go task holds no work of its own.
 - drop <task-id> closes a task that is not going to land as superseded, with every open task under it, as castle task
   close <task-id> --reason superseded does; a build's go task closes with it once nothing else is open under that go
@@ -134,52 +135,74 @@ def _next(conn, task_ids: list) -> list:
     return lines or ["Next: nothing more to type for it."]
 
 
+class _Stop(Exception):
+    """A go close refused inside its transaction, which rolls back every build it closed: its lines."""
+
+    def __init__(self, lines: list):
+        super().__init__(lines[0])
+        self.lines = lines
+
+
 def _close_go(conn, go_id: str, now: int) -> tuple:
-    """(lines, closed) for close <go task>: with every open build's review lock held, taken without waiting, and every
-    build read again under them, each closes through the hook's close (close_locked); then the go task moves on on a
-    build's proof, or closes as superseded under its own review lock. A held lock or a build in flight closes nothing."""
+    """(lines, closed) for close <go task>: with every open build's review lock held, taken without waiting, its builds
+    are read again and each closes through the hook's close (close_locked), all in one store transaction, so a build
+    that opened, moved or could not close meanwhile closes nothing. Then the go task moves on on a build's proof, or
+    closes as superseded under its own review lock."""
     refused = _go_refused(conn, go_id)
     if refused is not None:
         return refused, False
     builds, done = _builds(conn, go_id), []
-    with contextlib.ExitStack() as locks:
-        for build in builds:
-            try:
-                locks.enter_context(run_desk.task_lock(build["id"]))
-            except safefs.Busy:
-                return [f"Close was not applied to {go_id}: a review, a run or auto-close is working on its build"
-                        f" {build['id']} right now, so nothing was closed.",
-                        f"Fix: type close {go_id} again once that ends; castle task show {build['id']} says where it"
-                        " is."], False
-        refused = _go_refused(conn, go_id)  # read again under the locks
-        if refused is not None:
-            return refused, False
-        for build in builds:
-            said = hook.close_locked(conn, build["id"], now, words=CLOSE)
-            if not said[0].startswith("Close:"):
-                closed = [f"- closed before it: {line}" for line in done]
-                return [f"Close of go task {go_id} stopped at its build {build['id']}, so the go task stays open."
-                        f" {said[0]}", *said[1:], *closed], False
-            done.append(f"build {build['id']} ({build['desk']}) closed as complete")
-            done += [line[2:] for line in said[1:] if line.startswith("- cascaded:")]
-    how = "as complete, on a build's proof"
+    try:
+        with contextlib.ExitStack() as locks:
+            for build in builds:
+                try:
+                    locks.enter_context(run_desk.task_lock(build["id"]))
+                except safefs.Busy:
+                    return [f"Close was not applied to {go_id}: a review, a run or auto-close is working on its build"
+                            f" {build['id']} right now, so nothing was closed.",
+                            f"Fix: type close {go_id} again once that ends; castle task show {build['id']} says where"
+                            " it is."], False
+            with db.transaction(conn):
+                refused = _go_refused(conn, go_id)  # read again under the locks and in the close's own transaction
+                if refused is not None:
+                    raise _Stop(refused)
+                current = _builds(conn, go_id)  # a build auto-close closed meanwhile is gone from here
+                new = [build["id"] for build in current if build["id"] not in {row["id"] for row in builds}]
+                if new:
+                    raise _Stop([f"Close was not applied to {go_id}: its build {new[0]} opened meanwhile, so nothing"
+                                 " was closed.", f"Fix: type close {go_id} again."])
+                for build in current:
+                    said = hook.close_locked(conn, build["id"], now, words=CLOSE)
+                    if not said[0].startswith("Close:"):
+                        raise _Stop([f"Close was not applied to {go_id}, so nothing was closed: its build"
+                                     f" {build['id']} could not close. {said[0]}", *said[1:]])
+                    done.append(f"build {build['id']} ({build['desk']}) closed as complete")
+                    done += [line[2:] for line in said[1:] if line.startswith("- cascaded:")]
+    except _Stop as stop:
+        return stop.lines, False
     if pensieve.get_task(conn, go_id)["status"] != "closed":
         closer.advance_parents(conn, now, only=go_id)
-        if pensieve.get_task(conn, go_id)["status"] != "closed":
-            try:
-                with run_desk.task_lock(go_id), db.transaction(conn):
-                    if pensieve.open_descendants(conn, go_id):
-                        raise ConflictError("new work opened under it meanwhile")
-                    pensieve.close_task(conn, go_id, "superseded", now=now)
-            except safefs.Busy:
-                return [f"Close of go task {go_id} closed its builds, but a review, a run or auto-close holds the go"
-                        " task right now.", f"Fix: type close {go_id} again once that ends.",
-                        *(f"- {line}" for line in done)], False
-            except StoreError as exc:
-                return [f"Close of go task {go_id} closed its builds, but not the go task: {common.one_line(exc, 200)}",
-                        f"Fix: type close {go_id} again; castle task show {go_id} says where it stands.",
-                        *(f"- {line}" for line in done)], False
-            how = "as superseded, since a go task holds no work of its own and no proven build close moved it on"
+    if pensieve.get_task(conn, go_id)["status"] != "closed":
+        try:
+            with run_desk.task_lock(go_id), db.transaction(conn):
+                if pensieve.open_descendants(conn, go_id):
+                    raise ConflictError("new work opened under it meanwhile")
+                pensieve.close_task(conn, go_id, "superseded", now=now)
+        except safefs.Busy:
+            return [f"Close of go task {go_id} closed its builds, but a review, a run or auto-close holds the go"
+                    " task right now.", f"Fix: type close {go_id} again once that ends.",
+                    *(f"- {line}" for line in done)], False
+        except StoreError as exc:
+            return [f"Close of go task {go_id} closed its builds, but not the go task: {common.one_line(exc, 200)}",
+                    f"Fix: type close {go_id} again; castle task show {go_id} says where it stands.",
+                    *(f"- {line}" for line in done)], False
+    closed = pensieve.get_task(conn, go_id)
+    if closed["close_reason"] == "complete":
+        how = "as complete, on a build's proof"
+    elif closed["close_reason"] == "superseded":
+        how = "as superseded, since a go task holds no work of its own and no proven build close moved it on"
+    else:
+        how = f"as {closed['close_reason']}"
     lines = [f"Close: go task {go_id} is closed {how}.", *(f"- {line}" for line in done)]
     return lines + _next(conn, [build["id"] for build in builds]), True
 
