@@ -98,9 +98,11 @@ HANDOFF_RECORD = re.compile(r"auto-(owl_[0-9a-f]{16})\.(pending|done|try[1-9])")
 # And after-<request>.json for each round the review loop opens: where it is with what follows that round's verdict.
 # "review" from before the reviewer starts, "acting" with the step (fix-round, push, pr, or followup for a PR
 # follow-up's push and replies) before anything that reaches outside the office starts, and "done" once it has ended
-# and said what it must. Written whole, so a reader sees the old record or the new one.
+# and said what it must. A round Ryan runs by hand (fleet review), but a PR follow-up's, is "hand" in place of
+# "review", with the handoff its PASS may push for, so what follows it is finished as a review run by hand. Written
+# whole, so a reader sees the old record or the new one.
 AFTER_RECORD = re.compile(r"after-(rq_[0-9a-f]{16})\.json")
-AFTER_STATES = ("review", "acting", "done")
+AFTER_STATES = ("review", "hand", "acting", "done")
 AFTER_STEPS = ("fix-round", "push", "pr", "followup")
 AFTER_MAX_BYTES = 1024
 REVIEW_STARTED = "review started"

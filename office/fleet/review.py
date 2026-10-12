@@ -90,14 +90,17 @@ happened, so it is never started again by itself: Ryan hears so once.
 
 A review Ryan runs with fleet review <task-id> tells its verdict as one event, with the kinds and keys the loop uses,
 and then runs one go updates pass, so go status, go updates and McGonagall's watch see where the task stands
-(_after_hand_verdict). A PASS of the task's newest handoff goes on as the loop's PASS does, under the same review
-lock: the draft PR while Ryan has opted in, through the same push.push_draft_pr, binding and after record (written
-with no handoff owl, so recovery never takes the loop's earlier ending of that handoff for it), the open PR's event
-when one is bound, else ready for push. Any other PASS stops at its event: a PR follow-up's round stops that
-follow-up, and one of an older handoff, or of none, is ready for push. CHANGES and HEADMASTER start nothing, since
-Ryan ran the review and decides what follows: CHANGES is told as a fix round that did not start (or the round cap),
-HEADMASTER as any review's. The orchestrator's open_draft_pr takes the same lock and checks the same binding and
-events (fleet/orchestrator.py), so the two never both open a PR for one commit.
+(_after_hand_verdict). A PASS of the task's newest handoff, when that handoff passed the loop's own check under the
+review lock before the review began (_checked_handoff), goes on as the loop's PASS does, under the same lock: the
+draft PR while Ryan has opted in, through the same push.push_draft_pr, binding and after record, the open PR's event
+when one is bound, else ready for push. Its round's after record (none for a PR follow-up's round) is "hand" from
+before its reviewer starts, so a review killed after its verdict is finished by the loop's recovery as one run by
+hand, once, and the loop's earlier ending of that handoff is never taken for this round's. Any other PASS stops at
+its event: a PR follow-up's round stops that follow-up, and one of an older handoff, of one that fails that check,
+or of none, is ready for push. CHANGES and HEADMASTER start nothing, since Ryan ran the review and decides what
+follows: CHANGES is told as a fix round that did not start (or the round cap), HEADMASTER as any review's. The
+orchestrator's open_draft_pr takes the same lock and checks the same binding and events (fleet/orchestrator.py), so
+the two never both open a PR for one commit.
 
 Tooling is never a verdict. Before a reviewer starts, the review checks that git can read the task's worktree and
 writes the round's review input (git log, stat and the full diff of base...sha) next to TASK.md, so the reviewer
@@ -932,6 +935,10 @@ def run_review(conn, task: dict, record: dict, sha: str, holder_id: str, handoff
             if inputs.get("handoff_owl") is not None:
                 # The review loop's own round: what follows its verdict is tracked from here (see _after_verdict).
                 owl_post.write_after(task["id"], request_id, inputs["handoff_owl"], "review")
+            elif inputs.get("by_hand") and round_followup is None:
+                # A round Ryan runs by hand, with the checked handoff its PASS may push for (see _after_hand_verdict).
+                # A PR follow-up's round has none: the Map's housekeeping stops that follow-up after a kill, as before.
+                owl_post.write_after(task["id"], request_id, inputs.get("checked_owl"), "hand")
         if run_desk.over_daily_cap(conn, reviewer, now) is not None:
             run_desk.report_cap(conn, reviewer, now)
             raise run_desk.Capped(f"{reviewer} is at its fleet daily cap, so round {opened['round']} of {task['id']}"
@@ -985,20 +992,35 @@ def review_build(conn, task_id: str) -> dict:
     """A build desk's task: commit its work from the handoff, then review HEAD. Its verdict is told as one event and,
     for a PASS of the task's newest handoff, followed as the review loop follows its own (_after_hand_verdict), still
     under the task's review lock. Then one go updates pass runs, as after the loop's review."""
+    task_id = ids.check("task", task_id)
     with task_review_lock(task_id) as lock_fd:
-        result = _review_build(conn, ids.check("task", task_id), lock_fd)
+        checked = _checked_handoff(conn, task_id)
+        result = _review_build(conn, task_id, lock_fd, by_hand=True, checked_owl=checked)
         if result.get("verdict") is None:
             return result
-        result = {**result, "next": _after_hand_verdict(conn, pensieve.get_task(conn, task_id), result)}
+        result = {**result, "next": _after_hand_verdict(conn, pensieve.get_task(conn, task_id), result, checked)}
     # Its verdict, draft PR or stop as a go update now, not at the next Owl Post pass; a failure changes nothing.
     run_desk.watch_go(conn, wait=config.GO_WATCH_WAIT_SECONDS)
     return result
 
 
-def _review_build(conn, task_id: str, lock_fd: int, handoff_owl: Optional[str] = None) -> dict:
+def _checked_handoff(conn, task_id: str) -> Optional[str]:
+    """The id of the task's newest result owl when it passes the review loop's own check of a handoff
+    (owl_post.handoff_problem), read under the task's review lock before a review run by hand, or None. Only a PASS
+    of that handoff pushes (_after_hand_verdict)."""
+    task = pensieve.get_task(conn, task_id)
+    if task["desk"] not in config.WORKTREE_DESKS or task["status"] != "active":
+        return None  # _review_build refuses it
+    newest = latest_result_owl(conn, task)
+    return None if newest is None or owl_post.handoff_problem(conn, newest) is not None else newest["id"]
+
+
+def _review_build(conn, task_id: str, lock_fd: int, handoff_owl: Optional[str] = None, by_hand: bool = False,
+                  checked_owl: Optional[str] = None) -> dict:
     """The review of a build desk's task under its review lock (lock_fd). Its handoff is the desk's newest result
     owl, or for the review loop the handoff owl it chose and checked under this same lock (handoff_owl), so no owl
-    that came in meanwhile can stand in for it."""
+    that came in meanwhile can stand in for it. A review run by hand (by_hand) records its round's after record as
+    "hand", with checked_owl (_checked_handoff), before its reviewer starts."""
     task = pensieve.get_task(conn, task_id)
     if task["desk"] not in config.WORKTREE_DESKS:
         raise FleetError("use 'fleet review own' for your own sessions; this is for a build desk's task")
@@ -1041,7 +1063,8 @@ def _review_build(conn, task_id: str, lock_fd: int, handoff_owl: Optional[str] =
     if sha == gitops.rev(record, record["base"]):
         raise FleetError("there is nothing to review: HEAD is still the base")
     result = run_review(conn, task, record, sha, holder_id, handoff is not None, lock_fd,
-                        inputs={"handoff_sha256": handoff_digest(handoff), "handoff_owl": handoff_owl},
+                        inputs={"handoff_sha256": handoff_digest(handoff), "handoff_owl": handoff_owl,
+                                "by_hand": by_hand, "checked_owl": checked_owl},
                         handoff_text=handoff)
     return {**result, "handoff_owl": newest_id}
 
@@ -1196,7 +1219,7 @@ def _recover_after(conn, task: dict, record: dict, row: Optional[dict], lock_fd:
     """One round's unfinished after record (see _auto_recover). row is the round, from capacity.review_rounds."""
     task_id, request_id, owl_id = task["id"], record["request_id"], record["owl_id"]
     later = None
-    if record["state"] == "review" and (row is None or not row["has_verdict"]):
+    if record["state"] in ("review", "hand") and (row is None or not row["has_verdict"]):
         # Its review ended with no verdict (no live review holds this lock), so nothing follows it. Its handoff, if
         # still unfinished, gets its next try as any other.
         owl_post.write_after(task_id, request_id, owl_id, "done")
@@ -1220,6 +1243,15 @@ def _recover_after(conn, task: dict, record: dict, row: Optional[dict], lock_fd:
         later = _later_round(conn, task_id, request_id)
         if later is None:
             settle_verdict(conn, task, row["reviewer"], row["verdict"], row["sha"], row["followup_id"])
+    if record["state"] == "hand":
+        # A review run by hand killed after its verdict, before what follows it had begun: finished as one run by
+        # hand, once, unless a newer round has been opened since.
+        if later is not None:
+            owl_post.write_after(task_id, request_id, owl_id, "done")
+            return f"round {later['round']} was opened after it, so nothing follows its verdict"
+        result = {"verdict": row["verdict"], "round": row["round"], "sha": row["sha"], "request_id": request_id,
+                  "handoff_owl": owl_id}
+        return _after_hand_verdict(conn, pensieve.get_task(conn, task_id), result, owl_id, now)
     if record["state"] == "review":
         if later is not None:
             # A newer round was opened since, so this verdict is history: its review stays published, and nothing
@@ -1253,7 +1285,8 @@ def _told(conn, task: dict, record: dict, row: dict) -> bool:
     cap, a fix round that did not start). Each event is matched by its whole key."""
     task_id, sha, round_no = task["id"], row["sha"], row["round"]
     keys = [f"review:unpublished:{record['request_id']}"]
-    if record["owl_id"] is not None:
+    if record["owl_id"] is not None and record["state"] != "hand":
+        # A round run by hand is never told by the loop's own ending of its handoff, which came before it.
         keys.append(f"review:auto:{record['owl_id']}")
     if row["verdict"] == "PASS" and row.get("followup_id") is not None:
         # A follow-up's PASS is told only by its own ending: one at the commit it started from must never be taken
@@ -1467,7 +1500,8 @@ def _loop_stopped(conn, task: dict, why: str, round_no: int, now: Optional[int])
                        task_id=task_id, dedupe_key=f"review:loop-stopped:{task_id}:{round_no}", now=now)
 
 
-def _after_hand_verdict(conn, task: dict, result: dict, now: Optional[int] = None) -> str:
+def _after_hand_verdict(conn, task: dict, result: dict, checked_owl: Optional[str],
+                        now: Optional[int] = None) -> str:
     """What follows the verdict of a review run by hand (review_build), under the task's review lock. Every verdict is
     told as one headmaster event, with the kind and key the review loop uses for it, so go status, go updates and the
     chat watch see where the task stands. A PASS of the task's newest handoff, of a round that is not a PR
@@ -1477,7 +1511,19 @@ def _after_hand_verdict(conn, task: dict, result: dict, now: Optional[int] = Non
     instead, and with the switch off it is ready for push. Any other PASS stops at its event: a follow-up's round
     stops that follow-up (followup.stop_after_manual_pass), and one of an older handoff, or of none, is ready for
     push. CHANGES and HEADMASTER start nothing, since Ryan ran the review and decides what follows: CHANGES is told
-    as a fix round that did not start (at the round cap, as the cap), and HEADMASTER by settle_verdict's own event."""
+    as a fix round that did not start (at the round cap, as the cap), and HEADMASTER by settle_verdict's own event.
+    checked_owl is the newest handoff as it passed the loop's check before the review (_checked_handoff); only a PASS
+    of that same handoff, still the newest, pushes. The round's after record, unless it is a PR follow-up's, is "hand"
+    from before its reviewer started and done once this has ended, so a kill in between is finished by the loop's
+    recovery (_recover_after), once, as a review run by hand; each event is kept once by its key, so one told before
+    the kill is not told again."""
+    outcome = _hand_outcome(conn, task, result, checked_owl, now)
+    if any(record["request_id"] == result["request_id"] for record in owl_post.unfinished_afters(task["id"])):
+        owl_post.write_after(task["id"], result["request_id"], None, "done")
+    return outcome
+
+
+def _hand_outcome(conn, task: dict, result: dict, checked_owl: Optional[str], now: Optional[int]) -> str:
     verdict, round_no, task_id, sha = result["verdict"], result["round"], task["id"], result["sha"]
     tagged, group, cap = _round_group(conn, task_id, result["request_id"])
     if verdict == "HEADMASTER":
@@ -1493,17 +1539,17 @@ def _after_hand_verdict(conn, task: dict, result: dict, now: Optional[int] = Non
                            task_id=task_id, dedupe_key=f"review:fix-round:{task_id}:{round_no}", now=now)
         return "no fix round started: the review was run by hand"
     if tagged is not None:
-        if followup.stop_after_manual_pass(conn, task, followups.get(conn, tagged), now, locked=True) is not None:
+        stopped_key = f"followup:stopped:{tagged}"
+        if followup.stop_after_manual_pass(conn, task, followups.get(conn, tagged), now, locked=True) is not None \
+                or any(event["dedupe_key"] == stopped_key
+                       for event in pensieve.events_with_key_prefix(conn, stopped_key)):
             return "the follow-up stopped: nothing is pushed or posted after a review run by hand"
         return _ready_for_push(conn, task, sha, followups.pr_for_task(conn, task_id), now)
     newest = latest_result_owl(conn, task)
     checked = result.get("handoff_owl")
-    if newest is None or newest["id"] != checked:
-        checked = None  # not the newest handoff: ready for push, never pushed
-    outcome = _after_pass(conn, task, result, now, checked, by_hand=True)
-    if any(record["request_id"] == result["request_id"] for record in owl_post.unfinished_afters(task_id)):
-        owl_post.write_after(task_id, result["request_id"], None, "done")
-    return outcome
+    if checked is None or checked != checked_owl or newest is None or newest["id"] != checked:
+        checked = None  # not the newest handoff that passed the loop's check: ready for push, never pushed
+    return _after_pass(conn, task, result, now, checked, by_hand=True)
 
 
 def _ready_for_push(conn, task: dict, sha: str, bound: Optional[dict], now: Optional[int]) -> str:

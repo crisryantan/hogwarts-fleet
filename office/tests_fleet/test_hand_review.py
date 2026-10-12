@@ -14,7 +14,7 @@ from hogwarts import capacity, followups, ids, pensieve
 from fleet import config, gitops, go_status, go_watch, orchestrator, owl_post, push, review
 from tests_fleet.test_auto_push import PR_URL, AutoPushCase
 from tests_fleet.test_review_chain import Killed
-from tests_fleet.test_review_loop import REPO_ID, TASK_MD
+from tests_fleet.test_review_loop import HANDOFF, REPO_ID, TASK_MD
 
 
 class HandReviewCase(AutoPushCase):
@@ -77,7 +77,8 @@ class HandPassTests(HandReviewCase):
 
         def newer_after_the_review(conn, task):
             calls.append(task["id"])
-            return real(conn, task) if len(calls) == 1 else {"id": "owl_" + "0" * 16}
+            # Before and in the review it is this handoff; one came in after its verdict.
+            return real(conn, task) if len(calls) <= 2 else {"id": "owl_" + "0" * 16}
 
         with mock.patch.object(review, "latest_result_owl", side_effect=newer_after_the_review):
             result = self.by_hand("PASS")
@@ -138,6 +139,42 @@ class HandPassTests(HandReviewCase):
         with self.assertRaisesRegex(orchestrator.Invalid, "already tried"):
             orchestrator.check_legal(self.conn, self.open_draft_pr())
         self.assert_nothing_pushed()
+
+
+    def test_a_hand_pass_of_a_handoff_that_names_another_task_never_pushes(self):
+        self.opt_in()
+        self.post(1, "widget", body=HANDOFF.format(task_id="tk_" + "0" * 16))
+        result = self.by_hand("PASS")
+        self.assertEqual(result["next"], "ready for push")
+        self.assert_nothing_pushed()
+        self.assertIn(("review.ready-for-push", f"review:ready:{self.task['id']}:{self.head()}"), self.told())
+
+    def test_a_hand_pass_killed_before_what_follows_it_is_finished_once_by_the_next_pass(self):
+        self.opt_in()
+        self.post(1, "widget")
+        with self.fake_reviewer("PASS"), mock.patch.object(review, "_after_hand_verdict", side_effect=Killed("k")), \
+                self.assertRaises(Killed):
+            review.review_build(self.conn, self.task["id"])
+        self.assertEqual([record["state"] for record in owl_post.unfinished_afters(self.task["id"])], ["hand"])
+        self.assert_nothing_pushed()
+        self.next_pass()
+        self.next_pass()
+        sha = self.head()
+        self.assertEqual(self.told(), [("push.draft-pr", f"push:draft-pr:{self.task['id']}:{sha}")])
+        self.assertEqual(len(self.gh_calls), 1)
+        self.assertEqual(self.remote(), f"refs/heads/fix/widget {sha}")
+        self.assertEqual(owl_post.unfinished_afters(self.task["id"]), [])
+
+    def test_a_hand_changes_killed_before_its_event_is_told_once_and_starts_nothing(self):
+        self.post(1, "widget")
+        with self.fake_reviewer("CHANGES"), mock.patch.object(review, "_after_hand_verdict", side_effect=Killed("k")), \
+                self.assertRaises(Killed):
+            review.review_build(self.conn, self.task["id"])
+        self.next_pass()
+        self.next_pass()
+        self.harry_runs.assert_not_called()
+        self.assertEqual(self.told(), [("review.fix-round", f"review:fix-round:{self.task['id']}:1")])
+        self.assertEqual(owl_post.unfinished_afters(self.task["id"]), [])
 
 
 class HandChangesAndHeadmasterTests(HandReviewCase):
