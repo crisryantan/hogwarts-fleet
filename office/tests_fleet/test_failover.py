@@ -19,7 +19,7 @@ from tests_fleet import test_ollivander as olli
 from tests_fleet import test_patrol as tp
 from tests_fleet import test_portrait_auto as tpa
 from tests_fleet import test_run_desk as rd
-from tests_fleet.support import CODEX_PROFILE, fake_children
+from tests_fleet.support import CODEX_PROFILE, FakeChild, fake_children
 
 LADDER = {"claude": [{"model": "opus", "effort": "high", "line": "frontier"},
                      {"model": "sonnet", "effort": "high", "line": "workhorse"},
@@ -413,7 +413,7 @@ class RetryAndAuthTests(FailoverCase):
         owl_id, _ = self.request("hermione")
         with self.fake({"opus": claude_failed(401)}, {"opus": 1}) as started:
             code, _, _ = self.main("hermione", "--owl", owl_id)
-        self.assertEqual((code, started.call_count), (1, 2))  # a sign-in miss is tried once more first
+        self.assertEqual((code, started.call_count), (1, 1))
         [auth] = self.events_of("failover.auth")
         self.assertEqual((auth["desk"], auth["verdict"]), ("hermione", "headmaster"))
         self.assertEqual(len(self.events_of("rundesk.failed")), 1)
@@ -423,7 +423,12 @@ class RetryAndAuthTests(FailoverCase):
 class AuthMissTests(FailoverCase):
     """A fast Claude auth failure that used nothing is tried once more, under the same launch, before it tells anyone."""
 
-    MISS = claude_failed(error="authentication_failed", text="Not logged in")
+    MISS = lines([{"type": "system", "subtype": "init"},
+                  {"type": "assistant", "message": {"id": "m1", "content": [{"type": "text", "text": "Not logged in"}],
+                                                    "usage": {"input_tokens": 0, "output_tokens": 0}},
+                   "error": "authentication_failed"},
+                  {"type": "result", "is_error": True, "result": "Not logged in", "total_cost_usd": 0,
+                   "usage": {"input_tokens": 0, "output_tokens": 0, "cache_read_input_tokens": 0}, "modelUsage": {}}])
     WORKED = lines([{"type": "result", "subtype": "success", "is_error": False, "result": "done",
                      "total_cost_usd": 0.1, "usage": {"input_tokens": 10, "output_tokens": 5}}])
 
@@ -484,14 +489,41 @@ class AuthMissTests(FailoverCase):
                        {"type": "result", "subtype": "success", "is_error": True, "result": "Not logged in",
                         "api_error_status": 401, "total_cost_usd": 0.02, "usage": {"input_tokens": 40}}])
         no_result = lines([{"type": "assistant", "message": {"id": "m1"}, "error": "authentication_failed"}])
+        streamed = self.MISS.replace(b'"output_tokens": 0}}, "error"', b'"output_tokens": 7}}, "error"')
         for label, output, limit in (("slow", self.MISS, 0), ("used tokens", spent, 3),
-                                     ("not auth", claude_failed(), 3), ("no result event", no_result, 3)):
+                                     ("not auth", claude_failed(), 3), ("no result event", no_result, 3),
+                                     ("no usage reported", claude_failed(error="authentication_failed"), 3),
+                                     ("streamed tokens", streamed, 3)):
             with self.subTest(label), mock.patch.object(config, "AUTH_MISS_MAX_SECONDS", limit):
                 result, started = self.run_ron((output, 1))
                 self.assertEqual(started.call_count, 1)
                 self.assertNotIn("auth_miss_retried", result)
                 self.assertNotIn("auth_miss_retried", run_desk.run_end("ron", result["run_id"]))
         self.assertEqual(self.auth_miss_waits.call_count, 0)
+
+    def test_a_retry_that_fails_to_start_ends_as_its_first_try(self):
+        self.enable("ron")
+        owl_id, _ = self.request("ron")
+        starts = []
+
+        def miss(argv, **kwargs):
+            os.write(kwargs["stdout"], self.MISS)
+            return subprocess.CompletedProcess(args=argv, returncode=1)
+
+        def start(argv, **kwargs):
+            starts.append(argv)
+            if len(starts) == 2:
+                raise OSError("the retry could not start")
+            return FakeChild(miss, argv, kwargs)
+        with mock.patch.object(run_desk, "start_child", side_effect=start), self.assertRaises(OSError):
+            run_desk.run(self.conn, "ron", owl_id, now=NOW)
+        [launch] = capacity.list_launches(self.conn, "ron")
+        self.assertEqual(run_desk.run_end("ron", launch["run_id"]),
+                         {"exit_code": 1, "cap_source": None, "failure_class": "auth"})
+        self.assertEqual(self.file(launch["run_id"], ".out"), self.MISS)  # put back
+        [row] = self.conn.execute("SELECT input_tokens, cost_usd FROM metrics WHERE run_id = ?",
+                                  (launch["run_id"],)).fetchall()
+        self.assertEqual((row["input_tokens"], row["cost_usd"]), (0, 0.0))
 
     def test_a_codex_auth_failure_is_never_retried(self):
         self.enable("moody")

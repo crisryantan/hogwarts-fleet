@@ -613,12 +613,13 @@ def auth_note(conn, desk: str, family: str, now: Optional[int] = None) -> tuple:
 
 
 def _signed_in_since(conn, desk: str, family: str, since: int) -> bool:
-    """Whether a run of the desk on the family recorded tokens after since, so its CLI was signed in then. A model
-    whose family the store cannot tell counts, so a doubt tells the owner again rather than not at all."""
+    """Whether a run of the desk on the family recorded tokens from since on, so its CLI was signed in then. A doubt
+    tells the owner again rather than not at all: a run recorded in the same second as the event, before or after it,
+    counts, and so does a model whose family the store cannot tell."""
     rows = db.fetch_all(conn, "SELECT metrics.model FROM run_launches"
                               " JOIN metrics ON metrics.id = run_launches.metric_id WHERE run_launches.desk = ?"
-                              " AND metrics.ts > ?"
-                              " AND (metrics.input_tokens > 0 OR metrics.output_tokens > 0)", (desk, since))
+                              " AND metrics.ts >= ? AND (metrics.input_tokens > 0 OR metrics.output_tokens > 0"
+                              " OR metrics.cache_read_tokens > 0)", (desk, since))
     return any(model_family(conn, row["model"]) in (family, None) for row in rows)
 
 

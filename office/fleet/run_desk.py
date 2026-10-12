@@ -2473,17 +2473,21 @@ def _record_orphan(conn, plan: dict, run_fd: int, row: dict, now: Optional[int])
 
 def _auth_miss(run_fd: int, plan: dict, exit_code: int, seconds: float) -> bool:
     """Whether a run that just ended looks like a one-off sign-in read miss, not a sign-out: a Claude run whose CLI
-    said auth within AUTH_MISS_MAX_SECONDS, its output read whole with a result event that reports no tokens and no
-    cost. A run that used anything, ran longer, failed any other way or is not Claude is never one."""
+    said auth within AUTH_MISS_MAX_SECONDS, its output read whole with a result event whose own usage and cost say
+    zero, and no tokens in any message it streamed. A run that used anything, ran longer, failed any other way, did
+    not report its usage or is not Claude is never one."""
     if plan["family"] != "claude" or seconds >= config.AUTH_MISS_MAX_SECONDS:
         return False
     output, whole, _, cap_source = _ended(run_fd, plan, exit_code)
-    if not whole or cap_source is not None or not claude_result(output) \
-            or _failure_class(plan, output, exit_code) != "auth":
+    result = claude_result(output)
+    if not whole or cap_source is not None or _failure_class(plan, output, exit_code) != "auth":
         return False
-    usage = run_usage(plan, output, exit_code, whole)
-    return usage.get("spend_unknown") is not True and usage["cost_usd"] == 0 \
-        and usage["input_tokens"] == usage["output_tokens"] == usage["cache_read_tokens"] == 0
+    # Nothing used, as the result event itself reports it: a missing or malformed count or cost is no proof.
+    counts, cost = result.get("usage"), result.get("total_cost_usd")
+    if not isinstance(counts, dict) or type(cost) not in (int, float) or cost != 0 \
+            or any(type(counts.get(key)) is not int for key in ("input_tokens", "output_tokens")):
+        return False
+    return _claude_counts(result) == (0, 0, 0) and _streamed_counts(output) == (0, 0, 0)
 
 
 def auth_miss_wait() -> None:
@@ -2511,6 +2515,15 @@ def _empty_run_files(out_fd: int, err_fd: int) -> None:
         os.lseek(fd, 0, os.SEEK_SET)
 
 
+def _put_back(run_fd: int, run_id: str, out_fd: int, err_fd: int) -> None:
+    """Write a sign-in miss's kept output and errors back into the run's emptied files, for a retry that never
+    started, so every reader sees the run as its first try."""
+    for kind, fd, limit in (("out", out_fd, RUN_OUTPUT_MAX_BYTES), ("err", err_fd, config.RUN_ERROR_MAX_BYTES)):
+        view = memoryview(safefs.read_regular(run_fd, f"{run_id}.auth-miss.{kind}", limit, "run output"))
+        while view:
+            view = view[os.write(fd, view):]
+
+
 def _launch(conn, plan: dict, now: Optional[int], keep_fds: tuple = (), own: Optional[RunLock] = None,
             on_told: Optional[OnTold] = None, shadow: bool = False) -> dict:
     """Start the planned run, whose launch run() has recorded, and record what it did. The process inherits every
@@ -2526,7 +2539,7 @@ def _launch(conn, plan: dict, now: Optional[int], keep_fds: tuple = (), own: Opt
     desk, run_id = plan["desk"], plan["run_id"]
     with safefs.opened_dir(config.OFFICE_ROOT, "runs", desk, create=True) as run_fd:
         out_fd = err_fd = child = brief = None
-        retried = False
+        retried, first_exit = False, None
         started = time.monotonic()
         try:
             if plan.get("temp"):
@@ -2552,8 +2565,8 @@ def _launch(conn, plan: dict, now: Optional[int], keep_fds: tuple = (), own: Opt
                 if not stop_requested() and _keep_aside(run_fd, run_id):
                     with common.signals_held():
                         _empty_run_files(out_fd, err_fd)
-                        # From here the run's files are the retry's: one that fails to start ends as never started.
-                        retried, child = True, None
+                        # From here the run's files are the retry's. One that fails to start ends as its first try.
+                        retried, first_exit, child = True, exit_code, None
                         started = time.monotonic()
                         child = start_child(plan["argv"], cwd=plan["cwd"], env=plan.get("env") or child_env(),
                                             input=plan["stdin"].encode("utf-8"), stdout=out_fd, stderr=err_fd,
@@ -2572,11 +2585,18 @@ def _launch(conn, plan: dict, now: Optional[int], keep_fds: tuple = (), own: Opt
                             _keep_end(run_fd, run_id, child.returncode, cap_source,
                                       _failure_class(plan, output, child.returncode), retried)
                 settled = _record_interrupted(conn, plan, run_fd, started, now)
+            elif retried:
+                # The retry never started: the first try's output goes back, and the run ends as that sign-in miss.
+                with common.signals_held():
+                    with contextlib.suppress(FleetError, OSError):
+                        _put_back(run_fd, run_id, out_fd, err_fd)
+                    _keep_end(run_fd, run_id, first_exit, None, "auth")
+                settled = _record_interrupted(conn, plan, run_fd, started, now)
             else:
                 # Whatever was raised before the process had a handle here, a refused or failed start or a signal
                 # before it, none started: start_child returns once the binary runs and has its whole prompt (one
                 # that did not get it is killed there), and signals are held around it.
-                _keep_end(run_fd, run_id, None, None, auth_miss_retried=retried)
+                _keep_end(run_fd, run_id, None, None)
             if own is not None and settled:
                 own.keep = False
             raise
