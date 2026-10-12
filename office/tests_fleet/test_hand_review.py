@@ -165,6 +165,23 @@ class HandPassTests(HandReviewCase):
         self.assertEqual(self.remote(), f"refs/heads/fix/widget {sha}")
         self.assertEqual(owl_post.unfinished_afters(self.task["id"]), [])
 
+    def test_recovery_reads_the_after_record_again_under_the_lock(self):
+        self.opt_in()
+        self.post(1, "widget")
+        [owl_id] = owl_post.unfinished_handoffs(self.task["id"])
+        with self.fake_reviewer("PASS"), mock.patch.object(push, "_push_exact", side_effect=Killed("killed")), \
+                self.assertRaises(Killed):
+            review.review_build(self.conn, self.task["id"])
+        [record] = owl_post.unfinished_afters(self.task["id"])
+        # What a pass read before the review run by hand moved its record on to the push and was killed there.
+        stale = {**record, "owl_id": owl_id, "state": "hand", "step": None}
+        with mock.patch.object(push, "_push_exact", side_effect=AssertionError("pushed again")), \
+                mock.patch.object(gitops, "run_gh_pr", side_effect=AssertionError("gh ran again")):
+            [outcome] = review._auto_recover(self.conn, self.task, [stale], None)
+        self.assertTrue(outcome["outcome"].startswith("interrupted (push)"))
+        self.assertEqual([kind for kind, _ in self.told()], ["review.interrupted"])
+        self.assert_nothing_pushed()
+
     def test_a_hand_changes_killed_before_its_event_is_told_once_and_starts_nothing(self):
         self.post(1, "widget")
         with self.fake_reviewer("CHANGES"), mock.patch.object(review, "_after_hand_verdict", side_effect=Killed("k")), \

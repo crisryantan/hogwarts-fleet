@@ -1195,8 +1195,10 @@ def _pending_handoff(conn, task: dict, now: Optional[int]) -> tuple:
 
 
 def _auto_recover(conn, task: dict, afters: list, now: Optional[int]) -> Optional[list]:
-    """Finish what followed a verdict of the loop's own rounds that a kill cut off (afters, from
-    owl_post.unfinished_afters), under the task's review lock, or None while another review or a build run holds it.
+    """Finish what followed a verdict of the loop's own rounds, or of rounds run by hand, that a kill cut off (afters,
+    from owl_post.unfinished_afters, read again once the lock is held, so a record a review run by hand moved on
+    since is never acted on as it was), under the task's review lock, or None while another review or a build run
+    holds it.
     It never opens a round. A step that had not begun starts now, once, unless a newer round of the task has been
     opened since, which leaves the older verdict as history; one that had begun may or may not have
     happened, so it never runs again by itself and Ryan hears so, once (_interrupted)."""
@@ -1205,6 +1207,8 @@ def _auto_recover(conn, task: dict, afters: list, now: Optional[int]) -> Optiona
             lock_fd = held.enter_context(task_review_lock(task["id"]))
         except FleetError:
             return None
+        # Read again under the lock: a review run by hand moves its own record on under this lock, not the loop's.
+        afters = owl_post.unfinished_afters(task["id"])
         rows = capacity.review_rounds(conn, task["id"])
         rounds = {row["request_id"]: row for row in rows}
         order = {row["request_id"]: index for index, row in enumerate(rows)}

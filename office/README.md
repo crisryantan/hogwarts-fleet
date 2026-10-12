@@ -103,8 +103,8 @@ The store has none of these:
   reviews/<task>/                       review files and verify evidence, which no desk can write, what each review
                                         round was opened for (round-<request>.json), the review loop's record of
                                         each handoff (auto-<owl>.pending, .try<n>, .done) and of what follows each
-                                        verdict of its own rounds and each PASS you run by hand that pushes
-                                        (after-<request>.json), and each PR follow-up's threads file
+                                        verdict of its own rounds and of each round you run by hand, but a PR
+                                        follow-up's (after-<request>.json), and each PR follow-up's threads file
                                         (followup-<id>.md), which the castle copy is written from.
                                         Every TASK.md a verify read (task-md-<sha256>.md), and for your own sessions'
                                         tasks the digest fleet review own approved (task-md-approved). The closer's
