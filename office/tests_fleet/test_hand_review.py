@@ -280,3 +280,25 @@ class HandGoUpdatesTests(HandReviewCase):
         self.assertEqual(self.notified.call_args_list[-1][0][0],
                          f"{self.parent} / {self.task['id']}: review CHANGES, no fix round started because the review"
                          " was run by hand. Waiting on you: run fleet build for this build to start the fix round.")
+
+    def test_go_updates_say_a_hand_changes_killed_after_its_event_started_no_fix_round(self):
+        self.post(1, "widget")
+        real = owl_post.write_after
+
+        def killed(task_id, request_id, owl_id, state, step=None):
+            if state == "done":
+                raise Killed("killed")
+            return real(task_id, request_id, owl_id, state, step)
+
+        with self.fake_reviewer("CHANGES"), mock.patch.object(owl_post, "write_after", side_effect=killed), \
+                self.assertRaises(Killed):
+            review.review_build(self.conn, self.task["id"])
+        self.assertEqual(self.told(), [("review.fix-round", f"review:fix-round:{self.task['id']}:1")])
+        [record] = owl_post.unfinished_afters(self.task["id"])
+        self.assertEqual(record["state"], "hand")
+        self.assertIsNotNone(record["owl_id"])  # the checked handoff, which a finished record must not name
+        self.next_pass()  # the loop's recovery finishes its after record as a review run by hand
+        self.assertEqual(owl_post.unfinished_afters(self.task["id"]), [])
+        self.harry_runs.assert_not_called()
+        key, _ = go_watch.current(self.conn)[self.parent]
+        self.assertEqual((key["build"], key["state"]), (self.task["id"], "changes-hand"))

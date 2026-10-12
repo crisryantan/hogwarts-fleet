@@ -401,13 +401,22 @@ class TableTests(GoWatchCase):
         opened = self.round(build, SHAS[0], "CHANGES")
         self.told_fix_round(build)
         before = (self.folder() / go_watch.STATE).read_bytes()
-        for raw in (b"not json\n", b"[]\n", json.dumps({"state": "done", "owl_id": 7}).encode()):
+        whole = {"request_id": opened["request"]["id"], "owl_id": None, "state": "done", "step": None}
+        torn = [{"state": "done", "owl_id": None}, {**whole, "request_id": "rq_" + "0" * 16},
+                {**whole, "state": "later"}, {**whole, "owl_id": "not an owl"}, {**whole, "owl_id": 7},
+                {**whole, "step": "push"}, {**whole, "state": "acting"}, {**whole, "extra": 1}]
+        self.assertEqual((go_watch.AFTER_STATES, go_watch.AFTER_STEPS, go_watch.AFTER_MAX_BYTES),
+                         (owl_post.AFTER_STATES, owl_post.AFTER_STEPS, owl_post.AFTER_MAX_BYTES))
+        for raw in (b"not json\n", b"[]\n", *(json.dumps(data).encode() for data in torn)):
             with self.subTest(raw=raw):
                 self.after(build, opened, raw)
                 with self.assertRaisesRegex(FleetError, "after record"):
                     self.watch()
                 self.assertEqual((self.folder() / go_watch.STATE).read_bytes(), before)
                 self.assertEqual(len(self.lines()), 1)
+        self.after(build, opened, json.dumps(whole).encode())  # a whole record of a round run by hand
+        self.assertEqual(self.watch(), ["sent"])
+        self.assertEqual(self.kept()["tasks"][self.go]["state"], "changes-hand")
 
     def test_existing_state_text_and_order_are_unchanged(self):
         expected = {
@@ -919,6 +928,15 @@ class VerifyTests(GoWatchCase):
         self.round(build, SHAS[0])
         self.quiet()
         self.assertEqual(self.kept()["tasks"][self.go]["state"], "verify")
+
+    def test_verify_an_open_round_with_no_evidence_is_not_held_by_a_later_stop(self):
+        build = self.build_row
+        self.handoff(build)
+        self.expect("handoff", build)
+        self.round(build, SHAS[0])  # its verify finished before the round opened
+        self.write_file(self.office / config.STATE_DIR / config.STOP_FILE, "stop\n")
+        self.quiet()
+        self.assertEqual(self.kept()["tasks"][self.go]["state"], "handoff")
 
     def test_verify_stop_without_a_queued_handoff_keeps_the_existing_state(self):
         build = self.build_row

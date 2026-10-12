@@ -1235,11 +1235,14 @@ def _auto_recover(conn, task: dict, afters: list, now: Optional[int]) -> Optiona
 def _recover_after(conn, task: dict, record: dict, row: Optional[dict], lock_fd: int, now: Optional[int]) -> str:
     """One round's unfinished after record (see _auto_recover). row is the round, from capacity.review_rounds."""
     task_id, request_id, owl_id = task["id"], record["request_id"], record["owl_id"]
+    # A round run by hand is done naming no handoff, as _after_hand_verdict leaves it, so go updates never take it
+    # for the loop's own round.
+    done_owl = None if record["state"] == "hand" else owl_id
     later = None
     if record["state"] in ("review", "hand") and (row is None or not row["has_verdict"]):
         # Its review ended with no verdict (no live review holds this lock), so nothing follows it. Its handoff, if
         # still unfinished, gets its next try as any other.
-        owl_post.write_after(task_id, request_id, owl_id, "done")
+        owl_post.write_after(task_id, request_id, done_owl, "done")
         return "its round recorded no verdict, so nothing follows it"
     if row is not None and row["has_verdict"]:
         if owl_id is not None and owl_id in owl_post.unfinished_handoffs(task_id):
@@ -1248,14 +1251,14 @@ def _recover_after(conn, task: dict, record: dict, row: Optional[dict], lock_fd:
                                     f" {row['verdict']}")
         if _told(conn, task, record, row):
             # Ryan already heard how it ended, a failure before a push began included: nothing is tried again.
-            owl_post.write_after(task_id, request_id, owl_id, "done")
+            owl_post.write_after(task_id, request_id, done_owl, "done")
             return "its ending was already told"
         try:
             restore_publication(conn, task, row)
         except FleetError as exc:
             pensieve.add_event(conn, task["desk"], "review.unpublished", "headmaster", common.scrubbed_line(exc, 480),
                                task_id=task_id, dedupe_key=f"review:unpublished:{request_id}", now=now)
-            owl_post.write_after(task_id, request_id, owl_id, "done")
+            owl_post.write_after(task_id, request_id, done_owl, "done")
             return "stopped: its review could not be published"
         later = _later_round(conn, task_id, request_id)
         if later is None:
@@ -1264,7 +1267,7 @@ def _recover_after(conn, task: dict, record: dict, row: Optional[dict], lock_fd:
         # A review run by hand killed after its verdict, before what follows it had begun: finished as one run by
         # hand, once, unless a newer round has been opened since.
         if later is not None:
-            owl_post.write_after(task_id, request_id, owl_id, "done")
+            owl_post.write_after(task_id, request_id, done_owl, "done")
             return f"round {later['round']} was opened after it, so nothing follows its verdict"
         result = {"verdict": row["verdict"], "round": row["round"], "sha": row["sha"], "request_id": request_id,
                   "handoff_owl": owl_id}
@@ -1273,7 +1276,7 @@ def _recover_after(conn, task: dict, record: dict, row: Optional[dict], lock_fd:
         if later is not None:
             # A newer round was opened since, so this verdict is history: its review stays published, and nothing
             # follows it, neither the task's status, a fix round, a push nor a decision for Ryan.
-            owl_post.write_after(task_id, request_id, owl_id, "done")
+            owl_post.write_after(task_id, request_id, done_owl, "done")
             return f"round {later['round']} was opened after it, so nothing follows its verdict"
         # Nothing after the verdict had begun, so it starts now, once.
         result = {"verdict": row["verdict"], "round": row["round"], "sha": row["sha"], "request_id": request_id,
@@ -1283,7 +1286,7 @@ def _recover_after(conn, task: dict, record: dict, row: Optional[dict], lock_fd:
         # A follow-up's PASS: finished from the store's own state, which says what began, never twice.
         outcome = followup.resume_after_pass(conn, pensieve.get_task(conn, task_id), row, lock_fd, now, record)
         if followup.ended(conn, row["followup_id"]):
-            owl_post.write_after(task_id, request_id, owl_id, "done")
+            owl_post.write_after(task_id, request_id, done_owl, "done")
         return outcome
     return _interrupted(conn, task, record, row, now)
 

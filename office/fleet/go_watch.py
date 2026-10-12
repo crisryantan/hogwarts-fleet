@@ -7,17 +7,17 @@ changes what any run may do.
   from store fields: its newest build, the state from the fixed table below (task status, the build's PR binding and
   proven close, its live review round and that round's verdict, the newest result owl from its desk, Ollivander's held
   runs, and the loud events a state stands for), the round and verdict that state is about, and the id of the event
-  a state is made of (a go refusal, a tooling block, a refused round, McGonagall's escalation to Ryan). An
-  escalation (orchestrator.notify) on the go task or its build after the newest handoff, round, verdict and PR is a
-  waiting on you state, each its own key, so each one pings once. Four states are read from files. Verify's: once the
-  build's newest office evidence (reviews/<build>/evidence-<sha>.md, which no desk can write) ran at or after the
-  handoff its round is for, the key holds the counts of that evidence's structured head (its RAN, SUMMARY and
-  STOPPED lines, each exactly once), never its free text. Checks halted by the stop, or a queued verify held before
-  evidence exists, use their own fixed state. A handoff with no round yet says review running only
-  while the review loop holds it (the Owl Post's auto-<owl>.pending record in that folder, with no .done); else it
-  is handed off with no review started. And a CHANGES round whose newest run since its verdict died without doing
-  anything (run_desk.died_idle: the run's end record in the office runs folder, which no desk can write, and its
-  recorded usage) says the fix round died: retrying while auto-orchestrate is on and fewer than
+  a state is made of (a go refusal, a tooling block, a refused round, a hand-run CHANGES's fix-round event,
+  McGonagall's escalation to Ryan). An escalation (orchestrator.notify) on the go task or its build after the newest
+  handoff, round, verdict and PR is a waiting on you state, each its own key, so each one pings once. Four states
+  are read from files. Verify's: once the build's newest office evidence (reviews/<build>/evidence-<sha>.md, which
+  no desk can write) ran at or after the handoff its round is for, the key holds the counts of that evidence's
+  structured head (its RAN, SUMMARY and STOPPED lines, each exactly once), never its free text. Checks halted by the
+  stop, or a queued verify held before evidence exists, use their own fixed state. A handoff with no round yet says
+  review running only while the review loop holds it (the Owl Post's auto-<owl>.pending record in that folder, with
+  no .done); else it is handed off with no review started. And a CHANGES round whose newest run since its verdict
+  died without doing anything (run_desk.died_idle: the run's end record in the office runs folder, which no desk can
+  write, and its recorded usage) says the fix round died: retrying while auto-orchestrate is on and fewer than
   ORCHESTRATOR_DEAD_RUNS_IN_A_ROW of the build's newest runs in a row died that way, else waiting on you. A CHANGES
   round with no run since its verdict, told by its review.fix-round event, that the review loop did not open (no
   after-<request>.json in that folder naming the handoff it was for) was run by hand, so no fix round started: it
@@ -88,8 +88,11 @@ KEY_FIELDS = ("build", "state", "round", "verdict", "event")
 CHECKS = "checks"
 EVIDENCE_NAME = re.compile(r"evidence-([0-9a-f]{40})\.md")
 EVIDENCE_HEAD_BYTES = 1 << 17
-# The most a review round's after record holds (owl_post.AFTER_MAX_BYTES).
+# A review round's after record: the most it holds, its states and its steps (owl_post's, read here the same way).
 AFTER_MAX_BYTES = 1024
+AFTER_STATES = ("review", "hand", "acting", "done")
+AFTER_STEPS = ("fix-round", "push", "pr", "followup")
+AFTER_KEYS = {"request_id", "owl_id", "state", "step"}
 HEAD_RAN = re.compile(r"RAN (\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ) (?:under|without) .+")
 HEAD_SUMMARY = re.compile(r"SUMMARY (\d{1,4}) of (\d{1,4}) commands exited 0, (\d{1,4}) malformed checks not run,"
                           r" \d{1,4} observations for the reviewer")
@@ -232,7 +235,7 @@ def _loop_round(build_id: str, request_id: str) -> bool:
     """Whether the review loop opened this round: its after record (owl_post.AFTER_RECORD) in the build's office
     reviews folder, which no desk can write, names the handoff it was opened for. A round run by hand has none, or one
     in its own "hand" state, or one naming no handoff once it is done. Raises when that folder or record cannot be read
-    whole."""
+    whole, or any of its fields is not as owl_post writes it."""
     try:
         with safefs.opened_dir(config.OFFICE_ROOT, "reviews", build_id) as fd:
             raw = safefs.read_regular(fd, f"after-{ids.check('request', request_id)}.json", AFTER_MAX_BYTES,
@@ -243,8 +246,11 @@ def _loop_round(build_id: str, request_id: str) -> bool:
         data = common.strict_json(raw)
     except (UnicodeDecodeError, ValueError):
         data = None
-    if not isinstance(data, dict) or not isinstance(data.get("state"), str) \
-            or not isinstance(data.get("owl_id"), (str, type(None))):
+    if not isinstance(data, dict) or set(data) != AFTER_KEYS or data["request_id"] != request_id \
+            or data["state"] not in AFTER_STATES or (data["state"] == "acting") != (data["step"] in AFTER_STEPS) \
+            or (data["state"] != "acting" and data["step"] is not None) \
+            or not (data["owl_id"] is None or (isinstance(data["owl_id"], str)
+                                               and ids.PATTERNS["owl"].fullmatch(data["owl_id"]))):
         raise FleetError("an after record cannot be read whole")
     return data["state"] != "hand" and data["owl_id"] is not None
 
@@ -308,6 +314,8 @@ def _build_state(conn, go_id: str, build: dict, held: set) -> tuple:
         return _key(build_id, "draft-pr", round_no, latest["verdict"]), _link(pr)
     if not latest["has_verdict"]:  # its verify ran after the handoff and the round before it
         checks = _verified(build_id, max(handoff, live[-2]["created_at"] if len(live) > 1 else 0))
+        if checks is None:  # a round opens only once its verify has finished, so no stop holds that verify now
+            return _key(build_id, "handoff", round_no), None
         return _verify_key(build_id, round_no, checks), None
     verdict = latest["verdict"]
     if verdict == "PASS":
@@ -571,11 +579,11 @@ def _watch(conn, fd: int) -> list:
 
 
 def _claim_event(key: dict) -> bool:
-    """For a state made of a loud event (a refusal, a stop, an escalation to Ryan), claim that event's ping in
-    phone.deliver's folder: its ev-<id> marker, published create-exclusive as phone.deliver publishes it, so exactly
-    one of this line and the event's own ping goes, whichever claims it first. False only when phone.deliver sent
-    it; one it could not deliver lets the line try too. A state made of no event, or a folder that cannot be opened
-    (where phone.deliver cannot ping either), claims nothing and lets the line go."""
+    """For a state made of a loud event (a refusal, a stop, a hand-run CHANGES, an escalation to Ryan), claim that
+    event's ping in phone.deliver's folder: its ev-<id> marker, published create-exclusive as phone.deliver
+    publishes it, so exactly one of this line and the event's own ping goes, whichever claims it first. False only
+    when phone.deliver sent it; one it could not deliver lets the line try too. A state made of no event, or a
+    folder that cannot be opened (where phone.deliver cannot ping either), claims nothing and lets the line go."""
     if key["event"] is None:
         return True
     name = f"ev-{int(key['event'])}"
