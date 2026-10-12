@@ -114,11 +114,48 @@ class BlockedOnToolingTests(ToolingMixin, ChainCase):
     def test_a_reviewer_block_with_no_verdict_is_blocked_on_tooling(self):
         self.assert_blocked_then_reviewed(last="FOLLOW-UPS (not this PR)")
 
-    def test_tooling_blocked_every_try_tells_ryan_blocked_on_tooling_once(self):
-        with self.reviewer("BLOCKED-ON-TOOLING: Bash denied"):
+    def blocked_passes(self, *reasons: str) -> None:
+        """Post the handoff, then run one pass per later reason, each reviewer try declaring its reason."""
+        with self.reviewer(f"BLOCKED-ON-TOOLING: {reasons[0]}"):
             self.post(1, "widget one")
-            for _ in range(config.AUTO_REVIEW_MAX_TRIES):
+        for reason in reasons[1:]:
+            with self.reviewer(f"BLOCKED-ON-TOOLING: {reason}"):
                 self.next_pass()
+
+    def test_the_same_reason_twice_stops_after_try_two_with_one_event(self):
+        self.blocked_passes("Bash denied on try 1 for /tmp/a/b 1a2b3c4d5e", "bash  DENIED on try 2 for /var/x 9f8e7d6c5b")
+        outcomes = [result["outcome"] for result in self.reviews_run]
+        self.assertEqual(len(outcomes), 2)
+        self.assertTrue(outcomes[-1].startswith("BLOCKED-ON-TOOLING after 2 tries, so no reviewer judged it"), outcomes)
+        self.assertIn("it stopped early because the same cause repeated", outcomes[-1])
+        [event] = self.new_events()
+        self.assertEqual((event["kind"], event["verdict"]), ("review.blocked-on-tooling", "headmaster"))
+        self.assertEqual(owl_post.unfinished_handoffs(self.task["id"]), [])
+        with self.reviewer("BLOCKED-ON-TOOLING: Bash denied"):
+            self.next_pass()
+        self.assertEqual(self.reviews_run[-1]["outcome"], "no handoff of this task waits for its review")
+        self.assertEqual(len(self.new_events()), 1)  # still the one event: no try after it
+
+    def test_a_different_reason_on_try_two_keeps_all_the_tries(self):
+        self.blocked_passes("Bash denied", "the diff file is missing")
+        self.assertTrue(self.reviews_run[-1]["outcome"].startswith("waiting: BLOCKED-ON-TOOLING on try 2 of 3"))
+        self.assertEqual(self.new_events(), [])
+        with self.reviewer("BLOCKED-ON-TOOLING: the diff file is missing"):
+            self.next_pass()
+        self.assertTrue(self.reviews_run[-1]["outcome"].startswith("BLOCKED-ON-TOOLING after 3 tries, so no"))
+        self.assertNotIn("stopped early", self.reviews_run[-1]["outcome"])
+        self.assertEqual(len(self.new_events()), 1)
+
+    def test_a_first_block_still_waits(self):
+        self.blocked_passes("Bash denied")
+        self.assertTrue(self.reviews_run[-1]["outcome"].startswith("waiting: BLOCKED-ON-TOOLING on try 1 of 3"))
+        self.assertEqual(len(owl_post.unfinished_handoffs(self.task["id"])), 1)
+        self.assertEqual(self.new_events(), [])
+
+    def test_tooling_blocked_every_try_tells_ryan_blocked_on_tooling_once(self):
+        self.blocked_passes("Bash denied", "the diff file is missing", "git is not on the path")
+        with self.reviewer("BLOCKED-ON-TOOLING: git is not on the path"):
+            self.next_pass()
         outcomes = [result["outcome"] for result in self.reviews_run]
         # The pass after the last try only marks that try's round as followed by nothing.
         self.assertEqual(outcomes[-1], "no handoff of this task waits for its review")
@@ -126,7 +163,7 @@ class BlockedOnToolingTests(ToolingMixin, ChainCase):
                         outcomes)
         [event] = self.new_events()
         self.assertEqual(event["kind"], "review.blocked-on-tooling")
-        self.assertIn("the reviewer declared it could not gather its evidence: Bash denied", event["summary"])
+        self.assertIn("the reviewer declared it could not gather its evidence: git is not on the path", event["summary"])
         self.assertEqual(owl_post.unfinished_handoffs(self.task["id"]), [])
         self.assertEqual([row["counts"] for row in capacity.review_rounds(self.conn, self.task["id"])],
                          [False] * config.AUTO_REVIEW_MAX_TRIES)

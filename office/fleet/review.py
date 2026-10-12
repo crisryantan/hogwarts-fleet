@@ -108,7 +108,9 @@ needs no git of its own. A worktree git cannot read, a review input that cannot 
 non-zero, output with no REVIEW block or no VERDICT line, and a reviewer that declares BLOCKED-ON-TOOLING all raise
 ToolingBlocked: the round records no verdict and does not count. The review loop tries again on the Owl Post's next
 pass, within AUTO_REVIEW_MAX_TRIES, and then Ryan hears BLOCKED-ON-TOOLING with the reason, never a HEADMASTER or
-CHANGES decision. A worktree git cannot read (WorktreeGone) uses up no try: Ryan hears once the command that
+CHANGES decision. A try that blocks for the same reason as the try
+before it (_block_signature) ends the handoff there, with the same event, since a further try almost never gets
+past a cause that repeated. A worktree git cannot read (WorktreeGone) uses up no try: Ryan hears once the command that
 rebuilds it, and the handoff waits, up to AUTO_REVIEW_WAIT_LIMIT_SECONDS, for the next pass to find it back.
 
 Every round that runs records, before its reviewer starts, the sha256 of the TASK.md its verify read (verify keeps
@@ -1158,7 +1160,14 @@ def _auto_review(conn, task_id: str, now: Optional[int]) -> dict:
             owl_post.give_back_try(task_id, newest_id, tried)
             return _auto_blocked(conn, task, newest, exc, now)
         except ToolingBlocked as exc:
-            # No verdict, so the round does not count: the next pass tries again until the tries run out.
+            # No verdict, so the round does not count: the next pass tries again until the tries run out, unless the
+            # same cause blocked the try before this one, which a further try almost never gets past.
+            same = _same_block(task_id, newest_id, tried, exc.reason)
+            if same and tried < config.AUTO_REVIEW_MAX_TRIES:
+                return _auto_finish(conn, task, newest_id, f"{TOOLING} after {tried} tries, so no reviewer judged it:"
+                                    f" {exc.reason}; it stopped early because the same cause repeated; once that is"
+                                    f" sorted, fleet review {task_id} runs it", "headmaster", now,
+                                    kind="review.blocked-on-tooling")
             if tried >= config.AUTO_REVIEW_MAX_TRIES:
                 return _auto_finish(conn, task, newest_id, f"{TOOLING} after {tried} tries, so no reviewer judged it:"
                                     f" {exc.reason}; once that is sorted, fleet review {task_id} runs it", "headmaster",
@@ -1182,6 +1191,21 @@ def _auto_review(conn, task_id: str, now: Optional[int]) -> dict:
         after = _after_verdict(conn, task, result, lock_fd, now, checked_owl=newest_id)
     return {"task_id": task_id, "owl_id": newest_id, "outcome": f"reviewed: {result['verdict']}", "next": after,
             "review": result}
+
+
+def _block_signature(reason: str) -> str:
+    """A BLOCKED-ON-TOOLING reason with its noise taken out, to tell the same cause from a new one: lowercase, shas,
+    paths and digits collapsed, whitespace squeezed."""
+    text = re.sub(r"[0-9a-f]{7,64}\b", "#", reason.lower())
+    text = re.sub(r"\S*/\S*", "/", text)
+    return re.sub(r"\s+", " ", re.sub(r"\d+", "#", text)).strip()
+
+
+def _same_block(task_id: str, owl_id: str, tried: int, reason: str) -> bool:
+    """Keep this try's block, and say whether the try before it ended BLOCKED-ON-TOOLING for the same cause."""
+    signature = _block_signature(reason)
+    owl_post.note_block(task_id, owl_id, tried, signature)
+    return tried > 1 and owl_post.block_reason(task_id, owl_id, tried - 1) == signature
 
 
 def _pending_handoff(conn, task: dict, now: Optional[int]) -> tuple:

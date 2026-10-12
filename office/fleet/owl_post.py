@@ -414,6 +414,24 @@ def give_back_try(task_id: str, owl_id: str, number: int) -> None:
         os.unlink(f"auto-{ids.check('owl', owl_id)}.try{int(number)}", dir_fd=fd)
 
 
+def note_block(task_id: str, owl_id: str, number: int, reason: str) -> None:
+    """Keep the normalised reason try number of a handoff's automatic review ended BLOCKED-ON-TOOLING, so the next try
+    can tell the same cause came back."""
+    with _handoff_dir(task_id, create=True) as fd, contextlib.suppress(FileExistsError):
+        safefs.write_new(fd, f"auto-{ids.check('owl', owl_id)}.block{int(number)}",
+                         (common.one_line(reason, 480) + "\n").encode("ascii", "replace"))
+
+
+def block_reason(task_id: str, owl_id: str, number: int) -> Optional[str]:
+    """The normalised reason try number ended BLOCKED-ON-TOOLING, or None when it ended any other way."""
+    try:
+        with _handoff_dir(task_id) as fd:
+            raw = safefs.read_regular(fd, f"auto-{ids.check('owl', owl_id)}.block{int(number)}", 1024, "block record")
+    except (Missing, Unsafe):
+        return None
+    return raw.decode("ascii", "replace").strip()
+
+
 def write_after(task_id: str, request_id: str, owl_id: Optional[str], state: str, step: Optional[str] = None) -> None:
     """Record where the review loop is with what follows the verdict of its round request_id, opened for the handoff
     owl_id (None only when an unreadable record is finished). Written through a temp file and a rename."""
