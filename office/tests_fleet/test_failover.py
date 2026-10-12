@@ -4,6 +4,7 @@ and portrait callers never taking a run its CLI marked failed."""
 from __future__ import annotations
 
 import contextlib
+import copy
 import json
 import os
 import re
@@ -423,12 +424,13 @@ class RetryAndAuthTests(FailoverCase):
 class AuthMissTests(FailoverCase):
     """A fast Claude auth failure that used nothing is tried once more, under the same launch, before it tells anyone."""
 
-    MISS = lines([{"type": "system", "subtype": "init"},
-                  {"type": "assistant", "message": {"id": "m1", "content": [{"type": "text", "text": "Not logged in"}],
-                                                    "usage": {"input_tokens": 0, "output_tokens": 0}},
-                   "error": "authentication_failed"},
-                  {"type": "result", "is_error": True, "result": "Not logged in", "total_cost_usd": 0,
-                   "usage": {"input_tokens": 0, "output_tokens": 0, "cache_read_input_tokens": 0}, "modelUsage": {}}])
+    MISS_EVENTS = [{"type": "system", "subtype": "init"},
+                   {"type": "assistant", "message": {"id": "m1", "content": [{"type": "text", "text": "Not logged in"}],
+                                                     "usage": {"input_tokens": 0, "output_tokens": 0}},
+                    "error": "authentication_failed"},
+                   {"type": "result", "is_error": True, "result": "Not logged in", "total_cost_usd": 0,
+                    "usage": {"input_tokens": 0, "output_tokens": 0, "cache_read_input_tokens": 0}, "modelUsage": {}}]
+    MISS = lines(MISS_EVENTS)
     WORKED = lines([{"type": "result", "subtype": "success", "is_error": False, "result": "done",
                      "total_cost_usd": 0.1, "usage": {"input_tokens": 10, "output_tokens": 5}}])
 
@@ -449,6 +451,12 @@ class AuthMissTests(FailoverCase):
         with self.tries(*ends) as started:
             result = run_desk.run(self.conn, "ron", owl_id, now=now)
         return result, started
+
+    def miss(self, edit, array: bool = False) -> bytes:
+        """The sign-in miss's output with edit applied to a copy of its events, as stream-json or one JSON array."""
+        events = copy.deepcopy(self.MISS_EVENTS)
+        edit(events)
+        return json.dumps(events).encode("utf-8") if array else lines(events)
 
     def file(self, run_id: str, name: str) -> bytes:
         return (self.office / "runs" / "ron" / f"{run_id}{name}").read_bytes()
@@ -489,11 +497,19 @@ class AuthMissTests(FailoverCase):
                        {"type": "result", "subtype": "success", "is_error": True, "result": "Not logged in",
                         "api_error_status": 401, "total_cost_usd": 0.02, "usage": {"input_tokens": 40}}])
         no_result = lines([{"type": "assistant", "message": {"id": "m1"}, "error": "authentication_failed"}])
-        streamed = self.MISS.replace(b'"output_tokens": 0}}, "error"', b'"output_tokens": 7}}, "error"')
-        for label, output, limit in (("slow", self.MISS, 0), ("used tokens", spent, 3),
-                                     ("not auth", claude_failed(), 3), ("no result event", no_result, 3),
-                                     ("no usage reported", claude_failed(error="authentication_failed"), 3),
-                                     ("streamed tokens", streamed, 3)):
+        tokens = {"id": "m0", "usage": {"output_tokens": 9}}
+        cases = (("slow", self.MISS, 0), ("used tokens", spent, 3), ("not auth", claude_failed(), 3),
+                 ("no result event", no_result, 3),
+                 ("no usage reported", claude_failed(error="authentication_failed"), 3),
+                 ("streamed tokens", self.miss(lambda events: events[1]["message"].update(usage={"output_tokens": 7})),
+                  3),
+                 ("negative count", self.miss(lambda events: events[2]["usage"].update(input_tokens=-5)), 3),
+                 ("model usage", self.miss(lambda events: events[2].update(modelUsage={"m": {"outputTokens": 3}})), 3),
+                 ("an earlier message", self.miss(lambda events: events.insert(1, {"type": "assistant",
+                                                                                    "message": tokens})), 3),
+                 ("array form", self.miss(lambda events: events.insert(1, {"type": "assistant", "message": tokens}),
+                                          array=True), 3))
+        for label, output, limit in cases:
             with self.subTest(label), mock.patch.object(config, "AUTH_MISS_MAX_SECONDS", limit):
                 result, started = self.run_ron((output, 1))
                 self.assertEqual(started.call_count, 1)
@@ -513,6 +529,7 @@ class AuthMissTests(FailoverCase):
         def start(argv, **kwargs):
             starts.append(argv)
             if len(starts) == 2:
+                os.write(kwargs["stdout"], b'{"type": "system", "subtype": "init"}\n')  # wrote some, then failed
                 raise OSError("the retry could not start")
             return FakeChild(miss, argv, kwargs)
         with mock.patch.object(run_desk, "start_child", side_effect=start), self.assertRaises(OSError):

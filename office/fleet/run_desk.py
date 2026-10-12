@@ -2479,15 +2479,50 @@ def _auth_miss(run_fd: int, plan: dict, exit_code: int, seconds: float) -> bool:
     if plan["family"] != "claude" or seconds >= config.AUTH_MISS_MAX_SECONDS:
         return False
     output, whole, _, cap_source = _ended(run_fd, plan, exit_code)
-    result = claude_result(output)
     if not whole or cap_source is not None or _failure_class(plan, output, exit_code) != "auth":
         return False
-    # Nothing used, as the result event itself reports it: a missing or malformed count or cost is no proof.
-    counts, cost = result.get("usage"), result.get("total_cost_usd")
-    if not isinstance(counts, dict) or type(cost) not in (int, float) or cost != 0 \
-            or any(type(counts.get(key)) is not int for key in ("input_tokens", "output_tokens")):
-        return False
-    return _claude_counts(result) == (0, 0, 0) and _streamed_counts(output) == (0, 0, 0)
+    return _used_nothing(output)
+
+
+# The counts an auth miss's events must each report as exactly zero, wherever they appear.
+ZERO_USAGE_KEYS = ("input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")
+ZERO_MODEL_KEYS = ("inputTokens", "outputTokens", "cacheReadInputTokens", "cacheCreationInputTokens", "costUSD")
+
+
+def _zero(counts: object, keys: tuple, required: tuple = ()) -> bool:
+    """Whether counts is a dict with every required key, and every one of keys it has is a number exactly 0."""
+    return isinstance(counts, dict) and all(key in counts for key in required) \
+        and all(type(counts[key]) in (int, float) and counts[key] == 0 for key in keys if key in counts)
+
+
+def _used_nothing(raw: bytes) -> bool:
+    """Whether a Claude run's output proves it used nothing: a result event whose usage and cost say exactly zero,
+    every model in its modelUsage zero, and every assistant message that reports usage zero. A missing, malformed or
+    nonzero count anywhere is no proof. Read strictly, not through the tolerant accounting helpers."""
+    try:
+        data = json.loads(raw)
+        events = data if isinstance(data, list) else [data]
+    except (ValueError, RecursionError):
+        events = []
+        for line in raw.split(b"\n"):
+            with contextlib.suppress(ValueError, RecursionError):
+                events.append(json.loads(line))
+    results = 0
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+        if event.get("type") == "assistant":
+            message = event.get("message")
+            if isinstance(message, dict) and "usage" in message and not _zero(message["usage"], ZERO_USAGE_KEYS):
+                return False
+        elif event.get("type") == "result":
+            results += 1
+            models, cost = event.get("modelUsage", {}), event.get("total_cost_usd")
+            if not _zero(event.get("usage"), ZERO_USAGE_KEYS, ("input_tokens", "output_tokens")) \
+                    or type(cost) not in (int, float) or cost != 0 or not isinstance(models, dict) \
+                    or not all(_zero(model, ZERO_MODEL_KEYS) for model in models.values()):
+                return False
+    return results > 0
 
 
 def auth_miss_wait() -> None:
@@ -2517,7 +2552,8 @@ def _empty_run_files(out_fd: int, err_fd: int) -> None:
 
 def _put_back(run_fd: int, run_id: str, out_fd: int, err_fd: int) -> None:
     """Write a sign-in miss's kept output and errors back into the run's emptied files, for a retry that never
-    started, so every reader sees the run as its first try."""
+    started, so every reader sees the run as its first try. Emptied first, since the retry may have written some."""
+    _empty_run_files(out_fd, err_fd)
     for kind, fd, limit in (("out", out_fd, RUN_OUTPUT_MAX_BYTES), ("err", err_fd, config.RUN_ERROR_MAX_BYTES)):
         view = memoryview(safefs.read_regular(run_fd, f"{run_id}.auth-miss.{kind}", limit, "run output"))
         while view:
