@@ -136,6 +136,19 @@ class BlockedOnToolingTests(ToolingMixin, ChainCase):
         self.assertEqual(self.reviews_run[-1]["outcome"], "no handoff of this task waits for its review")
         self.assertEqual(len(self.new_events()), 1)  # still the one event: no try after it
 
+    def test_an_early_stop_cut_off_before_its_finish_is_finished_without_another_try(self):
+        with self.reviewer("BLOCKED-ON-TOOLING: Bash denied"):
+            self.post(1, "widget one")
+            with mock.patch.object(owl_post, "finish_handoff", side_effect=Killed("finish")), \
+                    self.assertRaises(Killed):
+                review.auto_review(self.conn, self.task["id"])
+        self.assertEqual(len(owl_post.unfinished_handoffs(self.task["id"])), 1)
+        with mock.patch.object(run_desk, "run", side_effect=AssertionError("a reviewer ran")):
+            self.next_pass()
+        self.assertEqual(owl_post.unfinished_handoffs(self.task["id"]), [])
+        self.assertIn("stopped early", self.reviews_run[-1]["outcome"])
+        self.assertEqual(len(self.new_events()), 1)
+
     def test_a_different_reason_on_try_two_keeps_all_the_tries(self):
         self.blocked_passes("Bash denied", "the diff file is missing")
         self.assertTrue(self.reviews_run[-1]["outcome"].startswith("waiting: BLOCKED-ON-TOOLING on try 2 of 3"))

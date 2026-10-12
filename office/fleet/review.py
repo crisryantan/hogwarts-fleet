@@ -1139,6 +1139,12 @@ def _auto_review(conn, task_id: str, now: Optional[int]) -> dict:
         newest_id = newest["id"]
         for owl_id in older:
             owl_post.finish_handoff(task_id, owl_id, "superseded by a newer handoff from the same desk")
+        repeated = _repeated_block(task_id, newest_id)
+        if repeated is not None:
+            # An early stop whose finish was cut off by a kill: finished now, the event already told.
+            return _auto_finish(conn, task, newest_id, f"{TOOLING} after the same cause repeated:"
+                                f" {repeated}; it stopped early; once that is sorted, fleet review {task_id} runs it",
+                                "headmaster", now, kind="review.blocked-on-tooling")
         tried = owl_post.take_try(task_id, newest_id)
         if tried is None:
             return _auto_finish(conn, task, newest_id, f"the automatic review stopped: it started"
@@ -1206,6 +1212,15 @@ def _same_block(task_id: str, owl_id: str, tried: int, reason: str) -> bool:
     signature = _block_signature(reason)
     owl_post.note_block(task_id, owl_id, tried, signature)
     return tried > 1 and owl_post.block_reason(task_id, owl_id, tried - 1) == signature
+
+
+def _repeated_block(task_id: str, owl_id: str) -> Optional[str]:
+    """The normalised reason two tries in a row ended BLOCKED-ON-TOOLING for, if any: that handoff is tried no more."""
+    for number in range(2, config.AUTO_REVIEW_MAX_TRIES):
+        reason = owl_post.block_reason(task_id, owl_id, number)
+        if reason is not None and reason == owl_post.block_reason(task_id, owl_id, number - 1):
+            return reason
+    return None
 
 
 def _pending_handoff(conn, task: dict, now: Optional[int]) -> tuple:
