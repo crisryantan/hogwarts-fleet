@@ -7,15 +7,18 @@ does. The outcome is the hook's reply and her context, or the confirmer's headma
 - close <task-id> closes a task exactly as Mischief managed <task-id> does (user_prompt_submit.close_confirmed), with
   its lines saying close: a task awaiting close (reviewed, dropped, or merged and proven) closes as complete with
   every open task under it, and one in flight is refused by name with its Fix line. For a go task, every open build
-  under it must await close, or the whole close is refused before anything closes; then each build closes through
-  that same close, its review tasks with it, and the go task moves on, on a build's proof (closer.advance_parents),
-  or else closes as superseded under its own review lock, since a go task holds no work of its own.
+  under it must await close and no review lock of one may be held, or the whole close is refused before anything
+  closes; then, with every build's lock held, each closes through that same close (close_locked), its review tasks
+  with it, and the go task moves on, on a build's proof (closer.advance_parents), or else closes as superseded under
+  its own review lock, since a go task holds no work of its own.
 - drop <task-id> closes a task that is not going to land as superseded, with every open task under it, as castle task
   close <task-id> --reason superseded does; a build's go task closes with it once nothing else is open under that go
-  task. Refused, with what to do next, while a review, a run or auto-close holds any of those tasks (their review
-  locks, taken without waiting and held through the drop), a run launched on one may still be going, or the review
-  loop holds one, so Ryan waits; and refused for a task with merged work at or under it, as far as the office knows (a
-  proven close, or auto-close's record of the merge commit), since a merged task is closed, not dropped.
+  task. Refused, with what to do next, while a review, a run or auto-close holds any of those tasks or the author
+  whose review round one of them is (their review locks, taken without waiting and held through the drop, with each
+  of their desks' launch locks, so no run launches on one meanwhile), a run launched on one may still be going, or
+  the review loop holds one, so Ryan waits; and refused for a task with merged work at or under it, as far as the
+  office knows (a proven close, or auto-close's record of the merge commit), since a merged task is closed, not
+  dropped.
 """
 from __future__ import annotations
 
@@ -132,20 +135,33 @@ def _next(conn, task_ids: list) -> list:
 
 
 def _close_go(conn, go_id: str, now: int) -> tuple:
-    """(lines, closed) for close <go task>: each open build closes through the hook's close, then the go task moves on
-    on a build's proof, or closes as superseded under its own review lock."""
+    """(lines, closed) for close <go task>: with every open build's review lock held, taken without waiting, and every
+    build read again under them, each closes through the hook's close (close_locked); then the go task moves on on a
+    build's proof, or closes as superseded under its own review lock. A held lock or a build in flight closes nothing."""
     refused = _go_refused(conn, go_id)
     if refused is not None:
         return refused, False
     builds, done = _builds(conn, go_id), []
-    for build in builds:
-        said = hook.close_confirmed(conn, build["id"], now, CLOSE)
-        if not said[0].startswith("Close:"):
-            closed = [f"- closed before it: {line}" for line in done]
-            return [f"Close of go task {go_id} stopped at its build {build['id']}, so the go task stays open."
-                    f" {said[0]}", *said[1:], *closed], False
-        done.append(f"build {build['id']} ({build['desk']}) closed as complete")
-        done += [line[2:] for line in said[1:] if line.startswith("- cascaded:")]
+    with contextlib.ExitStack() as locks:
+        for build in builds:
+            try:
+                locks.enter_context(run_desk.task_lock(build["id"]))
+            except safefs.Busy:
+                return [f"Close was not applied to {go_id}: a review, a run or auto-close is working on its build"
+                        f" {build['id']} right now, so nothing was closed.",
+                        f"Fix: type close {go_id} again once that ends; castle task show {build['id']} says where it"
+                        " is."], False
+        refused = _go_refused(conn, go_id)  # read again under the locks
+        if refused is not None:
+            return refused, False
+        for build in builds:
+            said = hook.close_locked(conn, build["id"], now, words=CLOSE)
+            if not said[0].startswith("Close:"):
+                closed = [f"- closed before it: {line}" for line in done]
+                return [f"Close of go task {go_id} stopped at its build {build['id']}, so the go task stays open."
+                        f" {said[0]}", *said[1:], *closed], False
+            done.append(f"build {build['id']} ({build['desk']}) closed as complete")
+            done += [line[2:] for line in said[1:] if line.startswith("- cascaded:")]
     how = "as complete, on a build's proof"
     if pensieve.get_task(conn, go_id)["status"] != "closed":
         closer.advance_parents(conn, now, only=go_id)
@@ -168,16 +184,18 @@ def _close_go(conn, go_id: str, now: int) -> tuple:
     return lines + _next(conn, [build["id"] for build in builds]), True
 
 
-def _held(conn, tasks: list, now: int) -> Optional[tuple]:
-    """(task id, why) for the first of the tasks a run, a review or the review loop is on, else None."""
+def _held(conn, tasks: list, guards: list, now: int) -> Optional[str]:
+    """Why a drop waits: a launch on one of the tasks that may still be running, or the review loop on one of the
+    guarded tasks (the tasks and the authors whose review rounds they are), else None."""
     since = now - config.RUNNING_WINDOW_SECONDS
     going = {row["task_id"] for row in capacity.list_launches(conn)
              if row["metric_id"] is None and row["launched_at"] > since}
     for task in tasks:
         if task["id"] in going:
-            return task["id"], f"{task['desk']} has a run going on {task['id']}"
-        if owl_post.auto_review_running(task["id"]):
-            return task["id"], f"the review loop is working on {task['id']}"
+            return f"{task['desk']} has a run going on {task['id']}"
+    for task_id in guards:
+        if owl_post.auto_review_running(task_id):
+            return f"the review loop is working on {task_id}"
     return None
 
 
@@ -197,20 +215,30 @@ def _drop(conn, task_id: str, now: int) -> tuple:
                 <= {task_id, *(row["id"] for row in under)}:
             parent = above
     tasks = [task, *under, *([parent] if parent else [])]
+    # A review holds its author task's review lock and loop lock, never its reviewer task's own, so a reviewer task
+    # is guarded by its author's too.
+    authors = [capacity.round_author(conn, row["id"]) for row in tasks]
+    guards = list(dict.fromkeys([row["id"] for row in tasks] + [author for author in authors if author]))
     try:
         with contextlib.ExitStack() as locks:
-            for row in tasks:
+            for guarded in guards:
                 try:
-                    locks.enter_context(run_desk.task_lock(row["id"]))
+                    locks.enter_context(run_desk.task_lock(guarded))
                 except safefs.Busy:
                     return [f"{DROP} was not applied to {task_id}: a review, a run or auto-close is working on"
-                            f" {row['id']} right now, so nothing was dropped.", _drop_fix(task_id)], False
+                            f" {guarded} right now, so nothing was dropped.", _drop_fix(task_id)], False
+            # Every desk's launch lock too, so no run on one of these tasks launches between the look below and the
+            # close: a launch checks its task is open and records its launch under that lock.
+            for desk in sorted({row["desk"] for row in tasks}):
+                if not locks.enter_context(run_desk.launch_lock_if_free(desk)):
+                    return [f"{DROP} was not applied to {task_id}: a run of {desk} is launching right now, so"
+                            " nothing was dropped.", _drop_fix(task_id)], False
             refused = _drop_checked(conn, task_id)  # read again under the locks: a merge auto-close just recorded
             if refused is not None:
                 return refused, False
-            held = _held(conn, tasks, now)
+            held = _held(conn, tasks, guards, now)
             if held is not None:
-                return [f"{DROP} was not applied to {task_id}: {held[1]}, so nothing was dropped.",
+                return [f"{DROP} was not applied to {task_id}: {held}, so nothing was dropped.",
                         _drop_fix(task_id)], False
             with db.transaction(conn):
                 locked = {row["id"] for row in tasks}

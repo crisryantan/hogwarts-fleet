@@ -77,6 +77,18 @@ class PlainCloseTests(CloseCase):
         self.assertEqual([self.status(task_id) for task_id in (ready["id"], live["id"], go_id)],
                          ["awaiting_close", "active", "queued"])
 
+    def test_close_of_a_go_task_with_a_build_held_by_a_review_closes_nothing(self):
+        go_id = self.go_task()
+        first = self.passed(parent=go_id, title="first")
+        second = self.passed(parent=go_id, title="second, held")
+        with run_desk.task_lock(second["id"]):
+            shown, _ = self.said(f"close {go_id}")
+        self.assertIn(f"Close was not applied to {go_id}: a review, a run or auto-close is working on its build"
+                      f" {second['id']} right now, so nothing was closed.", shown)
+        self.assertEqual([self.status(task_id) for task_id in (first["id"], second["id"], go_id)],
+                         ["awaiting_close", "awaiting_close", "queued"])
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM close_tokens").fetchone()[0], 0)
+
     def test_drop_closes_a_headmaster_build_with_its_go_task(self):
         go_id = self.go_task()
         build = self.built(parent=go_id, title="the decision is yours")
@@ -118,6 +130,19 @@ class PlainCloseTests(CloseCase):
         shown, _ = self.said(f"drop {build['id']}", prompt_id="5d0c9a3e-7777-4888-9999-0aaabbbccc12")
         self.assertIn(f"Drop was not applied to {build['id']}: harry has a run going on {build['id']}", shown)
         self.assertEqual([self.status(task_id) for task_id in (build["id"], go_id)], ["active", "queued"])
+
+    def test_drop_of_a_review_waits_for_its_author_and_a_launch_waits_too(self):
+        build = self.built(title="in review")
+        review = self.round(build)["task"]
+        with run_desk.task_lock(build["id"]):  # a review holds its author's lock, not its own task's
+            shown, _ = self.said(f"drop {review['id']}")
+        self.assertIn(f"Drop was not applied to {review['id']}: a review, a run or auto-close is working on"
+                      f" {build['id']} right now", shown)
+        with run_desk.launch_lock("harry"):
+            shown, _ = self.said(f"drop {build['id']}", prompt_id="5d0c9a3e-7777-4888-9999-0aaabbbccc16")
+        self.assertIn(f"Drop was not applied to {build['id']}: a run of harry is launching right now, so nothing was"
+                      " dropped.", shown)
+        self.assertEqual((self.status(build["id"]), self.status(review["id"])), ("active", "queued"))
 
     def test_drop_is_refused_for_a_merged_task_which_is_a_close(self):
         merged = self.passed(title="merged")
