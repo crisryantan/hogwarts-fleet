@@ -1125,6 +1125,12 @@ def _auto_review(conn, task_id: str, now: Optional[int]) -> dict:
         # Again under the lock, which a manual fleet build also takes: no run of the author may have begun since.
         if not _author_run_over(conn, task, now, wait=False):
             return _auto_wait(conn, task, newest, f"{task['desk']}'s run on it is still going", now)
+        repeated = _repeated_block(task_id, newest["id"])
+        if repeated is not None:
+            # An early stop whose finish was cut off by a kill: finished now, the event already told.
+            return _auto_finish(conn, task, newest["id"], f"{TOOLING} after the same cause repeated:"
+                                f" {repeated}; it stopped early; once that is sorted, fleet review {task_id} runs it",
+                                "headmaster", now, kind="review.blocked-on-tooling")
         gone = _worktree_gone(task)
         if gone is not None:
             # Before a try is taken: a dead worktree uses none up, and the next pass finds it once it is rebuilt.
@@ -1139,12 +1145,6 @@ def _auto_review(conn, task_id: str, now: Optional[int]) -> dict:
         newest_id = newest["id"]
         for owl_id in older:
             owl_post.finish_handoff(task_id, owl_id, "superseded by a newer handoff from the same desk")
-        repeated = _repeated_block(task_id, newest_id)
-        if repeated is not None:
-            # An early stop whose finish was cut off by a kill: finished now, the event already told.
-            return _auto_finish(conn, task, newest_id, f"{TOOLING} after the same cause repeated:"
-                                f" {repeated}; it stopped early; once that is sorted, fleet review {task_id} runs it",
-                                "headmaster", now, kind="review.blocked-on-tooling")
         tried = owl_post.take_try(task_id, newest_id)
         if tried is None:
             return _auto_finish(conn, task, newest_id, f"the automatic review stopped: it started"
