@@ -113,7 +113,7 @@ class BuildNoticeTests(GoCase):
         child = self.child()
         with mock.patch.object(run_desk, "spawn"):
             worktree.create(self.conn, child["id"], str(self.repo), BRANCH, fetch=False)
-        with on("darwin"):
+        with on("darwin"), mock.patch.object(adopt, "_has_terminal", return_value=True):
             adopt.adopt(self.conn, TASK_ID, lambda prompt: TASK_ID)
         self.assertEqual(pensieve.task_spec(self.conn, TASK_ID)["repo_dir"], str(self.repo))
 
