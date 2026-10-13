@@ -1337,6 +1337,26 @@ def kill_report_turn(pid: int) -> bool:
     return True
 
 
+def kill_chat_review_turn(pid: int) -> bool:
+    """Kill a chat review turn a killed launcher left running past its time, and its process group, only while pid
+    still runs Hermione's chat review command (her settings and its brief file). True when it was killed."""
+    command = report_turn_command(pid)
+    settings = f"{config.office_desk_dir(CHAT_REVIEW_DESK)}/{config.CLAUDE_SETTINGS_FILE}"
+    brief = f"{config.runs_dir()}/{CHAT_REVIEW_DESK}/chat-review-turn"
+    if not command.startswith(config.CLAUDE_BIN + " ") or settings not in command or brief not in command:
+        return False
+    try:
+        os.killpg(int(pid), signal.SIGKILL)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        try:
+            os.kill(int(pid), signal.SIGKILL)
+        except OSError:
+            return False
+    return True
+
+
 def run_report_turn(turn: ReportTurn, cwd: str, hand: tuple = (),
                     on_start: Optional[Callable[[int], None]] = None,
                     on_result: Optional[Callable[[dict], None]] = None) -> tuple:

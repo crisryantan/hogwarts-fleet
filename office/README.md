@@ -516,8 +516,9 @@ shell, in a fresh private folder that holds only the review input. The PR's titl
 between two marker lines with a random nonce, and her prompt names them as untrusted data. She never runs the PR's
 code. Her last block is read strictly, and anything else is a fixed "couldn't review" reply. Each person may ask for
 `CHAT_REVIEW_PER_PERSON_DAILY` reviews a cap day and the whole fleet `CHAT_REVIEW_DAILY`, counted before she starts,
-so a killed review counts. These caps are the bound on what chat reviews spend: at most `CHAT_REVIEW_DAILY` turns a
-day at her per-run budget, apart from her own desk caps.
+so a killed review counts. Each review is also one run of hers under her own daily run and spend caps, recorded with
+its cost like any other, so chat reviews spend at most `CHAT_REVIEW_DAILY` turns a day at her per-run budget, and
+never past her caps.
 
 While `~/.hogwarts/chat-review-github` holds `on` too, the review also goes on the PR with your `gh` login. Its event
 is always COMMENT, never an approval or a change request, so it can never count toward branch protection. It opens

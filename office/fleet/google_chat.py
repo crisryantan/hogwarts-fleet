@@ -9,7 +9,8 @@ APIs, with access tokens gcloud prints and nothing else:
   The service account has no key: you hold Token Creator on it, so only your own login can mint its tokens.
 gcloud runs by its absolute path (config.GCLOUD_BIN) with an environment of only HOME and PATH. A token lives only in
 this process's memory, for one call: it is never in argv, a log, a file or an error, and no error text a server or
-gcloud printed is kept. Requests go straight to the two Google hosts, with no proxy and certificates checked.
+gcloud printed is kept. Requests go straight to the two Google hosts, with no proxy, certificates checked and no
+redirect followed, so a bearer token never goes to any other host.
 
 Each Chat reply carries a request id the caller derives from its own record, so sending one again (after a kill, or a
 failed answer) gives back the message Chat already made instead of a second one.
@@ -95,9 +96,16 @@ def chat_token(service_account: str) -> str:
 # HTTPS
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Every redirect is refused (urllib then raises it as an HTTPError), since one would carry the bearer token on."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: D401 - urllib's own signature
+        return None
+
+
 def _opener() -> urllib.request.OpenerDirector:
-    """No proxy from anywhere, and certificates checked against the system's roots."""
-    return urllib.request.build_opener(urllib.request.ProxyHandler({}),
+    """No proxy from anywhere, no redirect followed, and certificates checked against the system's roots."""
+    return urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect(),
                                        urllib.request.HTTPSHandler(context=ssl.create_default_context()))
 
 

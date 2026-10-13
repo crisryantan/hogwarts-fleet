@@ -112,7 +112,12 @@ BRIEF = (
     " CHANGES when BLOCKING has a finding, and PASS when it has none. No other verdict exists here."
 )
 HEADER = re.compile(r"REVIEW PR ([A-Za-z0-9._-]{1,100}/[A-Za-z0-9._-]{1,100})#([1-9][0-9]{0,9}) @ ([0-9a-f]{40})")
-FINDING = re.compile(r"([BN])([1-9][0-9]?) (\S.*)")
+FINDING = re.compile(r"([BN])([1-9][0-9]?) (\S[^|]* \| \S.*)")
+# Google credentials the shared scrub has no shape for: OAuth access and refresh tokens, API keys, client secrets.
+GOOGLE_SECRET = re.compile(r"(?<![A-Za-z0-9_-])(?:ya29\.[A-Za-z0-9._-]{10,}|AIza[0-9A-Za-z_-]{30,}"
+                           r"|1//[0-9A-Za-z_-]{20,}|GOCSPX-[0-9A-Za-z_-]{10,})")
+# A turn still holding its PR's lock this long after it started outlived a killed launcher, and is killed.
+HUNG_AFTER_SECONDS = config.RUN_TIMEOUT_SECONDS + 300
 VERDICT = re.compile(r"VERDICT: (PASS|CHANGES)")
 
 
@@ -502,11 +507,17 @@ def _findings(lines: list, letter: str) -> list:
         match = FINDING.fullmatch(line)
         if match is None or match.group(1) != letter or int(match.group(2)) != expected:
             raise Unusable("a line in the block is not a finding in order")
-        cleaned = defanged(common.scrubbed_line(match.group(3), FINDING_MAX))
+        cleaned = defanged(scrubbed(match.group(3)))
         if not cleaned:
             raise Unusable("an empty finding")
         found.append(f"{letter}{expected} {cleaned}")
     return found
+
+
+def scrubbed(text: str) -> str:
+    """A finding with every credential shape out, the shared scrub's and Google's, before and after it is one line."""
+    once = common.scrubbed_line(GOOGLE_SECRET.sub("[token]", common.normalized(text)), FINDING_MAX)
+    return GOOGLE_SECRET.sub("[token]", once)
 
 
 def defanged(text: str) -> str:
@@ -546,15 +557,27 @@ def github_body(requester: str, sha: str, verdict: str, blocking: list, non_bloc
     return "\n".join(lines)[:GITHUB_BODY_MAX]
 
 
+def _record_usage(conn, run_id: str, model: str, result: dict, duration_ms: int) -> None:
+    """The turn's tokens and cost on its launch row, charged at its budget when it reported no cost."""
+    tokens_in, tokens_out, cache_read = run_desk._claude_counts(result)
+    capacity.record_launch_usage(conn, run_id, tokens_in, tokens_out, cache_read, _cost(result), duration_ms,
+                                 model=model, spend_unknown=_reported(result) is None)
+
+
 def _budget() -> float:
     return float(config.MAX_BUDGET_USD[DESK])
 
 
-def _cost(result: dict) -> float:
+def _reported(result: dict) -> Optional[float]:
     cost = result.get("total_cost_usd")
     if type(cost) in (int, float) and math.isfinite(cost) and 0 <= cost <= 1e6:
         return round(float(cost), 4)
-    return _budget()  # no cost reported: charged its budget, as a killed run is
+    return None
+
+
+def _cost(result: dict) -> float:
+    found = _reported(result)
+    return _budget() if found is None else found  # no cost reported: charged its budget, as a killed run is
 
 
 # One review
@@ -589,19 +612,35 @@ def review(conn, key: str, record: dict, pr_fd: int) -> dict:
     if diff is None:
         return finish(TOO_LARGE, "too-large", sha=sha)
     nonce = secrets.token_hex(16)
+    run_id = f"chat-{secrets.token_hex(8)}"
     found: dict = {}
     try:
-        with run_desk.desk_lock(DESK, wait=False) as slot, run_desk.launch_gate() as gate_fd:
+        with run_desk.desk_lock(DESK, wait=False) as slot, run_desk.launch_gate() as gate_fd, \
+                run_desk.run_lock(DESK, run_id) as own:
             turn = run_desk.chat_review_argv(conn, BRIEF, prompt_text(repo, number, sha, nonce), slot.index)
-            refusal = cap_refusal(requester, now, count=True)
-            if refusal is not None:
-                return finish(refusal, "capped", sha=sha)
-            record = _save(key, {**record, "state": "running", "sha": sha, "pid": os.getpid(), "started": now,
-                                 "cost_usd": _budget()})
+            model = turn.argv[turn.argv.index("--model") + 1]
+            with run_desk.launch_lock(DESK):
+                # Hermione's own daily caps hold too, and the turn counts toward them like any run of hers.
+                if run_desk.over_daily_cap(conn, DESK, now, launch_held=True) is not None:
+                    return finish(COULD_NOT, "desk-capped", sha=sha)
+                refusal = cap_refusal(requester, now, count=True)
+                if refusal is not None:
+                    return finish(refusal, "capped", sha=sha)
+                capacity.record_launch(conn, DESK, run_id, model, now=now)
+                own.keep = True  # until its usage is in: a killed launcher leaves it to reconcile_launches
+            record = _save(key, {**record, "state": "running", "sha": sha, "pid": None, "run_id": run_id,
+                                 "started": now, "cost_usd": _budget()})
             log("started", **_logged(key, record))
+
+            def started(pid: int) -> None:
+                _save(key, {**record, "pid": pid})
+
+            begun = time.monotonic()
             with _workdir(key, review_input(repo, number, pr, diff, nonce)) as folder:
-                outcome, text = run_desk.run_report_turn(turn, folder, (pr_fd, slot.fd, gate_fd),
-                                                         on_result=found.update)
+                outcome, text = run_desk.run_report_turn(turn, folder, (pr_fd, slot.fd, gate_fd, own.fd),
+                                                         on_start=started, on_result=found.update)
+            _record_usage(conn, run_id, model, found, int((time.monotonic() - begun) * 1000))
+            own.keep = False
     except safefs.Busy:
         raise Later("every Hermione run slot, or the caps lock, is busy") from None
     except run_desk.Stopped as exc:
@@ -690,6 +729,8 @@ def _send_reply(key: str, record: dict) -> dict:
     CHAT_REVIEW_REPLY_TRIES times. The record as it ends, or as it waits for the next pass."""
     if record.get("source") != "chat":  # by hand: the terminal had the answer, and no thread waits for one
         return _github_or_done(key, record) if record.get("kind") == "review" else _end(key, record, "done")
+    if not common.opt_in_on(config.CHAT_REVIEW_FILE):
+        return record  # switched off: it waits, unsent, until the intake is on again
     tries = int(record.get("reply_tries", 0))
     if tries >= config.CHAT_REVIEW_REPLY_TRIES:
         return _end(key, record, "reply-failed", replied=False)
@@ -786,6 +827,9 @@ def settle(conn, now: Optional[int] = None) -> list:
     done, reviews = [], 0
     for key, record in _records():
         state = record["state"]
+        if record.get("source") == "chat" and not common.opt_in_on(config.CHAT_REVIEW_FILE):
+            done.append("off")  # switched off part way through the pass: no Chat request moves on
+            continue
         try:
             if state == "reply":
                 done.append(_send_reply(key, record)["state"])
@@ -794,20 +838,43 @@ def settle(conn, now: Optional[int] = None) -> list:
             elif state == "queued" and record.get("source") != "chat":
                 if not _pr_busy(record["repo"], record["number"]):  # a hand run killed before its review began
                     done.append(_end(key, record, "interrupted")["state"])
-            elif state == "running" and not _pr_busy(record["repo"], record["number"]):
+            elif state == "running" and _pr_busy(record["repo"], record["number"]):
+                _reap_hung(key, record, now)
+            elif state == "running":
+                _clear_workdir(key)
                 record = _save(key, {**record, "state": "reply", "reply": COULD_NOT, "outcome": "interrupted"})
                 done.append(_send_reply(key, record)["state"])
             elif state == "queued" and now - int(record.get("at", 0)) > config.CHAT_REVIEW_QUEUE_MAX_SECONDS:
                 record = _save(key, {**record, "state": "reply", "reply": COULD_NOT, "outcome": "expired"})
                 done.append(_send_reply(key, record)["state"])
             elif state == "queued" and reviews < config.CHAT_REVIEW_PER_PASS:
-                reviews += 1
-                done.append(_run_queued(conn, key, record))
+                outcome = _run_queued(conn, key, record)
+                reviews += outcome != "queued"  # a request that waits uses up none of the pass
+                done.append(outcome)
         except (FleetError, StoreError, OSError, KeyError, TypeError, ValueError) as exc:
             # One request's trouble never stops the others; a record missing a field names only the field.
             why = common.scrubbed_line(exc, 200) if isinstance(exc, (FleetError, StoreError)) else type(exc).__name__
             log("step-failed", request=key[:12], state=state, why=why)
     return done
+
+
+def _reap_hung(key: str, record: dict, now: int) -> None:
+    """A turn whose launcher was killed and that still runs well past its time is killed, so its PR, Hermione's slot
+    and the update gate it holds come free; the next pass then answers its request."""
+    pid, started = record.get("pid"), record.get("started")
+    if type(pid) is int and pid > 1 and type(started) is int and now - started > HUNG_AFTER_SECONDS:
+        if run_desk.kill_chat_review_turn(pid):
+            log("killed-hung-turn", request=key[:12])
+
+
+def _clear_workdir(key: str) -> None:
+    """Remove the input folder a killed review left, so no PR text stays behind."""
+    with contextlib.suppress(FleetError, OSError):
+        root_fd = safefs.open_dir(config.CHAT_REVIEW_ROOT)
+        try:
+            _clear(root_fd, f"review-{key}")
+        finally:
+            os.close(root_fd)
 
 
 def _run_queued(conn, key: str, record: dict) -> str:
@@ -824,10 +891,11 @@ def _run_queued(conn, key: str, record: dict) -> str:
 
 
 def prune(now: Optional[int] = None) -> None:
-    """Drop ended request records, GitHub markers and caps files older than CHAT_REVIEW_KEEP_SECONDS."""
+    """Drop ended request records and caps files older than CHAT_REVIEW_KEEP_SECONDS. The GitHub markers stay, so a PR
+    and head commit is never posted twice however long ago it was."""
     now = int(time.time()) if now is None else now
     cutoff = now - config.CHAT_REVIEW_KEEP_SECONDS
-    for folder in (REQUESTS, GITHUB, CAPS):
+    for folder in (REQUESTS, CAPS):
         with _folder(folder) as fd:
             for name in os.listdir(fd):
                 if not name.endswith(".json"):
