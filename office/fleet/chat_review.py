@@ -112,7 +112,9 @@ BRIEF = (
     " CHANGES when BLOCKING has a finding, and PASS when it has none. No other verdict exists here."
 )
 HEADER = re.compile(r"REVIEW PR ([A-Za-z0-9._-]{1,100}/[A-Za-z0-9._-]{1,100})#([1-9][0-9]{0,9}) @ ([0-9a-f]{40})")
-FINDING = re.compile(r"([BN])([1-9][0-9]?) (\S[^|]* \| \S.*)")
+FINDING = re.compile(r"([BN])([1-9][0-9]?) (\S.*)")
+# The fields of a finding, split on |: a blocking one has its place, what breaks and the fix, a note its place and text.
+FIELDS = {"B": 3, "N": 2}
 # Google credentials the shared scrub has no shape for: OAuth access and refresh tokens, API keys, client secrets.
 GOOGLE_SECRET = re.compile(r"(?<![A-Za-z0-9_-])(?:ya29\.[A-Za-z0-9._-]{10,}|AIza[0-9A-Za-z_-]{30,}"
                            r"|1//[0-9A-Za-z_-]{20,}|GOCSPX-[0-9A-Za-z_-]{10,})")
@@ -507,6 +509,9 @@ def _findings(lines: list, letter: str) -> list:
         match = FINDING.fullmatch(line)
         if match is None or match.group(1) != letter or int(match.group(2)) != expected:
             raise Unusable("a line in the block is not a finding in order")
+        fields = [field.strip() for field in match.group(3).split("|")]
+        if len(fields) != FIELDS[letter] or not all(fields) or any(char.isspace() for char in fields[0]):
+            raise Unusable("a finding does not have its fields")
         cleaned = defanged(scrubbed(match.group(3)))
         if not cleaned:
             raise Unusable("an empty finding")
@@ -593,6 +598,8 @@ def review(conn, key: str, record: dict, pr_fd: int) -> dict:
     def finish(reply: str, outcome: str, **fields) -> dict:
         return {**record, **fields, "state": "reply", "reply": reply, "outcome": outcome}
 
+    if not intake_on(record):
+        raise Later("the chat review intake is off")
     if not run_desk.is_enabled(DESK):
         return finish(COULD_NOT, "desk-off")
     if run_desk.stop_requested():
@@ -617,9 +624,12 @@ def review(conn, key: str, record: dict, pr_fd: int) -> dict:
     try:
         with run_desk.desk_lock(DESK, wait=False) as slot, run_desk.launch_gate() as gate_fd, \
                 run_desk.run_lock(DESK, run_id) as own:
-            turn = run_desk.chat_review_argv(conn, BRIEF, prompt_text(repo, number, sha, nonce), slot.index)
+            turn = run_desk.chat_review_argv(conn, BRIEF, prompt_text(repo, number, sha, nonce), run_id)
             model = turn.argv[turn.argv.index("--model") + 1]
             with run_desk.launch_lock(DESK):
+                now = int(time.time())  # the cap day of the launch itself
+                if not intake_on(record):
+                    raise Later("the chat review intake was switched off")
                 # Hermione's own daily caps hold too, and the turn counts toward them like any run of hers.
                 if run_desk.over_daily_cap(conn, DESK, now, launch_held=True) is not None:
                     return finish(COULD_NOT, "desk-capped", sha=sha)
@@ -628,17 +638,13 @@ def review(conn, key: str, record: dict, pr_fd: int) -> dict:
                     return finish(refusal, "capped", sha=sha)
                 capacity.record_launch(conn, DESK, run_id, model, now=now)
                 own.keep = True  # until its usage is in: a killed launcher leaves it to reconcile_launches
-            record = _save(key, {**record, "state": "running", "sha": sha, "pid": None, "run_id": run_id,
-                                 "started": now, "cost_usd": _budget()})
+            record = _save(key, {**record, "state": "running", "sha": sha, "run_id": run_id, "started": now,
+                                 "cost_usd": _budget()})
             log("started", **_logged(key, record))
-
-            def started(pid: int) -> None:
-                _save(key, {**record, "pid": pid})
-
             begun = time.monotonic()
             with _workdir(key, review_input(repo, number, pr, diff, nonce)) as folder:
                 outcome, text = run_desk.run_report_turn(turn, folder, (pr_fd, slot.fd, gate_fd, own.fd),
-                                                         on_start=started, on_result=found.update)
+                                                         on_result=found.update)
             _record_usage(conn, run_id, model, found, int((time.monotonic() - begun) * 1000))
             own.keep = False
     except safefs.Busy:
@@ -670,12 +676,20 @@ def github_on() -> bool:
     return common.opt_in_on(config.CHAT_REVIEW_GITHUB_FILE)
 
 
+def intake_on(record: dict) -> bool:
+    """Whether a request may move on now: one from Chat only while the intake is on, read again before each step that
+    reaches outside the office; one by hand always."""
+    return record.get("source") != "chat" or common.opt_in_on(config.CHAT_REVIEW_FILE)
+
+
 def post_github(key: str, record: dict, poster: Callable = None) -> dict:
     """Post the review on the PR once per (PR, head commit), only while chat-review-github is on: a marker made
     create-exclusive first, so a second request, or this one after a kill, never posts it again. The record as it
     ends."""
     poster = poster or gitops.post_pr_review
     repo, number, sha = record["repo"], record["number"], record["sha"]
+    if not intake_on(record):
+        return record  # a Chat request waits, its GitHub step not begun, until the intake is on again
     if not github_on():
         return _end(key, record, "reviewed", github="off")
     name = _github_marker(repo, number, sha)
@@ -729,7 +743,7 @@ def _send_reply(key: str, record: dict) -> dict:
     CHAT_REVIEW_REPLY_TRIES times. The record as it ends, or as it waits for the next pass."""
     if record.get("source") != "chat":  # by hand: the terminal had the answer, and no thread waits for one
         return _github_or_done(key, record) if record.get("kind") == "review" else _end(key, record, "done")
-    if not common.opt_in_on(config.CHAT_REVIEW_FILE):
+    if not intake_on(record):
         return record  # switched off: it waits, unsent, until the intake is on again
     tries = int(record.get("reply_tries", 0))
     if tries >= config.CHAT_REVIEW_REPLY_TRIES:
@@ -737,6 +751,8 @@ def _send_reply(key: str, record: dict) -> dict:
     record = _save(key, {**record, "reply_tries": tries + 1})
     try:
         token = google_chat.chat_token(config.CHAT_REVIEW_SERVICE_ACCOUNT)
+        if not intake_on(record):  # switched off while gcloud ran: this try is not counted, and nothing is sent
+            return _save(key, {**record, "reply_tries": tries})
         google_chat.create_message(record["space"], record["thread"], record["reply"], f"chat-review-{key}", token)
     except FleetError as exc:
         log("reply-failed", request=key[:12], why=common.scrubbed_line(exc, 200))
@@ -806,6 +822,8 @@ def pull_once() -> list:
     """Pull, make each answerable message's record, and acknowledge every message handled or rejected."""
     project, subscription = config.CHAT_REVIEW_PROJECT, config.CHAT_REVIEW_SUBSCRIPTION
     token = google_chat.pull_token()
+    if not common.opt_in_on(config.CHAT_REVIEW_FILE):
+        return []  # switched off while gcloud ran: nothing is pulled
     received = google_chat.pull(project, subscription, token, config.CHAT_REVIEW_PULL_MAX)
     done, acks = [], []
     for message in received:
@@ -819,7 +837,7 @@ def pull_once() -> list:
     return done
 
 
-def settle(conn, now: Optional[int] = None) -> list:
+def settle(conn, now: Optional[int] = None, only_hand: bool = False) -> list:
     """Move every open request one step on, oldest first: a reply to send, a GitHub step a kill cut short, a review
     killed part way (its PR's lock free again), a queued request too old to run, and queued reviews, at most
     CHAT_REVIEW_PER_PASS of them. What happened to each."""
@@ -827,6 +845,8 @@ def settle(conn, now: Optional[int] = None) -> list:
     done, reviews = [], 0
     for key, record in _records():
         state = record["state"]
+        if only_hand and record.get("source") == "chat":
+            continue
         if record.get("source") == "chat" and not common.opt_in_on(config.CHAT_REVIEW_FILE):
             done.append("off")  # switched off part way through the pass: no Chat request moves on
             continue
@@ -861,9 +881,11 @@ def settle(conn, now: Optional[int] = None) -> list:
 def _reap_hung(key: str, record: dict, now: int) -> None:
     """A turn whose launcher was killed and that still runs well past its time is killed, so its PR, Hermione's slot
     and the update gate it holds come free; the next pass then answers its request."""
-    pid, started = record.get("pid"), record.get("started")
-    if type(pid) is int and pid > 1 and type(started) is int and now - started > HUNG_AFTER_SECONDS:
-        if run_desk.kill_chat_review_turn(pid):
+    run_id, started = record.get("run_id"), record.get("started")
+    if not isinstance(run_id, str) or type(started) is not int or now - started <= HUNG_AFTER_SECONDS:
+        return
+    for pid in run_desk.chat_review_turns(run_id):  # found by its own run id, so no other run is ever hit
+        if run_desk.kill_chat_review_turn(pid, run_id):
             log("killed-hung-turn", request=key[:12])
 
 
@@ -910,13 +932,34 @@ def prune(now: Optional[int] = None) -> None:
                     os.unlink(name, dir_fd=fd)
 
 
+def sweep_hand() -> None:
+    """Finish the runs by hand a kill left (a hung turn killed past its time, an interrupted one ended), whatever the
+    intake's switch and settings say: nothing here pulls or reaches Chat. Under the job's lock; skipped while it is
+    held, and when no request was ever recorded."""
+    try:
+        with safefs.opened_dir(config.OFFICE_ROOT, DIR, REQUESTS):
+            pass
+    except (FleetError, OSError):
+        return
+    with contextlib.ExitStack() as held:
+        locks_fd = held.enter_context(safefs.opened_dir(config.OFFICE_ROOT, "locks", create=True))
+        try:
+            held.enter_context(safefs.held_lock(locks_fd, JOB_LOCK, blocking=False))
+        except safefs.Busy:
+            return
+        settle(None, only_hand=True)
+
+
 def run_pass(conn_factory: Callable = common.connect) -> dict:
-    """One pass of the chat-review job. Off: nothing at all, not even a pull. On with a setting unfilled: refused,
-    naming each. Otherwise one pull, then every open request moved on, under the job's own lock."""
+    """One pass of the chat-review job. Off: no pull and no Chat call, only the runs by hand a kill left are finished
+    (sweep_hand). On with a setting unfilled: the same, then refused, naming each setting. Otherwise one pull, then
+    every open request moved on, under the job's own lock."""
     if not common.opt_in_on(config.CHAT_REVIEW_FILE):
+        sweep_hand()
         return {"state": "off"}
     problems = config_problems(intake=True)
     if problems:
+        sweep_hand()
         raise FleetError("the chat review intake cannot start: " + "; ".join(problems))
     with contextlib.ExitStack() as held:
         locks_fd = held.enter_context(safefs.opened_dir(config.OFFICE_ROOT, "locks", create=True))

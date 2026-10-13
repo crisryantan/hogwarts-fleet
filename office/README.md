@@ -44,6 +44,7 @@ The store has none of these:
   desks/<desk>/                         each desk's office folder: for a headless desk, BRIEF.md, role.json (its role card),
                                         and settings.json (Claude) or codex.toml (Codex)
   desks/<desk>/enabled                  a headless desk runs only while this plain file exists
+  desks/hermione/chat-review-settings.json  the locked-down settings of Hermione's chat review turns
   desks/<desk>/live-tools.json          for mcgonagall and snape: every tool their live herdr session may have, by exact name
   hogwarts/__init__.py                  version string
   hogwarts/errors.py                    error classes and exit codes
@@ -511,8 +512,9 @@ repo in `CHAT_REVIEW_REPOS`. Anything else gets one fixed help reply. The reques
 
 A review reads the PR with your `gh` login, read only: its metadata, then the diff of its base and head commits. A
 PR that is not open, or whose diff is over `CHAT_REVIEW_DIFF_MAX_BYTES`, gets a fixed reply. Hermione then runs
-headless as in her fleet reviews, under her own settings, model and budget, but with Read as her only tool and no
-shell, in a fresh private folder that holds only the review input. The PR's title, description and diff sit there
+headless as in her fleet reviews, with her model and budget, but with Read as her only tool and no shell, under
+`desks/hermione/chat-review-settings.json`, which allows no read beyond the working folder, no write and no network,
+in a fresh private folder that holds only the review input. The PR's title, description and diff sit there
 between two marker lines with a random nonce, and her prompt names them as untrusted data. She never runs the PR's
 code. Her last block is read strictly, and anything else is a fixed "couldn't review" reply. Each person may ask for
 `CHAT_REVIEW_PER_PERSON_DAILY` reviews a cap day and the whole fleet `CHAT_REVIEW_DAILY`, counted before she starts,

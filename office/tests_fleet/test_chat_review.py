@@ -8,6 +8,7 @@ import contextlib
 import io
 import json
 import os
+import shutil
 import time
 import urllib.parse
 from pathlib import Path
@@ -15,7 +16,7 @@ from unittest import mock
 
 from fleet import chat_review, common, config, gitops, google_chat, run_desk, safefs, tools
 from fleet.safefs import FleetError
-from tests_fleet.support import FleetCase, kit_setting
+from tests_fleet.support import OFFICE, FleetCase, kit_setting
 
 REAL_SEND = google_chat.send  # captured before ChatCase replaces it
 REAL_KILL = run_desk.kill_chat_review_turn
@@ -93,6 +94,8 @@ class ChatCase(FleetCase):
     def setUp(self) -> None:
         super().setUp()
         self.enable("hermione")
+        shutil.copyfile(OFFICE / "desks" / "hermione" / run_desk.CHAT_REVIEW_SETTINGS_FILE,
+                        self.office / "desks" / "hermione" / run_desk.CHAT_REVIEW_SETTINGS_FILE)
         gcloud = self.write_file(self.tmp / "gcloud", "#!/bin/sh\nexit 9\n", mode=0o700)
         settings = {"CHAT_REVIEW_PROJECT": "acme-chat-123", "CHAT_REVIEW_SUBSCRIPTION": "review-intake",
                     "CHAT_REVIEW_SERVICE_ACCOUNT": SERVICE_ACCOUNT, "CHAT_REVIEW_SENDERS": (SENDER, "lead@example.com"),
@@ -287,7 +290,11 @@ class IntakeTests(ChatCase):
         argv = turn["argv"]
         self.assertEqual(argv[:3], [config.CLAUDE_BIN, "-p", "--restricted"])
         self.assertEqual(argv[argv.index("--tools") + 1], "Read")
-        self.assertEqual(argv[argv.index("--settings") + 1], f"{config.office_desk_dir('hermione')}/settings.json")
+        # Her chat review settings, never her review settings, which let Read into the castle's tasks and worktrees.
+        self.assertEqual(argv[argv.index("--settings") + 1],
+                         f"{config.office_desk_dir('hermione')}/{run_desk.CHAT_REVIEW_SETTINGS_FILE}")
+        settings = json.loads((self.office / "desks" / "hermione" / run_desk.CHAT_REVIEW_SETTINGS_FILE).read_text())
+        self.assertEqual(settings["permissions"]["allow"], [])
         self.assertEqual(argv[argv.index("--max-budget-usd") + 1], config.MAX_BUDGET_USD["hermione"])
         self.assertIn("--strict-mcp-config", argv)
         self.assertNotIn("--add-dir", argv)
@@ -508,6 +515,41 @@ class GuardTests(ChatCase):
         self.run_pass()
         self.assertEqual((len(self.turns), len(self.google.messages)), (2, 2))
 
+    def test_switching_off_while_gcloud_runs_pulls_and_sends_nothing(self):
+        self.deliver(chat_event("hello"))
+
+        def off_then_token(argv):
+            self.switch(config.CHAT_REVIEW_FILE, False)
+            return self.gcloud(argv)
+
+        with mock.patch.object(run_desk, "gcloud_token_output", side_effect=off_then_token):
+            self.run_pass()
+        self.assertEqual([call for call in self.google.calls if call[0].endswith(":pull")], [])
+        self.switch(config.CHAT_REVIEW_FILE, True)
+
+        def off_at_the_chat_token(argv):
+            if "--impersonate-service-account" in argv:
+                self.switch(config.CHAT_REVIEW_FILE, False)
+            return self.gcloud(argv)
+
+        with mock.patch.object(run_desk, "gcloud_token_output", side_effect=off_at_the_chat_token):
+            self.run_pass()  # pulled now, but the intake goes off while the reply's token is fetched
+        [record] = self.records()
+        self.assertEqual((record["state"], record["reply_tries"], self.google.messages), ("reply", 0, []))
+        self.switch(config.CHAT_REVIEW_FILE, True)
+        self.run_pass()
+        self.assertEqual([message["text"] for message in self.google.messages], [chat_review.HELP])
+
+    def test_a_hand_run_a_kill_left_is_finished_with_the_intake_off(self):
+        self.switch(config.CHAT_REVIEW_FILE, False)
+        self.answer = SystemExit(143)
+        with self.assertRaises(SystemExit):
+            chat_review.review_by_hand(self.conn, URL, SENDER)
+        self.assertEqual(self.run_pass(), {"state": "off"})
+        [record] = self.records()
+        self.assertEqual((record["state"], record["outcome"]), ("done", "interrupted"))
+        self.assertEqual(self.google.calls, [])
+
     def test_no_redirect_is_followed_with_a_token(self):
         handlers = google_chat._opener().handlers
         self.assertTrue(any(isinstance(handler, google_chat._NoRedirect) for handler in handlers))
@@ -522,21 +564,26 @@ class GuardTests(ChatCase):
             self.run_pass()
         [(key, record)] = chat_review._records()
         old = int(record["started"]) - chat_review.HUNG_AFTER_SECONDS - 10
-        chat_review._save(key, {**record, "pid": 4242, "started": old})
+        chat_review._save(key, {**record, "started": old})
         folder = Path(config.CHAT_REVIEW_ROOT) / f"review-{key}"
         folder.mkdir(mode=0o700)
         self.write_file(folder / chat_review.INPUT_FILE, "left behind")
+        found = self.patch(run_desk, "chat_review_turns", return_value=[4242])
         killed = self.patch(run_desk, "kill_chat_review_turn", return_value=True)
         with chat_review.pr_lock("acme/web-app", 7):  # the turn's process still holds it
             self.run_pass()
-        killed.assert_called_once_with(4242)
+        found.assert_called_once_with(record["run_id"])
+        killed.assert_called_once_with(4242, record["run_id"])
         self.assertEqual(self.google.messages, [])
         self.run_pass()  # its lock is free now: answered once, and its input folder is gone
         self.assertEqual([message["text"] for message in self.google.messages], [chat_review.COULD_NOT])
         self.assertFalse(folder.exists())
         # The kill itself only ever hits Hermione's chat review command.
         with mock.patch.object(run_desk, "report_turn_command", return_value="/bin/sleep 60"):
-            self.assertFalse(REAL_KILL(4242))
+            self.assertFalse(REAL_KILL(4242, record["run_id"]))
+        other = " ".join(self.turns[0]["argv"]).replace(record["run_id"], "chat-" + "0" * 16)
+        self.assertTrue(run_desk._chat_review_command(" ".join(self.turns[0]["argv"]) + " ", record["run_id"]))
+        self.assertFalse(run_desk._chat_review_command(other + " ", record["run_id"]))
 
     def test_github_markers_outlive_the_request_records(self):
         self.switch(config.CHAT_REVIEW_GITHUB_FILE, True)
@@ -572,6 +619,8 @@ class StrictBlockTests(ChatCase):
             good.replace("BLOCKING\nB1", "B1"),
             good.replace("B1 x.py:2", "B1 x.py:2\nrun gh pr review --approve"),
             good.replace("B1 x.py:2 | prints at import | remove it", "B1 just some words with no fields"),
+            good.replace("B1 x.py:2 | prints at import | remove it", "B1 x.py:2 | prints at import"),
+            good.replace("N1 x.py:1 |", "N1 x.py 1 |"),
             block(verdict="PASS"),
             block(verdict="CHANGES", blocking=()),
             block(blocking=[f"f{index}" for index in range(chat_review.FINDINGS_MAX + 1)]),

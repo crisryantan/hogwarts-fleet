@@ -1193,26 +1193,33 @@ def owl_report_argv(brief: str, prompt: str, model: str = None, budget: str = No
 
 CHAT_REVIEW_DESK = "hermione"
 CHAT_REVIEW_TOOLS = "Read"
+# Her chat review turns run under this settings file in her office folder, not her review settings, which let Read
+# into the castle's tasks and worktrees: it allows nothing beyond the default reads of the working folder.
+CHAT_REVIEW_SETTINGS_FILE = "chat-review-settings.json"
+CHAT_RUN_ID = re.compile(r"chat-[0-9a-f]{16}")
 
 
-def chat_review_argv(conn, brief: str, prompt: str, slot: int) -> ReportTurn:
+def chat_review_argv(conn, brief: str, prompt: str, run_id: str) -> ReportTurn:
     """Hermione's chat review turn (fleet/chat_review.py), run like her fleet reviews but with Read as its only tool:
-    claude -p --restricted under her own checked settings (file tools confined to its working folder, which holds only
-    the review input), no MCP, her model (Ollivander's pick or her registry model) and effort, her per-run budget,
-    the fixed brief in runs/hermione/chat-review-turn.brief (.slot<n>.brief for slot n) for the run slot the caller
-    holds, the fixed prompt on stdin, and JSON output. The turn runs at most RUN_TIMEOUT_SECONDS. Gates first: no
-    stop, no CLI update, and her model not blocked (Stopped, Blocked)."""
+    claude -p --restricted (file tools confined to its working folder, which holds only the review input) under her
+    chat review settings, held to the report-only shape (check_report_settings: no allow rule, no write, no network,
+    no hooks), no MCP, her model (Ollivander's pick or her registry model) and effort, her per-run budget, the fixed
+    brief in runs/hermione/<run_id>.brief, so the run's own id is in its command line, the fixed prompt on stdin, and
+    JSON output. The turn runs at most RUN_TIMEOUT_SECONDS. Gates first: no stop, no CLI update, and her model not
+    blocked (Stopped, Blocked)."""
     desk = CHAT_REVIEW_DESK
-    check_claude_settings(_read_office(desk, config.CLAUDE_SETTINGS_FILE, config.SETTINGS_MAX_BYTES,
-                                       "desk settings"), desk)
+    check_report_settings(_read_office(desk, CHAT_REVIEW_SETTINGS_FILE, config.SETTINGS_MAX_BYTES,
+                                       "chat review settings"), desk)
+    if not isinstance(run_id, str) or CHAT_RUN_ID.fullmatch(run_id) is None:
+        raise FleetError("a chat review run id is chat- and 16 hex digits")
     choice = desk_choice(conn, desk)
     model = choice["model"] or pensieve.get_desk(conn, desk).get("model")
     if not model:
         raise FleetError("Hermione has no model in the registry")
     check_report_launch(conn, model)
-    name = brief_name("chat-review-turn", check_slot(slot))
+    name = brief_name(run_id)
     argv = [config.CLAUDE_BIN, "-p", "--restricted", "--settings",
-            f"{config.office_desk_dir(desk)}/{config.CLAUDE_SETTINGS_FILE}", "--strict-mcp-config",
+            f"{config.office_desk_dir(desk)}/{CHAT_REVIEW_SETTINGS_FILE}", "--strict-mcp-config",
             "--tools", CHAT_REVIEW_TOOLS, "--permission-mode", "dontAsk", "--model", model,
             *(("--effort", choice["effort"]) if choice["effort"] else ()),
             "--append-system-prompt-file", f"{config.runs_dir()}/{desk}/{name}", "--output-format", "json",
@@ -1231,11 +1238,12 @@ REPORT_KEYS = {"disableAllHooks", "permissions", "sandbox"}
 REPORT_PERMISSION_KEYS = {"allow", "deny", "disableBypassPermissionsMode"}
 
 
-def check_report_settings(raw: bytes) -> dict:
+def check_report_settings(raw: bytes, desk: str = config.HOOK_DESK) -> dict:
     """The report-only settings: a locked-down Claude desk's (check_claude_settings), and exactly this shape: an empty
     allow list, every required deny rule, every required protected path in the sandbox's denyRead, hooks off and none
-    set, no write allowed anywhere, no network, and no other key."""
-    data = check_claude_settings(raw, config.HOOK_DESK)
+    set, no write allowed anywhere, no network, and no other key. desk is whose they are: McGonagall's owl reports, or
+    Hermione's chat reviews."""
+    data = check_claude_settings(raw, desk)
     account_root = os.path.dirname(ids.OFFICE_ROOT)  # the real home the settings name, as required_deny_write uses
     if set(data) - REPORT_KEYS or data.get("disableAllHooks") is not True:
         raise FleetError("the owl report settings must set disableAllHooks and nothing but permissions and sandbox")
@@ -1337,13 +1345,36 @@ def kill_report_turn(pid: int) -> bool:
     return True
 
 
-def kill_chat_review_turn(pid: int) -> bool:
-    """Kill a chat review turn a killed launcher left running past its time, and its process group, only while pid
-    still runs Hermione's chat review command (her settings and its brief file). True when it was killed."""
-    command = report_turn_command(pid)
-    settings = f"{config.office_desk_dir(CHAT_REVIEW_DESK)}/{config.CLAUDE_SETTINGS_FILE}"
-    brief = f"{config.runs_dir()}/{CHAT_REVIEW_DESK}/chat-review-turn"
-    if not command.startswith(config.CLAUDE_BIN + " ") or settings not in command or brief not in command:
+def _chat_review_command(command: str, run_id: str) -> bool:
+    """Whether a command line is the chat review turn of that run: claude under her chat review settings, with that
+    run's own brief file, which no other run shares."""
+    settings = f"{config.office_desk_dir(CHAT_REVIEW_DESK)}/{CHAT_REVIEW_SETTINGS_FILE}"
+    brief = f"--append-system-prompt-file {config.runs_dir()}/{CHAT_REVIEW_DESK}/{brief_name(run_id)} "
+    return command.startswith(config.CLAUDE_BIN + " ") and f"--settings {settings} " in command and brief in command
+
+
+def chat_review_turns(run_id: str) -> list:
+    """The pids now running the chat review turn of run_id, read from the process list, so a turn is found even when
+    its launcher was killed before it kept the pid. [] when there is none or the list cannot be read."""
+    if not isinstance(run_id, str) or CHAT_RUN_ID.fullmatch(run_id) is None:
+        return []
+    try:
+        done = subprocess.run(["/bin/ps", "-A", "-o", "pid=,command="], env={}, stdin=subprocess.DEVNULL,
+                              capture_output=True, timeout=10, check=False, close_fds=True)
+    except (OSError, subprocess.SubprocessError):
+        return []
+    found = []
+    for line in done.stdout.decode("utf-8", "replace").splitlines() if done.returncode == 0 else []:
+        pid, _, command = line.strip().partition(" ")
+        if pid.isdigit() and int(pid) > 1 and _chat_review_command(command.strip() + " ", run_id):
+            found.append(int(pid))
+    return found
+
+
+def kill_chat_review_turn(pid: int, run_id: str) -> bool:
+    """Kill the chat review turn of run_id that a killed launcher left running past its time, and its process group,
+    only while pid still runs exactly that run's command. True when it was killed."""
+    if not _chat_review_command(report_turn_command(pid) + " ", run_id):
         return False
     try:
         os.killpg(int(pid), signal.SIGKILL)
