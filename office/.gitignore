@@ -6,3 +6,4 @@ backups/
 patrol/*
 !patrol/shadow
 loops/running.json
+chat-reviews/

@@ -155,10 +155,18 @@ ORCHESTRATOR_FILE = "auto-orchestrate"
 # While this office file holds "on", each change in where one of McGonagall's open go tasks stands is one line to Ryan
 # through the phone transports (fleet/go_watch.py). Off by default: echo on > ~/.hogwarts/auto-go-updates
 GO_UPDATES_FILE = "auto-go-updates"
+# Chat review requests (fleet/chat_review.py), off by default: while this office file holds "on", the chat-review job
+# fleet loops runs pulls the Chat app's Pub/Sub subscription each minute and Hermione reviews the GitHub PRs teammates
+# ask for there, replying in their Chat thread. Off, the job pulls nothing. echo on > ~/.hogwarts/chat-review
+CHAT_REVIEW_FILE = "chat-review"
+# While this second office file holds "on" too, each chat review is also posted on the PR as a review with your gh
+# login, always event COMMENT, at most once per PR and head commit. echo on > ~/.hogwarts/chat-review-github
+CHAT_REVIEW_GITHUB_FILE = "chat-review-github"
 # Every office opt-in file. common.opt_in_on reads only these names, so a typo never reads another office file as a
 # switch, every switch is read through that one reader, and a name not listed here always reads off.
 OPT_IN_FILES = (AUTO_DRAFT_PR_FILE, AUTO_PORTRAIT_FILE, PR_FOLLOWUP_FILE, AUTO_CLOSE_FILE, WORKTREE_CLEANUP_FILE,
-                OWL_REPORTS_FILE, CROSS_FAMILY_FAILOVER_FILE, ORCHESTRATOR_FILE, GO_UPDATES_FILE)
+                OWL_REPORTS_FILE, CROSS_FAMILY_FAILOVER_FILE, ORCHESTRATOR_FILE, GO_UPDATES_FILE, CHAT_REVIEW_FILE,
+                CHAT_REVIEW_GITHUB_FILE)
 # Review rounds of one follow-up, apart from the task's REVIEW_ROUND_CAP, and the follow-ups one task may take.
 FOLLOWUP_ROUND_CAP = 2
 FOLLOWUP_MAX_PER_TASK = 5
@@ -404,6 +412,37 @@ ORCHESTRATOR_LAND_WINDOW_SECONDS = 7 * 86400
 ORCHESTRATOR_KEEP_SECONDS = 14 * 86400
 # How much of an owl's body her context file carries, after it is scrubbed.
 ORCHESTRATOR_BODY_MAX = 4000
+# Chat review requests (fleet/chat_review.py, fleet/google_chat.py). A Google Chat app whose connection is Cloud
+# Pub/Sub: the chat-review job pulls the app's subscription with your own gcloud login and replies as the app through
+# the service account below, which it impersonates; no key file exists and nothing listens on the network. Your
+# private overlay fills the placeholders, and while any is unfilled the job refuses to start and says which.
+CHAT_REVIEW_PROJECT = "<gcp-project>"
+CHAT_REVIEW_SUBSCRIPTION = "<chat-review-subscription>"
+CHAT_REVIEW_SERVICE_ACCOUNT = "<chat-app-service-account>"
+# Only messages from these people (their Chat email) in these spaces (spaces/<id>) are read; any other is acked and
+# ignored without a reply. Only PRs of these repos (owner/name) are reviewed.
+CHAT_REVIEW_SENDERS: tuple = ("<allowed-sender-email>",)
+CHAT_REVIEW_SPACES: tuple = ("<allowed-chat-space>",)
+CHAT_REVIEW_REPOS: tuple = ("<allowed-repo>",)
+# Reviews per person and for the whole fleet in one cap day (CAP_RESET_UTC_SECONDS), counted before Hermione starts,
+# so a killed review counts. Each is one Hermione turn at her MAX_BUDGET_USD at most.
+CHAT_REVIEW_PER_PERSON_DAILY = 3
+CHAT_REVIEW_DAILY = 10
+GCLOUD_BIN = "/opt/homebrew/bin/gcloud"
+# Messages one pull takes, reviews one job pass runs, and how long a request may wait for a free Hermione run slot.
+CHAT_REVIEW_PULL_MAX = 10
+CHAT_REVIEW_PER_PASS = 2
+CHAT_REVIEW_QUEUE_MAX_SECONDS = 2 * 3600
+# A PR whose diff is larger than this is refused with a fixed reply, never reviewed in part.
+CHAT_REVIEW_DIFF_MAX_BYTES = 300_000
+# A Chat reply is sent at most this many times (each with the same request id, so Chat keeps one message).
+CHAT_REVIEW_REPLY_TRIES = 3
+# Hermione's chat review turn: Read only, her settings, her model and budget, and this much of its JSON output read.
+CHAT_REVIEW_OUTPUT_MAX_BYTES = 262144
+# Where each review's private folder is made: outside the office and the castle, so her Read may open it.
+CHAT_REVIEW_ROOT = "/Users/crisryantan/Library/Caches/hogwarts-chat-review"
+# Request records are kept this long after they end, so the owner can see who asked for what.
+CHAT_REVIEW_KEEP_SECONDS = 30 * 86400
 # Phone delivery (fleet/phone.py): the loud headmaster events go to Ryan off the machine, one ping each. The primary
 # transport is a command set only in the private overlay: an absolute argv, never holding a secret, that reads one JSON
 # payload on stdin and exits 0 once delivered. None, or a failure, falls back to the macOS notification.

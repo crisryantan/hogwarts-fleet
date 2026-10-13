@@ -36,7 +36,7 @@ The store has none of these:
 ~/.hogwarts                             mode 0700
   README.md                             this file
   .gitignore                            ignores state/, logs/, runs/, locks/, backups/, patrol/ except patrol/shadow,
-                                        and loops/running.json
+                                        loops/running.json and chat-reviews/
   bin/castle                            POSIX sh wrapper, mode 0700
   bin/fleet                             POSIX sh wrapper for the fleet command, mode 0700
   bin/hogwarts-spaces                   opens one herdr space per desk, after fleet/agent_gate.py checks the live ones
@@ -69,7 +69,9 @@ The store has none of these:
                                         model breaker and in-family fallback), orchestrator.py (McGonagall's typed
                                         next step), owl_report.py (her one-line owl reports), phone.py (loud events to
                                         the phone), scratchpad.py (keeps each scratchpad and task pad to its latest
-                                        Checkpoint, older ones archived) and their helpers
+                                        Checkpoint, older ones archived), chat_review.py (PR reviews teammates ask
+                                        for in Google Chat, and fleet review pr), google_chat.py (the Chat app's
+                                        Pub/Sub pull and its replies) and their helpers
   fleet/hooks/                          the castle's session hooks and the push gate, push_gate.py; stop.py is
                                         McGonagall's chat watch, which wakes her with a go task's line when it moves,
                                         in the session that typed its go (go_owners.py keeps which session watches
@@ -146,6 +148,14 @@ The store has none of these:
                                         that failed or timed out is woken once more on the next pass, and a fix
                                         round that died idle may be started again until 2 of the build's newest runs
                                         in a row died that way, after which it is yours (off when missing)
+  chat-review                           while it holds exactly "on", the chat-review job pulls the Chat app's Pub/Sub
+                                        subscription each minute and Hermione reviews the PRs teammates ask for there
+                                        (off when missing: nothing is pulled)
+  chat-review-github                    while it holds exactly "on" too, each chat review is also posted on its PR as a
+                                        COMMENT review with your gh login, once per PR and head commit (off when
+                                        missing)
+  chat-reviews/                         one record per chat review request (requests/), the once-per-head-commit
+                                        GitHub markers (github/) and each cap day's counts (caps/)
   patrol/shadow                         while it is here, the patrol and Gringotts only write files (shadow mode)
   patrol/<job>/                         the Map's snapshot and rows, lineups, keeper's watches, scoreboards, bot passes,
                                         and in shadow mode what a follow-up would have routed (patrol/followup/)
@@ -485,6 +495,70 @@ Each weeknight `fleet/portrait.py` exports the day into Dumbledore's inbox, scru
 `portrait show` lists each op as ready, applied, out of schema or refused by the store, which it learns by running the ops in a transaction it always rolls back, and prints the exact apply command with the file's sha256. `portrait apply` needs that hash, so the bytes you read are the bytes applied. It runs the chosen ops in patch order in one transaction through `facts.add_fact`, `facts.set_key`, `facts.supersede`, `facts.withdraw`, `pensieve.archive` and `pensieve.add_keypoint`, so one refusal applies none. An archive move is never carried out: it comes back under `for_you`. Each applied op is a routine `portrait.applied` event on the `portrait` desk with dedupe key `portrait:applied:<date>:<op id>`, so no op applies twice. Facts it writes carry the source `portrait:<date>:<op id>`, and key points the tag `portrait`. `portrait patches` lists the newest 30 with the ops each holds, those out of schema and those applied.
 
 Auto-portrait (`fleet/portrait_auto.py`) applies his additions for you while `~/.hogwarts/auto-portrait` holds exactly `on`, read through `fleet/common.py`'s `opt_in_on`, the one reader of every office switch. You switch it on with `echo on > ~/.hogwarts/auto-portrait` and off by removing the file with `rm ~/.hogwarts/auto-portrait`; the job reads it before his run and again just before anything applies, and a file missing at either read means nothing applies that night. The weeknight job takes every run slot he could have (`run_desk.all_slots_lock`, slots 0 to `RUN_SLOT_LIMIT - 1` whatever `RUN_SLOTS` says), reads the patch for the date (`absent`, `present` or `unreadable`), arms the night in `auto_patches` and runs him with those slots, which his process inherits. After a clean run, still under the slots, it reads the patch once more; only a patch that was absent before the run goes on, so a file another run of his wrote is never applied. It parses the patch and stores its snapshot, then applies from the store, never from the file again: one transaction re-reads the night, checks the stored ops against `check_op` and `AUTO_TYPES` (`fact_add` and `memory_note_add`), stops if you applied any op of the patch by hand, then runs each addition in its own savepoint, checking from whole rows before and after that it added exactly one current fact or key point and changed nothing else. Each applied op is a routine `portrait.auto-applied` event under the same dedupe key `portrait:applied:<date>:<op id>`, so both paths share one ledger. The night ends in that transaction with one headmaster `portrait.auto` event (dedupe key `portrait:auto:<date>`): what applied, what waits, and the exact apply command for the rest, or `castle portrait show <date>` when it does not fit in 500 characters. A night that stops after it was armed raises one headmaster `portrait.auto-stopped` event (dedupe key `portrait:auto-stopped:<date>:<attempt>`), scrubbed and without the sha256. A night whose switch is off, or whose stop file is in place, at the apply ends `off` with the usual `portrait.patch-ready` event. A clean run with no patch ends `done` with no event, and a run that failed, was refused or called a model blocked here only raises its own: its `rundesk.cap`, `rundesk.plan-limit`, `rundesk.blocked`, `rundesk.failed` or `rundesk.lock-wait` event ends the night `stopped` in the same transaction (`portrait_auto.Ending`, passed as `on_told` to `run_desk.run` and its notifiers, which `run_desk.tell_ending` calls before it writes the event), and once one event has ended the night no later one of that run is written. When the store refuses that transaction, neither is written and the night stays `armed` for the next job to tell. A clean run that called a model blocked here (`blocked_model` in its result) applies nothing; when its `rundesk.blocked` note could not be written, one `portrait.auto-stopped` event says so instead. A run Ollivander's stop or a CLI update kept from starting raises no event of its own, so it stops the night with one `portrait.auto-stopped` event. With the switch off, a night of the date an earlier killed attempt left `armed` ends `off` only in the transaction of the event that tells you of the rerun (`portrait_auto.off_ending`), or with none for a clean rerun with no patch. Each nightly job but `--export-only` first finishes the nights an earlier job left `armed` or `validated`, without reading the castle: an `armed` night whose run is over is closed with one `portrait.auto-stopped` event, or with none when its owl-keyed run event is already there, and a `validated` night is applied from its snapshot. `portrait show` and `portrait patches` print each night's state and outcome line, even after the file is gone or when it or the outbox cannot be read (the problem is printed beside the line), and `show` says when the file on disk is no longer the one the lane read.
+
+## Chat reviews
+
+Teammates ask the Hermione desk for a review of a GitHub PR from Google Chat, and get her verdict and findings in
+their thread. It runs on your Mac under `fleet loops` and only ever pulls: the Chat app's connection is Cloud Pub/Sub,
+and the chat-review job pulls the app's subscription with your own gcloud login, so nothing listens on the network.
+It uses no key file. Replies go out as the app through its service account, which your login impersonates.
+
+Anyone in your organisation's Chat can send the app text, so the job reads very little of it. A message counts only
+when its sender's email is in `CHAT_REVIEW_SENDERS` and its space is in `CHAT_REVIEW_SPACES`; any other message is
+acknowledged and ignored, with no reply and one scrubbed log line. The one request is a message whose text, once the
+app mention is out, is exactly `review https://github.com/<owner>/<repo>/pull/<n>` (the link may sit in `<>`), for a
+repo in `CHAT_REVIEW_REPOS`. Anything else gets one fixed help reply. The requester's own words never reach a model.
+
+A review reads the PR with your `gh` login, read only: its metadata, then the diff of its base and head commits. A
+PR that is not open, or whose diff is over `CHAT_REVIEW_DIFF_MAX_BYTES`, gets a fixed reply. Hermione then runs
+headless as in her fleet reviews, under her own settings, model and budget, but with Read as her only tool and no
+shell, in a fresh private folder that holds only the review input. The PR's title, description and diff sit there
+between two marker lines with a random nonce, and her prompt names them as untrusted data. She never runs the PR's
+code. Her last block is read strictly, and anything else is a fixed "couldn't review" reply. Each person may ask for
+`CHAT_REVIEW_PER_PERSON_DAILY` reviews a cap day and the whole fleet `CHAT_REVIEW_DAILY`, counted before she starts,
+so a killed review counts. These caps are the bound on what chat reviews spend: at most `CHAT_REVIEW_DAILY` turns a
+day at her per-run budget, apart from her own desk caps.
+
+While `~/.hogwarts/chat-review-github` holds `on` too, the review also goes on the PR with your `gh` login. Its event
+is always COMMENT, never an approval or a change request, so it can never count toward branch protection. It opens
+with a fixed line saying it is an automated review by the Hermione desk requested by the requester in Chat, naming
+them by their Chat email, and it is posted at most once per PR and head commit. Her findings are defanged before they are
+posted, so no mention or link markup in them survives in either place.
+
+Every request, its outcome and its cost is one JSON line in `logs/chat-review.log`, and its record stays in
+`chat-reviews/requests/` for 30 days. `fleet review pr <link> --requested-by <email>` runs the same review from your
+terminal, under the same caps, locks and GitHub switch, with no Chat reply.
+
+### Setting it up
+
+In Google Cloud, with an account that may administer the project:
+
+1. Pick or create a project, and turn on the Google Chat API and the Cloud Pub/Sub API.
+2. Create a Pub/Sub topic. Grant `chat-api-push@system.gserviceaccount.com` the Pub/Sub Publisher role on that topic,
+   and no one else, so only Chat can put events on it.
+3. Create a pull subscription on the topic. It has no push endpoint.
+4. Create a service account for the app, with no keys and no project roles. Grant your own account Service Account
+   Token Creator on that service account, and Pub/Sub Subscriber on the subscription.
+5. In the Chat API's configuration, name the app, let it join spaces, set its connection to Cloud Pub/Sub with the
+   topic's full name, and make it visible to named people first, before a wider group.
+6. Sign gcloud in as yourself with `gcloud auth login`, then check both tokens print:
+   `gcloud auth print-access-token` and
+   `gcloud auth print-access-token --impersonate-service-account=<service account> --scopes=https://www.googleapis.com/auth/chat.bot`.
+
+Then fill these in your private overlay of `fleet/config.py`; while any is a placeholder, the job refuses to start and
+says which:
+
+- `CHAT_REVIEW_PROJECT`: the project id.
+- `CHAT_REVIEW_SUBSCRIPTION`: the pull subscription's id.
+- `CHAT_REVIEW_SERVICE_ACCOUNT`: the app's service account email.
+- `CHAT_REVIEW_SENDERS`: the emails of the people who may ask.
+- `CHAT_REVIEW_SPACES`: the spaces it answers in, as `spaces/<id>` (the id is the last part of the space's link).
+- `CHAT_REVIEW_REPOS`: the repos it reviews, as `owner/name`.
+
+`CHAT_REVIEW_PER_PERSON_DAILY`, `CHAT_REVIEW_DAILY` and `GCLOUD_BIN` have working defaults. Run
+`sh scripts/loops-setup.sh`, which adds the chat-review job to `loops/jobs`, restart `fleet loops`, add the app to a
+space, and switch it on with `echo on > ~/.hogwarts/chat-review`. Once a few Chat replies read right, switch on the
+GitHub post with `echo on > ~/.hogwarts/chat-review-github`. `rm` either file switches it off again.
 
 ## Exit codes
 

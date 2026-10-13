@@ -1156,11 +1156,15 @@ def notifications_on() -> bool:
 
 class ReportTurn(NamedTuple):
     """One headless owl-report turn as owl_report_argv builds it: its argv, the name of its brief file (brief_name, in
-    the office runs folder of HOOK_DESK), the brief that file holds while it runs, and the prompt it gets on stdin."""
+    the office runs folder of desk, HOOK_DESK unless set), the brief that file holds while it runs, and the prompt it
+    gets on stdin. timeout and output_max replace the owl report's own when set (a chat review turn's)."""
     argv: list
     brief_name: str
     brief: str
     prompt: str
+    desk: str = config.HOOK_DESK
+    timeout: Optional[int] = None
+    output_max: Optional[int] = None
 
 
 def owl_report_argv(brief: str, prompt: str, model: str = None, budget: str = None,
@@ -1185,6 +1189,36 @@ def owl_report_argv(brief: str, prompt: str, model: str = None, budget: str = No
     if schema is not None:
         argv += ["--json-schema", schema]
     return ReportTurn(argv, name, brief, prompt)
+
+
+CHAT_REVIEW_DESK = "hermione"
+CHAT_REVIEW_TOOLS = "Read"
+
+
+def chat_review_argv(conn, brief: str, prompt: str, slot: int) -> ReportTurn:
+    """Hermione's chat review turn (fleet/chat_review.py), run like her fleet reviews but with Read as its only tool:
+    claude -p --restricted under her own checked settings (file tools confined to its working folder, which holds only
+    the review input), no MCP, her model (Ollivander's pick or her registry model) and effort, her per-run budget,
+    the fixed brief in runs/hermione/chat-review-turn.brief (.slot<n>.brief for slot n) for the run slot the caller
+    holds, the fixed prompt on stdin, and JSON output. The turn runs at most RUN_TIMEOUT_SECONDS. Gates first: no
+    stop, no CLI update, and her model not blocked (Stopped, Blocked)."""
+    desk = CHAT_REVIEW_DESK
+    check_claude_settings(_read_office(desk, config.CLAUDE_SETTINGS_FILE, config.SETTINGS_MAX_BYTES,
+                                       "desk settings"), desk)
+    choice = desk_choice(conn, desk)
+    model = choice["model"] or pensieve.get_desk(conn, desk).get("model")
+    if not model:
+        raise FleetError("Hermione has no model in the registry")
+    check_report_launch(conn, model)
+    name = brief_name("chat-review-turn", check_slot(slot))
+    argv = [config.CLAUDE_BIN, "-p", "--restricted", "--settings",
+            f"{config.office_desk_dir(desk)}/{config.CLAUDE_SETTINGS_FILE}", "--strict-mcp-config",
+            "--tools", CHAT_REVIEW_TOOLS, "--permission-mode", "dontAsk", "--model", model,
+            *(("--effort", choice["effort"]) if choice["effort"] else ()),
+            "--append-system-prompt-file", f"{config.runs_dir()}/{desk}/{name}", "--output-format", "json",
+            "--max-budget-usd", config.MAX_BUDGET_USD[desk]]
+    guard(argv)
+    return ReportTurn(argv, name, brief, prompt, desk, config.RUN_TIMEOUT_SECONDS, config.CHAT_REVIEW_OUTPUT_MAX_BYTES)
 
 
 # The exact shape the report-only settings must have. Anything broader is refused.
@@ -1245,6 +1279,35 @@ def check_report_launch(conn, model: str = None) -> None:
         raise Blocked(f"the headless turn model {name} is blocked here ({blocked}), so no turn runs")
 
 
+GCLOUD_TIMEOUT_SECONDS = 60
+GCLOUD_OUTPUT_MAX_BYTES = 16384
+
+
+def gcloud_env() -> dict:
+    """gcloud's whole environment: HOME, for its own login, and the fleet's fixed PATH."""
+    return {"HOME": config.USER_HOME_DIR, "PATH": config.CHILD_PATH}
+
+
+def gcloud_token_output(argv: list) -> tuple:
+    """(exit code, stdout) of gcloud printing one access token for a chat review (fleet/google_chat.py checks the
+    whole argv first): only gcloud auth print-access-token, by its absolute path, in the office, with an environment
+    of only HOME and PATH and nothing on stdin. stderr is never read, and stdout is cut at GCLOUD_OUTPUT_MAX_BYTES.
+    Tests replace this."""
+    if not isinstance(argv, list) or not argv or argv[0] != config.GCLOUD_BIN or not argv[0].startswith("/") \
+            or argv[1:3] != ["auth", "print-access-token"] or not all(isinstance(arg, str) for arg in argv):
+        raise FleetError("gcloud runs only to print an access token, by the absolute GCLOUD_BIN")
+    guard(argv)
+    try:
+        done = subprocess.run(argv, cwd=config.OFFICE_ROOT, env=gcloud_env(), stdin=subprocess.DEVNULL,
+                              stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=GCLOUD_TIMEOUT_SECONDS,
+                              check=False, close_fds=True)
+    except subprocess.TimeoutExpired:
+        raise FleetError("gcloud did not print an access token in time") from None
+    except OSError:
+        raise FleetError(f"gcloud is not at {config.GCLOUD_BIN}; set GCLOUD_BIN in fleet/config.py") from None
+    return done.returncode, done.stdout[:GCLOUD_OUTPUT_MAX_BYTES]
+
+
 def report_turn_command(pid: int) -> str:
     """The command line process pid runs now, or "" when there is none or it cannot be read."""
     try:
@@ -1275,7 +1338,8 @@ def kill_report_turn(pid: int) -> bool:
 
 
 def run_report_turn(turn: ReportTurn, cwd: str, hand: tuple = (),
-                    on_start: Optional[Callable[[int], None]] = None) -> tuple:
+                    on_start: Optional[Callable[[int], None]] = None,
+                    on_result: Optional[Callable[[dict], None]] = None) -> tuple:
     """(outcome, text) for one owl-report turn. outcome is "ok" with the result text, "auth" when claude could not
     sign in or bill, or "failed". Its brief file is written just before it starts and removed once it has ended, replacing one
     a killed caller left (the caller's lock, held here and inherited by the turn, means no earlier turn of its kind
@@ -1284,17 +1348,19 @@ def run_report_turn(turn: ReportTurn, cwd: str, hand: tuple = (),
     it comes, at most OWL_REPORT_OUTPUT_MAX_BYTES, and the process (a session of its own) is killed on overflow, at
     the timeout, or when this process is stopped. stderr is never read. hand holds the reporter's lock and the launch
     gate, handed to the child, so no other reporter starts and no CLI update runs while it lives, even if this process
-    dies first. on_start gets the child's pid as soon as it runs."""
-    with safefs.opened_dir(config.OFFICE_ROOT, "runs", config.HOOK_DESK, create=True) as run_fd:
+    dies first. on_start gets the child's pid as soon as it runs, and on_result the CLI's result event once its
+    whole output was read ({} when it had none), for its cost."""
+    with safefs.opened_dir(config.OFFICE_ROOT, "runs", turn.desk, create=True) as run_fd:
         drop_brief(run_fd, turn.brief_name)
         brief = write_brief(run_fd, turn.brief_name, turn.brief)
         try:
-            return _report_turn(turn, cwd, hand, on_start)
+            return _report_turn(turn, cwd, hand, on_start, on_result)
         finally:
             drop_brief(run_fd, brief)
 
 
-def _report_turn(turn: ReportTurn, cwd: str, hand: tuple, on_start: Optional[Callable[[int], None]]) -> tuple:
+def _report_turn(turn: ReportTurn, cwd: str, hand: tuple, on_start: Optional[Callable[[int], None]],
+                 on_result: Optional[Callable[[dict], None]] = None) -> tuple:
     for fd in hand:
         safefs.hand_over(fd)
     try:
@@ -1312,9 +1378,11 @@ def _report_turn(turn: ReportTurn, cwd: str, hand: tuple, on_start: Optional[Cal
             child.stdin.close()
             child.stdout.close()
             raise
-    chunks, total, deadline = [], 0, time.monotonic() + config.OWL_REPORT_TIMEOUT_SECONDS
+    timeout = turn.timeout or config.OWL_REPORT_TIMEOUT_SECONDS
+    output_max = turn.output_max or config.OWL_REPORT_OUTPUT_MAX_BYTES
+    chunks, total, deadline = [], 0, time.monotonic() + timeout
     try:
-        feed_stdin(child, turn.prompt.encode("utf-8"), min(STDIN_TIMEOUT_SECONDS, config.OWL_REPORT_TIMEOUT_SECONDS))
+        feed_stdin(child, turn.prompt.encode("utf-8"), min(STDIN_TIMEOUT_SECONDS, timeout))
         fd = child.stdout.fileno()
         while True:
             left = deadline - time.monotonic()
@@ -1327,7 +1395,7 @@ def _report_turn(turn: ReportTurn, cwd: str, hand: tuple, on_start: Optional[Cal
             if not chunk:
                 break
             total += len(chunk)
-            if total > config.OWL_REPORT_OUTPUT_MAX_BYTES:
+            if total > output_max:
                 return "failed", ""
             chunks.append(chunk)
         code = child.wait(timeout=max(1.0, deadline - time.monotonic()))
@@ -1345,6 +1413,8 @@ def _report_turn(turn: ReportTurn, cwd: str, hand: tuple, on_start: Optional[Cal
                 pass
         child.stdout.close()
     result = claude_result(b"".join(chunks))
+    if on_result is not None:
+        on_result(result)
     text = result.get("result") if isinstance(result.get("result"), str) else ""
     if "--json-schema" in turn.argv:
         text = _structured_text(b"".join(chunks), text)

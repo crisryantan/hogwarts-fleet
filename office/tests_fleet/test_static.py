@@ -77,6 +77,8 @@ KNOWN_FLAGS = {
     "--export-only",
     # the closer: the first-parent line of the fetched base, and the merged diff's stat in the judge's pack
     "--first-parent", "--stat",
+    # a chat review: gh api -H for the diff of a PR's commits, gcloud's impersonated Chat token, and fleet review pr
+    "-H", "--impersonate-service-account", "--scopes", "--requested-by",
 }
 # Modules whose flag-shaped constants describe commands they read and refuse, never ones they run.
 FLAG_TABLE_MODULES = {"push_gate.py"}
@@ -87,7 +89,7 @@ FLAG_TABLE_MODULES = {"push_gate.py"}
 PROCESS_MODULES_ALLOWED = {"run_desk.py": {"subprocess"}, "gitops.py": {"subprocess"}, "verify.py": {"subprocess"},
                            "ollivander.py": {"subprocess"}, "patrol.py": {"subprocess"}, "loops.py": {"subprocess"},
                            "phone.py": {"subprocess"}}
-PLISTS = ("owlpost", "map", "morning", "keeper", "scoreboard", "portrait", "gringotts", "ollivander")
+PLISTS = ("owlpost", "map", "morning", "keeper", "scoreboard", "portrait", "gringotts", "ollivander", "chat-review")
 REAL_OFFICE = "/Users/crisryantan/.hogwarts"
 REAL_CASTLE = "/Users/crisryantan/hogwarts"
 
@@ -112,13 +114,13 @@ def env_problems(source: str, temp_root_allowed: bool = False) -> list:
 
 
 OPT_IN_NAMES = ("auto-draft-pr", "auto-portrait", "pr-followup", "auto-close", "worktree-cleanup", "owl-reports",
-                "cross-family-failover", "auto-orchestrate", "auto-go-updates")
+                "cross-family-failover", "auto-orchestrate", "auto-go-updates", "chat-review", "chat-review-github")
 # An opt-in file named as a file: the whole string, or the last part of a path. The feature's name in a message
 # ("auto-portrait applied ...") is not a file name.
 OPT_IN_FILE_SHAPE = re.compile(r"(?:^|/)(?:" + "|".join(map(re.escape, OPT_IN_NAMES)) + r")/?$")
 OPT_IN_ATTRIBUTES = {"AUTO_DRAFT_PR_FILE", "AUTO_PORTRAIT_FILE", "PR_FOLLOWUP_FILE", "AUTO_CLOSE_FILE",
                      "WORKTREE_CLEANUP_FILE", "OWL_REPORTS_FILE", "CROSS_FAMILY_FAILOVER_FILE", "ORCHESTRATOR_FILE",
-                     "GO_UPDATES_FILE", "OPT_IN_FILES"}
+                     "GO_UPDATES_FILE", "CHAT_REVIEW_FILE", "CHAT_REVIEW_GITHUB_FILE", "OPT_IN_FILES"}
 
 
 def _docstrings(tree: ast.AST) -> set:
@@ -221,7 +223,8 @@ class OptInTests(unittest.TestCase):
                                                     config.PR_FOLLOWUP_FILE, config.AUTO_CLOSE_FILE,
                                                     config.WORKTREE_CLEANUP_FILE, config.OWL_REPORTS_FILE,
                                                     config.CROSS_FAMILY_FAILOVER_FILE, config.ORCHESTRATOR_FILE,
-                                                    config.GO_UPDATES_FILE})
+                                                    config.GO_UPDATES_FILE, config.CHAT_REVIEW_FILE,
+                                                    config.CHAT_REVIEW_GITHUB_FILE})
         self.assertEqual(len(config.OPT_IN_FILES), len(set(config.OPT_IN_FILES)))
         self.assertEqual(set(OPT_IN_NAMES), set(config.OPT_IN_FILES))
         self.assertIn(FLEET / "hooks" / "session_start.py", SOURCES)
@@ -300,9 +303,10 @@ class ProcessTests(unittest.TestCase):
                 else:
                     self.assertEqual((sorted(modules), calls), ([], []))
 
-    def test_only_gitops_writes_to_github_in_three_shapes(self):
+    def test_only_gitops_writes_to_github_in_four_shapes(self):
         # A gh command that writes is built only in gitops, from its fixed shapes: no other fleet module names a gh
-        # write method or the draft PR command, and followup.py, which posts the replies, starts no process at all.
+        # write method or the draft PR command, and followup.py and chat_review.py, which post the replies and the
+        # chat review, start no process at all.
         writes = {"--method", "--input", "--draft", "--body-file", "POST", "PATCH", "PUT", "DELETE"}
         for path in SOURCES:
             if path.name == "gitops.py":
@@ -311,8 +315,9 @@ class ProcessTests(unittest.TestCase):
                          if isinstance(node, ast.Constant) and isinstance(node.value, str)}
             with self.subTest(path=path.name):
                 self.assertEqual(constants & writes, set())
-        self.assertNotIn("followup.py", PROCESS_MODULES_ALLOWED)
-        self.assertEqual(imported_modules(ast.parse((FLEET / "followup.py").read_text())) & PROCESS_MODULES, set())
+        for name in ("followup.py", "chat_review.py", "google_chat.py"):
+            self.assertNotIn(name, PROCESS_MODULES_ALLOWED)
+            self.assertEqual(imported_modules(ast.parse((FLEET / name).read_text())) & PROCESS_MODULES, set())
 
     def test_no_process_module_uses_a_shell_keyword(self):
         for path in [FLEET / name for name in PROCESS_MODULES_ALLOWED] + [RUNNER]:

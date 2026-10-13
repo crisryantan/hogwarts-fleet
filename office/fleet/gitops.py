@@ -13,9 +13,11 @@ the worktree and review scripts. They name the repo folder (a main checkout or a
 checkout's .git folder, the branch and base.
 
 This module and run_desk are the only fleet modules that start git or a desk. This module also runs the only gh
-commands that write to GitHub, three shapes held exactly by one guard (check_write_argv): gh pr create --draft for the
-review loop's automatic draft PR (open_draft_pr), and for a PR follow-up's replies, gh api --method POST to reply in a
-review thread (post_reply) or to comment on the PR (post_pr_comment). Each runs in the office with a fixed environment
+commands that write to GitHub, four shapes held exactly by one guard (check_write_argv): gh pr create --draft for the
+review loop's automatic draft PR (open_draft_pr), for a PR follow-up's replies, gh api --method POST to reply in a
+review thread (post_reply) or to comment on the PR (post_pr_comment), and for a chat review, gh api --method POST of
+one PR review whose event is always COMMENT, never an approval or a change request (post_pr_review). The chat review's
+reads of a PR are two fixed gh api GET shapes (check_read_argv). Each runs in the office with a fixed environment
 and its text on stdin, never in a worktree, so no file a desk wrote can steer it, and nothing gh prints about a login
 reaches an event. Nothing here resolves a thread, requests a review, marks a PR ready or merges: no such shape passes
 the guard. An answer that does not say for sure whether a comment was posted raises Uncertain, so the caller reads
@@ -60,6 +62,13 @@ _REPO_PART = r"([A-Za-z0-9._-]{1,100}/[A-Za-z0-9._-]{1,100})"
 REPLY_PATH = re.compile(_REPO_PART + r"/pulls/([1-9][0-9]{0,9})/comments/([1-9][0-9]{0,19})/replies")
 PR_COMMENT_PATH = re.compile(_REPO_PART + r"/issues/([1-9][0-9]{0,9})/comments")
 COMMENT_ID = re.compile(r"[1-9][0-9]{0,19}")
+# A chat review's one write shape: a PR review, always event COMMENT, at one head commit.
+PR_REVIEW_PATH = re.compile(_REPO_PART + r"/pulls/([1-9][0-9]{0,9})/reviews")
+REVIEW_EVENT = "COMMENT"
+# A chat review's two reads: a PR's metadata, and the diff of its base and head commits.
+PR_READ_PATH = re.compile(_REPO_PART + r"/pulls/([1-9][0-9]{0,9})")
+COMPARE_PATH = re.compile(_REPO_PART + r"/compare/([0-9a-f]{40})\.\.\.([0-9a-f]{40})")
+DIFF_ACCEPT = "Accept: application/vnd.github.v3.diff"
 # gh api says (HTTP 4xx) when GitHub answered with a refusal, so nothing was posted.
 GH_HTTP_REFUSED = re.compile(r"\(HTTP 4[0-9]{2}\)")
 GH_LOGIN = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})")
@@ -418,10 +427,11 @@ def pr_comment_argv(repo: str, number: int) -> list:
 
 
 def check_write_argv(argv: object, repo: Optional[str] = None) -> str:
-    """The one guard on every gh command that writes to GitHub: the draft PR, a reply in a review thread, or a PR
-    comment, each rebuilt from its parts and compared whole, and, when repo is given, aimed at that repo only. Which
-    one it is ("draft-pr", "reply" or "pr-comment"), or a FleetError for anything else: a ready or merged PR, a
-    resolved thread, a review request, a mutation, another method, another repo, another path or an extra flag."""
+    """The one guard on every gh command that writes to GitHub: the draft PR, a reply in a review thread, a PR
+    comment or a chat review's PR review, each rebuilt from its parts and compared whole, and, when repo is given,
+    aimed at that repo only. Which one it is ("draft-pr", "reply", "pr-comment" or "pr-review"), or a FleetError for
+    anything else: a ready or merged PR, a resolved thread, a review request, a mutation, another method, another
+    repo, another path or an extra flag. A PR review's event is fixed by post_pr_review, never by its caller."""
     if isinstance(argv, list) and argv[:4] == [config.GH_BIN, "pr", "create", "--draft"]:
         check_draft_pr_argv(argv)
         if repo is not None and argv[5].lower() != repo.lower():
@@ -429,7 +439,7 @@ def check_write_argv(argv: object, repo: Optional[str] = None) -> str:
         return "draft-pr"
     if not isinstance(argv, list) or len(argv) != 7 or argv[:4] != [config.GH_BIN, "api", "--method", "POST"] \
             or argv[5:] != ["--input", "-"] or not isinstance(argv[4], str):
-        raise FleetError("the fleet writes to GitHub only with its three fixed gh commands")
+        raise FleetError("the fleet writes to GitHub only with its four fixed gh commands")
     path = argv[4]
     if path.startswith("repos/"):
         found = None
@@ -439,11 +449,21 @@ def check_write_argv(argv: object, repo: Optional[str] = None) -> str:
         comment = PR_COMMENT_PATH.fullmatch(path[len("repos/"):])
         if comment is not None and pr_comment_argv(comment.group(1), int(comment.group(2))) == argv:
             found = ("pr-comment", comment.group(1))
+        review = PR_REVIEW_PATH.fullmatch(path[len("repos/"):])
+        if review is not None and pr_review_argv(review.group(1), int(review.group(2))) == argv:
+            found = ("pr-review", review.group(1))
         if found is not None:
             if repo is not None and found[1].lower() != repo.lower():
                 raise FleetError("the fleet writes to GitHub only on the repo it was asked to")
             return found[0]
-    raise FleetError("the fleet writes to GitHub only with its three fixed gh commands")
+    raise FleetError("the fleet writes to GitHub only with its four fixed gh commands")
+
+
+def pr_review_argv(repo: str, number: int) -> list:
+    """gh api for one review on a PR, with its JSON on stdin. post_pr_review fixes the event to COMMENT."""
+    number = ids.check_int(number, "PR number", minimum=1, maximum=9999999999)
+    return [config.GH_BIN, "api", "--method", "POST", f"repos/{ids.check('repo', repo)}/pulls/{number}/reviews",
+            "--input", "-"]
 
 
 def run_gh_write(argv: list, body: bytes) -> tuple:
@@ -465,9 +485,34 @@ def run_gh_write(argv: list, body: bytes) -> tuple:
 def _post(argv: list, text: str, repo: str, number: int, fragment: str) -> dict:
     """Run one write and read its answer strictly: {"id", "url", "login"} of the comment GitHub made. Refused when
     GitHub (or gh before it) refused it, so it surely was not posted; Uncertain for anything that does not say."""
+    answer = _write(argv, {"body": _comment_text(text)}, repo)
+    comment_id, login = _made(answer)
+    url = f"https://github.com/{repo}/pull/{number}#{fragment}{comment_id}"
+    html_url = answer.get("html_url")
+    if not isinstance(html_url, str) or html_url.lower() != url.lower():
+        raise Uncertain("gh's answer links somewhere else, so the comment may or may not be posted where it should")
+    return {"id": str(comment_id), "url": html_url, "login": login}
+
+
+def _comment_text(text: object) -> str:
     if not isinstance(text, str) or not text.strip() or len(text) > WRITE_BODY_MAX or "\x00" in text:
         raise FleetError("a comment is text of at most 65536 characters")
-    body = json.dumps({"body": text}, ensure_ascii=True).encode("ascii")
+    return text
+
+
+def _made(answer: dict) -> tuple:
+    """(id, login) of what GitHub says it made, else Uncertain."""
+    made_id = answer.get("id")
+    login = answer.get("user", {}).get("login") if isinstance(answer.get("user"), dict) else None
+    if type(made_id) is not int or not 0 < made_id < 10 ** 20 or not isinstance(login, str) \
+            or GH_LOGIN.fullmatch(login) is None:
+        raise Uncertain("gh's answer names no comment, so it may or may not be posted")
+    return made_id, login
+
+
+def _write(argv: list, payload: dict, repo: str) -> dict:
+    """Run one checked write with payload as JSON on stdin, and read GitHub's answer strictly as a JSON object."""
+    body = json.dumps(payload, ensure_ascii=True).encode("ascii")
     check_write_argv(argv, repo)
     code, out, err = run_gh_write(argv, body)
     if len(out) >= OUTPUT_MAX_CHARS or len(err) >= OUTPUT_MAX_CHARS:
@@ -490,17 +535,9 @@ def _post(argv: list, text: str, repo: str, number: int, fragment: str) -> dict:
         answer = common.strict_json(out.encode("utf-8"))
     except (UnicodeDecodeError, ValueError):
         raise Uncertain("gh's answer is not JSON, so the comment may or may not be posted") from None
-    comment_id = answer.get("id") if isinstance(answer, dict) else None
-    login = answer.get("user", {}).get("login") if isinstance(answer, dict) and isinstance(answer.get("user"), dict) \
-        else None
-    if type(comment_id) is not int or not 0 < comment_id < 10 ** 20 or not isinstance(login, str) \
-            or GH_LOGIN.fullmatch(login) is None:
+    if not isinstance(answer, dict):
         raise Uncertain("gh's answer names no comment, so it may or may not be posted")
-    url = f"https://github.com/{repo}/pull/{number}#{fragment}{comment_id}"
-    html_url = answer.get("html_url")
-    if not isinstance(html_url, str) or html_url.lower() != url.lower():
-        raise Uncertain("gh's answer links somewhere else, so the comment may or may not be posted where it should")
-    return {"id": str(comment_id), "url": html_url, "login": login}
+    return answer
 
 
 def post_reply(repo: str, number: int, comment_id: str, text: str) -> dict:
@@ -511,6 +548,76 @@ def post_reply(repo: str, number: int, comment_id: str, text: str) -> dict:
 def post_pr_comment(repo: str, number: int, text: str) -> dict:
     """Post one comment on a PR's conversation."""
     return _post(pr_comment_argv(repo, number), text, repo, number, "issuecomment-")
+
+
+def post_pr_review(repo: str, number: int, sha: str, text: str) -> dict:
+    """Post one review on a PR at commit sha, its event always COMMENT, so it never approves or requests changes and
+    never counts toward branch protection. {"id", "url", "login"} of the review GitHub made, which must be a
+    COMMENTED review at that commit; Refused when it surely was not posted, Uncertain for anything that does not say."""
+    sha = ids.check("sha", sha)
+    payload = {"commit_id": sha, "event": REVIEW_EVENT, "body": _comment_text(text)}
+    answer = _write(pr_review_argv(repo, number), payload, repo)
+    review_id, login = _made(answer)
+    if answer.get("state") != "COMMENTED" or answer.get("commit_id") != sha:
+        raise Uncertain("GitHub's answer is not a comment review at that commit")
+    url = f"https://github.com/{repo}/pull/{number}#pullrequestreview-{review_id}"
+    html_url = answer.get("html_url")
+    if not isinstance(html_url, str) or html_url.lower() != url.lower():
+        raise Uncertain("gh's answer links somewhere else, so the review may or may not be posted where it should")
+    return {"id": str(review_id), "url": html_url, "login": login}
+
+
+# A chat review's reads of a PR
+
+
+def pr_read_argv(repo: str, number: int) -> list:
+    """gh api GET of one PR's metadata."""
+    number = ids.check_int(number, "PR number", minimum=1, maximum=9999999999)
+    return [config.GH_BIN, "api", f"repos/{ids.check('repo', repo)}/pulls/{number}"]
+
+
+def compare_diff_argv(repo: str, base_sha: str, head_sha: str) -> list:
+    """gh api GET of the diff between two commits, as git diff base...head shows it: what a PR at head_sha changes."""
+    return [config.GH_BIN, "api", "-H", DIFF_ACCEPT,
+            f"repos/{ids.check('repo', repo)}/compare/{ids.check('sha', base_sha)}...{ids.check('sha', head_sha)}"]
+
+
+def check_read_argv(argv: object) -> str:
+    """The guard on a chat review's gh reads: exactly one of the two shapes above, rebuilt and compared whole. Which
+    one ("pr" or "diff"), or a FleetError for anything else, a write or another flag or path included."""
+    if isinstance(argv, list) and len(argv) == 3 and argv[:2] == [config.GH_BIN, "api"] and isinstance(argv[2], str) \
+            and argv[2].startswith("repos/"):
+        found = PR_READ_PATH.fullmatch(argv[2][len("repos/"):])
+        if found is not None and pr_read_argv(found.group(1), int(found.group(2))) == argv:
+            return "pr"
+    if isinstance(argv, list) and len(argv) == 5 and argv[:4] == [config.GH_BIN, "api", "-H", DIFF_ACCEPT] \
+            and isinstance(argv[4], str) and argv[4].startswith("repos/"):
+        found = COMPARE_PATH.fullmatch(argv[4][len("repos/"):])
+        if found is not None and compare_diff_argv(found.group(1), found.group(2), found.group(3)) == argv:
+            return "diff"
+    raise FleetError("a chat review reads GitHub only with its two fixed gh api reads")
+
+
+def run_gh_read(argv: list) -> bytes:
+    """stdout of one checked read, run once in the office with nothing on stdin. A failure names no line gh printed
+    about a login, and keeps only the scrubbed last line of anything else. Tests replace this."""
+    check_read_argv(argv)
+    try:
+        done = subprocess.run(argv, cwd=config.OFFICE_ROOT, env=gh_env(), stdin=subprocess.DEVNULL,
+                              capture_output=True, timeout=config.GH_TIMEOUT_SECONDS, check=False)
+    except subprocess.TimeoutExpired:
+        raise FleetError("gh did not answer in time") from None
+    except OSError:
+        raise FleetError(f"gh is not at {config.GH_BIN}; set GH_BIN in fleet/config.py") from None
+    if done.returncode != 0:
+        err = done.stderr.decode("utf-8", "replace")[:OUTPUT_MAX_CHARS]
+        if done.returncode == GH_AUTH_EXIT or GH_AUTH_WORDS.search(err):
+            raise FleetError("gh could not read the PR with your login: check gh auth status in your terminal")
+        last = [line for line in pensieve.scrub(err).splitlines() if line.strip()]
+        raise FleetError("gh failed: " + common.scrubbed_line(last[-1] if last else f"exit {done.returncode}", 200))
+    if len(done.stdout) > config.GH_OUTPUT_MAX_BYTES:
+        raise FleetError("gh returned more than the fleet reads")
+    return done.stdout
 
 
 def remote_tip(record: dict, branch: str) -> Optional[str]:

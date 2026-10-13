@@ -22,7 +22,7 @@ from fleet import config, gitops, loops, safefs, tools
 from fleet.safefs import FleetError
 from tests_fleet.support import OFFICE, FleetCase, kit_setting
 
-KIT_JOBS = ("owlpost", "map", "morning", "keeper", "scoreboard", "portrait", "gringotts", "ollivander")
+KIT_JOBS = ("owlpost", "map", "morning", "keeper", "scoreboard", "portrait", "gringotts", "ollivander", "chat-review")
 # A fake job's -c line, the shape the fleet's own plists use.
 FAKE_LINE = 'import sys; sys.path.insert(0, "{fake}"); from {module} import main; sys.exit(main())'
 T0 = 1_760_000_000.0  # a fixed wall clock for the scheduling tests

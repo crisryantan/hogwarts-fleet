@@ -10,7 +10,9 @@
 #   sh scripts/loops-setup.sh
 #
 # It makes ~/.hogwarts/loops/jobs, adds every com.hogwarts job it finds in
-# ~/Library/LaunchAgents to it, checks fleet loops can run every listed job,
+# ~/Library/LaunchAgents to it, adds the chat-review job, which runs only under
+# fleet loops and does nothing until ~/.hogwarts/chat-review holds on, checks
+# fleet loops can run every listed job,
 # and only then unloads and removes each of those plists, so no job runs twice
 # and a job fleet loops would refuse stays with launchd. It starts nothing:
 # start the loops afterwards in a herdr pane or a Terminal window with
@@ -39,11 +41,11 @@ AGENTS="$HOME/Library/LaunchAgents"
 DOMAIN="gui/$(id -u)"
 FLEET="$OFFICE/bin/fleet"
 
-echo "Step 1 of 5: checking the office has fleet loops"
+echo "Step 1 of 6: checking the office has fleet loops"
 [ -f "$OFFICE/fleet/loops.py" ] && [ -x "$FLEET" ] || fail "$OFFICE/fleet/loops.py or $FLEET is missing. Reinstall the office from this clone first"
 ok "the office can run fleet loops"
 
-echo "Step 2 of 5: making the job list"
+echo "Step 2 of 6: making the job list"
 if [ -L "$OFFICE/loops" ] || [ -L "$LIST" ]; then fail "$LIST or its folder is a symlink"; fi
 if mkdir -p "$OFFICE/loops" && chmod 700 "$OFFICE/loops"; then :; else fail "could not make $OFFICE/loops"; fi
 if [ -f "$LIST" ]; then
@@ -55,7 +57,7 @@ else
 fi
 
 # Adding a job to the list is harmless while launchd still has it: fleet loops skips such a job.
-echo "Step 3 of 5: adding each launchd job to the list, unloading nothing yet"
+echo "Step 3 of 6: adding each launchd job to the list, unloading nothing yet"
 found=""
 for plist in "$AGENTS"/com.hogwarts.*.plist; do
 	[ -e "$plist" ] || continue
@@ -73,7 +75,16 @@ for plist in "$AGENTS"/com.hogwarts.*.plist; do
 done
 [ -n "$found" ] || ok "launchd has no fleet job; the setup scripts will add theirs to $LIST"
 
-echo "Step 4 of 5: checking fleet loops can run every listed job, starting nothing"
+# The chat review intake pulls a Pub/Sub subscription, so it runs only here, never under launchd. Listed, it still
+# does nothing until you write on to ~/.hogwarts/chat-review.
+echo "Step 4 of 6: adding the chat-review job, which stays off until ~/.hogwarts/chat-review holds on"
+[ -f "$OFFICE/launchd/com.hogwarts.chat-review.plist" ] || fail "$OFFICE/launchd/com.hogwarts.chat-review.plist is missing. Reinstall the office from this clone first"
+if ! grep -qx chat-review "$LIST"; then
+	printf 'chat-review\n' >>"$LIST" || fail "could not add chat-review to $LIST"
+fi
+ok "chat-review is in the list"
+
+echo "Step 5 of 6: checking fleet loops can run every listed job, starting nothing"
 out=$("$FLEET" loops --dry-run 2>&1)
 rc=$?
 if [ "$rc" -eq 0 ]; then
@@ -87,7 +98,7 @@ else
 	fail "fleet loops --dry-run did not report ok (exit $rc), so launchd keeps every job"
 fi
 
-echo "Step 5 of 5: unloading and removing each moved launchd job"
+echo "Step 6 of 6: unloading and removing each moved launchd job"
 for job in $found; do
 	label="com.hogwarts.$job"
 	if launchctl print "$DOMAIN/$label" >/dev/null 2>&1; then

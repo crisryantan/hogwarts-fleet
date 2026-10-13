@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.hogwarts.chat-review</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/usr/bin/env</string>
+		<string>-i</string>
+		<string>/usr/bin/python3</string>
+		<string>-I</string>
+		<string>-B</string>
+		<string>-X</string>
+		<string>pycache_prefix=/var/empty</string>
+		<string>-c</string>
+		<string>import sys; sys.path.insert(0, "/Users/crisryantan/.hogwarts"); from fleet.chat_review import main; sys.exit(main())</string>
+	</array>
+	<key>WorkingDirectory</key>
+	<string>/Users/crisryantan/.hogwarts</string>
+	<key>StandardOutPath</key>
+	<string>/Users/crisryantan/.hogwarts/logs/chat-review.out.log</string>
+	<key>StandardErrorPath</key>
+	<string>/Users/crisryantan/.hogwarts/logs/chat-review.err.log</string>
+	<key>Umask</key>
+	<integer>63</integer>
+	<key>ProcessType</key>
+	<string>Background</string>
+	<key>RunAtLoad</key>
+	<false/>
+	<key>StartInterval</key>
+	<integer>60</integer>
+</dict>
+</plist>

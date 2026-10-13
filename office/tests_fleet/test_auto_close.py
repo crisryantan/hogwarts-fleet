@@ -368,7 +368,8 @@ class OptInTests(CloseCase):
                                                config.PR_FOLLOWUP_FILE, config.AUTO_CLOSE_FILE,
                                                config.WORKTREE_CLEANUP_FILE, config.OWL_REPORTS_FILE,
                                                config.CROSS_FAMILY_FAILOVER_FILE, config.ORCHESTRATOR_FILE,
-                                               config.GO_UPDATES_FILE))
+                                               config.GO_UPDATES_FILE, config.CHAT_REVIEW_FILE,
+                                               config.CHAT_REVIEW_GITHUB_FILE))
 
 
 class MapRoundCase(CloseCase):

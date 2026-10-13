@@ -12,6 +12,9 @@
   fleet review own --repo-dir <checkout> --task <task-id> [--intent-file <file>]
       --intent-file on a fix round rewrites the task's TASK.md, and its approval, once you type the task id back
       in your own terminal (no --yes), before the round's checks read it.
+  fleet review pr <PR link> --requested-by <email>
+      The chat review of one PR of a repo in CHAT_REVIEW_REPOS, run now (fleet/chat_review.py): Hermione, Read only,
+      under the chat review caps and locks, posted on the PR as a COMMENT review only while chat-review-github is on.
   fleet feed --desk <name> | --all
   fleet go-wait <go-task-id> [--since <key>]
       Waits, read only, until that go task changes where it stands, then prints one line with the key for the next
@@ -50,7 +53,7 @@ if __name__ == "__main__" and "/Users/crisryantan/.hogwarts" not in sys.path:
 from hogwarts import ids  # noqa: E402
 from hogwarts.errors import StoreError  # noqa: E402
 
-from fleet import adopt, closer, common, config, gitops, push, review, verify, worktree  # noqa: E402
+from fleet import adopt, chat_review, closer, common, config, gitops, push, review, verify, worktree  # noqa: E402
 from fleet import gringotts, ollivander, patrol  # noqa: E402
 from fleet.safefs import FleetError  # noqa: E402
 from fleet import feed, go_wait, loops  # noqa: E402
@@ -91,7 +94,9 @@ def build_parser() -> argparse.ArgumentParser:
     commands.add_parser("worktree-rebuild", allow_abbrev=False).add_argument("task")
     commands.add_parser("verify", allow_abbrev=False).add_argument("task")
     reviewed = commands.add_parser("review", allow_abbrev=False)
-    reviewed.add_argument("target", help="a build task id, or 'own' for a commit from your own session")
+    reviewed.add_argument("target", help="a build task id, 'own' for a commit from your own session, or 'pr'")
+    reviewed.add_argument("url", nargs="?", help="with pr: the PR's link")
+    reviewed.add_argument("--requested-by")
     reviewed.add_argument("--repo-dir")
     reviewed.add_argument("--title")
     reviewed.add_argument("--intent-file")
@@ -137,7 +142,14 @@ def run(conn, args: argparse.Namespace) -> object:
         # Never under a running review, whose evidence it would replace; each check's process keeps the lock while it runs.
         with review.task_review_lock(args.task) as lock_fd:
             return verify.verify(conn, args.task, keep_fds=(lock_fd,))
+    if args.command == "review" and args.target == "pr":
+        if any(value is not None for value in (args.repo_dir, args.title, args.intent_file, args.task)) \
+                or args.url is None or args.requested_by is None:
+            raise FleetError("review pr takes the PR's link and --requested-by <email>, nothing else")
+        return chat_review.review_by_hand(conn, args.url, args.requested_by)
     if args.command == "review":
+        if args.url is not None or args.requested_by is not None:
+            raise FleetError("only review pr takes a link and --requested-by")
         if args.target != "own":
             if any(value is not None for value in (args.repo_dir, args.title, args.intent_file, args.task)):
                 raise FleetError("a build task review takes only its task id")

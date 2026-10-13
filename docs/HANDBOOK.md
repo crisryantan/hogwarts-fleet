@@ -193,9 +193,10 @@ Where each piece stands once onboarding stage 4 passes, and what switches it on.
 | Go updates: one line each time one of McGonagall's open go tasks changes where it stands | Installed, off | `echo on > ~/.hogwarts/auto-go-updates`. Each line names the go task, its build, the new state and what you do next, from a fixed table, and goes the way phone pings go. The first pass after you switch it on only records where things stand, and a loud event one of its lines already covers isn't pinged a second time. A line also goes out right after a go is confirmed or refused and right after verify runs for a build round, with how many checks ran and passed. When McGonagall escalates a question to you on a go task, its line says it's waiting on you and to answer her in her session, and that line is the one ping for it. A handoff only says review running once the review loop has taken it. Once a go task reaches PASS, HEADMASTER, the round cap or closed, that line is its last until the go task closes, except that after PASS you still get the draft PR opened line, your cue to merge. Every line is also added to `~/.hogwarts/logs/go-updates.log`, so `tail -F ~/.hogwarts/logs/go-updates.log` shows them live; past 256 KB the log moves to `go-updates.log.1` and a new one starts, which `tail -F` follows. Banners go away after a few seconds, so set the notification style for Script Editor to Persistent in System Settings, Notifications, to keep them on screen. `rm ~/.hogwarts/auto-go-updates` switches it off. |
 | Chat watch: McGonagall tells you in her chat each time one of her open go tasks moves | Installed, on | Nothing. A Stop hook in the castle settings (`office/fleet/hooks/stop.py`) runs in the background at the end of each of her turns, with Claude Code's `asyncRewake`. It waits, read-only, on her open go tasks, and when one changes where it stands (a build started, Harry handed off, verify counts, a review verdict, a fix round, waiting on you, a draft PR, merged, closed) it wakes her with that go task's line from the same fixed table go updates use, and she relays it in a line or two and takes no action because of it. Her reply ends a turn, so the next wait starts by itself, until the go task closes. With several of her sessions open at once, one per task, each session hears only the go tasks typed in it: the go task belongs to the session that typed its go, and that session's chat watch, go status and go-changed blocks cover it, with a one-line count of the go tasks open in other sessions. When a session ends, the next of her sessions to start takes over its open go tasks and says so once; to move one yourself, send `watch <task-id>` as a whole message in the session you want it in. Only real changes wake her, one waiter runs per session, and a line she was given is never given again. A wait runs at most just under the hook's 3 hour timeout; with no change by then it ends quietly and starts again when her next turn ends. It needs a Claude Code version with `asyncRewake` hooks. The one thing to check live is that the wake fires in her interactive session: type a go, let her turn end, and watch for her line when Harry hands off. If it never fires nothing else breaks, and go updates still reach your phone while they're on. |
 | **Terminal loops**: the background jobs run from a Terminal window | Installed, off. launchd runs them by default | `./install.sh --terminal-loops`, or `sh scripts/loops-setup.sh` on an existing install, then keep `fleet loops` running. `rm ~/.hogwarts/loops/jobs` and loading the jobs again goes back to launchd. |
+| **Chat reviews**: teammates ask Hermione for a PR review from Google Chat | Installed, off | Set up the Chat app and fill its settings ([Chat reviews](#chat-reviews-from-google-chat)), run `sh scripts/loops-setup.sh`, then `echo on > ~/.hogwarts/chat-review`. Posting each review on its PR as a COMMENT review is a second switch, `echo on > ~/.hogwarts/chat-review-github`. `rm` either file switches it off. |
 | **Model failover**: a desk runs on the next model of its family while its own is down | Installed, on | Nothing. Crossing to the other family is the one opt-in: `echo on > ~/.hogwarts/cross-family-failover`, and only for a desk whose runs no review reads. `rm ~/.hogwarts/cross-family-failover` switches it off. |
 
-A desk switches on when you create its `enabled` file after reading its dry run, one desk at a time. Draft PRs, follow-ups, auto-portrait, auto-close, the worktree cleanup, owl reports, the orchestrator and cross-family failover are each on only while their file in the office is a plain file you own that no one else can write, holding exactly `on`. Nothing switches itself on.
+A desk switches on when you create its `enabled` file after reading its dry run, one desk at a time. Draft PRs, follow-ups, auto-portrait, auto-close, the worktree cleanup, owl reports, the orchestrator, chat reviews and their GitHub post, and cross-family failover are each on only while their file in the office is a plain file you own that no one else can write, holding exactly `on`. Nothing switches itself on.
 
 ## Daily rhythm
 
@@ -309,6 +310,44 @@ Moody reviews work from your own Claude sessions. Those tasks sit under the desk
 - **Shallow clones.** A shallow clone can't always tell whether you built on a task's commits, so it's refused until you run `git fetch --unshallow`. So is a clone cut short whose shallow file was deleted. A full clone that simply doesn't have a task's commits is fine.
 - **What the fleet reads.** It reads the parents your commits really name, the ones a push sends, so replace refs and grafts don't hide a task's commits. The checkout is the folder itself, so the same checkout typed in other letter case is still that checkout.
 - **Rewritten history.** The fleet can't follow it. A rebase, squash or cherry-pick makes new commits, so moving the work that way onto a new branch name starts a new task at round one. The fleet trusts you not to route around the cap like that. Keep a PR's fixes building on the commits its review started with, and close a task rather than work past its cap.
+
+## Chat reviews from Google Chat
+
+Teammates can ask the Hermione desk to review a GitHub PR from Google Chat, and she answers in their thread. It runs on your Mac under `fleet loops` and only pulls: the Chat app's connection is Cloud Pub/Sub, the chat-review job pulls its subscription each minute with your own gcloud login, and nothing listens on the network. There is no key file anywhere. Replies go out as the app, through its service account, which your login impersonates.
+
+Anyone in your organisation's Chat can message the app, so it reads very little:
+
+- Only people whose email is in `CHAT_REVIEW_SENDERS`, in spaces listed in `CHAT_REVIEW_SPACES`. Any other message is acknowledged and ignored, with no reply.
+- The one request is exactly `review https://github.com/<owner>/<repo>/pull/<n>` (the link may sit in `<>`), for a repo in `CHAT_REVIEW_REPOS`. Anything else gets one fixed help reply. Nothing else the requester wrote ever reaches a model.
+- Hermione reads the PR through a file the job writes with your `gh` login, read only, with the PR's text marked as untrusted data. She has Read and no shell, and never runs the PR's code. A PR that's too large or not open gets a fixed reply, and an answer that isn't her exact review block gets a fixed "couldn't review" line.
+- Each person gets `CHAT_REVIEW_PER_PERSON_DAILY` reviews a day and everyone together `CHAT_REVIEW_DAILY`, counted before she starts. Those caps are what bounds the spend: at most that many turns a day at her per-run budget, apart from her own desk caps.
+- With `chat-review-github` on too, the review also goes on the PR under your `gh` login. It's always a COMMENT review, never an approval or a change request, so it can't satisfy branch protection. It opens with a fixed line saying it's an automated review by the Hermione desk requested by the requester in Chat, naming them by their Chat email, and goes up at most once per PR and head commit.
+
+Every request, its outcome and its cost is a JSON line in `~/.hogwarts/logs/chat-review.log`, so you can see who asked for what.
+
+### Setting up chat reviews
+
+In Google Cloud:
+
+1. Pick or create a project, and turn on the Google Chat API and the Cloud Pub/Sub API.
+2. Create a Pub/Sub topic, and grant `chat-api-push@system.gserviceaccount.com` the Pub/Sub Publisher role on it. Grant it to no one else.
+3. Create a pull subscription on the topic.
+4. Create a service account for the app with no keys and no project roles. Grant yourself Service Account Token Creator on it, and Pub/Sub Subscriber on the subscription.
+5. In the Chat API's configuration, name the app, let it join spaces, set its connection to Cloud Pub/Sub with the topic's full name, and make it visible to named people first.
+6. Run `gcloud auth login` as yourself, then check that `gcloud auth print-access-token` and `gcloud auth print-access-token --impersonate-service-account=<service account> --scopes=https://www.googleapis.com/auth/chat.bot` both print a token.
+
+Then fill these in your private overlay of `fleet/config.py`. While any is still a placeholder the job refuses to start and names it:
+
+| Setting | What goes there |
+| --- | --- |
+| `CHAT_REVIEW_PROJECT` | The project id |
+| `CHAT_REVIEW_SUBSCRIPTION` | The pull subscription's id |
+| `CHAT_REVIEW_SERVICE_ACCOUNT` | The app's service account email |
+| `CHAT_REVIEW_SENDERS` | The emails of the people who may ask |
+| `CHAT_REVIEW_SPACES` | The spaces it answers in, as `spaces/<id>`, the last part of the space's link |
+| `CHAT_REVIEW_REPOS` | The repos it reviews, as `owner/name` |
+
+The caps and `GCLOUD_BIN` have working defaults. Run `sh scripts/loops-setup.sh`, which adds the chat-review job to your loops list, restart `fleet loops`, add the app to a space, and `echo on > ~/.hogwarts/chat-review`. Try `fleet review pr <PR link> --requested-by <your email>` first if you like: it runs the same review in your terminal with no Chat reply. Once a few replies read right, `echo on > ~/.hogwarts/chat-review-github` posts them on the PRs too.
 
 ## The patrol and the backups
 
@@ -494,6 +533,9 @@ Everything `castle` prints is JSON. The installer links `castle` and `fleet` int
 | `echo on > ~/.hogwarts/auto-orchestrate` | Let McGonagall pick the next step after an owl or a verdict, as one checked typed action |
 | `echo on > ~/.hogwarts/cross-family-failover` | Let a desk whose own family is all down run on the other family, where no review reads its runs |
 | `echo on > ~/.hogwarts/auto-go-updates` | Get one line each time one of McGonagall's open go tasks changes where it stands |
+| `echo on > ~/.hogwarts/chat-review` | Let teammates on the allowlist ask Hermione for a PR review from Google Chat |
+| `echo on > ~/.hogwarts/chat-review-github` | Also post each chat review on its PR, as a COMMENT review with your gh login |
+| `fleet review pr <PR link> --requested-by <email>` | Run one chat review from your terminal, with no Chat reply |
 | `rm ~/.hogwarts/<file>` | Switch that one off again |
 
 ## Rules worth remembering
@@ -544,7 +586,7 @@ Everything the fleet installs lives in two folders, a few background jobs and on
 Switch the automations off first. A review or closer pass that is already running is a process of its own, so stopping the background jobs doesn't end it, but with the files gone no draft PR, follow-up push or reply, proven close, worktree removal or memory addition starts after its next check.
 
 ```
-rm -f ~/.hogwarts/auto-draft-pr ~/.hogwarts/pr-followup ~/.hogwarts/auto-close ~/.hogwarts/worktree-cleanup ~/.hogwarts/auto-portrait ~/.hogwarts/owl-reports ~/.hogwarts/auto-orchestrate ~/.hogwarts/cross-family-failover ~/.hogwarts/auto-go-updates
+rm -f ~/.hogwarts/auto-draft-pr ~/.hogwarts/pr-followup ~/.hogwarts/auto-close ~/.hogwarts/worktree-cleanup ~/.hogwarts/auto-portrait ~/.hogwarts/owl-reports ~/.hogwarts/auto-orchestrate ~/.hogwarts/cross-family-failover ~/.hogwarts/auto-go-updates ~/.hogwarts/chat-review ~/.hogwarts/chat-review-github
 ```
 
 From your clone of the repo, run `./uninstall.sh` to see every step it would take. It changes nothing. Then run `./uninstall.sh --yes` to do it. It stops the background jobs, archives both folders to `~/hogwarts-fleet-archive-<timestamp>.tar.gz` before it removes them, and never edits your Claude or Codex settings. If your settings still mention the fleet, it shows the lines and the backup to restore. [UNINSTALL.md](UNINSTALL.md) has the same steps by hand, and how to restore from the archive.
