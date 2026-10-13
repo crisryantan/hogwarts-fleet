@@ -47,10 +47,10 @@ def block(sha: str = HEAD, verdict: str = "CHANGES", blocking=("x.py:2 | prints 
 
 
 def chat_event(text: str, email: str = SENDER, space: str = SPACE, message: str = "m1", kind: str = "MESSAGE",
-               user_type: str = "HUMAN") -> dict:
+               user_type: str = "HUMAN", name: str = "Dev Person") -> dict:
     return {"type": kind, "space": {"name": space, "type": "ROOM"},
             "user": {"name": "users/111", "email": email, "type": user_type, "displayName": SECRET_MARK},
-            "message": {"name": f"{space}/messages/{message}", "sender": {"name": "users/111"},
+            "message": {"name": f"{space}/messages/{message}", "sender": {"name": "users/111", "displayName": name},
                         "text": "@Hermione " + text, "argumentText": " " + text,
                         "formattedText": SECRET_MARK, "thread": {"name": f"{space}/threads/t1"}}}
 
@@ -654,6 +654,17 @@ class StrictBlockTests(ChatCase):
 
 
 class GitHubTests(ChatCase):
+    def test_the_display_name_is_scrubbed_defanged_and_capped(self):
+        self.assertEqual(chat_review.display_name("Dev Person"), "Dev Person")
+        for value in (None, "", "   ", 7, "dev@example.com", "\u200b"):
+            with self.subTest(value=value):
+                self.assertEqual(chat_review.display_name(value), "a teammate")
+        named = chat_review.display_name("<users/all> @acme/everyone https://evil.test " + "x" * 80)
+        self.assertLessEqual(len(named), chat_review.NAME_MAX)
+        for bad in ("<users/all>", "@acme", "https://evil"):
+            self.assertNotIn(bad, named)
+
+
     def test_the_github_review_is_a_comment_with_the_fixed_opening_once_per_head_commit(self):
         self.switch(config.CHAT_REVIEW_GITHUB_FILE, True)
         self.deliver(chat_event(f"review {URL}"))
@@ -666,7 +677,10 @@ class GitHubTests(ChatCase):
                                 "--input", "-"])
         self.assertEqual((payload["event"], payload["commit_id"]), ("COMMENT", HEAD))
         self.assertEqual(payload["body"].splitlines()[0],
-                         f"This is an automated review by the Hermione desk, requested by {SENDER} in Chat.")
+                         "This is an automated review by the Hermione desk, requested by Dev Person in Chat.")
+        # No email is ever posted: it stays in the office's own log and records.
+        self.assertNotIn("@", payload["body"])
+        self.assertIn(SENDER, json.dumps(self.log_lines()))
         outcomes = {record["requester"]: (record["github"], record.get("github_url")) for record in self.records()}
         self.assertEqual(outcomes, {SENDER: ("posted", "https://github.com/acme/web-app/pull/7#pullrequestreview-901"),
                                     "lead@example.com": ("already", None)})
@@ -743,7 +757,8 @@ class HandTests(ChatCase):
         self.assertEqual((data["outcome"], data["verdict"], data["github"]), ("reviewed", "CHANGES", "posted"))
         self.assertEqual(self.google.calls, [])
         [(_, payload)] = self.writes
-        self.assertIn("requested by lead@example.com in Chat", payload["body"])
+        self.assertIn("requested by a teammate in Chat", payload["body"])
+        self.assertNotIn("lead@example.com", payload["body"])
         [record] = self.records()
         self.assertEqual((record["source"], record["state"]), ("hand", "done"))
 

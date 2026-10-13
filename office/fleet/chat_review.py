@@ -24,8 +24,9 @@ Anyone in the company's Chat can send the app text, so everything here treats a 
   (parse_block); anything else is a fixed "couldn't review" reply.
 - Her verdict line and findings, scrubbed and cut, go back as the app to the message's thread. Then, while the office
   file chat-review-github holds "on" too, the same review goes on the PR with your gh login as a review whose event is
-  always COMMENT (gitops.post_pr_review), opening with a fixed line naming the requester, at most once per PR and head
-  commit (a marker made create-exclusive before it is posted, never posted again after a kill).
+  always COMMENT (gitops.post_pr_review), opening with a fixed line naming the requester by Chat display name, never
+  email, at most once per PR and head commit (a marker made create-exclusive before it is posted, never posted again
+  after a kill).
 - Each reply carries a request id made from its record, so a reply sent again after a kill is the same Chat message.
 - Every request, its outcome and its cost is one JSON line in logs/chat-review.log, and its record stays in the office
   folder chat-reviews/ for CHAT_REVIEW_KEEP_SECONDS.
@@ -86,6 +87,9 @@ TOO_LARGE = "That PR's diff is too large for a chat review, so it was not review
 CAPPED_PERSON = "You have used today's chat reviews. Ask again tomorrow."
 CAPPED_FLEET = "Today's chat reviews are used up. Ask again tomorrow."
 OPENING = "This is an automated review by the Hermione desk, requested by {requester} in Chat."
+# Who the opening names: the sender's Chat display name, never an email, which stays in the office's own log.
+NAME_MAX = 60
+NO_NAME = "a teammate"
 
 BRIEF = (
     "You are Hermione, the fleet's staff engineer reviewer, run headless for one chat review: a teammate asked for a"
@@ -552,8 +556,18 @@ def reply_text(repo: str, number: int, sha: str, verdict: str, blocking: list, n
     return "\n".join(kept)
 
 
+def display_name(value: object) -> str:
+    """A Chat display name fit to post: scrubbed (so no email or credential shape is left), defanged, one line of at
+    most NAME_MAX characters, and "a teammate" when nothing is left of it."""
+    if not isinstance(value, str):
+        return NO_NAME
+    name = defanged(common.scrubbed_line(value, NAME_MAX)).strip()
+    return name[:NAME_MAX] if name and "[email]" not in name else NO_NAME
+
+
 def github_body(requester: str, sha: str, verdict: str, blocking: list, non_blocking: list) -> str:
-    """The PR review's text: the fixed opening line, then the verdict and findings."""
+    """The PR review's text: the fixed opening line naming the requester by display name, then the verdict and
+    findings."""
     lines = [OPENING.format(requester=requester), "", f"Verdict: {verdict} at {sha[:12]}"]
     if blocking:
         lines += ["", "Blocking", *(f"- `{item}`" for item in blocking)]
@@ -696,7 +710,7 @@ def post_github(key: str, record: dict, poster: Callable = None) -> dict:
     with _folder(GITHUB) as fd:
         if not markers.publish(fd, name, {"state": "posting", "request": key, "at": int(time.time())}):
             return _end(key, record, "reviewed", github="already")
-    body = github_body(record["requester"], sha, record["verdict"], record.get("blocking", []),
+    body = github_body(display_name(record.get("requester_name")), sha, record["verdict"], record.get("blocking", []),
                        record.get("non_blocking", []))
     try:
         posted = poster(repo, number, sha, body)
@@ -803,6 +817,7 @@ def intake(message: dict) -> str:
     asked = parse_request(text)
     key = _digest(f"chat:{name}")
     record = {"state": "reply", "kind": "help", "source": "chat", "at": int(time.time()), "requester": email.lower(),
+              "requester_name": display_name(sender.get("displayName")),
               "space": space, "thread": thread, "reply": HELP}
     if asked is not None:
         record = {**record, "state": "queued", "kind": "review", "repo": asked[0], "number": asked[1]}

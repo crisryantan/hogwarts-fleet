@@ -525,7 +525,8 @@ never past her caps.
 While `~/.hogwarts/chat-review-github` holds `on` too, the review also goes on the PR with your `gh` login. Its event
 is always COMMENT, never an approval or a change request, so it can never count toward branch protection. It opens
 with a fixed line saying it is an automated review by the Hermione desk requested by the requester in Chat, naming
-them by their Chat email, and it is posted at most once per PR and head commit. Her findings are defanged before they are
+them by their Chat display name (scrubbed, at most 60 characters, else "a teammate"), never their email, which stays
+in the office's own log, and it is posted at most once per PR and head commit. Her findings are defanged before they are
 posted, so no mention or link markup in them survives in either place.
 
 Every request, its outcome and its cost is one JSON line in `logs/chat-review.log`, and its record stays in

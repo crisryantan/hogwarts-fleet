@@ -325,6 +325,7 @@ pre.cmdline { margin: 0.4rem 0 0; background: var(--code-bg); border-radius: 5px
     <li><a href="#rhythm">Daily rhythm</a></li>
     <li><a href="#models">Models</a></li>
     <li><a href="#caps">Caps</a></li>
+    <li><a href="#chat">Chat reviews</a></li>
     <li><a href="#patrol">Patrol</a></li>
     <li><a href="#herdr">Watch live</a></li>
     <li><a href="#cheats">Cheat sheet</a></li>
@@ -601,11 +602,12 @@ pre.cmdline { margin: 0.4rem 0 0; background: var(--code-bg); border-radius: 5px
         <tr><td data-label="Desk or piece"><b>Phone pings</b> for loud events (PR opened, a review that needs you or is blocked on tooling, a refused go, a model outage or sign-in failure, her notes and caps)</td><td data-label="State">Installed, on</td><td data-label="What switches it on">A macOS notification by default. Your private overlay can set <code>PHONE_COMMAND</code> in <code>fleet/config.py</code> to an absolute command that reads one JSON payload on stdin and exits 0 once it delivered it; a failure falls back to the notification.</td></tr>
         <tr><td data-label="Desk or piece"><b>Go updates</b>: one line each time one of McGonagall's open go tasks changes where it stands</td><td data-label="State">Installed, off</td><td data-label="What switches it on"><code>echo on &gt; ~/.hogwarts/auto-go-updates</code>. Each line names the go task, its build, the new state and what you do next, from a fixed table, and goes the way phone pings go. The first pass after you switch it on only records where things stand, and a loud event one of its lines already covers isn't pinged a second time. A line also goes out right after a go is confirmed or refused and right after verify runs for a build round, with how many checks ran and passed. When McGonagall escalates a question to you on a go task, its line says it's waiting on you and to answer her in her session, and that line is the one ping for it. A handoff only says review running once the review loop has taken it. Once a go task reaches PASS, HEADMASTER, the round cap or closed, that line is its last until the go task closes, except that after PASS you still get the draft PR opened line, your cue to merge. Every line is also added to <code>~/.hogwarts/logs/go-updates.log</code>, so <code>tail -F ~/.hogwarts/logs/go-updates.log</code> shows them live; past 256 KB the log moves to <code>go-updates.log.1</code> and a new one starts, which <code>tail -F</code> follows. Banners go away after a few seconds, so set the notification style for Script Editor to Persistent in System Settings, Notifications, to keep them on screen. <code>rm ~/.hogwarts/auto-go-updates</code> switches it off.</td></tr>
         <tr><td data-label="Desk or piece"><b>Terminal loops</b>: the background jobs run from a Terminal window</td><td data-label="State">Installed, off. launchd runs them by default</td><td data-label="What switches it on"><code>./install.sh --terminal-loops</code>, or <code>sh scripts/loops-setup.sh</code> on an existing install, then keep <code>fleet loops</code> running. <code>rm ~/.hogwarts/loops/jobs</code> and loading the jobs again goes back to launchd.</td></tr>
+        <tr><td data-label="Desk or piece"><b>Chat reviews</b>: teammates ask Hermione for a PR review from Google Chat</td><td data-label="State">Installed, off</td><td data-label="What switches it on">Set up the Chat app and fill its settings (<a href="#chat">Chat reviews</a>), run <code>sh scripts/loops-setup.sh</code>, then <code>echo on &gt; ~/.hogwarts/chat-review</code>. Posting each review on its PR as a COMMENT review is a second switch, <code>echo on &gt; ~/.hogwarts/chat-review-github</code>. <code>rm</code> either file switches it off.</td></tr>
         <tr><td data-label="Desk or piece"><b>Model failover</b>: a desk runs on the next model of its family while its own is down</td><td data-label="State">Installed, on</td><td data-label="What switches it on">Nothing. Crossing to the other family is the one opt-in: <code>echo on &gt; ~/.hogwarts/cross-family-failover</code>, and only for a desk whose runs no review reads. <code>rm ~/.hogwarts/cross-family-failover</code> switches it off.</td></tr>
       </tbody>
     </table>
   </div>
-  <p class="note">A desk switches on when you create its <code>enabled</code> file after reading its dry run, one desk at a time. Draft PRs, follow-ups, auto-portrait, auto-close, the worktree cleanup, owl reports, the orchestrator and cross-family failover are each on only while their file in the office is a plain file you own that no one else can write, holding exactly <code>on</code>. Nothing switches itself on.</p>
+  <p class="note">A desk switches on when you create its <code>enabled</code> file after reading its dry run, one desk at a time. Draft PRs, follow-ups, auto-portrait, auto-close, the worktree cleanup, owl reports, the orchestrator, chat reviews and their GitHub post, and cross-family failover are each on only while their file in the office is a plain file you own that no one else can write, holding exactly <code>on</code>. Nothing switches itself on.</p>
 </section>
 
 <section id="rhythm">
@@ -742,6 +744,48 @@ castle model line &lt;name&gt; &lt;line&gt;     file a model name under a tier</
     <li><b>What the fleet reads</b><span>It reads the parents your commits really name, the ones a push sends, so replace refs and grafts don't hide a task's commits. The checkout is the folder itself, so the same checkout typed in other letter case is still that checkout.</span></li>
     <li><b>Rewritten history</b><span>The fleet can't follow it. A rebase, squash or cherry-pick makes new commits, so moving the work that way onto a new branch name starts a new task at round one. The fleet trusts you not to route around the cap like that. Keep a PR's fixes building on the commits its review started with, and close a task rather than work past its cap.</span></li>
   </ul>
+</section>
+
+<section id="chat">
+  <div class="sec-head">
+    <p class="eyebrow">Chat reviews from Google Chat</p>
+    <h2>Teammates ask for a review in Chat, and Hermione answers in their thread</h2>
+    <p>It runs on your Mac under <code>fleet loops</code> and only pulls: the Chat app's connection is Cloud Pub/Sub, the chat-review job pulls its subscription each minute with your own gcloud login, and nothing listens on the network. There is no key file anywhere. Replies go out as the app, through its service account, which your login impersonates.</p>
+  </div>
+  <p>Anyone in your organisation's Chat can message the app, so it reads very little:</p>
+  <ul class="gates">
+    <li><b>Allowlisted people and spaces only</b><span>Only people whose email is in <code>CHAT_REVIEW_SENDERS</code>, in spaces listed in <code>CHAT_REVIEW_SPACES</code>. Any other message is acknowledged and ignored, with no reply.</span></li>
+    <li><b>One exact request</b><span>The one request is exactly <code>review https://github.com/&lt;owner&gt;/&lt;repo&gt;/pull/&lt;n&gt;</code> (the link may sit in <code>&lt;&gt;</code>), for a repo in <code>CHAT_REVIEW_REPOS</code>. Anything else gets one fixed help reply. Nothing else the requester wrote ever reaches a model.</span></li>
+    <li><b>Read only, and only the PR</b><span>Hermione reads the PR through a file the job writes with your <code>gh</code> login, read only, with the PR's text marked as untrusted data. She has Read and no shell, under settings that let her read nothing beyond that one folder, and never runs the PR's code. A PR that's too large or not open gets a fixed reply, and an answer that isn't her exact review block gets a fixed "couldn't review" line.</span></li>
+    <li><b>Caps</b><span>Each person gets <code>CHAT_REVIEW_PER_PERSON_DAILY</code> reviews a day and everyone together <code>CHAT_REVIEW_DAILY</code>, counted before she starts. Each review also counts as one of her runs under her own daily run and spend caps, with its cost, so chat reviews never push her past them.</span></li>
+    <li><b>The GitHub post</b><span>With <code>chat-review-github</code> on too, the review also goes on the PR under your <code>gh</code> login. It's always a COMMENT review, never an approval or a change request, so it can't satisfy branch protection. It opens with a fixed line saying it's an automated review by the Hermione desk requested by the requester in Chat, naming them by their Chat display name, never their email, and goes up at most once per PR and head commit. Their email stays in the office's own log.</span></li>
+  </ul>
+  <p>Every request, its outcome and its cost is a JSON line in <code>~/.hogwarts/logs/chat-review.log</code>, so you can see who asked for what.</p>
+  <h3>Setting up chat reviews</h3>
+  <p>In Google Cloud:</p>
+  <ol>
+    <li>Pick or create a project, and turn on the Google Chat API and the Cloud Pub/Sub API.</li>
+    <li>Create a Pub/Sub topic, and grant <code>chat-api-push@system.gserviceaccount.com</code> the Pub/Sub Publisher role on it. Grant it to no one else.</li>
+    <li>Create a pull subscription on the topic.</li>
+    <li>Create a service account for the app with no keys and no project roles. Grant yourself Service Account Token Creator on it, and Pub/Sub Subscriber on the subscription.</li>
+    <li>In the Chat API's configuration, name the app, let it join spaces, set its connection to Cloud Pub/Sub with the topic's full name, and make it visible to named people first.</li>
+    <li>Run <code>gcloud auth login</code> as yourself, then check that <code>gcloud auth print-access-token</code> and <code>gcloud auth print-access-token --impersonate-service-account=&lt;service account&gt; --scopes=https://www.googleapis.com/auth/chat.bot</code> both print a token.</li>
+  </ol>
+  <p>Then fill these in your private overlay of <code>fleet/config.py</code>. While any is still a placeholder the job refuses to start and names it:</p>
+  <div class="tbl">
+    <table>
+      <thead><tr><th>Setting</th><th>What goes there</th></tr></thead>
+      <tbody>
+        <tr><td data-label="Setting"><code>CHAT_REVIEW_PROJECT</code></td><td data-label="What goes there">The project id</td></tr>
+        <tr><td data-label="Setting"><code>CHAT_REVIEW_SUBSCRIPTION</code></td><td data-label="What goes there">The pull subscription's id</td></tr>
+        <tr><td data-label="Setting"><code>CHAT_REVIEW_SERVICE_ACCOUNT</code></td><td data-label="What goes there">The app's service account email</td></tr>
+        <tr><td data-label="Setting"><code>CHAT_REVIEW_SENDERS</code></td><td data-label="What goes there">The emails of the people who may ask</td></tr>
+        <tr><td data-label="Setting"><code>CHAT_REVIEW_SPACES</code></td><td data-label="What goes there">The spaces it answers in, as <code>spaces/&lt;id&gt;</code>, the last part of the space's link</td></tr>
+        <tr><td data-label="Setting"><code>CHAT_REVIEW_REPOS</code></td><td data-label="What goes there">The repos it reviews, as <code>owner/name</code></td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>The caps and <code>GCLOUD_BIN</code> have working defaults. Run <code>sh scripts/loops-setup.sh</code>, which adds the chat-review job to your loops list, restart <code>fleet loops</code>, add the app to a space, and <code>echo on &gt; ~/.hogwarts/chat-review</code>. Try <code>fleet review pr &lt;PR link&gt; --requested-by &lt;your email&gt;</code> first if you like: it runs the same review in your terminal with no Chat reply. Once a few replies read right, <code>echo on &gt; ~/.hogwarts/chat-review-github</code> posts them on the PRs too.</p>
 </section>
 
 <section id="patrol">
@@ -942,6 +986,7 @@ castle model line &lt;name&gt; &lt;line&gt;     file a model name under a tier</
           <tr><td data-label="Type"><code>fleet review own --repo-dir &lt;checkout&gt; --title "&lt;title&gt;"</code></td><td data-label="To">Start a review of work from your own Claude sessions</td></tr>
           <tr><td data-label="Type"><code>fleet review own --repo-dir &lt;checkout&gt; --task &lt;task-id&gt;</code></td><td data-label="To">Review a fix round on a task from your own Claude sessions</td></tr>
           <tr><td data-label="Type"><code>fleet close &lt;task-id&gt;</code></td><td data-label="To">Try auto-close once more on one task, in the foreground, while auto-close is on</td></tr>
+          <tr><td data-label="Type"><code>fleet review pr &lt;PR link&gt; --requested-by &lt;email&gt;</code></td><td data-label="To">Run one chat review from your terminal, with no Chat reply</td></tr>
           <tr><td data-label="Type"><code>fleet loops</code></td><td data-label="To">Run the background jobs from this Terminal window, in the foreground. Ctrl+C stops them all</td></tr>
           <tr><td data-label="Type"><code>fleet loops --dry-run</code></td><td data-label="To">See each job's schedule from its plist and start nothing</td></tr>
           <tr><td data-label="Type"><code>fleet worktree-rebuild &lt;task-id&gt;</code></td><td data-label="To">Make an open task's worktree one git reads again, when a BLOCKED-ON-TOOLING row says git can't read it. Its files and uncommitted work stay, no repo hook runs, and its dependency links come back</td></tr>
@@ -965,6 +1010,8 @@ castle model line &lt;name&gt; &lt;line&gt;     file a model name under a tier</
           <tr><td data-label="Type"><code>echo on &gt; ~/.hogwarts/auto-orchestrate</code></td><td data-label="To">Let McGonagall pick the next step after an owl or a verdict, as one checked typed action</td></tr>
           <tr><td data-label="Type"><code>echo on &gt; ~/.hogwarts/cross-family-failover</code></td><td data-label="To">Let a desk whose own family is all down run on the other family, where no review reads its runs</td></tr>
           <tr><td data-label="Type"><code>echo on &gt; ~/.hogwarts/auto-go-updates</code></td><td data-label="To">Get one line each time one of McGonagall's open go tasks changes where it stands</td></tr>
+          <tr><td data-label="Type"><code>echo on &gt; ~/.hogwarts/chat-review</code></td><td data-label="To">Let teammates on the allowlist ask Hermione for a PR review from Google Chat</td></tr>
+          <tr><td data-label="Type"><code>echo on &gt; ~/.hogwarts/chat-review-github</code></td><td data-label="To">Also post each chat review on its PR, as a COMMENT review with your gh login</td></tr>
           <tr><td data-label="Type"><code>rm ~/.hogwarts/&lt;file&gt;</code></td><td data-label="To">Switch that one off again</td></tr>
         </tbody>
       </table></div>
@@ -1034,7 +1081,7 @@ castle model line &lt;name&gt; &lt;line&gt;     file a model name under a tier</
     <li class="stage"><div class="n">1<small>Switch off</small></div><div>
       <h3>Switch the automations off first</h3>
       <p>A review or closer pass that is already running is a process of its own, so stopping the background jobs doesn't end it, but with the files gone no draft PR, follow-up push or reply, proven close, worktree removal or memory addition starts after its next check.</p>
-      <pre class="cmdline">rm -f ~/.hogwarts/auto-draft-pr ~/.hogwarts/pr-followup ~/.hogwarts/auto-close ~/.hogwarts/worktree-cleanup ~/.hogwarts/auto-portrait ~/.hogwarts/owl-reports ~/.hogwarts/auto-orchestrate ~/.hogwarts/cross-family-failover ~/.hogwarts/auto-go-updates</pre>
+      <pre class="cmdline">rm -f ~/.hogwarts/auto-draft-pr ~/.hogwarts/pr-followup ~/.hogwarts/auto-close ~/.hogwarts/worktree-cleanup ~/.hogwarts/auto-portrait ~/.hogwarts/owl-reports ~/.hogwarts/auto-orchestrate ~/.hogwarts/cross-family-failover ~/.hogwarts/auto-go-updates ~/.hogwarts/chat-review ~/.hogwarts/chat-review-github</pre>
     </div></li>
     <li class="stage"><div class="n">2<small>Look</small></div><div>
       <h3>See every step first</h3>
