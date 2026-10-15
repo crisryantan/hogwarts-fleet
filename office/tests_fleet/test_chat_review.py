@@ -351,10 +351,10 @@ class CodeGsTests(ChatCase):
         source = self.source()
         body = source[source.index("function onMessage"):source.index("function prLink_")]
         # reason line, then the reply (or the empty response) it goes with, in the order the checks run
-        steps = [("not a human", "return {};"), ("bad message name", "return {};"),
-                 ("settings missing", "return reply_(addOn, NOT_SET_UP);"),
+        steps = [("not a message", "return {};"), ("not a human", "return {};"), ("bad message name", "return {};"),
+                 ("bad thread", "return {};"), ("settings missing", "return reply_(addOn, NOT_SET_UP);"),
                  ("space not allowed", "return reply_(addOn, SPACE_REFUSED);"),
-                 ("sender not allowed", "return reply_(addOn, SENDER_REFUSED);"), ("bad thread", "return {};")]
+                 ("sender not allowed", "return reply_(addOn, SENDER_REFUSED);")]
         at = 0
         for reason, outcome in steps:
             with self.subTest(reason=reason):
@@ -373,10 +373,10 @@ class CodeGsTests(ChatCase):
         for constant in ("NOT_SET_UP", "SPACE_REFUSED", "SENDER_REFUSED"):
             self.assertEqual(len(re.findall(rf"\b{constant}\b", body)), 1)
         self.assertEqual(body.count("reply_(addOn, "), 6)
-        # A bot is dropped before the Script Properties are read, so it never gets a reply, and a non-message event
-        # still gets the empty response.
-        self.assertLess(body.index("(not a human)"), body.index("settings_()"))
-        self.assertIn("if (!addOn && (!event || event.type !== 'MESSAGE')) return {};", body)
+        # A bot, a non-message event and a malformed name or thread are all dropped before the Script Properties are
+        # read, so none of them gets a refusal reply.
+        self.assertLess(body.index("(bad thread)"), body.index("settings_()"))
+        self.assertIn("if (!addOn && (!event || event.type !== 'MESSAGE')) {", body)
 
     def test_a_direct_message_must_be_in_the_allowed_spaces_like_any_other(self):
         source = self.source()

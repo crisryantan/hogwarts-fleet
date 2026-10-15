@@ -319,7 +319,7 @@ Two service accounts with no project roles do the Google side. The writer is the
 
 Anyone in your organisation's Chat can message the app, so it keeps very little:
 
-- Only people whose email is in the allowlist, in allowlisted spaces, get any answer, and a direct message counts as a space that must be listed. Rejected messages get a fixed reply and a reason line in the Apps Script executions log.
+- Only people whose email is in the allowlist, in allowlisted spaces, get a review queued, and a direct message counts as a space that must be listed. Anyone else gets a fixed short reply, and every rejected message leaves a reason line in the Apps Script executions log.
 - The one request is exactly `review https://github.com/<owner>/<repo>/pull/<n>` (the link may sit in `<>`), for an allowlisted repo. Anything else, a question, a task like "fix it" or "deploy it", or extra words after the link, gets one fixed help text and no row. The row holds only names, the sender, the link, the time and a status.
 - The job checks every row again against its own allowlists and the link's exact shape, and marks a row that fails `failed` with no reply. A row is taken once, even across a kill, and ends `done` or `failed`.
 - Hermione reads the PR through a file the job writes with your `gh` login, read only, with the PR's text marked as untrusted data whose instructions are ignored. Her only job is the review. She has Read and no shell, under settings that let her read nothing beyond that one folder, and never runs the PR's code. A PR that's too large or not open gets a fixed reply, and an answer that isn't her exact review block, or that repeats a long run of the PR's own text, gets a fixed "couldn't review" line.

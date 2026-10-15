@@ -54,7 +54,10 @@ var SHEET_ID = /^[A-Za-z0-9_-]{20,100}$/;
 
 function onMessage(event) {
   var addOn = Boolean(event && event.chat);
-  if (!addOn && (!event || event.type !== 'MESSAGE')) return {};
+  if (!addOn && (!event || event.type !== 'MESSAGE')) {
+    console.log('chat review: dropped (not a message)');
+    return {};
+  }
   var payload = addOn ? (event.chat.messagePayload || {}) : event;
   var message = payload.message || {};
   var space = payload.space || message.space || {};
@@ -68,6 +71,11 @@ function onMessage(event) {
   var named = MESSAGE_NAME.exec(name);
   if (!named || named[1] !== spaceName) {
     console.log('chat review: dropped (bad message name)');
+    return {};
+  }
+  var thread = text_((message.thread || {}).name);
+  if (!THREAD_NAME.test(thread) || thread.indexOf(spaceName + '/') !== 0) {
+    console.log('chat review: dropped (bad thread)');
     return {};
   }
   var settings = settings_();
@@ -84,11 +92,6 @@ function onMessage(event) {
   if (!EMAIL.test(email) || settings.senders.indexOf(email) < 0) {
     console.log('chat review: dropped (sender not allowed)');
     return reply_(addOn, SENDER_REFUSED);
-  }
-  var thread = text_((message.thread || {}).name);
-  if (!THREAD_NAME.test(thread) || thread.indexOf(spaceName + '/') !== 0) {
-    console.log('chat review: dropped (bad thread)');
-    return {};
   }
   var asked = typeof message.argumentText === 'string' ? message.argumentText : text_(message.text);
   var link = prLink_(asked, settings.repos);
