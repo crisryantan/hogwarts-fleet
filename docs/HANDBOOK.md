@@ -315,7 +315,7 @@ Moody reviews work from your own Claude sessions. Those tasks sit under the desk
 
 Teammates can ask Hermione (Staff Engineer), a Google Chat app, to review a GitHub PR, and she answers in their thread. It does code reviews only: it answers no questions and fixes, builds, runs or deploys nothing. Nothing listens on your Mac. The app's connection is an Apps Script project (`chat-app/Code.gs`) that queues each request as a row of a Google Sheet, and the chat-review job, which runs under `fleet loops`, reads the Sheet each minute, runs the review and replies in Chat as the app.
 
-Two service accounts with no project roles do the Google side. The writer only adds rows to the Sheet; its key is a Script Property of the Apps Script project. The worker reads the Sheet and replies in Chat; its key sits in your login Keychain, and the job mints short-lived tokens from it itself, never putting the key or a token in a command line, a file or a log. Both are editors of the Sheet, and no one else is.
+Two service accounts with no project roles do the Google side. The writer is the account Code.gs adds rows as; its key is a Script Property of the Apps Script project. The worker reads the Sheet and replies in Chat; its key sits in your login Keychain, and the job mints short-lived tokens from it itself, never putting the key or a token in a command line, a file or a log. Both are editors of the Sheet, and no one else is. An editor can change any row, so the job checks every row again rather than trusting the writer.
 
 Anyone in your organisation's Chat can message the app, so it keeps very little:
 

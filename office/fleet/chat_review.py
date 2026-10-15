@@ -7,8 +7,8 @@ Anyone in the company's Chat can send the app text, so everything here treats a 
 - The Chat app is an Apps Script deployment (chat-app/Code.gs), and it does code reviews only. It answers each
   message at once: a message from an allowlisted sender in an allowlisted space whose text, once the app mention is
   taken out, is exactly review https://github.com/<owner>/<repo>/pull/<n> (the link may sit in <>), for an
-  allowlisted repo, becomes one "queued" row of the request Sheet, appended through the Sheets API as a second,
-  write-only service account, holding only the message's, thread's and space's names, the sender's email and
+  allowlisted repo, becomes one "queued" row of the request Sheet, appended through the Sheets API as a second
+  service account used for nothing else, holding only the message's, thread's and space's names, the sender's email and
   display name, the PR link and the time. Anything else from them (a question, a task, extra words) gets the fixed
   help reply and no row, and nothing at all goes to anyone else. No other text of a message is kept anywhere.
 - The chat-review job, which fleet loops runs every minute, reads the Sheet as the worker service account
@@ -877,6 +877,11 @@ def intake(cells: list, now: int) -> tuple:
     """Take one queued row: check it, then make its record create-exclusive. (what happened, for the log; the row's
     new status and run marker, or None to leave it). Raises only when its record could not be made, so the row stays
     queued for the next pass."""
+    known = _row_key(cells[0])
+    existing = read_record(known) if known else None
+    if existing is not None and existing.get("source") == "chat":
+        # Taken before (its status write lost, or a kill came first): it only gets its status, however old it is.
+        return "seen before", _row_status(existing)
     fields, why = check_row(cells, now)
     if fields is None:
         log("ignored", why=why, message=_digest(f"row:{cells[0]}")[:12])

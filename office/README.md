@@ -506,13 +506,14 @@ nothing. Nothing listens on your Mac. The app's connection is an Apps Script pro
 `chat-app/appsscript.json`) that queues each request as one row of a Google Sheet, and the chat-review job, which runs
 on your Mac under `fleet loops`, reads that Sheet each minute, runs the review and replies in Chat as the app.
 
-Two service accounts do the Google side, neither with any project role. The writer account can only add rows: its key
-is the Script Property `WRITER_KEY`, and Code.gs signs its own short-lived Sheets token with it, cached for less than
+Two service accounts do the Google side, neither with any project role. The writer account is the one Code.gs adds rows as: its
+key is the Script Property `WRITER_KEY`, and Code.gs signs its own short-lived Sheets token with it, cached for less than
 its lifetime and never logged. The worker account is the one the job uses: its one JSON key sits in your login
 Keychain as a generic password (service `CHAT_REVIEW_KEYCHAIN_SERVICE`, account the account's email), and the job mints
 short-lived tokens from it itself, one for the spreadsheets scope and one for chat.bot, signing with `/usr/bin/openssl`
 fed the key on its stdin. The key and the tokens are never in an argv, a file or a log. Both accounts are editors of
-the Sheet and no one else is.
+the Sheet and no one else is. An editor can change any row, so a leaked writer key could too, which is one reason
+the job checks every row again.
 
 Anyone in your organisation's Chat can send the app text, so very little of it is kept. Code.gs answers a message
 only when its sender's email is in `ALLOWED_SENDERS` and its space in `ALLOWED_SPACES`; anything else gets no reply.
@@ -559,7 +560,7 @@ terminal, under the same caps, locks and GitHub switch, with no Chat reply.
 In Google Cloud, with an account that may administer the project:
 
 1. Create a project, and turn on `chat.googleapis.com` and `sheets.googleapis.com`.
-2. Create two service accounts with no project roles: a writer (it only adds rows) and a worker (it reads the Sheet
+2. Create two service accounts with no project roles: a writer (Code.gs adds rows as it) and a worker (it reads the Sheet
    and replies in Chat). Create one JSON key for each.
 3. Store the worker key in your login Keychain once `CHAT_REVIEW_SERVICE_ACCOUNT` and `CHAT_REVIEW_KEYCHAIN_SERVICE`
    are filled in (below) and the office is installed:

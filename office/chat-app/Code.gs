@@ -27,6 +27,7 @@ var HELP = "I'm Hermione (Staff Engineer), and I do code reviews only. Send exac
     ' or deploy anything.';
 var QUEUED = 'Queued your review of ';
 var BUSY = "I couldn't queue that just now. Send it again in a minute.";
+var FULL = "My review queue is full right now. Ask the review desk's owner to clear it.";
 var TOKEN_URL = 'https://oauth2.googleapis.com/token';
 var SHEETS_ROOT = 'https://sheets.googleapis.com/v4/spreadsheets/';
 var SHEETS_SCOPE = 'https://www.googleapis.com/auth/spreadsheets';
@@ -68,12 +69,11 @@ function onMessage(event) {
   var row = [name, thread, spaceName, email, displayName_(user.displayName), link, new Date().toISOString(),
              'queued', ''];
   try {
-    appendOnce_(settings, row);
+    return reply_(addOn, appendOnce_(settings, row));
   } catch (err) {
     console.error('chat review: a request could not be queued');  // the error itself is never logged
     return reply_(addOn, BUSY);
   }
-  return reply_(addOn, QUEUED + link);
 }
 
 /** The PR link, rebuilt from what the grammar matched, when text is exactly a review request for an allowed repo. */
@@ -125,7 +125,10 @@ function settings_() {
   return settings;
 }
 
-/** Append row unless a row for its message is already there, under the script lock. */
+/**
+ * Append row unless a row for its message is already there or the Sheet holds SHEET_MAX_ROWS rows, under the script
+ * lock. The reply the sender gets: queued, or the fixed full text.
+ */
 function appendOnce_(settings, row) {
   var lock = LockService.getScriptLock();
   lock.waitLock(LOCK_WAIT_MS);
@@ -135,9 +138,12 @@ function appendOnce_(settings, row) {
     var names = sheets_(base + encodeURIComponent(SHEET_TAB + '!A2:A' + (SHEET_MAX_ROWS + 1)) +
                         '?majorDimension=COLUMNS', 'get', token, null);
     var column = (names.values && names.values[0]) || [];
-    if (column.indexOf(row[0]) >= 0) return;
+    if (column.indexOf(row[0]) >= 0) return QUEUED + row[5];
+    // The worker reads at most SHEET_MAX_ROWS rows, so a full Sheet takes no more until old rows are cleared.
+    if (column.length >= SHEET_MAX_ROWS) return FULL;
     sheets_(base + encodeURIComponent(SHEET_TAB + '!A:I') + ':append?valueInputOption=RAW&insertDataOption=INSERT_ROWS',
             'post', token, {majorDimension: 'ROWS', values: [row]});
+    return QUEUED + row[5];
   } finally {
     lock.releaseLock();
   }

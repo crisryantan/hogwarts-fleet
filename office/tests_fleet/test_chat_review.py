@@ -347,6 +347,9 @@ class CodeGsTests(ChatCase):
         self.assertIn("valueInputOption=RAW", source)
         append = source[source.index("function appendOnce_"):source.index("function sheets_")]
         self.assertLess(append.index("lock.waitLock("), append.index("column.indexOf(row[0])"))
+        # A Sheet as full as the job reads takes no more rows, so no request is queued where the job never looks.
+        self.assertIn(f"var SHEET_MAX_ROWS = {config.CHAT_REVIEW_SHEET_MAX_ROWS};", source)
+        self.assertLess(append.index("if (column.length >= SHEET_MAX_ROWS) return FULL;"), append.index(":append?"))
         self.assertIn("lock.releaseLock()", append)
         self.assertIn("Utilities.computeRsaSha256Signature", source)
         self.assertIn("CacheService.getScriptCache()", source)
@@ -498,6 +501,18 @@ class IntakeTests(ChatCase):
         self.google.fail_writes = False
         self.assertEqual(self.run_pass()["taken"], ["seen before"])
         self.assertEqual((len(self.turns), len(self.google.messages), self.google.statuses()), (1, 1, ["done"]))
+
+    def test_a_status_recovered_long_after_the_queue_limit_keeps_its_outcome(self):
+        self.deliver(row())
+        self.google.fail_writes = True
+        self.run_pass()
+        [record] = self.records()
+        self.google.fail_writes = False
+        later = time.time() + config.CHAT_REVIEW_QUEUE_MAX_SECONDS + 3600
+        with mock.patch.object(chat_review.time, "time", return_value=later):
+            self.assertEqual(self.run_pass()["taken"], ["seen before"])
+        self.assertEqual(self.google.rows[0][7:], ["done", record["claim"]])
+        self.assertEqual(len(self.turns), 1)
 
     def test_a_review_killed_part_way_is_answered_once_and_never_run_again(self):
         self.deliver(row())
