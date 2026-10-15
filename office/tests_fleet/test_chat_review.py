@@ -14,13 +14,14 @@ import re
 import shutil
 import subprocess
 import time
+import unittest
 import urllib.parse
 from pathlib import Path
 from unittest import mock
 
 from fleet import chat_review, common, config, gitops, google_chat, run_desk, safefs, tools
 from fleet.safefs import FleetError
-from tests_fleet.support import OFFICE, FleetCase, kit_setting
+from tests_fleet.support import IN_KIT, OFFICE, ONLY_IN_KIT, FleetCase, kit_setting
 
 REAL_SEND = google_chat.send  # captured before ChatCase replaces it
 REAL_KILL = run_desk.kill_chat_review_turn
@@ -233,7 +234,14 @@ class ChatCase(FleetCase):
 class SwitchAndConfigTests(ChatCase):
     SETTINGS = ("CHAT_REVIEW_SHEET_ID", "CHAT_REVIEW_SERVICE_ACCOUNT", "CHAT_REVIEW_KEYCHAIN_SERVICE",
                 "CHAT_REVIEW_SENDERS", "CHAT_REVIEW_SPACES", "CHAT_REVIEW_REPOS")
+    # The kit's placeholders, written out: an installed office fills some of them in its own config.
+    PLACEHOLDERS = {"CHAT_REVIEW_SHEET_ID": "<chat-review-sheet-id>",
+                    "CHAT_REVIEW_SERVICE_ACCOUNT": "<chat-app-service-account>",
+                    "CHAT_REVIEW_KEYCHAIN_SERVICE": "<chat-review-keychain-service>",
+                    "CHAT_REVIEW_SENDERS": ("<allowed-sender-email>",), "CHAT_REVIEW_SPACES": ("<allowed-chat-space>",),
+                    "CHAT_REVIEW_REPOS": ("<allowed-repo>",)}
 
+    @unittest.skipUnless(IN_KIT, ONLY_IN_KIT)
     def test_the_kit_ships_both_switches_off_and_every_setting_a_placeholder(self):
         for name in self.SETTINGS[:3]:
             self.assertTrue(kit_setting(name).startswith("<"), name)
@@ -256,7 +264,7 @@ class SwitchAndConfigTests(ChatCase):
 
     def test_unfilled_settings_refuse_to_start_and_name_each_one(self):
         for name in self.SETTINGS:
-            self.patch(config, name, kit_setting(name))
+            self.patch(config, name, self.PLACEHOLDERS[name])
         self.deliver(row())
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
@@ -633,6 +641,7 @@ class TokenTests(ChatCase):
             REAL_SIGN(b"key", b"x" * (run_desk.SIGN_INPUT_MAX_BYTES + 1))
 
 
+@unittest.skipUnless(IN_KIT, ONLY_IN_KIT)
 class StoreKeyTests(ChatCase):
     def helper(self):
         spec = importlib.util.spec_from_file_location("chat_review_store_key", STORE_KEY)
