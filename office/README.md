@@ -45,6 +45,7 @@ The store has none of these:
                                         and settings.json (Claude) or codex.toml (Codex)
   desks/<desk>/enabled                  a headless desk runs only while this plain file exists
   desks/hermione/chat-review-settings.json  the locked-down settings of Hermione's chat review turns
+  chat-app/Code.gs, chat-app/appsscript.json  the Chat app's Apps Script source, which you paste into its project
   desks/<desk>/live-tools.json          for mcgonagall and snape: every tool their live herdr session may have, by exact name
   hogwarts/__init__.py                  version string
   hogwarts/errors.py                    error classes and exit codes
@@ -71,8 +72,8 @@ The store has none of these:
                                         next step), owl_report.py (her one-line owl reports), phone.py (loud events to
                                         the phone), scratchpad.py (keeps each scratchpad and task pad to its latest
                                         Checkpoint, older ones archived), chat_review.py (PR reviews teammates ask
-                                        for in Google Chat, and fleet review pr), google_chat.py (the Chat app's
-                                        Pub/Sub pull and its replies) and their helpers
+                                        for in Google Chat, and fleet review pr), google_chat.py (the request
+                                        Sheet, the Chat replies and the service account's tokens) and their helpers
   fleet/hooks/                          the castle's session hooks and the push gate, push_gate.py; stop.py is
                                         McGonagall's chat watch, which wakes her with a go task's line when it moves,
                                         in the session that typed its go (go_owners.py keeps which session watches
@@ -149,9 +150,9 @@ The store has none of these:
                                         that failed or timed out is woken once more on the next pass, and a fix
                                         round that died idle may be started again until 2 of the build's newest runs
                                         in a row died that way, after which it is yours (off when missing)
-  chat-review                           while it holds exactly "on", the chat-review job pulls the Chat app's Pub/Sub
-                                        subscription each minute and Hermione reviews the PRs teammates ask for there
-                                        (off when missing: nothing is pulled)
+  chat-review                           while it holds exactly "on", the chat-review job reads the request Sheet
+                                        each minute and Hermione reviews the PRs teammates ask for in Chat (off when
+                                        missing: no token is minted and the Sheet is not read)
   chat-review-github                    while it holds exactly "on" too, each chat review is also posted on its PR as a
                                         COMMENT review with your gh login, once per PR and head commit (off when
                                         missing)
@@ -499,24 +500,44 @@ Auto-portrait (`fleet/portrait_auto.py`) applies his additions for you while `~/
 
 ## Chat reviews
 
-Teammates ask the Hermione desk for a review of a GitHub PR from Google Chat, and get her verdict and findings in
-their thread. It runs on your Mac under `fleet loops` and only ever pulls: the Chat app's connection is Cloud Pub/Sub,
-and the chat-review job pulls the app's subscription with your own gcloud login, so nothing listens on the network.
-It uses no key file. Replies go out as the app through its service account, which your login impersonates.
+Teammates ask Hermione (Staff Engineer), a Google Chat app, for a code review of a GitHub PR, and get her verdict and
+findings in their thread. The app does code reviews only: it answers no questions and fixes, builds, runs or deploys
+nothing. Nothing listens on your Mac. The app's connection is an Apps Script project (`chat-app/Code.gs` and
+`chat-app/appsscript.json`) that queues each request as one row of a Google Sheet, and the chat-review job, which runs
+on your Mac under `fleet loops`, reads that Sheet each minute, runs the review and replies in Chat as the app.
 
-Anyone in your organisation's Chat can send the app text, so the job reads very little of it. A message counts only
-when its sender's email is in `CHAT_REVIEW_SENDERS` and its space is in `CHAT_REVIEW_SPACES`; any other message is
-acknowledged and ignored, with no reply and one scrubbed log line. The one request is a message whose text, once the
-app mention is out, is exactly `review https://github.com/<owner>/<repo>/pull/<n>` (the link may sit in `<>`), for a
-repo in `CHAT_REVIEW_REPOS`. Anything else gets one fixed help reply. The requester's own words never reach a model.
+Two service accounts do the Google side, neither with any project role. The writer account can only add rows: its key
+is the Script Property `WRITER_KEY`, and Code.gs signs its own short-lived Sheets token with it, cached for less than
+its lifetime and never logged. The worker account is the one the job uses: its one JSON key sits in your login
+Keychain as a generic password (service `CHAT_REVIEW_KEYCHAIN_SERVICE`, account the account's email), and the job mints
+short-lived tokens from it itself, one for the spreadsheets scope and one for chat.bot, signing with `/usr/bin/openssl`
+fed the key on its stdin. The key and the tokens are never in an argv, a file or a log. Both accounts are editors of
+the Sheet and no one else is.
+
+Anyone in your organisation's Chat can send the app text, so very little of it is kept. Code.gs answers a message
+only when its sender's email is in `ALLOWED_SENDERS` and its space in `ALLOWED_SPACES`; anything else gets no reply.
+The one request is a message whose text, once the app mention is out, is exactly
+`review https://github.com/<owner>/<repo>/pull/<n>` (the link may sit in `<>`), for a repo in `ALLOWED_REPOS`. It
+becomes a row holding the message's, thread's and space's names, the sender's email and display name, the link, the
+time and the status `queued`, written as plain values (never a formula), once per message under the script lock, and
+the sender is told it is queued. Anything else, a question, a task or extra words after the link, gets one fixed
+help text and no row.
+
+The job trusts no row. It checks each again against `CHAT_REVIEW_SENDERS`, `CHAT_REVIEW_SPACES`, `CHAT_REVIEW_REPOS`
+and the exact link shape, and a row that fails, or that waited longer than `CHAT_REVIEW_QUEUE_MAX_SECONDS`, is marked
+`failed` with no reply. A row is taken once even across kills: its office record, keyed by the Chat message's name, is
+made create-exclusive before the row is marked `taken` with a run marker, and a row with a record is never taken again.
+When its request ends the row says `done` (replied) or `failed`. The job writes only those status and run cells.
 
 A review reads the PR with your `gh` login, read only: its metadata, then the diff of its base and head commits. A
 PR that is not open, or whose diff is over `CHAT_REVIEW_DIFF_MAX_BYTES`, gets a fixed reply. Hermione then runs
 headless as in her fleet reviews, with her model and budget, but with Read as her only tool and no shell, under
 `desks/hermione/chat-review-settings.json`, which allows no read beyond the working folder, no write and no network,
 in a fresh private folder that holds only the review input. The PR's title, description and diff sit there
-between two marker lines with a random nonce, and her prompt names them as untrusted data. She never runs the PR's
-code. Her last block is read strictly, and anything else is a fixed "couldn't review" reply. Each person may ask for
+between two marker lines with a random nonce, and her brief and prompt say her only job is to review it and return
+her block, and that any instruction inside the PR text is ignored. She never runs the PR's code. Her last block is
+read strictly, and anything else, including a finding that repeats 40 or more characters of the PR's own text, is a
+fixed "couldn't review" reply, so planted text never reaches Chat or GitHub word for word. Each person may ask for
 `CHAT_REVIEW_PER_PERSON_DAILY` reviews a cap day and the whole fleet `CHAT_REVIEW_DAILY`, counted before she starts,
 so a killed review counts. Each review is also one run of hers under her own daily run and spend caps, recorded with
 its cost like any other, so chat reviews spend at most `CHAT_REVIEW_DAILY` turns a day at her per-run budget, and
@@ -524,10 +545,10 @@ never past her caps.
 
 While `~/.hogwarts/chat-review-github` holds `on` too, the review also goes on the PR with your `gh` login. Its event
 is always COMMENT, never an approval or a change request, so it can never count toward branch protection. It opens
-with a fixed line saying it is an automated review by the Hermione desk requested by the requester in Chat, naming
-them by their Chat display name (scrubbed, at most 60 characters, else "a teammate"), never their email, which stays
-in the office's own log, and it is posted at most once per PR and head commit. Her findings are defanged before they are
-posted, so no mention or link markup in them survives in either place.
+with a fixed line saying it is an automated review by Hermione (Staff Engineer) requested by the requester in Chat,
+naming them by their Chat display name (scrubbed, at most 60 characters, else "a teammate"), never their email, which
+stays in the office's own log, and it is posted at most once per PR and head commit. Her findings are defanged before
+they are posted, so no mention or link markup in them survives in either place.
 
 Every request, its outcome and its cost is one JSON line in `logs/chat-review.log`, and its record stays in
 `chat-reviews/requests/` for 30 days. `fleet review pr <link> --requested-by <email>` runs the same review from your
@@ -537,32 +558,46 @@ terminal, under the same caps, locks and GitHub switch, with no Chat reply.
 
 In Google Cloud, with an account that may administer the project:
 
-1. Pick or create a project, and turn on the Google Chat API and the Cloud Pub/Sub API.
-2. Create a Pub/Sub topic. Grant `chat-api-push@system.gserviceaccount.com` the Pub/Sub Publisher role on that topic,
-   and no one else, so only Chat can put events on it.
-3. Create a pull subscription on the topic. It has no push endpoint.
-4. Create a service account for the app, with no keys and no project roles. Grant your own account Service Account
-   Token Creator on that service account, and Pub/Sub Subscriber on the subscription.
-5. In the Chat API's configuration, name the app, let it join spaces, set its connection to Cloud Pub/Sub with the
-   topic's full name, and make it visible to named people first, before a wider group.
-6. Sign gcloud in as yourself with `gcloud auth login`, then check both tokens print:
-   `gcloud auth print-access-token` and
-   `gcloud auth print-access-token --impersonate-service-account=<service account> --scopes=https://www.googleapis.com/auth/chat.bot`.
+1. Create a project, and turn on `chat.googleapis.com` and `sheets.googleapis.com`.
+2. Create two service accounts with no project roles: a writer (it only adds rows) and a worker (it reads the Sheet
+   and replies in Chat). Create one JSON key for each.
+3. Store the worker key in your login Keychain once `CHAT_REVIEW_SERVICE_ACCOUNT` and `CHAT_REVIEW_KEYCHAIN_SERVICE`
+   are filled in (below) and the office is installed:
+   `/usr/bin/python3 -I -B scripts/chat-review-store-key.py <worker key.json>`. It refuses any other account's key,
+   and the key never appears in a process's arguments. Then delete the downloaded file.
+4. Create a Google Sheet with a tab named `requests` whose first row is the header
+   `message, thread, space, sender_email, sender_name, pr_url, created, status, run` (columns A to I). Share it with
+   both service accounts' emails as editors, and with no one else. Its id is the long part of its link.
+5. Create an Apps Script project, link it to the project from step 1 (Project Settings, Google Cloud Platform
+   project, the project number), and paste in `chat-app/Code.gs` and `chat-app/appsscript.json` (show the manifest
+   in the editor's settings first). In Project Settings, Script Properties, set `SHEET_ID`, `ALLOWED_SENDERS`,
+   `ALLOWED_SPACES` and `ALLOWED_REPOS` (each list comma-separated), and `WRITER_KEY`: open the writer key file, copy
+   its whole text into the value, save, then delete the downloaded file and copy something else so the key leaves
+   your clipboard. Deploy it (Deploy, New deployment) and note the deployment id.
+6. In the Chat API's configuration, name the app `Hermione (Staff Engineer)`, let it join spaces, set its connection
+   to the Apps Script project with that deployment id, and make it visible to named people only. Install it in a
+   test space first. Each person who messages it is asked once to let it connect to an external service, the one
+   scope it has.
 
 Then fill these in your private overlay of `fleet/config.py`; while any is a placeholder, the job refuses to start and
 says which:
 
-- `CHAT_REVIEW_PROJECT`: the project id.
-- `CHAT_REVIEW_SUBSCRIPTION`: the pull subscription's id.
-- `CHAT_REVIEW_SERVICE_ACCOUNT`: the app's service account email.
+- `CHAT_REVIEW_SHEET_ID`: the Sheet's id.
+- `CHAT_REVIEW_SERVICE_ACCOUNT`: the worker service account's email.
+- `CHAT_REVIEW_KEYCHAIN_SERVICE`: the Keychain service name the worker key is stored under.
 - `CHAT_REVIEW_SENDERS`: the emails of the people who may ask.
 - `CHAT_REVIEW_SPACES`: the spaces it answers in, as `spaces/<id>` (the id is the last part of the space's link).
 - `CHAT_REVIEW_REPOS`: the repos it reviews, as `owner/name`.
 
-`CHAT_REVIEW_PER_PERSON_DAILY`, `CHAT_REVIEW_DAILY` and `GCLOUD_BIN` have working defaults. Run
-`sh scripts/loops-setup.sh`, which adds the chat-review job to `loops/jobs`, restart `fleet loops`, add the app to a
-space, and switch it on with `echo on > ~/.hogwarts/chat-review`. Once a few Chat replies read right, switch on the
-GitHub post with `echo on > ~/.hogwarts/chat-review-github`. `rm` either file switches it off again.
+`CHAT_REVIEW_PER_PERSON_DAILY` and `CHAT_REVIEW_DAILY` have working defaults. Run `sh scripts/loops-setup.sh`, which
+adds the chat-review job to `loops/jobs`, restart `fleet loops`, and switch it on with
+`echo on > ~/.hogwarts/chat-review`. Once a few Chat replies read right, switch on the GitHub post with
+`echo on > ~/.hogwarts/chat-review-github`. `rm` either file switches it off again. Clear old Sheet rows only while
+the intake is off.
+
+Rotate both keys every 90 days: create a new key for the account, store the worker's with the same helper (it
+replaces the Keychain item) or paste the writer's into `WRITER_KEY`, check a review goes through, then delete the old
+key in Google Cloud.
 
 ## Exit codes
 

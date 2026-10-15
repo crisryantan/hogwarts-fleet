@@ -75,7 +75,7 @@ for plist in "$AGENTS"/com.hogwarts.*.plist; do
 done
 [ -n "$found" ] || ok "launchd has no fleet job; the setup scripts will add theirs to $LIST"
 
-# The chat review intake pulls a Pub/Sub subscription, so it runs only here, never under launchd. Listed, it still
+# The chat review intake reads its key from your login Keychain, so it runs only here, never under launchd. Listed, it still
 # does nothing until you write on to ~/.hogwarts/chat-review.
 echo "Step 4 of 6: adding the chat-review job, which stays off until ~/.hogwarts/chat-review holds on"
 [ -f "$OFFICE/launchd/com.hogwarts.chat-review.plist" ] || fail "$OFFICE/launchd/com.hogwarts.chat-review.plist is missing. Reinstall the office from this clone first"

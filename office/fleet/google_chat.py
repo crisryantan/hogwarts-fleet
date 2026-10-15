@@ -1,21 +1,25 @@
-"""Google Chat for chat reviews: the Chat app's Pub/Sub subscription, pulled, and replies posted as the app.
+"""Google for chat reviews: the request Sheet the Chat app's Apps Script fills, replies posted as the app, and the
+worker service account's access tokens.
 
-Nothing here listens on the network. The chat-review job (fleet/chat_review.py) calls out, over HTTPS, to two Google
-APIs, with access tokens gcloud prints and nothing else:
-- Pub/Sub REST, projects/<p>/subscriptions/<s>:pull and :acknowledge, with your own gcloud login
-  (gcloud auth print-access-token);
-- Chat REST, spaces.messages.create in the request's thread, as the Chat app, by impersonating the app's service
-  account for the chat.bot scope (gcloud auth print-access-token --impersonate-service-account <sa> --scopes <scope>).
-  The service account has no key: you hold Token Creator on it, so only your own login can mint its tokens.
-gcloud runs by its absolute path (config.GCLOUD_BIN) with an environment of only HOME and PATH. A token lives only in
-this process's memory, for one call: it is never in argv, a log, a file or an error, and no error text a server or
-gcloud printed is kept. Requests go straight to the two Google hosts, with no proxy, certificates checked and no
+Nothing here listens on the network. The chat-review job (fleet/chat_review.py) calls out, over HTTPS, to three Google
+endpoints, all as the worker service account (CHAT_REVIEW_SERVICE_ACCOUNT):
+- the OAuth token endpoint, with a JWT bearer grant this module signs (RS256) for exactly one of two scopes,
+  spreadsheets or chat.bot, and gets back a short-lived access token;
+- Sheets REST, values.get and values.batchUpdate on the one request Sheet (CHAT_REVIEW_SHEET_ID), shared as editor
+  with this service account and with the writer service account chat-app/Code.gs appends rows as, and no one else;
+- Chat REST, spaces.messages.create in the request's thread, as the app, with the chat.bot scope.
+The worker service account's one JSON key is never a file here: its private key sits in your login Keychain as a generic
+password (service CHAT_REVIEW_KEYCHAIN_SERVICE, account the service account's email), stored there by
+scripts/chat-review-store-key.py as the base64 of its PKCS#8 body. run_desk.keychain_output reads it with
+/usr/bin/security, and run_desk.openssl_sign_output signs with /usr/bin/openssl, which gets the key on its stdin. The
+key and every token live only in this process's memory: never in argv, a log, a file or an error, and no error text a
+server or a tool printed is kept. Requests go straight to the Google hosts, with no proxy, certificates checked and no
 redirect followed, so a bearer token never goes to any other host.
 
 Each Chat reply carries a request id the caller derives from its own record, so sending one again (after a kill, or a
 failed answer) gives back the message Chat already made instead of a second one.
 
-It starts no process itself: run_desk.gcloud_token_output runs gcloud for it.
+It starts no process itself: run_desk runs security and openssl for it.
 """
 from __future__ import annotations
 
@@ -23,6 +27,7 @@ import base64
 import json
 import re
 import ssl
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -31,66 +36,106 @@ from typing import Optional
 from fleet import common, config, run_desk
 from fleet.safefs import FleetError
 
-PUBSUB_ROOT = "https://pubsub.googleapis.com/v1"
+TOKEN_URL = "https://oauth2.googleapis.com/token"
+SHEETS_ROOT = "https://sheets.googleapis.com/v4/spreadsheets"
 CHAT_ROOT = "https://chat.googleapis.com/v1"
+SHEETS_SCOPE = "https://www.googleapis.com/auth/spreadsheets"
 CHAT_BOT_SCOPE = "https://www.googleapis.com/auth/chat.bot"
+SCOPES = (SHEETS_SCOPE, CHAT_BOT_SCOPE)
+JWT_BEARER = "urn:ietf:params:oauth:grant-type:jwt-bearer"
+# The signed grant is good for this long; the token Google gives back is kept no longer than that, in memory only.
+GRANT_SECONDS = 600
+TOKEN_MARGIN_SECONDS = 60
 REPLY_OPTION = "REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD"
 TOKEN = re.compile(r"[A-Za-z0-9._~+/=-]{20,4096}")
+# What the Keychain item holds: the base64 of the private key's PKCS#8 body, one line.
+KEY_BODY = re.compile(rb"[A-Za-z0-9+/]{400,8000}={0,2}")
 HTTP_TIMEOUT_SECONDS = 30
 RESPONSE_MAX_BYTES = 8 * 1024 * 1024
-# One Pub/Sub message's data, decoded: a Chat event is a few KB.
-EVENT_MAX_BYTES = 65536
 # What Chat takes as a message's text is 4096 characters.
 MESSAGE_MAX_CHARS = 4000
-PROJECT = re.compile(r"[a-z][a-z0-9-]{4,28}[a-z0-9]")
-SUBSCRIPTION = re.compile(r"[A-Za-z][A-Za-z0-9._~+-]{2,254}")
 SERVICE_ACCOUNT = re.compile(r"[a-z][a-z0-9-]{4,28}[a-z0-9]@[a-z][a-z0-9-]{4,28}[a-z0-9]\.iam\.gserviceaccount\.com")
+KEYCHAIN_SERVICE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,99}")
+SHEET_ID = re.compile(r"[A-Za-z0-9_-]{20,100}")
 SPACE = re.compile(r"spaces/[A-Za-z0-9_-]{1,100}")
 THREAD = re.compile(r"spaces/[A-Za-z0-9_-]{1,100}/threads/[A-Za-z0-9_.-]{1,200}")
 REQUEST_ID = re.compile(r"[a-z0-9][a-z0-9-]{0,99}")
-ACK_ID = re.compile(r"[A-Za-z0-9_./+=-]{1,2048}")
+# The request Sheet: one tab, one row per request, written by chat-app/Code.gs in these columns, A to I.
+SHEET_TAB = "requests"
+COLUMNS = ("message", "thread", "space", "sender_email", "sender_name", "pr_url", "created", "status", "run")
+STATUS_COLUMN, RUN_COLUMN = "H", "I"
+CELL_MAX = 400
+# The statuses this side writes; only Code.gs writes "queued".
+WRITTEN_STATUSES = ("taken", "done", "failed")
+RUN_MARKER = re.compile(r"[0-9a-f]{16}")
+
+_TOKENS: dict = {}
 
 
 class GoogleError(FleetError):
-    """A Google call that failed. Its text never holds a token or anything a server or gcloud printed."""
+    """A Google call that failed. Its text never holds a key, a token or anything a server or a tool printed."""
 
 
 # Tokens
 
 
-def pull_token_argv() -> list:
-    return [config.GCLOUD_BIN, "auth", "print-access-token"]
+def _b64url(raw: bytes) -> str:
+    return base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
 
 
-def chat_token_argv(service_account: str) -> list:
-    if not isinstance(service_account, str) or SERVICE_ACCOUNT.fullmatch(service_account) is None:
-        raise GoogleError("the Chat app's service account is not a service account email")
-    return [config.GCLOUD_BIN, "auth", "print-access-token", "--impersonate-service-account", service_account,
-            "--scopes", CHAT_BOT_SCOPE]
+def _identity() -> tuple:
+    service, account = config.CHAT_REVIEW_KEYCHAIN_SERVICE, config.CHAT_REVIEW_SERVICE_ACCOUNT
+    if not isinstance(account, str) or SERVICE_ACCOUNT.fullmatch(account) is None:
+        raise GoogleError("CHAT_REVIEW_SERVICE_ACCOUNT is not a service account email")
+    if not isinstance(service, str) or KEYCHAIN_SERVICE.fullmatch(service) is None:
+        raise GoogleError("CHAT_REVIEW_KEYCHAIN_SERVICE is not a Keychain service name")
+    return service, account
 
 
-def run_gcloud(argv: list) -> str:
-    """The access token gcloud prints for argv, one of the two shapes above. Tests replace this."""
-    if argv != pull_token_argv() and (len(argv) != 7 or argv != chat_token_argv(argv[4])):
-        raise GoogleError("gcloud runs only to print an access token")
-    try:
-        code, out = run_desk.gcloud_token_output(argv)
-    except FleetError as exc:
-        raise GoogleError(str(exc)) from None
-    token = out.decode("ascii", "replace").strip()
-    if code != 0 or TOKEN.fullmatch(token) is None:
-        # Nothing gcloud printed is kept: it can name an account, a project or a token.
-        raise GoogleError(f"gcloud could not print an access token (exit {code}): run gcloud auth login, and check"
-                          " you hold Service Account Token Creator on the Chat app's service account")
+def _key_pem(service: str, account: str) -> bytes:
+    """The service account's private key as PEM, read from your login Keychain."""
+    code, out = run_desk.keychain_output(service, account)
+    body = out.strip()
+    if code != 0 or KEY_BODY.fullmatch(body) is None:
+        # Nothing security printed is kept.
+        raise GoogleError(f"no usable key for {account} is in your login Keychain under service {service} (exit"
+                          f" {code}): store one with scripts/chat-review-store-key.py")
+    lines = [body[index:index + 64] for index in range(0, len(body), 64)]
+    return b"-----BEGIN PRIVATE KEY-----\n" + b"\n".join(lines) + b"\n-----END PRIVATE KEY-----\n"
+
+
+def grant(scope: str, now: int) -> str:
+    """A JWT bearer grant for scope, signed RS256 with the service account's key by openssl."""
+    if scope not in SCOPES:
+        raise GoogleError("a chat review token is only for the spreadsheets or the chat.bot scope")
+    service, account = _identity()
+    header = {"alg": "RS256", "typ": "JWT"}
+    claims = {"iss": account, "scope": scope, "aud": TOKEN_URL, "iat": now, "exp": now + GRANT_SECONDS}
+    signing_input = ".".join(_b64url(json.dumps(part, separators=(",", ":"), sort_keys=True).encode("ascii"))
+                             for part in (header, claims))
+    code, signature = run_desk.openssl_sign_output(_key_pem(service, account), signing_input.encode("ascii"))
+    if code != 0 or not 128 <= len(signature) <= 1024:
+        raise GoogleError(f"openssl could not sign the token grant (exit {code})")
+    return f"{signing_input}.{_b64url(signature)}"
+
+
+def access_token(scope: str) -> str:
+    """A short-lived access token for scope, minted from a signed grant, kept in this process's memory only."""
+    now = int(time.time())
+    held = _TOKENS.get(scope)
+    if held is not None and held[1] - TOKEN_MARGIN_SECONDS > now:
+        return held[0]
+    answer = send(TOKEN_URL, None, {"grant_type": JWT_BEARER, "assertion": grant(scope, now)})
+    token, kind, lasts = answer.get("access_token"), answer.get("token_type"), answer.get("expires_in")
+    if not isinstance(token, str) or TOKEN.fullmatch(token) is None or not isinstance(kind, str) \
+            or kind.lower() != "bearer" or type(lasts) is not int or lasts <= TOKEN_MARGIN_SECONDS:
+        raise GoogleError("Google's token answer is not an access token")
+    _TOKENS[scope] = (token, now + min(lasts, GRANT_SECONDS))
     return token
 
 
-def pull_token() -> str:
-    return run_gcloud(pull_token_argv())
-
-
-def chat_token(service_account: str) -> str:
-    return run_gcloud(chat_token_argv(service_account))
+def forget_tokens() -> None:
+    _TOKENS.clear()
 
 
 # HTTPS
@@ -109,14 +154,27 @@ def _opener() -> urllib.request.OpenerDirector:
                                        urllib.request.HTTPSHandler(context=ssl.create_default_context()))
 
 
-def send(url: str, token: str, payload: dict) -> dict:
-    """One JSON request with payload as its body (so urllib sends it as a POST) and the token as its bearer, and the
-    JSON object answered. Only the two Google hosts are reached. Tests replace this."""
-    if not (url.startswith(PUBSUB_ROOT + "/") or url.startswith(CHAT_ROOT + "/")):
-        raise GoogleError("the chat review calls only Pub/Sub and Chat")
-    body = json.dumps(payload, ensure_ascii=True).encode("ascii")
-    request = urllib.request.Request(url, data=body, headers={"Authorization": f"Bearer {token}",
-                                                              "Content-Type": "application/json"})
+def send(url: str, token: Optional[str], payload: Optional[dict]) -> dict:
+    """One request and the JSON object answered. The token endpoint gets payload as a form and no token; Sheets and
+    Chat get payload as JSON (a GET when it is None) with the token as its bearer. Only those Google hosts are
+    reached. Tests replace this."""
+    headers = {}
+    if url == TOKEN_URL:
+        if token is not None or not isinstance(payload, dict):
+            raise GoogleError("the token endpoint takes a grant and no token")
+        body = urllib.parse.urlencode(payload).encode("ascii")
+        headers["Content-Type"] = "application/x-www-form-urlencoded"
+    elif url.startswith(SHEETS_ROOT + "/") or url.startswith(CHAT_ROOT + "/"):
+        if not isinstance(token, str) or TOKEN.fullmatch(token) is None:
+            raise GoogleError("a Sheets or Chat call needs an access token")
+        headers["Authorization"] = f"Bearer {token}"
+        body = None
+        if payload is not None:
+            body = json.dumps(payload, ensure_ascii=True).encode("ascii")
+            headers["Content-Type"] = "application/json"
+    else:
+        raise GoogleError("the chat review calls only Google's token endpoint, Sheets and Chat")
+    request = urllib.request.Request(url, data=body, headers=headers)
     try:
         with _opener().open(request, timeout=HTTP_TIMEOUT_SECONDS) as answer:
             raw = answer.read(RESPONSE_MAX_BYTES + 1)
@@ -135,51 +193,45 @@ def send(url: str, token: str, payload: dict) -> dict:
     return data
 
 
-# Pub/Sub
+# The request Sheet
 
 
-def subscription_path(project: str, subscription: str) -> str:
-    if not isinstance(project, str) or PROJECT.fullmatch(project) is None:
-        raise GoogleError("the project is not a Google Cloud project id")
-    if not isinstance(subscription, str) or SUBSCRIPTION.fullmatch(subscription) is None \
-            or subscription.startswith("goog"):
-        raise GoogleError("the subscription is not a Pub/Sub subscription id")
-    return f"projects/{project}/subscriptions/{subscription}"
+def _sheet_url(sheet_id: str) -> str:
+    if not isinstance(sheet_id, str) or SHEET_ID.fullmatch(sheet_id) is None:
+        raise GoogleError("the request Sheet's id is not a Sheets id")
+    return f"{SHEETS_ROOT}/{sheet_id}"
 
 
-def pull(project: str, subscription: str, token: str, most: int) -> list:
-    """Up to most messages, each {"ack_id", "message_id", "data"} with data as bytes, or None for a message that does
-    not decode; any received message's ack id is kept, so even a bad one is acknowledged."""
-    url = f"{PUBSUB_ROOT}/{subscription_path(project, subscription)}:pull"
-    answer = send(url, token, {"maxMessages": int(most), "returnImmediately": True})
-    received = answer.get("receivedMessages", [])
-    if not isinstance(received, list):
-        raise GoogleError("Pub/Sub's pull answer has no message list")
-    found = []
-    for item in received[: max(int(most), 0)]:
-        ack_id = item.get("ackId") if isinstance(item, dict) else None
-        if not isinstance(ack_id, str) or ACK_ID.fullmatch(ack_id) is None:
-            continue  # nothing to acknowledge it with; its deadline lapses and the subscription's retention ends it
-        message = item.get("message") if isinstance(item.get("message"), dict) else {}
-        message_id = message.get("messageId") if isinstance(message.get("messageId"), str) else ""
-        data = message.get("data")
-        decoded: Optional[bytes] = None
-        if isinstance(data, str) and len(data) <= EVENT_MAX_BYTES * 2:
-            try:
-                decoded = base64.b64decode(data, validate=True)
-            except ValueError:
-                decoded = None
-            if decoded is not None and len(decoded) > EVENT_MAX_BYTES:
-                decoded = None
-        found.append({"ack_id": ack_id, "message_id": common.one_line(message_id, 64), "data": decoded})
-    return found
+def read_rows(sheet_id: str, token: str, most: int) -> list:
+    """Up to most rows under the header, each (row number, its cells A to I as strings), a missing or non-string
+    cell read as "" and each cut at CELL_MAX. Code.gs writes its cells as plain values (RAW), so none is a formula."""
+    last = 1 + max(int(most), 0)
+    target = urllib.parse.quote(f"{SHEET_TAB}!A2:{RUN_COLUMN}{last}", safe="")
+    answer = send(f"{_sheet_url(sheet_id)}/values/{target}?majorDimension=ROWS&valueRenderOption=FORMATTED_VALUE",
+                  token, None)
+    values = answer.get("values", [])
+    if not isinstance(values, list):
+        raise GoogleError("the Sheet's answer has no rows")
+    rows = []
+    for index, row in enumerate(values[: max(int(most), 0)]):
+        row = row if isinstance(row, list) else []
+        cells = [cell if isinstance(cell, str) else "" for cell in row[: len(COLUMNS)]]
+        cells += [""] * (len(COLUMNS) - len(cells))
+        rows.append((index + 2, [cell[:CELL_MAX] for cell in cells]))
+    return rows
 
 
-def acknowledge(project: str, subscription: str, token: str, ack_ids: list) -> None:
-    if not ack_ids:
-        return
-    url = f"{PUBSUB_ROOT}/{subscription_path(project, subscription)}:acknowledge"
-    send(url, token, {"ackIds": list(ack_ids)})
+def write_statuses(sheet_id: str, token: str, updates: list) -> None:
+    """Set each (row number, status, run marker): the status and run cells only, as plain values (RAW), in one call."""
+    data = []
+    for row, status, marker in updates:
+        if type(row) is not int or not 2 <= row <= 1_000_000 or status not in WRITTEN_STATUSES \
+                or not isinstance(marker, str) or RUN_MARKER.fullmatch(marker) is None:
+            raise GoogleError("a Sheet status update is not one the fleet makes")
+        data.append({"range": f"{SHEET_TAB}!{STATUS_COLUMN}{row}:{RUN_COLUMN}{row}", "majorDimension": "ROWS",
+                     "values": [[status, marker]]})
+    if data:
+        send(f"{_sheet_url(sheet_id)}/values:batchUpdate", token, {"valueInputOption": "RAW", "data": data})
 
 
 # Chat

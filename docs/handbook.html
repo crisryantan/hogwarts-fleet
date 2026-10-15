@@ -750,42 +750,45 @@ castle model line &lt;name&gt; &lt;line&gt;     file a model name under a tier</
   <div class="sec-head">
     <p class="eyebrow">Chat reviews from Google Chat</p>
     <h2>Teammates ask for a review in Chat, and Hermione answers in their thread</h2>
-    <p>It runs on your Mac under <code>fleet loops</code> and only pulls: the Chat app's connection is Cloud Pub/Sub, the chat-review job pulls its subscription each minute with your own gcloud login, and nothing listens on the network. There is no key file anywhere. Replies go out as the app, through its service account, which your login impersonates.</p>
+    <p>Hermione (Staff Engineer) is a Google Chat app that does code reviews only: it answers no questions and fixes, builds, runs or deploys nothing. Nothing listens on your Mac. The app's connection is an Apps Script project (<code>chat-app/Code.gs</code>) that queues each request as a row of a Google Sheet, and the chat-review job, which runs under <code>fleet loops</code>, reads the Sheet each minute, runs the review and replies in Chat as the app.</p>
   </div>
-  <p>Anyone in your organisation's Chat can message the app, so it reads very little:</p>
+  <p>Two service accounts with no project roles do the Google side. The writer only adds rows to the Sheet; its key is a Script Property of the Apps Script project. The worker reads the Sheet and replies in Chat; its key sits in your login Keychain, and the job mints short-lived tokens from it itself, never putting the key or a token in a command line, a file or a log. Both are editors of the Sheet, and no one else is.</p>
+  <p>Anyone in your organisation's Chat can message the app, so it keeps very little:</p>
   <ul class="gates">
-    <li><b>Allowlisted people and spaces only</b><span>Only people whose email is in <code>CHAT_REVIEW_SENDERS</code>, in spaces listed in <code>CHAT_REVIEW_SPACES</code>. Any other message is acknowledged and ignored, with no reply.</span></li>
-    <li><b>One exact request</b><span>The one request is exactly <code>review https://github.com/&lt;owner&gt;/&lt;repo&gt;/pull/&lt;n&gt;</code> (the link may sit in <code>&lt;&gt;</code>), for a repo in <code>CHAT_REVIEW_REPOS</code>. Anything else gets one fixed help reply. Nothing else the requester wrote ever reaches a model.</span></li>
-    <li><b>Read only, and only the PR</b><span>Hermione reads the PR through a file the job writes with your <code>gh</code> login, read only, with the PR's text marked as untrusted data. She has Read and no shell, under settings that let her read nothing beyond that one folder, and never runs the PR's code. A PR that's too large or not open gets a fixed reply, and an answer that isn't her exact review block gets a fixed "couldn't review" line.</span></li>
+    <li><b>Allowlisted people and spaces only</b><span>Only people whose email is in the allowlist, in allowlisted spaces, get any answer. Anyone else gets no reply.</span></li>
+    <li><b>One exact request</b><span>The one request is exactly <code>review https://github.com/&lt;owner&gt;/&lt;repo&gt;/pull/&lt;n&gt;</code> (the link may sit in <code>&lt;&gt;</code>), for an allowlisted repo. Anything else, a question, a task like "fix it" or "deploy it", or extra words after the link, gets one fixed help text and no row. The row holds only names, the sender, the link, the time and a status.</span></li>
+    <li><b>Checked again on your Mac</b><span>The job checks every row again against its own allowlists and the link's exact shape, and marks a row that fails <code>failed</code> with no reply. A row is taken once, even across a kill, and ends <code>done</code> or <code>failed</code>.</span></li>
+    <li><b>Read only, and only the PR</b><span>Hermione reads the PR through a file the job writes with your <code>gh</code> login, read only, with the PR's text marked as untrusted data whose instructions are ignored. Her only job is the review. She has Read and no shell, under settings that let her read nothing beyond that one folder, and never runs the PR's code. A PR that's too large or not open gets a fixed reply, and an answer that isn't her exact review block, or that repeats a long run of the PR's own text, gets a fixed "couldn't review" line.</span></li>
     <li><b>Caps</b><span>Each person gets <code>CHAT_REVIEW_PER_PERSON_DAILY</code> reviews a day and everyone together <code>CHAT_REVIEW_DAILY</code>, counted before she starts. Each review also counts as one of her runs under her own daily run and spend caps, with its cost, so chat reviews never push her past them.</span></li>
-    <li><b>The GitHub post</b><span>With <code>chat-review-github</code> on too, the review also goes on the PR under your <code>gh</code> login. It's always a COMMENT review, never an approval or a change request, so it can't satisfy branch protection. It opens with a fixed line saying it's an automated review by the Hermione desk requested by the requester in Chat, naming them by their Chat display name, never their email, and goes up at most once per PR and head commit. Their email stays in the office's own log.</span></li>
+    <li><b>The GitHub post</b><span>With <code>chat-review-github</code> on too, the review also goes on the PR under your <code>gh</code> login. It's always a COMMENT review, never an approval or a change request, so it can't satisfy branch protection. It opens with a fixed line saying it's an automated review by Hermione (Staff Engineer) requested by the requester in Chat, naming them by their Chat display name, never their email, and goes up at most once per PR and head commit. Their email stays in the office's own log.</span></li>
   </ul>
   <p>Every request, its outcome and its cost is a JSON line in <code>~/.hogwarts/logs/chat-review.log</code>, so you can see who asked for what.</p>
   <h3>Setting up chat reviews</h3>
   <p>In Google Cloud:</p>
   <ol>
-    <li>Pick or create a project, and turn on the Google Chat API and the Cloud Pub/Sub API.</li>
-    <li>Create a Pub/Sub topic, and grant <code>chat-api-push@system.gserviceaccount.com</code> the Pub/Sub Publisher role on it. Grant it to no one else.</li>
-    <li>Create a pull subscription on the topic.</li>
-    <li>Create a service account for the app with no keys and no project roles. Grant yourself Service Account Token Creator on it, and Pub/Sub Subscriber on the subscription.</li>
-    <li>In the Chat API's configuration, name the app, let it join spaces, set its connection to Cloud Pub/Sub with the topic's full name, and make it visible to named people first.</li>
-    <li>Run <code>gcloud auth login</code> as yourself, then check that <code>gcloud auth print-access-token</code> and <code>gcloud auth print-access-token --impersonate-service-account=&lt;service account&gt; --scopes=https://www.googleapis.com/auth/chat.bot</code> both print a token.</li>
+    <li>Create a project, and turn on <code>chat.googleapis.com</code> and <code>sheets.googleapis.com</code>.</li>
+    <li>Create two service accounts with no project roles, a writer and a worker, and one JSON key for each.</li>
+    <li>Once the office is installed and <code>CHAT_REVIEW_SERVICE_ACCOUNT</code> and <code>CHAT_REVIEW_KEYCHAIN_SERVICE</code> are filled in, store the worker key with <code>/usr/bin/python3 -I -B scripts/chat-review-store-key.py &lt;worker key.json&gt;</code>, then delete the downloaded file.</li>
+    <li>Create a Google Sheet with a tab named <code>requests</code> whose first row is <code>message, thread, space, sender_email, sender_name, pr_url, created, status, run</code>. Share it with both service accounts as editors and with no one else.</li>
+    <li>Create an Apps Script project, link it to the project from step 1 (Project Settings, Google Cloud Platform project), and paste in <code>chat-app/Code.gs</code> and <code>chat-app/appsscript.json</code>. Set its Script Properties: <code>SHEET_ID</code>, <code>ALLOWED_SENDERS</code>, <code>ALLOWED_SPACES</code> and <code>ALLOWED_REPOS</code> (comma-separated), and <code>WRITER_KEY</code>, the writer key file's whole text. Delete that file once it's saved, and copy something else so the key leaves your clipboard. Deploy it and note the deployment id.</li>
+    <li>In the Chat API's configuration, name the app <code>Hermione (Staff Engineer)</code>, let it join spaces, set its connection to the Apps Script project with that deployment id, and make it visible to named people only. Install it in a test space first. Each person who messages it is asked once to let it connect to an external service, its one scope.</li>
   </ol>
   <p>Then fill these in your private overlay of <code>fleet/config.py</code>. While any is still a placeholder the job refuses to start and names it:</p>
   <div class="tbl">
     <table>
       <thead><tr><th>Setting</th><th>What goes there</th></tr></thead>
       <tbody>
-        <tr><td data-label="Setting"><code>CHAT_REVIEW_PROJECT</code></td><td data-label="What goes there">The project id</td></tr>
-        <tr><td data-label="Setting"><code>CHAT_REVIEW_SUBSCRIPTION</code></td><td data-label="What goes there">The pull subscription's id</td></tr>
-        <tr><td data-label="Setting"><code>CHAT_REVIEW_SERVICE_ACCOUNT</code></td><td data-label="What goes there">The app's service account email</td></tr>
+        <tr><td data-label="Setting"><code>CHAT_REVIEW_SHEET_ID</code></td><td data-label="What goes there">The Sheet's id, the long part of its link</td></tr>
+        <tr><td data-label="Setting"><code>CHAT_REVIEW_SERVICE_ACCOUNT</code></td><td data-label="What goes there">The worker service account's email</td></tr>
+        <tr><td data-label="Setting"><code>CHAT_REVIEW_KEYCHAIN_SERVICE</code></td><td data-label="What goes there">The Keychain service name the worker key is stored under</td></tr>
         <tr><td data-label="Setting"><code>CHAT_REVIEW_SENDERS</code></td><td data-label="What goes there">The emails of the people who may ask</td></tr>
         <tr><td data-label="Setting"><code>CHAT_REVIEW_SPACES</code></td><td data-label="What goes there">The spaces it answers in, as <code>spaces/&lt;id&gt;</code>, the last part of the space's link</td></tr>
         <tr><td data-label="Setting"><code>CHAT_REVIEW_REPOS</code></td><td data-label="What goes there">The repos it reviews, as <code>owner/name</code></td></tr>
       </tbody>
     </table>
   </div>
-  <p>The caps and <code>GCLOUD_BIN</code> have working defaults. Run <code>sh scripts/loops-setup.sh</code>, which adds the chat-review job to your loops list, restart <code>fleet loops</code>, add the app to a space, and <code>echo on &gt; ~/.hogwarts/chat-review</code>. Try <code>fleet review pr &lt;PR link&gt; --requested-by &lt;your email&gt;</code> first if you like: it runs the same review in your terminal with no Chat reply. Once a few replies read right, <code>echo on &gt; ~/.hogwarts/chat-review-github</code> posts them on the PRs too.</p>
+  <p>The caps have working defaults. Run <code>sh scripts/loops-setup.sh</code>, which adds the chat-review job to your loops list, restart <code>fleet loops</code>, and <code>echo on &gt; ~/.hogwarts/chat-review</code>. Try <code>fleet review pr &lt;PR link&gt; --requested-by &lt;your email&gt;</code> first if you like: it runs the same review in your terminal with no Chat reply. Once a few replies read right, <code>echo on &gt; ~/.hogwarts/chat-review-github</code> posts them on the PRs too. Clear old Sheet rows only while the intake is off.</p>
+  <p>Rotate both keys every 90 days: make a new key, store the worker's with the same helper (it replaces the Keychain item) or paste the writer's into <code>WRITER_KEY</code>, check a review goes through, then delete the old key in Google Cloud.</p>
 </section>
 
 <section id="patrol">

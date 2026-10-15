@@ -77,8 +77,9 @@ KNOWN_FLAGS = {
     "--export-only",
     # the closer: the first-parent line of the fetched base, and the merged diff's stat in the judge's pack
     "--first-parent", "--stat",
-    # a chat review: gh api -H for the diff of a PR's commits, gcloud's impersonated Chat token, and fleet review pr
-    "-H", "--impersonate-service-account", "--scopes", "--requested-by",
+    # a chat review: gh api -H for the diff of a PR's commits, fleet review pr, the worker key read from the Keychain
+    # (security find-generic-password -s -a -w) and the token grant signed by openssl dgst -sha256 -sign
+    "-H", "--requested-by", "-s", "-a", "-w", "-sha256", "-sign",
 }
 # Modules whose flag-shaped constants describe commands they read and refuse, never ones they run.
 FLAG_TABLE_MODULES = {"push_gate.py"}

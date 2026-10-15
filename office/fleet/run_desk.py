@@ -1287,33 +1287,74 @@ def check_report_launch(conn, model: str = None) -> None:
         raise Blocked(f"the headless turn model {name} is blocked here ({blocked}), so no turn runs")
 
 
-GCLOUD_TIMEOUT_SECONDS = 60
-GCLOUD_OUTPUT_MAX_BYTES = 16384
+# The chat review's credentials (fleet/google_chat.py): the macOS tools by their fixed paths, never configurable.
+SECURITY_BIN = "/usr/bin/security"
+OPENSSL_BIN = "/usr/bin/openssl"
+CREDENTIAL_TIMEOUT_SECONDS = 30
+CREDENTIAL_OUTPUT_MAX_BYTES = 16384
+# What openssl signs, one JWT's header and claims, goes to it on a pipe, so it must fit the pipe's buffer.
+SIGN_INPUT_MAX_BYTES = 4096
 
 
-def gcloud_env() -> dict:
-    """gcloud's whole environment: HOME, for its own login, and the fleet's fixed PATH."""
+def credential_env() -> dict:
+    """The whole environment of security and openssl: HOME, for your login Keychain, and the fleet's fixed PATH."""
     return {"HOME": config.USER_HOME_DIR, "PATH": config.CHILD_PATH}
 
 
-def gcloud_token_output(argv: list) -> tuple:
-    """(exit code, stdout) of gcloud printing one access token for a chat review (fleet/google_chat.py checks the
-    whole argv first): only gcloud auth print-access-token, by its absolute path, in the office, with an environment
-    of only HOME and PATH and nothing on stdin. stderr is never read, and stdout is cut at GCLOUD_OUTPUT_MAX_BYTES.
-    Tests replace this."""
-    if not isinstance(argv, list) or not argv or argv[0] != config.GCLOUD_BIN or not argv[0].startswith("/") \
-            or argv[1:3] != ["auth", "print-access-token"] or not all(isinstance(arg, str) for arg in argv):
-        raise FleetError("gcloud runs only to print an access token, by the absolute GCLOUD_BIN")
+def keychain_argv(service: str, account: str) -> list:
+    return [SECURITY_BIN, "find-generic-password", "-s", service, "-a", account, "-w"]
+
+
+def keychain_output(service: str, account: str) -> tuple:
+    """(exit code, stdout) of security printing one generic password from your login Keychain: only
+    find-generic-password -s <service> -a <account> -w, by its absolute path, in the office, with an environment of
+    only HOME and PATH and nothing on stdin. stderr is never read, and stdout is cut at CREDENTIAL_OUTPUT_MAX_BYTES.
+    fleet/google_chat.py checks service and account first. Tests replace this."""
+    argv = keychain_argv(service, account)
+    if not all(isinstance(arg, str) and arg and not arg.startswith("-") for arg in (service, account)):
+        raise FleetError("the Keychain item's service and account must be plain names")
     guard(argv)
     try:
-        done = subprocess.run(argv, cwd=config.OFFICE_ROOT, env=gcloud_env(), stdin=subprocess.DEVNULL,
-                              stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=GCLOUD_TIMEOUT_SECONDS,
+        done = subprocess.run(argv, cwd=config.OFFICE_ROOT, env=credential_env(), stdin=subprocess.DEVNULL,
+                              stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=CREDENTIAL_TIMEOUT_SECONDS,
                               check=False, close_fds=True)
     except subprocess.TimeoutExpired:
-        raise FleetError("gcloud did not print an access token in time") from None
+        raise FleetError("security did not read the Keychain in time") from None
     except OSError:
-        raise FleetError(f"gcloud is not at {config.GCLOUD_BIN}; set GCLOUD_BIN in fleet/config.py") from None
-    return done.returncode, done.stdout[:GCLOUD_OUTPUT_MAX_BYTES]
+        raise FleetError(f"{SECURITY_BIN} could not run") from None
+    return done.returncode, done.stdout[:CREDENTIAL_OUTPUT_MAX_BYTES]
+
+
+def sign_argv(data_fd: int) -> list:
+    return [OPENSSL_BIN, "dgst", "-sha256", "-sign", "/dev/stdin", f"/dev/fd/{int(data_fd)}"]
+
+
+def openssl_sign_output(key_pem: bytes, data: bytes) -> tuple:
+    """(exit code, stdout) of openssl signing data with RSA SHA-256 (RS256) under key_pem. The key goes to openssl on
+    its stdin and data on a pipe it reads as /dev/fd/<n>, so neither is ever in an argv or a file. Its environment is
+    only HOME and PATH, stderr is never read, and stdout (the signature) is cut at CREDENTIAL_OUTPUT_MAX_BYTES. Tests
+    replace this."""
+    if not isinstance(key_pem, bytes) or not isinstance(data, bytes) or not 0 < len(data) <= SIGN_INPUT_MAX_BYTES:
+        raise FleetError("openssl signs only one token's header and claims")
+    read_fd, write_fd = os.pipe()
+    try:
+        try:
+            os.write(write_fd, data)  # it fits the pipe's buffer, so this never blocks
+        finally:
+            os.close(write_fd)
+        argv = sign_argv(read_fd)
+        guard(argv)
+        try:
+            done = subprocess.run(argv, cwd=config.OFFICE_ROOT, env=credential_env(), input=key_pem,
+                                  stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=CREDENTIAL_TIMEOUT_SECONDS,
+                                  check=False, close_fds=True, pass_fds=(read_fd,))
+        except subprocess.TimeoutExpired:
+            raise FleetError("openssl did not sign in time") from None
+        except OSError:
+            raise FleetError(f"{OPENSSL_BIN} could not run") from None
+    finally:
+        os.close(read_fd)
+    return done.returncode, done.stdout[:CREDENTIAL_OUTPUT_MAX_BYTES]
 
 
 def report_turn_command(pid: int) -> str:
