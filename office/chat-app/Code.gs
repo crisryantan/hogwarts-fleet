@@ -7,8 +7,11 @@
  *   review https://github.com/<owner>/<repo>/pull/<n>
  * (the link may sit in <>), for a repo in ALLOWED_REPOS, becomes one row of the request Sheet, and the sender is told
  * it is queued. Anything else from them (a question, a task, extra words after the link) gets the fixed help text and
- * no row. A message from anyone else, or from another space, gets no reply at all. No other text of a message is kept
- * or logged anywhere: the row holds the message's, thread's and space's names, the sender's email and display name,
+ * no row. A message from a sender not on the list, from a space not on the list (a direct message is a space like any
+ * other, with no implicit allow) or while the Script Properties are not all set gets one fixed short reply and no row;
+ * a bot sender, a non-message event or a malformed name gets none. Every rejection logs one fixed reason line
+ * ('chat review: dropped (<reason>)') in the Apps Script executions log. No other text of a message is kept or logged
+ * anywhere: the row holds the message's, thread's and space's names, the sender's email and display name,
  * the PR link rebuilt from what the grammar matched, the time and the status "queued".
  *
  * The row is appended through the Sheets API as the writer service account, whose JSON key is the Script Property
@@ -25,6 +28,9 @@ var APP_NAME = 'Hermione (Staff Engineer)';
 var HELP = "I'm Hermione (Staff Engineer), and I do code reviews only. Send exactly: review" +
     ' https://github.com/OWNER/REPO/pull/NUMBER, for a repo I take. I don\'t answer questions or fix, build, run' +
     ' or deploy anything.';
+var NOT_SET_UP = "I'm not set up yet.";
+var SPACE_REFUSED = 'I only take review requests in approved conversations. Ask the owner to add this one.';
+var SENDER_REFUSED = "You're not on the list for review requests yet. Ask the owner to add you.";
 var QUEUED = 'Queued your review of ';
 var BUSY = "I couldn't queue that just now. Send it again in a minute.";
 var FULL = "My review queue is full right now. Ask the review desk's owner to clear it.";
@@ -53,16 +59,37 @@ function onMessage(event) {
   var message = payload.message || {};
   var space = payload.space || message.space || {};
   var user = (addOn ? event.chat.user : event.user) || {};
-  var settings = settings_();
-  if (!settings) return {};
+  if (user.type !== 'HUMAN') {
+    console.log('chat review: dropped (not a human)');
+    return {};
+  }
   var name = text_(message.name);
   var spaceName = text_(space.name);
   var named = MESSAGE_NAME.exec(name);
-  if (!named || named[1] !== spaceName || settings.spaces.indexOf(spaceName) < 0) return {};
+  if (!named || named[1] !== spaceName) {
+    console.log('chat review: dropped (bad message name)');
+    return {};
+  }
+  var settings = settings_();
+  if (!settings) {
+    console.log('chat review: dropped (settings missing)');
+    return reply_(addOn, NOT_SET_UP);
+  }
+  // Every conversation, a direct message included, must be listed: nothing here looks at the space's type.
+  if (settings.spaces.indexOf(spaceName) < 0) {
+    console.log('chat review: dropped (space not allowed)');
+    return reply_(addOn, SPACE_REFUSED);
+  }
   var email = text_(user.email).toLowerCase();
-  if (user.type !== 'HUMAN' || !EMAIL.test(email) || settings.senders.indexOf(email) < 0) return {};
+  if (!EMAIL.test(email) || settings.senders.indexOf(email) < 0) {
+    console.log('chat review: dropped (sender not allowed)');
+    return reply_(addOn, SENDER_REFUSED);
+  }
   var thread = text_((message.thread || {}).name);
-  if (!THREAD_NAME.test(thread) || thread.indexOf(spaceName + '/') !== 0) return {};
+  if (!THREAD_NAME.test(thread) || thread.indexOf(spaceName + '/') !== 0) {
+    console.log('chat review: dropped (bad thread)');
+    return {};
+  }
   var asked = typeof message.argumentText === 'string' ? message.argumentText : text_(message.text);
   var link = prLink_(asked, settings.repos);
   if (!link) return reply_(addOn, HELP);
@@ -107,7 +134,7 @@ function list_(value, lower) {
   }).filter(function (item) { return item.length > 0; });
 }
 
-/** The Script Properties, or null (and one fixed log line) while any is missing. */
+/** The Script Properties, or null while any is missing. */
 function settings_() {
   var props = PropertiesService.getScriptProperties();
   var settings = {
@@ -119,7 +146,6 @@ function settings_() {
   };
   if (!SHEET_ID.test(settings.sheet) || !settings.key || !settings.senders.length || !settings.spaces.length ||
       !settings.repos.length) {
-    console.error('chat review: the Script Properties are not all set');
     return null;
   }
   return settings;

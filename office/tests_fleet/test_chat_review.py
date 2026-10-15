@@ -347,6 +347,45 @@ class CodeGsTests(ChatCase):
         body = self.source()[self.source().index("function onMessage"):self.source().index("function prLink_")]
         self.assertLess(body.index("if (!link) return reply_(addOn, HELP);"), body.index("appendOnce_(settings, row)"))
 
+    def test_every_rejection_logs_one_fixed_reason_and_the_sender_is_told_where_it_is_safe(self):
+        source = self.source()
+        body = source[source.index("function onMessage"):source.index("function prLink_")]
+        # reason line, then the reply (or the empty response) it goes with, in the order the checks run
+        steps = [("not a human", "return {};"), ("bad message name", "return {};"),
+                 ("settings missing", "return reply_(addOn, NOT_SET_UP);"),
+                 ("space not allowed", "return reply_(addOn, SPACE_REFUSED);"),
+                 ("sender not allowed", "return reply_(addOn, SENDER_REFUSED);"), ("bad thread", "return {};")]
+        at = 0
+        for reason, outcome in steps:
+            with self.subTest(reason=reason):
+                line = f"console.log('chat review: dropped ({reason})');"
+                self.assertEqual(body.count(line), 1)
+                self.assertGreater(body.index(line), at)
+                at = body.index(line)
+                self.assertTrue(body[at + len(line):].lstrip().startswith(outcome))
+        self.assertEqual(len(re.findall(r"console\.log\(", body)), len(steps))
+        self.assertEqual(self.js_string("NOT_SET_UP"), "I'm not set up yet.")
+        self.assertEqual(self.js_string("SPACE_REFUSED"), "I only take review requests in approved conversations."
+                                                          " Ask the owner to add this one.")
+        self.assertEqual(self.js_string("SENDER_REFUSED"), "You're not on the list for review requests yet."
+                                                           " Ask the owner to add you.")
+        # The replies go through reply_ and are fixed text: nothing from the message is echoed.
+        for constant in ("NOT_SET_UP", "SPACE_REFUSED", "SENDER_REFUSED"):
+            self.assertEqual(len(re.findall(rf"\b{constant}\b", body)), 1)
+        self.assertEqual(body.count("reply_(addOn, "), 6)
+        # A bot is dropped before the Script Properties are read, so it never gets a reply, and a non-message event
+        # still gets the empty response.
+        self.assertLess(body.index("(not a human)"), body.index("settings_()"))
+        self.assertIn("if (!addOn && (!event || event.type !== 'MESSAGE')) return {};", body)
+
+    def test_a_direct_message_must_be_in_the_allowed_spaces_like_any_other(self):
+        source = self.source()
+        body = source[source.index("function onMessage"):source.index("function prLink_")]
+        for word in ("singleUserBotDm", "spaceType", "DIRECT_MESSAGE", "'DM'", ".type === 'DM'"):
+            self.assertNotIn(word, source)
+        self.assertEqual(body.count("settings.spaces.indexOf(spaceName) < 0"), 1)
+        self.assertNotRegex(body, r"spaces\.indexOf\(spaceName\) *>=? *0\s*\|\|")
+
     def test_the_row_holds_only_names_the_link_and_fixed_fields_and_is_written_raw_under_the_lock(self):
         source = self.source()
         self.assertIn("var row = [name, thread, spaceName, email, displayName_(user.displayName), link,"

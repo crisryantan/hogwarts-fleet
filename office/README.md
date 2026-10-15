@@ -515,8 +515,10 @@ fed the key on its stdin. The key and the tokens are never in an argv, a file or
 the Sheet and no one else is. An editor can change any row, so a leaked writer key could too, which is one reason
 the job checks every row again.
 
-Anyone in your organisation's Chat can send the app text, so very little of it is kept. Code.gs answers a message
-only when its sender's email is in `ALLOWED_SENDERS` and its space in `ALLOWED_SPACES`; anything else gets no reply.
+Anyone in your organisation's Chat can send the app text, so very little of it is kept. Code.gs queues a message only
+when its sender's email is in `ALLOWED_SENDERS` and its space in `ALLOWED_SPACES` (a direct message is a space like
+any other, so it must be listed too). Rejected messages get a fixed reply and a reason line in the Apps Script
+executions log, except a bot sender or a malformed name, which get the log line only.
 The one request is a message whose text, once the app mention is out, is exactly
 `review https://github.com/<owner>/<repo>/pull/<n>` (the link may sit in `<>`), for a repo in `ALLOWED_REPOS`. It
 becomes a row holding the message's, thread's and space's names, the sender's email and display name, the link, the
