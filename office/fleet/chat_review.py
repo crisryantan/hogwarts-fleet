@@ -96,7 +96,9 @@ _PR_LINK = r"https://github\.com/([A-Za-z0-9._-]{1,100})/([A-Za-z0-9._-]{1,100})
 PR_LINK = re.compile(_PR_LINK)
 # A PR link inside a message, however the words around it run. Chat may hand a link over as <url> or <url|label>; the
 # label is read with it, so a link shown twice is one and a label naming another PR is a second link.
-PR_IN_TEXT = re.compile(r"(?<![A-Za-z0-9])" + _PR_LINK + r"(?![0-9])")
+# The link must start a word (or follow an opening bracket or quote), so one inside another address is no link.
+PR_IN_TEXT = re.compile(r"(?<![^\s<(\[\"':])" + _PR_LINK + r"(?![0-9])")
+ANY_ADDRESS = re.compile(r"https?://\S*")
 LINK_MARKUP = re.compile(r"<(https?://[^\s<>|]*)(?:\|([^<>\n]*))?>")
 REVIEW_WORD = re.compile(r"\breview(?:s|ing)?\b", re.IGNORECASE)
 PR_TEXT_MAX = 20000
@@ -115,11 +117,11 @@ HELP = (f"I'm {APP_NAME}, and I do code reviews only. Mention me with a GitHub P
         " anything.")
 # The acknowledgement of an accepted request: one of these, picked by the message's own digest, and then the line saying
 # a review is all she does. Nothing a requester wrote is ever in one.
-ACKS = ("On it. I'll read every line properly, someone has to.",
-        "Give me a few minutes, I'm reading it the way it ought to be read: all of it.",
-        "Right, let's have a look. I'll be thorough, I always am.",
-        "Leave it with me. Nothing gets past a careful read, and this will get one.")
-REVIEW_ONLY = "I only review, so if you asked for anything else too, that part won't be done."
+ACKS = ("Right. Leave it with me.",
+        "Honestly, give me a minute. I'll go through it properly.",
+        "I'm on it. Back shortly.",
+        "Fine. Reading it now.")
+REVIEW_ONLY = "I'll review it. Fixing it is someone else's job."
 SENDER_REFUSED = "You're not on the list for review requests yet. Ask the owner to add you."
 COULD_NOT = "I couldn't review that PR this time. Ask the review desk's owner if it keeps happening."
 NOT_OPEN = "That PR is not open, so it was not reviewed."
@@ -256,10 +258,13 @@ def parse_request(text: object) -> Optional[tuple]:
         return None
     # A link with a label reads as the link, plus the label when it is not just the link again, so a label that names
     # another PR counts as a second link.
+    original = text
     text = LINK_MARKUP.sub(lambda found: found.group(1) if found.group(2) in (None, found.group(1))
-                           else f"{found.group(1)} {found.group(2)}", text)
+                           else f"{found.group(1)} {found.group(2)}", original)
     links = list(PR_IN_TEXT.finditer(text))
-    if len(links) != 1 or REVIEW_WORD.search(PR_IN_TEXT.sub(" ", text)) is None:
+    # The review word is looked for outside every address, with its path, query and fragment, and outside any label.
+    words = ANY_ADDRESS.sub(" ", LINK_MARKUP.sub(" ", original))
+    if len(links) != 1 or REVIEW_WORD.search(words) is None:
         return None
     return _allowed_pr(*links[0].group(1, 2, 3))
 

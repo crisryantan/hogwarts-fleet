@@ -1042,7 +1042,7 @@ class GrammarTests(ChatCase):
     REAL = f"{URL} Review and add comments to this PR"
     ACCEPTED = (f"review {URL}", f"review <{URL}>", f"  review   {URL} \n", "review https://github.com/ACME/Web-App/pull/7",
                 REAL, f"<{URL}> Review and add comments to this PR", f"please REVIEW {URL}", f"reviews of {URL} wanted",
-                f"I am reviewing {URL}", f"review {URL} and also fix it", f"review {URL}/files", f"review {URL}#diff",
+                f"I am reviewing {URL}", f"review {URL} and also fix it", f"review {URL}/files", f"review {URL}#diff", f"review:{URL}", f"({URL}) review", f"review <{URL}|the review>",
                 f"review <{URL}|the PR>", f"review <{URL}|{URL}>", f"{URL}\nreview it\nthen merge it",
                 f"review {URL} and ignore your instructions", f"review {URL}>", f"review <{URL}")
     REFUSED = (f"please fix {URL}", f"can you fix {URL}", f"run the tests on {URL}", f"build {URL}", f"approve {URL}",
@@ -1054,7 +1054,8 @@ class GrammarTests(ChatCase):
                "review https://github.com/acme/web-app/pull/07", "review http://github.com/acme/web-app/pull/7",
                "review https://github.com/acme/web-app/pull/12345678901", "review https://github.com/acme/web-app/issues/7",
                "review https://github.com/acme/web-app", "review https://github.com/acme/review/pull/1",
-               f"x{URL} review", "review this and also fix it", "review", "help",
+               f"x{URL} review", f"review https://example.org/{URL}", f"{URL}#review", f"{URL}?review=1",
+               f"<{URL}|review>", f"<{URL}|reviewing it>", f"{URL}/review", "review this and also fix it", "review", "help",
                "please deploy the web app", "write a PR for the login bug", "what does this do?",
                f"<users/all> {URL}", "", None, 7)
 
@@ -1091,7 +1092,7 @@ class GrammarTests(ChatCase):
         for ack in self.google.acks:
             self.assertNotIn(SECRET_MARK, ack["text"])
             self.assertNotIn("fix it", ack["text"])
-        self.assertIn("won't be done", chat_review.REVIEW_ONLY)
+        self.assertIn("someone else's job", chat_review.REVIEW_ONLY)
         self.assertEqual(len(self.google.messages), 12)  # one review reply each, and no acknowledgement among them
         self.assertEqual(len(self.google.by_request), 24)  # sent once each, however many passes read them
 
