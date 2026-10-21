@@ -138,9 +138,11 @@ class FakeGoogle:
                 if who == "app":
                     if space not in self.app_in:
                         raise google_chat.GoogleError("Google answered HTTP 404", status=404)
-                    return {"name": f"{space}/members/{APP_USER[6:]}", "state": "JOINED",
-                            "member": {"name": APP_USER, "type": "BOT"},
-                            "createTime": google_chat.rfc3339(int(self.joined * 1e6))}
+                    answer = {"name": f"{space}/members/{APP_USER[6:]}", "state": "JOINED",
+                              "member": {"name": APP_USER, "type": "BOT"}}
+                    if self.joined is not None:
+                        answer["createTime"] = google_chat.rfc3339(int(self.joined * 1e6))
+                    return answer
                 user = self.members.get(space, {}).get(who)
                 if user is None:
                     raise google_chat.GoogleError("Google answered HTTP 404", status=404)
@@ -664,6 +666,29 @@ class ReadTests(ChatCase):
         [record] = self.records()
         self.assertEqual(record["message"], f"{SPACE}/messages/m2")
 
+    def test_a_join_with_no_time_reads_only_from_then_on(self):
+        self.google.app_in = set()
+        self.run_pass()
+        self.google.app_in, self.google.joined = {SPACE}, None
+        self.deliver(msg(message="m1", at=time.time() - 0.5))
+        self.run_pass()
+        self.assertEqual(self.records(), [])
+        self.deliver(msg(message="m2", at=time.time() + 1))
+        self.assertEqual(self.run_pass()["taken"], ["review"])
+
+    def test_a_future_message_waiting_for_room_never_moves_the_marker_ahead(self):
+        self.patch(config, "CHAT_REVIEW_PULL_MAX", 1)
+        now = time.time()
+        self.deliver(msg(message="m1", at=now - 2), msg(text="hello", message="m2", at=now + 3600))
+        self.assertEqual(self.run_pass()["taken"], ["review"])
+        self.deliver(msg(sender=LEAD_USER, message="m3", at=time.time() + 1))
+        self.run_pass()
+        self.assertIn(f"{SPACE}/messages/m3", [record["message"] for record in self.records()])
+
+    def test_text_longer_than_chat_sends_is_never_read_as_a_cut_prefix(self):
+        self.deliver(msg(text=f"review {URL}" + " " * google_chat.TEXT_MAX))
+        self.assertEqual(self.run_pass()["taken"], ["help"])
+
     def test_a_read_cut_short_never_skips_a_message_sharing_its_last_microsecond(self):
         self.patch(config, "CHAT_REVIEW_LIST_PAGES", 1)
         self.patch(google_chat, "PAGE_SIZE", 2)
@@ -954,6 +979,13 @@ class AuthorizeTests(ChatCase):
                                 send=answer(scope))
         self.assertEqual([(url, form) for url, form in sent if url == helper.REVOKE_URL],
                          [(helper.REVOKE_URL, {"token": REFRESH})] * 2)
+        # A wrong grant with no refresh token is still revoked, with the access token it came with.
+        sent.clear()
+        with self.assertRaises(helper.Failed):
+            helper.exchange((CLIENT_ID, CLIENT_SECRET), "the-code-0123", "v" * 64, "http://127.0.0.1:1/",
+                            send=lambda url, form: sent.append((url, form)) or {"access_token": USER_TOKEN,
+                                                                                "scope": "openid"})
+        self.assertEqual(sent[-1], (helper.REVOKE_URL, {"token": USER_TOKEN}))
 
     def test_it_stores_over_stdin_never_argv_and_reads_back(self):
         helper = self.helper()

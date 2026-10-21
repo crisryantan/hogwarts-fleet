@@ -423,11 +423,14 @@ def list_messages(space: str, after_us: int, app_user: str, token: str, page: Op
             continue
         sender = item.get("sender") if isinstance(item.get("sender"), dict) else {}
         thread = item.get("thread") if isinstance(item.get("thread"), dict) else {}
+        argument = item.get("argumentText")
+        if not isinstance(argument, str) or len(argument) > TEXT_MAX:
+            argument = ""  # text longer than Chat sends is read as none, never as a cut prefix
         messages.append({"created_us": at, "mentions": True, "name": _text(item.get("name"), NAME_MAX * 2),
                          "thread": _text(thread.get("name"), NAME_MAX * 2),
                          "sender": _text(sender.get("name"), NAME_MAX), "sender_type": _text(sender.get("type"), 20),
                          "sender_name": _text(sender.get("displayName"), NAME_MAX),
-                         "argument": _text(item.get("argumentText"), TEXT_MAX)})
+                         "argument": argument})
     return messages, following
 
 

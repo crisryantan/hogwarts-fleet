@@ -939,10 +939,11 @@ def read_space(space: str, token: str, known: dict, done: list, room: int, now: 
     if marker is None or type(marker.get("after_us")) is not int or type(marker.get("floor_us")) is not int:
         _save_marker(space, now_us, now_us, True)  # the first read: nothing from before it is answered
         return
+    newest, floor = marker["after_us"], max(marker["floor_us"], joined or 0)
     if marker.get("member") is False:
         log("member", space=space)
-    newest = marker["after_us"]
-    floor = max(marker["floor_us"], joined or 0)
+        if joined is None:  # just joined, and Chat gave no time it did: only what comes from now on is read
+            floor = now_us
     overlap = config.CHAT_REVIEW_READ_OVERLAP_SECONDS * 1_000_000 if marker.get("complete") is not False else 0
     after = max(newest - overlap, floor, now_us - config.CHAT_REVIEW_QUEUE_MAX_SECONDS * 1_000_000)
     page, complete, waiting = None, False, None
@@ -954,7 +955,7 @@ def read_space(space: str, token: str, known: dict, done: list, room: int, now: 
             for message in messages:
                 if message["mentions"]:
                     if sum(outcome in TAKEN for outcome in done) >= room:
-                        waiting = message["created_us"]  # no room left: the next read starts with this one
+                        waiting = min(message["created_us"], now_us)  # no room: the next read starts here
                         return
                     done.append(take_message(message, space, token, known, now))
                 if message["created_us"] <= now_us:  # a time ahead of this Mac's clock never moves the marker

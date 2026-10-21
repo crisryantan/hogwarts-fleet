@@ -365,7 +365,7 @@ With the office installed and those filled in, run both helpers yourself in Term
 
 The caps have working defaults. Run `sh scripts/loops-setup.sh`, which adds the chat-review job to your loops list, restart `fleet loops`, and `echo on > ~/.hogwarts/chat-review`. Try `fleet review pr <PR link> --requested-by <your email>` first if you like: it runs the same review in your terminal with no Chat reply. Once a few replies read right, `echo on > ~/.hogwarts/chat-review-github` posts them on the PRs too.
 
-Rotate the worker key every 90 days: make a new key, store it with the same helper (it replaces the Keychain item), check a review goes through, then delete the old key in Google Cloud. Re-run the authorize helper whenever reading stops, or to rotate the read authorization; it replaces the Keychain item, and you can then remove the old grant from your Google account's third-party access page. Removing the app's access there stops all reading at once.
+Rotate the worker key every 90 days: make a new key, store it with the same helper (it replaces the Keychain item), check a review goes through, then delete the old key in Google Cloud. Re-run the authorize helper whenever reading stops; it replaces the Keychain item. To rotate the read authorization, first remove the app's access in your Google account's third-party access page (that revokes every token of the client, the stored one too), then re-run the helper. Removing that access is also how you stop all reading at once.
 
 ## The patrol and the backups
 

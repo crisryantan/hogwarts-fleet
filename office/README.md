@@ -623,8 +623,9 @@ with `echo on > ~/.hogwarts/chat-review-github`. `rm` either file switches it of
 
 Rotate the worker key every 90 days: create a new key, store it with the same helper (it replaces the Keychain item),
 check a review goes through, then delete the old key in Google Cloud. Re-run the authorize helper whenever the read
-authorization stops, or to rotate it: it replaces the Keychain item, and you can then remove the old grant in your
-Google account's third-party access page. To stop all reading at once, remove the app's access there.
+authorization stops; it replaces the Keychain item. To rotate it, first remove the app's access in your Google
+account's third-party access page (that revokes every token of the client, the stored one too), then re-run the
+helper. Removing that access is also how you stop all reading at once.
 
 ## Exit codes
 

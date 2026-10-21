@@ -152,17 +152,21 @@ def exchange(client: tuple, code: str, verifier: str, redirect: str, send=post) 
     answer = send(TOKEN_URL, {"grant_type": "authorization_code", "code": code, "client_id": client[0],
                               "client_secret": client[1], "redirect_uri": redirect, "code_verifier": verifier})
     refresh, granted = answer.get("refresh_token"), answer.get("scope")
-    if not isinstance(refresh, str) or REFRESH_TOKEN.fullmatch(refresh) is None:
-        raise Failed("Google gave no refresh token. Remove the app's access in your Google account and run this again")
     if not isinstance(granted, str) or sorted(set(granted.split())) != sorted(SCOPES):
+        held = next((token for token in (refresh, answer.get("access_token"))
+                     if isinstance(token, str) and REFRESH_TOKEN.fullmatch(token)), None)
         try:
-            send(REVOKE_URL, {"token": refresh})
+            if held is None:
+                raise Failed("there is no token to revoke")
+            send(REVOKE_URL, {"token": held})
             outcome = "it was revoked"
         except Failed:
             outcome = ("revoking it failed, so remove the app's access yourself in your Google account's third-party"
                        " access page")
         raise Failed("the grant was not for exactly the two read-only Chat scopes (allow both, and check the consent"
                      f" screen lists only them). Nothing was stored, and {outcome}")
+    if not isinstance(refresh, str) or REFRESH_TOKEN.fullmatch(refresh) is None:
+        raise Failed("Google gave no refresh token. Remove the app's access in your Google account and run this again")
     return refresh
 
 
