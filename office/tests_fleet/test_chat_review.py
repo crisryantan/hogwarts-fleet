@@ -1051,6 +1051,7 @@ class GrammarTests(ChatCase):
                 self.assertIsNone(chat_review.parse_request(text))
 
 
+@unittest.skipUnless(IN_KIT, ONLY_IN_KIT)
 class StoreKeyTests(ChatCase):
     def helper(self):
         spec = importlib.util.spec_from_file_location("chat_review_store_key", STORE_KEY)
