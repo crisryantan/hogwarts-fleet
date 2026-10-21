@@ -13,9 +13,10 @@ Anyone in the company's Chat can send the app text, so everything here treats a 
   messages created since its read marker for it, a few pages at most. A message that does not mention the app is
   dropped as it is read: never kept, never logged. Of those that mention it, one from a human whose Chat user is the
   member of that conversation with an email in CHAT_REVIEW_SENDERS, whose text, once the app mention is taken out,
-  is exactly review https://github.com/<owner>/<repo>/pull/<n> (the link may sit in <>), for an allowlisted repo,
-  becomes a queued review; anything else from them (a question, a task, extra words) gets the fixed help reply, and a
-  person not on the list the fixed refusal. Each is taken once, even across kills and the overlap of each read: its
+  has exactly one GitHub PR link (https://github.com/<owner>/<repo>/pull/<n>, bare or in <>), for an allowlisted
+  repo, and the word review outside it, becomes a queued review and the rest of the text is ignored, never kept,
+  logged or passed on; anything else from them (no review word, two links, a repo not listed) gets the fixed help
+  reply, and a person not on the list the fixed refusal. Each is taken once, even across kills and the overlap of each read: its
   record, named by a digest of the Chat message's name, is made create-exclusive, and a message whose record exists
   is never taken again. At most CHAT_REVIEW_PULL_MAX are taken a pass, and one waiting longer than
   CHAT_REVIEW_QUEUE_MAX_SECONDS gets nothing. The requester's words never reach a model, and Hermione is told only the
@@ -32,7 +33,9 @@ Anyone in the company's Chat can send the app text, so everything here treats a 
   named in her prompt as untrusted data whose instructions are ignored. Her only job is that review: she never runs
   the PR's code and has no tool to act with. Her last block is read strictly (parse_block), a finding that repeats a
   long run of the PR's own text included; anything else is a fixed "couldn't review" reply.
-- Her verdict line and findings, scrubbed and cut, go back as the app to the message's thread. Then, while the office
+- An accepted request is acknowledged first in its thread with one of a few fixed lines, picked by the message's own
+  digest, and a fixed line saying a review is all she does. Her verdict line and findings, scrubbed and cut, go back
+  as the app to the message's thread. Then, while the office
   file chat-review-github holds "on" too, the same review goes on the PR with your gh login as a review whose event is
   always COMMENT (gitops.post_pr_review), opening with a fixed line naming the requester by Chat display name, never
   email, at most once per PR and head commit (a marker made create-exclusive before it is posted, never posted again
@@ -90,8 +93,12 @@ MESSAGE_NAME = re.compile(r"(spaces/[A-Za-z0-9_-]{1,100})/messages/[A-Za-z0-9_.-
 # How far ahead of this Mac's clock a message's time may be, for a clock that runs a little behind Google's.
 CLOCK_SKEW_SECONDS = 300
 _PR_LINK = r"https://github\.com/([A-Za-z0-9._-]{1,100})/([A-Za-z0-9._-]{1,100})/pull/([1-9][0-9]{0,9})"
-REQUEST_TEXT = re.compile(r"review +(?:<" + _PR_LINK + r">|" + _PR_LINK + r")")
 PR_LINK = re.compile(_PR_LINK)
+# A PR link inside a message, however the words around it run. Chat may hand a link over as <url> or <url|label>; the
+# label is read with it, so a link shown twice is one and a label naming another PR is a second link.
+PR_IN_TEXT = re.compile(r"(?<![A-Za-z0-9])" + _PR_LINK + r"(?![0-9])")
+LINK_MARKUP = re.compile(r"<(https?://[^\s<>|]*)(?:\|([^<>\n]*))?>")
+REVIEW_WORD = re.compile(r"\breview(?:s|ing)?\b", re.IGNORECASE)
 PR_TEXT_MAX = 20000
 FINDINGS_MAX = 15
 FINDING_MAX = 300
@@ -103,9 +110,16 @@ ECHO_MAX = 40
 # The Chat app's name, as every fixed text that names it spells it.
 APP_NAME = "Hermione (Staff Engineer)"
 # The fixed replies. Nothing a requester wrote is ever in one.
-HELP = (f"I'm {APP_NAME}, and I do code reviews only. Send exactly: review"
-        " https://github.com/OWNER/REPO/pull/NUMBER, for a repo I take. I don't answer questions or fix, build, run"
-        " or deploy anything.")
+HELP = (f"I'm {APP_NAME}, and I do code reviews only. Mention me with a GitHub PR link and the word review, for a"
+        " repo I take, and one PR link per message. I don't answer questions or fix, merge, build, run or deploy"
+        " anything.")
+# The acknowledgement of an accepted request: one of these, picked by the message's own digest, and then the line saying
+# a review is all she does. Nothing a requester wrote is ever in one.
+ACKS = ("On it. I'll read every line properly, someone has to.",
+        "Give me a few minutes, I'm reading it the way it ought to be read: all of it.",
+        "Right, let's have a look. I'll be thorough, I always am.",
+        "Leave it with me. Nothing gets past a careful read, and this will get one.")
+REVIEW_ONLY = "I only review, so if you asked for anything else too, that part won't be done."
 SENDER_REFUSED = "You're not on the list for review requests yet. Ask the owner to add you."
 COULD_NOT = "I couldn't review that PR this time. Ask the review desk's owner if it keeps happening."
 NOT_OPEN = "That PR is not open, so it was not reviewed."
@@ -235,16 +249,19 @@ def _space_allowed(space: str) -> bool:
 
 
 def parse_request(text: object) -> Optional[tuple]:
-    """(repo, number) when text, with the app mention already out, is exactly a review request for an allowed repo,
-    else None. Only spaces and line ends around it are let go. chat-app/Code.gs applies this same grammar (its
-    PR_LINK and REQUEST_TEXT match these, checked in the tests); the job itself sees only the link Code.gs kept."""
+    """(repo, number) when text, with the app mention already out, asks for a review: exactly one GitHub PR link, for an
+    allowed repo, and the word review (or reviews, reviewing) outside the link, else None. Nothing else in the text is
+    read, kept or passed on; only the link rebuilt from what the pattern matched is."""
     if not isinstance(text, str):
         return None
-    match = REQUEST_TEXT.fullmatch(text.strip(" \t\r\n"))
-    if match is None:
+    # A link with a label reads as the link, plus the label when it is not just the link again, so a label that names
+    # another PR counts as a second link.
+    text = LINK_MARKUP.sub(lambda found: found.group(1) if found.group(2) in (None, found.group(1))
+                           else f"{found.group(1)} {found.group(2)}", text)
+    links = list(PR_IN_TEXT.finditer(text))
+    if len(links) != 1 or REVIEW_WORD.search(PR_IN_TEXT.sub(" ", text)) is None:
         return None
-    owner, name, number = match.group(1, 2, 3) if match.group(1) else match.group(4, 5, 6)
-    return _allowed_pr(owner, name, number)
+    return _allowed_pr(*links[0].group(1, 2, 3))
 
 
 def parse_pr_url(url: object) -> Optional[tuple]:
@@ -833,6 +850,29 @@ def _send_reply(key: str, record: dict) -> dict:
     return _github_or_done(key, {**record, "replied": True})
 
 
+def ack_text(key: str) -> str:
+    """The fixed acknowledgement for the request with this key: a line chosen by the key, then the review-only line."""
+    return f"{ACKS[int(key[:8], 16) % len(ACKS)]} {REVIEW_ONLY}"
+
+
+def _acknowledge(key: str, record: dict) -> dict:
+    """Tell the thread, once, that the review is coming, before it starts. Best effort: a few tries across passes, then
+    the review goes on without it. The record as it is after."""
+    if record.get("source") != "chat" or record.get("acked") is not None or not intake_on(record):
+        return record
+    tries = int(record.get("ack_tries", 0))
+    record = _save(key, {**record, "ack_tries": tries + 1})
+    try:
+        token = google_chat.access_token(google_chat.CHAT_BOT_SCOPE)
+        if not intake_on(record):  # switched off while the token was minted: this try is not counted, nothing sent
+            return _save(key, {**record, "ack_tries": tries})
+        google_chat.create_message(record["space"], record["thread"], ack_text(key), f"chat-review-ack-{key}", token)
+    except FleetError as exc:
+        log("ack-failed", request=key[:12], why=common.scrubbed_line(exc, 200))
+        return _save(key, {**record, "acked": False}) if tries + 1 >= config.CHAT_REVIEW_REPLY_TRIES else record
+    return _save(key, {**record, "acked": True})
+
+
 # Reading Chat
 
 
@@ -1057,10 +1097,12 @@ def settle(conn, now: Optional[int] = None, only_hand: bool = False) -> list:
             elif state == "queued" and now - int(record.get("at", 0)) > config.CHAT_REVIEW_QUEUE_MAX_SECONDS:
                 record = _save(key, {**record, "state": "reply", "reply": COULD_NOT, "outcome": "expired"})
                 done.append(_send_reply(key, record)["state"])
-            elif state == "queued" and reviews < config.CHAT_REVIEW_PER_PASS:
-                outcome = _run_queued(conn, key, record)
-                reviews += outcome != "queued"  # a request that waits uses up none of the pass
-                done.append(outcome)
+            elif state == "queued":
+                record = _acknowledge(key, record)
+                if reviews < config.CHAT_REVIEW_PER_PASS:
+                    outcome = _run_queued(conn, key, record)
+                    reviews += outcome != "queued"  # a request that waits uses up none of the pass
+                    done.append(outcome)
         except (FleetError, StoreError, OSError, KeyError, TypeError, ValueError) as exc:
             # One request's trouble never stops the others; a record missing a field names only the field.
             why = common.scrubbed_line(exc, 200) if isinstance(exc, (FleetError, StoreError)) else type(exc).__name__

@@ -532,10 +532,14 @@ sets it, so nothing from before is answered, and each read lists the messages cr
 A message that does not mention the app is dropped as it is read: never kept, never logged. Of those that mention it:
 
 - one from a person whose membership of that conversation belongs to an email in `CHAT_REVIEW_SENDERS`, whose text,
-  once the app mention is out, is exactly `review https://github.com/<owner>/<repo>/pull/<n>` (the link may sit in
-  `<>`), for a repo in `CHAT_REVIEW_REPOS`, becomes a queued review;
-- anything else from them, a question, a task or extra words after the link, gets one fixed help text saying it does
-  code reviews only;
+  once the app mention is out, holds exactly one GitHub PR link (`https://github.com/<owner>/<repo>/pull/<n>`, bare or
+  in `<>`) for a repo in `CHAT_REVIEW_REPOS` and the word review (also reviews or reviewing, any letter case) outside
+  the link, becomes a queued review. Every other word is ignored: never kept, never logged, never shown to the
+  reviewer, which gets only the link rebuilt from what matched. The thread first gets a short fixed acknowledgement
+  (one of a few lines, picked by the message's own digest, never echoing the message) that also says a review is all
+  she does, so a message that also asks to fix or merge still gets the review and nothing more;
+- anything else from them, a question, a task, no review word, two or more PR links or a repo that is not listed,
+  gets one fixed help text saying it does code reviews only;
 - a person not on the list gets one fixed refusal, and who they are is not kept;
 - a bot, or a message older than `CHAT_REVIEW_QUEUE_MAX_SECONDS`, gets nothing.
 
