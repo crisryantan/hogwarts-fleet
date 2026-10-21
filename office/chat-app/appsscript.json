@@ -2,13 +2,7 @@
   "timeZone": "Etc/UTC",
   "runtimeVersion": "V8",
   "exceptionLogging": "STACKDRIVER",
-  "oauthScopes": [
-    "https://www.googleapis.com/auth/script.external_request"
-  ],
-  "urlFetchWhitelist": [
-    "https://oauth2.googleapis.com/",
-    "https://sheets.googleapis.com/"
-  ],
+  "oauthScopes": [],
   "addOns": {
     "common": {
       "name": "Hermione (Staff Engineer)",

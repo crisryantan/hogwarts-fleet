@@ -5,8 +5,8 @@ from Google Cloud:
   /usr/bin/python3 -I -B scripts/chat-review-store-key.py <downloaded key.json>
 
 It reads CHAT_REVIEW_SERVICE_ACCOUNT and CHAT_REVIEW_KEYCHAIN_SERVICE from the installed office's fleet/config.py
-(~/.hogwarts), without running it, and refuses a key whose client_email is not that service account, so the writer
-key Code.gs uses can never land here by mistake. It stores the private key's PKCS#8 body (base64) as a generic
+(~/.hogwarts), without running it, and refuses a key whose client_email is not that service account, so no other
+account's key can land here by mistake. It stores the private key's PKCS#8 body (base64) as a generic
 password in your login Keychain, service CHAT_REVIEW_KEYCHAIN_SERVICE and account the service account's email, by
 driving /usr/bin/security -i over its stdin: the key is never in any process's argv, a file this writes, or its
 output. An item already there is replaced (-U), which is how a rotated key goes in. It then reads the item back to

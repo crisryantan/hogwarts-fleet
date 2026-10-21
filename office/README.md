@@ -45,7 +45,7 @@ The store has none of these:
                                         and settings.json (Claude) or codex.toml (Codex)
   desks/<desk>/enabled                  a headless desk runs only while this plain file exists
   desks/hermione/chat-review-settings.json  the locked-down settings of Hermione's chat review turns
-  chat-app/Code.gs, chat-app/appsscript.json  the Chat app's Apps Script source, which you paste into its project
+  chat-app/Code.gs, chat-app/appsscript.json  the Chat app's Apps Script source (it does nothing), pasted into its project
   desks/<desk>/live-tools.json          for mcgonagall and snape: every tool their live herdr session may have, by exact name
   hogwarts/__init__.py                  version string
   hogwarts/errors.py                    error classes and exit codes
@@ -72,8 +72,8 @@ The store has none of these:
                                         next step), owl_report.py (her one-line owl reports), phone.py (loud events to
                                         the phone), scratchpad.py (keeps each scratchpad and task pad to its latest
                                         Checkpoint, older ones archived), chat_review.py (PR reviews teammates ask
-                                        for in Google Chat, and fleet review pr), google_chat.py (the request
-                                        Sheet, the Chat replies and the service account's tokens) and their helpers
+                                        for in Google Chat, and fleet review pr), google_chat.py (Chat read
+                                        with your read-only token, replies sent with the app's) and their helpers
   fleet/hooks/                          the castle's session hooks and the push gate, push_gate.py; stop.py is
                                         McGonagall's chat watch, which wakes her with a go task's line when it moves,
                                         in the session that typed its go (go_owners.py keeps which session watches
@@ -150,14 +150,15 @@ The store has none of these:
                                         that failed or timed out is woken once more on the next pass, and a fix
                                         round that died idle may be started again until 2 of the build's newest runs
                                         in a row died that way, after which it is yours (off when missing)
-  chat-review                           while it holds exactly "on", the chat-review job reads the request Sheet
-                                        each minute and Hermione reviews the PRs teammates ask for in Chat (off when
-                                        missing: no token is minted and the Sheet is not read)
+  chat-review                           while it holds exactly "on", the chat-review job reads the app's Chat
+                                        conversations each minute and Hermione reviews the PRs teammates ask for there
+                                        (off when missing: no token is minted and nothing is read)
   chat-review-github                    while it holds exactly "on" too, each chat review is also posted on its PR as a
                                         COMMENT review with your gh login, once per PR and head commit (off when
                                         missing)
-  chat-reviews/                         one record per chat review request (requests/), the once-per-head-commit
-                                        GitHub markers (github/) and each cap day's counts (caps/)
+  chat-reviews/                         one record per message that asked the app something (requests/), each
+                                        conversation's read marker (read/), the once-per-head-commit GitHub markers
+                                        (github/) and each cap day's counts (caps/)
   patrol/shadow                         while it is here, the patrol and Gringotts only write files (shadow mode)
   patrol/<job>/                         the Map's snapshot and rows, lineups, keeper's watches, scoreboards, bot passes,
                                         and in shadow mode what a follow-up would have routed (patrol/followup/)
@@ -502,35 +503,52 @@ Auto-portrait (`fleet/portrait_auto.py`) applies his additions for you while `~/
 
 Teammates ask Hermione (Staff Engineer), a Google Chat app, for a code review of a GitHub PR, and get her verdict and
 findings in their thread. The app does code reviews only: it answers no questions and fixes, builds, runs or deploys
-nothing. Nothing listens on your Mac. The app's connection is an Apps Script project (`chat-app/Code.gs` and
-`chat-app/appsscript.json`) that queues each request as one row of a Google Sheet, and the chat-review job, which runs
-on your Mac under `fleet loops`, reads that Sheet each minute, runs the review and replies in Chat as the app.
+nothing. Nothing listens on your Mac, and no one who writes to the app is ever asked to authorize anything.
 
-Two service accounts do the Google side, neither with any project role. The writer account is the one Code.gs adds rows as: its
-key is the Script Property `WRITER_KEY`, and Code.gs signs its own short-lived Sheets token with it, cached for less than
-its lifetime and never logged. The worker account is the one the job uses: its one JSON key sits in your login
-Keychain as a generic password (service `CHAT_REVIEW_KEYCHAIN_SERVICE`, account the account's email), and the job mints
-short-lived tokens from it itself, one for the spreadsheets scope and one for chat.bot, signing with `/usr/bin/openssl`
-fed the key on its stdin. The key and the tokens are never in an argv, a file or a log. Both accounts are editors of
-the Sheet and no one else is. An editor can change any row, so a leaked writer key could too, which is one reason
-the job checks every row again.
+The app's connection is an Apps Script project (`chat-app/Code.gs` and `chat-app/appsscript.json`) that does nothing:
+each event Chat sends it (a message, being added or removed, an app command) gets an empty acknowledgement, and its
+manifest asks for no scope and fetches nothing. The work happens in the chat-review job, which runs on your Mac under
+`fleet loops` each minute, with two separate authorizations that never stand in for each other:
 
-Anyone in your organisation's Chat can send the app text, so very little of it is kept. Code.gs queues a message only
-when its sender's email is in `ALLOWED_SENDERS` and its space in `ALLOWED_SPACES` (a direct message is a space like
-any other, so it must be listed too). Rejected messages get a fixed reply and a reason line in the Apps Script
-executions log, except a bot sender or a malformed name, which get the log line only.
-The one request is a message whose text, once the app mention is out, is exactly
-`review https://github.com/<owner>/<repo>/pull/<n>` (the link may sit in `<>`), for a repo in `ALLOWED_REPOS`. It
-becomes a row holding the message's, thread's and space's names, the sender's email and display name, the link, the
-time and the status `queued`, written as plain values (never a formula), once per message under the script lock, and
-the sender is told it is queued. Anything else, a question, a task or extra words after the link, gets one fixed
-help text and no row.
+- Reading is yours, read only. A Desktop OAuth client in the Cloud project and `scripts/chat-review-authorize.py`
+  give the job a refresh token for exactly `chat.messages.readonly` and `chat.memberships.readonly`, nothing that
+  writes, stored with the client's id and secret in your login Keychain (generic password, service
+  `CHAT_REVIEW_USER_KEYCHAIN_SERVICE`). The job trades it for a short-lived access token each pass and refuses one
+  granted any other scope.
+- Sending is the app's. The worker service account, with no project role, has one JSON key in your login Keychain
+  (service `CHAT_REVIEW_KEYCHAIN_SERVICE`, account the account's email). The job signs its own short-lived chat.bot
+  token from it with `/usr/bin/openssl`, fed the key on its stdin, and with it only posts replies as the app.
 
-The job trusts no row. It checks each again against `CHAT_REVIEW_SENDERS`, `CHAT_REVIEW_SPACES`, `CHAT_REVIEW_REPOS`
-and the exact link shape, and a row that fails, or that waited longer than `CHAT_REVIEW_QUEUE_MAX_SECONDS`, is marked
-`failed` with no reply. A row is taken once even across kills: its office record, keyed by the Chat message's name, is
-made create-exclusive before the row is marked `taken` with a run marker, and a row with a record is never taken again.
-When its request ends the row says `done` (replied) or `failed`. The job writes only those status and run cells.
+The job refuses a read with the app's token and a post with yours before anything is sent. Keys, the refresh token,
+the client secret and the access tokens are never in an argv, a file or a log. Reading is a separate authorization
+so that the app needs no scope anyone must grant: the Apps Script connection asks no one for anything, the app's own
+token only sends, and your read-only token reads only what you can already read and can change nothing.
+
+Your token reads only a conversation that is in `CHAT_REVIEW_SPACES` and that you are in, and only while the app is a
+member of it: each pass first asks Chat for the app's own membership there (`spaces/<id>/members/app`), and a
+conversation it has left is not read at all. Each conversation has a read marker in the office. A first read only
+sets it, so nothing from before is answered, and each read lists the messages created since it (back by
+`CHAT_REVIEW_READ_OVERLAP_SECONDS`, for a message Chat lists a little late), at most `CHAT_REVIEW_LIST_PAGES` pages.
+A message that does not mention the app is dropped as it is read: never kept, never logged. Of those that mention it:
+
+- one from a person whose membership of that conversation belongs to an email in `CHAT_REVIEW_SENDERS`, whose text,
+  once the app mention is out, is exactly `review https://github.com/<owner>/<repo>/pull/<n>` (the link may sit in
+  `<>`), for a repo in `CHAT_REVIEW_REPOS`, becomes a queued review;
+- anything else from them, a question, a task or extra words after the link, gets one fixed help text saying it does
+  code reviews only;
+- a person not on the list gets one fixed refusal, and who they are is not kept;
+- a bot, or a message older than `CHAT_REVIEW_QUEUE_MAX_SECONDS`, gets nothing.
+
+Each such message is taken once, even across kills and the overlap of each read: its office record, keyed by a digest
+of the Chat message's name, is made create-exclusive, and a message with a record is never taken again. At most
+`CHAT_REVIEW_PULL_MAX` are taken a pass; the rest wait for the next. The record holds the message's, thread's and
+space's names, the requester's email and display name, and the PR link rebuilt from what the grammar matched. No
+other text of a message is kept anywhere, and the requester's words never reach a model.
+
+When your read authorization fails (revoked, expired, deleted from the Keychain, or granted more than the two read
+scopes), the job stops reading with one headmaster event saying to run the authorize helper again. It never tries
+anything broader instead. Replies to requests already taken still go out as the app, and reading resumes the first
+pass after you re-authorize.
 
 A review reads the PR with your `gh` login, read only: its metadata, then the diff of its base and head commits. A
 PR that is not open, or whose diff is over `CHAT_REVIEW_DIFF_MAX_BYTES`, gets a fixed reply. Hermione then runs
@@ -561,49 +579,52 @@ terminal, under the same caps, locks and GitHub switch, with no Chat reply.
 
 In Google Cloud, with an account that may administer the project:
 
-1. Create a project, and turn on `chat.googleapis.com` and `sheets.googleapis.com`.
-2. Create two service accounts with no project roles: a writer (Code.gs adds rows as it) and a worker (it reads the Sheet
-   and replies in Chat). Create one JSON key for each.
-3. Store the worker key in your login Keychain once `CHAT_REVIEW_SERVICE_ACCOUNT` and `CHAT_REVIEW_KEYCHAIN_SERVICE`
-   are filled in (below) and the office is installed:
-   `/usr/bin/python3 -I -B scripts/chat-review-store-key.py <worker key.json>`. It refuses any other account's key,
-   and the key never appears in a process's arguments. Then delete the downloaded file.
-4. Create a Google Sheet with a tab named `requests` whose first row is the header
-   `message, thread, space, sender_email, sender_name, pr_url, created, status, run` (columns A to I). Share it with
-   both service accounts' emails as editors, and with no one else. Its id is the long part of its link.
-5. Create an Apps Script project, link it to the project from step 1 (Project Settings, Google Cloud Platform
+1. Create a project, and turn on `chat.googleapis.com`.
+2. Create a service account with no project roles, the worker the app replies as, and one JSON key for it.
+3. Set up the OAuth consent screen (Google Auth Platform, Branding and Audience): user type Internal, and under Data
+   Access add exactly `https://www.googleapis.com/auth/chat.messages.readonly` and
+   `https://www.googleapis.com/auth/chat.memberships.readonly`. Then create an OAuth client (Clients, Create client,
+   application type Desktop app) and download its client JSON.
+4. Create an Apps Script project, link it to the project from step 1 (Project Settings, Google Cloud Platform
    project, the project number), and paste in `chat-app/Code.gs` and `chat-app/appsscript.json` (show the manifest
-   in the editor's settings first). In Project Settings, Script Properties, set `SHEET_ID`, `ALLOWED_SENDERS`,
-   `ALLOWED_SPACES` and `ALLOWED_REPOS` (each list comma-separated), and `WRITER_KEY`: open the writer key file, copy
-   its whole text into the value, save, then delete the downloaded file and copy something else so the key leaves
-   your clipboard. Deploy it (Deploy, New deployment, type Add-on) and note the deployment id. The manifest's
-   `addOns` section is what lets Chat call the script: the console builds Chat apps as Workspace add-ons, and
-   without it every message ends in "not responding" with a broken-manifest error in the project's logs. After
-   pasting a new `Code.gs` or manifest, use Deploy, Manage deployments, edit, New version, so the id stays the same.
-6. In the Chat API's configuration, name the app `Hermione (Staff Engineer)`, let it join spaces, set its connection
-   to the Apps Script project with that deployment id, and make it visible to named people only. Install it in a
-   test space first. Each person who messages it is asked once to let it connect to an external service, the one
-   scope it has.
+   in the editor's settings first). It needs no Script Properties. Deploy it (Deploy, New deployment, type Add-on)
+   and note the deployment id. The manifest's `addOns` section is what lets Chat call the script: the console builds
+   Chat apps as Workspace add-ons, and without it every message ends in "not responding" with a broken-manifest error
+   in the project's logs. After pasting a new `Code.gs` or manifest, use Deploy, Manage deployments, edit, New
+   version, so the id stays the same.
+5. In the Chat API's configuration, name the app `Hermione (Staff Engineer)`, let it join spaces, set its connection
+   to the Apps Script project with that deployment id, and make it visible to named people only. Add it to a test
+   space you are in first.
 
 Then fill these in your private overlay of `fleet/config.py`; while any is a placeholder, the job refuses to start and
 says which:
 
-- `CHAT_REVIEW_SHEET_ID`: the Sheet's id.
+- `CHAT_REVIEW_USER_KEYCHAIN_SERVICE`: the Keychain service name your read-only authorization is stored under.
 - `CHAT_REVIEW_SERVICE_ACCOUNT`: the worker service account's email.
-- `CHAT_REVIEW_KEYCHAIN_SERVICE`: the Keychain service name the worker key is stored under.
+- `CHAT_REVIEW_KEYCHAIN_SERVICE`: the Keychain service name the worker key is stored under, a different one.
 - `CHAT_REVIEW_SENDERS`: the emails of the people who may ask.
-- `CHAT_REVIEW_SPACES`: the spaces it answers in, as `spaces/<id>` (the id is the last part of the space's link).
+- `CHAT_REVIEW_SPACES`: the conversations it answers in, as `spaces/<id>` (the id is the last part of the space's
+  link). You must be a member of each, since your token reads them.
 - `CHAT_REVIEW_REPOS`: the repos it reviews, as `owner/name`.
 
-`CHAT_REVIEW_PER_PERSON_DAILY` and `CHAT_REVIEW_DAILY` have working defaults. Run `sh scripts/loops-setup.sh`, which
-adds the chat-review job to `loops/jobs`, restart `fleet loops`, and switch it on with
-`echo on > ~/.hogwarts/chat-review`. Once a few Chat replies read right, switch on the GitHub post with
-`echo on > ~/.hogwarts/chat-review-github`. `rm` either file switches it off again. Clear old Sheet rows only while
-the intake is off.
+Once the office is installed with those filled in, run both helpers yourself in Terminal, from your clone:
 
-Rotate both keys every 90 days: create a new key for the account, store the worker's with the same helper (it
-replaces the Keychain item) or paste the writer's into `WRITER_KEY`, check a review goes through, then delete the old
-key in Google Cloud.
+- `/usr/bin/python3 -I -B scripts/chat-review-store-key.py <worker key.json>` stores the worker key. It refuses any
+  other account's key. Then delete the downloaded file.
+- `/usr/bin/python3 -I -B scripts/chat-review-authorize.py <client.json>` prints a Google sign-in link. Open it, sign
+  in as yourself and allow both read-only scopes. It listens on 127.0.0.1 only, for that one answer, uses PKCE, and
+  stores the refresh token and the client's id and secret in your login Keychain. A grant for any other set of
+  scopes is revoked and nothing is stored.
+
+Neither puts a secret in a process's arguments. `CHAT_REVIEW_PER_PERSON_DAILY` and `CHAT_REVIEW_DAILY` have working
+defaults. Run `sh scripts/loops-setup.sh`, which adds the chat-review job to `loops/jobs`, restart `fleet loops`, and
+switch it on with `echo on > ~/.hogwarts/chat-review`. Once a few Chat replies read right, switch on the GitHub post
+with `echo on > ~/.hogwarts/chat-review-github`. `rm` either file switches it off again.
+
+Rotate the worker key every 90 days: create a new key, store it with the same helper (it replaces the Keychain item),
+check a review goes through, then delete the old key in Google Cloud. Re-run the authorize helper whenever the read
+authorization stops, or to rotate it: it replaces the Keychain item, and you can then remove the old grant in your
+Google account's third-party access page. To stop all reading at once, remove the app's access there.
 
 ## Exit codes
 

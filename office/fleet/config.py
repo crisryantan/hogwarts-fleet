@@ -156,7 +156,7 @@ ORCHESTRATOR_FILE = "auto-orchestrate"
 # through the phone transports (fleet/go_watch.py). Off by default: echo on > ~/.hogwarts/auto-go-updates
 GO_UPDATES_FILE = "auto-go-updates"
 # Chat review requests (fleet/chat_review.py), off by default: while this office file holds "on", the chat-review job
-# fleet loops runs reads the request Sheet each minute and Hermione reviews the GitHub PRs teammates ask for in Chat,
+# fleet loops runs reads the Chat app's conversations each minute and Hermione reviews the GitHub PRs teammates ask for,
 # replying in their Chat thread. Off, the job reads nothing and mints no token. echo on > ~/.hogwarts/chat-review
 CHAT_REVIEW_FILE = "chat-review"
 # While this second office file holds "on" too, each chat review is also posted on the PR as a review with your gh
@@ -413,17 +413,21 @@ ORCHESTRATOR_KEEP_SECONDS = 14 * 86400
 # How much of an owl's body her context file carries, after it is scrubbed.
 ORCHESTRATOR_BODY_MAX = 4000
 # Chat review requests (fleet/chat_review.py, fleet/google_chat.py). The Chat app's connection is an Apps Script
-# deployment (chat-app/Code.gs) that appends each accepted request as one row of a Google Sheet. The chat-review job
-# reads and claims those rows with the Sheets API and replies in Chat as the app, both as the service account below,
-# whose one JSON key sits in your login Keychain (generic password, service CHAT_REVIEW_KEYCHAIN_SERVICE, account the
-# service account's email). Nothing listens on the network. Your private overlay fills the placeholders, and while
-# any is unfilled the job refuses to start and says which.
-CHAT_REVIEW_SHEET_ID = "<chat-review-sheet-id>"
+# deployment (chat-app/Code.gs) that does nothing and asks no one to authorize anything. The chat-review job
+# reads new messages in the app's conversations itself, with your own read-only authorization: a Desktop OAuth
+# client's id and secret and a refresh token for only chat.messages.readonly and chat.memberships.readonly, stored by
+# scripts/chat-review-authorize.py in your login Keychain (generic password, service
+# CHAT_REVIEW_USER_KEYCHAIN_SERVICE). It replies in Chat as the app, as the worker service account below, whose one
+# JSON key sits in your login Keychain too (service CHAT_REVIEW_KEYCHAIN_SERVICE, account the service account's
+# email). The two services differ, and neither authorization ever does the other's job. Nothing listens on the
+# network. Your private overlay fills the placeholders, and while any is unfilled the job refuses to start and says
+# which.
+CHAT_REVIEW_USER_KEYCHAIN_SERVICE = "<chat-review-user-keychain-service>"
 CHAT_REVIEW_SERVICE_ACCOUNT = "<chat-app-service-account>"
 CHAT_REVIEW_KEYCHAIN_SERVICE = "<chat-review-keychain-service>"
-# Only rows from these people (their Chat email) in these spaces (spaces/<id>) are taken; any other row is marked
-# failed without a reply. Only PRs of these repos (owner/name) are reviewed. Code.gs holds its own copy of each list
-# in its Script Properties, and this side checks every row again.
+# Only messages from these people (their Chat email) in these spaces (spaces/<id>), each one the app is a member of,
+# are taken; a person not on the list who mentions the app gets a fixed refusal. Only PRs of these repos (owner/name)
+# are reviewed.
 CHAT_REVIEW_SENDERS: tuple = ("<allowed-sender-email>",)
 CHAT_REVIEW_SPACES: tuple = ("<allowed-chat-space>",)
 CHAT_REVIEW_REPOS: tuple = ("<allowed-repo>",)
@@ -431,13 +435,16 @@ CHAT_REVIEW_REPOS: tuple = ("<allowed-repo>",)
 # so a killed review counts. Each is one Hermione turn at her MAX_BUDGET_USD at most.
 CHAT_REVIEW_PER_PERSON_DAILY = 3
 CHAT_REVIEW_DAILY = 10
-# Queued rows one pass takes, reviews one job pass runs, and how long a request may wait for a free Hermione run slot
-# (a queued row older than this is marked failed and never taken).
+# Messages that mention the app one pass takes, reviews one job pass runs, and how long a request may wait for a free
+# Hermione run slot (a message older than this is never taken, and a queued request older than this is answered with
+# the fixed failure line).
 CHAT_REVIEW_PULL_MAX = 10
 CHAT_REVIEW_PER_PASS = 2
 CHAT_REVIEW_QUEUE_MAX_SECONDS = 2 * 3600
-# The most rows of the request Sheet one pass reads; clear old rows (with the intake off) before it fills.
-CHAT_REVIEW_SHEET_MAX_ROWS = 5000
+# Pages of at most 100 messages one pass lists per conversation, and how far before its read marker each read starts,
+# so a message Chat lists a little late is still seen (each message's record keeps it from being taken twice).
+CHAT_REVIEW_LIST_PAGES = 5
+CHAT_REVIEW_READ_OVERLAP_SECONDS = 120
 # A PR whose diff is larger than this is refused with a fixed reply, never reviewed in part.
 CHAT_REVIEW_DIFF_MAX_BYTES = 300_000
 # A Chat reply is sent at most this many times (each with the same request id, so Chat keeps one message).

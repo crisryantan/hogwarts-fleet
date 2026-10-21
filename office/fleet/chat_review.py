@@ -4,23 +4,24 @@ Anyone in the company's Chat can send the app text, so everything here treats a 
 - The intake is on only while the office file chat-review holds "on" (common.opt_in_on); off, the job reads nothing
   and mints no token. On, it refuses to start while any setting it needs in fleet/config.py is still a placeholder,
   and says which.
-- The Chat app is an Apps Script deployment (chat-app/Code.gs), and it does code reviews only. It answers each
-  message at once: a message from an allowlisted sender in an allowlisted space whose text, once the app mention is
-  taken out, is exactly review https://github.com/<owner>/<repo>/pull/<n> (the link may sit in <>), for an
-  allowlisted repo, becomes one "queued" row of the request Sheet, appended through the Sheets API as a second
-  service account used for nothing else, holding only the message's, thread's and space's names, the sender's email and
-  display name, the PR link and the time. Anything else from them (a question, a task, extra words) gets the fixed
-  help reply and no row, and nothing at all goes to anyone else. No other text of a message is kept anywhere.
-- The chat-review job, which fleet loops runs every minute, reads the Sheet as the worker service account
-  (fleet/google_chat.py) and takes up to CHAT_REVIEW_PULL_MAX queued rows. It trusts no row: each is checked again,
-  every name against its shape, the sender against CHAT_REVIEW_SENDERS, the space against CHAT_REVIEW_SPACES and
-  the link against the grammar and CHAT_REVIEW_REPOS, and one that fails, or waited longer than
-  CHAT_REVIEW_QUEUE_MAX_SECONDS, is marked failed with no reply and one scrubbed log line. The requester's words
-  never reach a model, and Hermione is told only the PR's repo, number and head commit, which the script checked.
-- A row is taken once, even across kills: its record, named by a digest of the Chat message's name, is made
-  create-exclusive before the row is marked taken with a run marker, and a row whose record exists is never taken
-  again, only given the status its record reached. Each pass marks every row whose request ended done (replied) or
-  failed. The job writes only the status and run cells, never free text.
+- The Chat app is an Apps Script deployment (chat-app/Code.gs) that does nothing: each event it gets is answered
+  with an empty acknowledgement, and it asks for no scope, so no one who writes to it is ever asked to authorize
+  anything.
+- The chat-review job, which fleet loops runs every minute, reads instead, with your own read-only authorization
+  (fleet/google_chat.py: chat.messages.readonly and chat.memberships.readonly, nothing that writes). It reads only a
+  conversation that is in CHAT_REVIEW_SPACES and that the app is a member of, checked each pass, and only the
+  messages created since its read marker for it, a few pages at most. A message that does not mention the app is
+  dropped as it is read: never kept, never logged. Of those that mention it, one from a human whose Chat user is the
+  member of that conversation with an email in CHAT_REVIEW_SENDERS, whose text, once the app mention is taken out,
+  is exactly review https://github.com/<owner>/<repo>/pull/<n> (the link may sit in <>), for an allowlisted repo,
+  becomes a queued review; anything else from them (a question, a task, extra words) gets the fixed help reply, and a
+  person not on the list the fixed refusal. Each is taken once, even across kills and the overlap of each read: its
+  record, named by a digest of the Chat message's name, is made create-exclusive, and a message whose record exists
+  is never taken again. At most CHAT_REVIEW_PULL_MAX are taken a pass, and one waiting longer than
+  CHAT_REVIEW_QUEUE_MAX_SECONDS gets nothing. The requester's words never reach a model, and Hermione is told only the
+  PR's repo, number and head commit, which the script checked. When your read authorization fails (revoked,
+  expired, or broader than read only), reading stops with one headmaster event saying to run
+  scripts/chat-review-authorize.py again, and nothing broader is ever tried.
 - A review (review, also fleet review pr <url> --requested-by <email> by hand) holds the PR's own lock, so one
   review of a PR runs at a time, then reads the PR with your gh login, read only (gitops.check_read_argv): its
   metadata, then the diff of its base and head commits, refused with a fixed reply when larger than
@@ -37,7 +38,8 @@ Anyone in the company's Chat can send the app text, so everything here treats a 
   email, at most once per PR and head commit (a marker made create-exclusive before it is posted, never posted again
   after a kill).
 - Each reply carries a request id made from its record, so a reply sent again after a kill is the same Chat message.
-  It goes as the app (spaces.messages.create with the chat.bot scope) in the request's thread.
+  It goes as the app (spaces.messages.create with the chat.bot scope, the worker service account's token, which never
+  reads) in the request's thread.
 - Every request, its outcome and its cost is one JSON line in logs/chat-review.log, and its record stays in the office
   folder chat-reviews/ for CHAT_REVIEW_KEEP_SECONDS.
 
@@ -58,7 +60,7 @@ import sys
 import time
 from typing import Callable, Iterator, Optional
 
-from hogwarts import capacity, ids
+from hogwarts import capacity, ids, pensieve
 from hogwarts.errors import StoreError
 
 from fleet import common, config, gitops, google_chat, markers, run_desk, safefs
@@ -68,6 +70,11 @@ DIR = "chat-reviews"
 REQUESTS = "requests"
 GITHUB = "github"
 CAPS = "caps"
+# The read markers, one per conversation, and the marker of a stopped read authorization.
+READS = "read"
+READ_STOPPED = "read-stopped.json"
+# What taking a message that mentions the app can make: a record, each counted toward CHAT_REVIEW_PULL_MAX.
+TAKEN = ("review", "help", "refusal")
 LOG = "chat-review.log"
 JOB_LOCK = "chat-review-job.lock"
 CAPS_LOCK = "chat-review-caps.lock"
@@ -80,10 +87,8 @@ INPUT_FILE = "review-input.txt"
 WORKDIR = re.compile(r"review-[0-9a-f]{32}")
 EMAIL = re.compile(r"[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9.-]{1,190}\.[A-Za-z]{2,24}")
 MESSAGE_NAME = re.compile(r"(spaces/[A-Za-z0-9_-]{1,100})/messages/[A-Za-z0-9_.-]{1,200}")
-# A row's created cell: an ISO UTC time, with or without its milliseconds.
-CREATED = re.compile(r"([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2})(?:\.[0-9]{1,6})?Z")
-# How far ahead of this Mac's clock a row's time may be, for a clock that runs a little behind Google's.
-ROW_CLOCK_SKEW_SECONDS = 300
+# How far ahead of this Mac's clock a message's time may be, for a clock that runs a little behind Google's.
+CLOCK_SKEW_SECONDS = 300
 _PR_LINK = r"https://github\.com/([A-Za-z0-9._-]{1,100})/([A-Za-z0-9._-]{1,100})/pull/([1-9][0-9]{0,9})"
 REQUEST_TEXT = re.compile(r"review +(?:<" + _PR_LINK + r">|" + _PR_LINK + r")")
 PR_LINK = re.compile(_PR_LINK)
@@ -97,16 +102,19 @@ ECHO_MAX = 40
 
 # The Chat app's name, as every fixed text that names it spells it.
 APP_NAME = "Hermione (Staff Engineer)"
-# The fixed replies. Nothing a requester wrote is ever in one. HELP is the one chat-app/Code.gs sends.
+# The fixed replies. Nothing a requester wrote is ever in one.
 HELP = (f"I'm {APP_NAME}, and I do code reviews only. Send exactly: review"
         " https://github.com/OWNER/REPO/pull/NUMBER, for a repo I take. I don't answer questions or fix, build, run"
         " or deploy anything.")
+SENDER_REFUSED = "You're not on the list for review requests yet. Ask the owner to add you."
 COULD_NOT = "I couldn't review that PR this time. Ask the review desk's owner if it keeps happening."
 NOT_OPEN = "That PR is not open, so it was not reviewed."
 TOO_LARGE = "That PR's diff is too large for a chat review, so it was not reviewed."
 CAPPED_PERSON = "You have used today's chat reviews. Ask again tomorrow."
 CAPPED_FLEET = "Today's chat reviews are used up. Ask again tomorrow."
 OPENING = "This is an automated review by " + APP_NAME + ", requested by {requester} in Chat."
+READ_STOPPED_EVENT = ("Chat reviews stopped reading Chat: the read-only authorization is missing, revoked, expired or"
+                      " broader than read only. Run scripts/chat-review-authorize.py <client.json> again to resume.")
 # Who the opening names: the sender's Chat display name, never an email, which stays in the office's own log.
 NAME_MAX = 60
 NO_NAME = "a teammate"
@@ -181,9 +189,9 @@ def config_problems(intake: bool) -> list:
             bad(name, value, "must be a whole number of at least 1")
     if not intake:
         return problems
-    for name, pattern in (("CHAT_REVIEW_SHEET_ID", google_chat.SHEET_ID),
-                          ("CHAT_REVIEW_SERVICE_ACCOUNT", google_chat.SERVICE_ACCOUNT),
-                          ("CHAT_REVIEW_KEYCHAIN_SERVICE", google_chat.KEYCHAIN_SERVICE)):
+    for name, pattern in (("CHAT_REVIEW_SERVICE_ACCOUNT", google_chat.SERVICE_ACCOUNT),
+                          ("CHAT_REVIEW_KEYCHAIN_SERVICE", google_chat.KEYCHAIN_SERVICE),
+                          ("CHAT_REVIEW_USER_KEYCHAIN_SERVICE", google_chat.KEYCHAIN_SERVICE)):
         value = getattr(config, name)
         if not isinstance(value, str) or pattern.fullmatch(value) is None:
             bad(name, value, "is not a valid value")
@@ -192,7 +200,10 @@ def config_problems(intake: bool) -> list:
         if not isinstance(value, tuple) or not value or not all(isinstance(item, str) and pattern.fullmatch(item)
                                                                  for item in value):
             bad(name, value, "must list at least one valid entry")
-    for name in ("CHAT_REVIEW_PULL_MAX", "CHAT_REVIEW_SHEET_MAX_ROWS"):
+    if config.CHAT_REVIEW_USER_KEYCHAIN_SERVICE == config.CHAT_REVIEW_KEYCHAIN_SERVICE:
+        problems.append("CHAT_REVIEW_USER_KEYCHAIN_SERVICE in fleet/config.py must differ from"
+                        " CHAT_REVIEW_KEYCHAIN_SERVICE, so the two authorizations never share an item")
+    for name in ("CHAT_REVIEW_PULL_MAX", "CHAT_REVIEW_LIST_PAGES", "CHAT_REVIEW_READ_OVERLAP_SECONDS"):
         value = getattr(config, name)
         if type(value) is not int or value < 1:
             bad(name, value, "must be a whole number of at least 1")
@@ -822,110 +833,186 @@ def _send_reply(key: str, record: dict) -> dict:
     return _github_or_done(key, {**record, "replied": True})
 
 
-# The request Sheet
+# Reading Chat
 
 
-def _row_time(text: str) -> Optional[int]:
-    """The epoch second of a row's created cell, an ISO UTC time as Code.gs writes it, else None."""
-    match = CREATED.fullmatch(text)
-    if match is None:
-        return None
-    try:
-        return calendar.timegm(time.strptime(match.group(1), "%Y-%m-%dT%H:%M:%S"))
-    except (ValueError, OverflowError):
-        return None
-
-
-def check_row(cells: list, now: int) -> tuple:
-    """(request fields, None) for a queued row that passes every check again here, else (None, why). Nothing in the
-    Sheet is trusted: Code.gs checked it, and so does this."""
-    name, thread, space, email, sender_name, url, created = cells[:7]
-    named = MESSAGE_NAME.fullmatch(name)
-    if named is None or space != named.group(1) or google_chat.SPACE.fullmatch(space) is None:
-        return None, "a row with no message name in its space"
-    if not _space_allowed(space):
-        return None, "a row from a space not on the allowlist"
-    if EMAIL.fullmatch(email) is None or not _sender_allowed(email):
-        return None, "a row from a sender not on the allowlist"
-    if google_chat.THREAD.fullmatch(thread) is None or not thread.startswith(space + "/"):
-        return None, "a row with no thread in its space"
-    asked = parse_pr_url(url)
-    if asked is None:
-        return None, "a row whose link is not a PR of an allowed repo"
-    at = _row_time(created)
-    if at is None or at > now + ROW_CLOCK_SKEW_SECONDS:
-        return None, "a row with no time it was asked"
-    if now - at > config.CHAT_REVIEW_QUEUE_MAX_SECONDS:
-        return None, "a row that waited too long"
-    return {"message": name, "space": space, "thread": thread, "requester": email.lower(),
-            "requester_name": display_name(sender_name), "repo": asked[0], "number": asked[1], "at": at}, None
-
-
-def _row_key(name: str) -> Optional[str]:
+def _message_key(name: str) -> Optional[str]:
     return _digest(f"chat:{name}") if MESSAGE_NAME.fullmatch(name) else None
 
 
-def _row_status(record: dict) -> tuple:
-    """The status and run marker a request's row shows for its record."""
-    marker = record.get("claim") if isinstance(record.get("claim"), str) else secrets.token_hex(8)
-    if record.get("state") != "done":
-        return "taken", marker
-    return ("done" if record.get("replied") else "failed"), marker
+def _marker_name(space: str) -> str:
+    return f"{_digest(f'space:{space}')}.json"
 
 
-def intake(cells: list, now: int) -> tuple:
-    """Take one queued row: check it, then make its record create-exclusive. (what happened, for the log; the row's
-    new status and run marker, or None to leave it). Raises only when its record could not be made, so the row stays
-    queued for the next pass."""
-    known = _row_key(cells[0])
-    existing = read_record(known) if known else None
-    if existing is not None and existing.get("source") == "chat":
-        # Taken before (its status write lost, or a kill came first): it only gets its status, however old it is.
-        return "seen before", _row_status(existing)
-    fields, why = check_row(cells, now)
-    if fields is None:
-        log("ignored", why=why, message=_digest(f"row:{cells[0]}")[:12])
-        return "ignored", ("failed", secrets.token_hex(8))
-    key = _row_key(fields["message"])
-    record = {**fields, "state": "queued", "kind": "review", "source": "chat", "claim": secrets.token_hex(8)}
-    if not _create(key, record):
-        return "seen before", _row_status(read_record(key) or {})
-    log("received", **_logged(key, record), kind="review")
-    return "review", ("taken", record["claim"])
+def _read_marker(space: str) -> Optional[dict]:
+    with _folder(READS) as fd:
+        return _read(fd, _marker_name(space))
 
 
-def sync_sheet(take: bool) -> list:
-    """Read the request Sheet once; with take, take up to CHAT_REVIEW_PULL_MAX queued rows; and mark every taken row
-    whose request ended done or failed. What happened to each row taken, in the order read."""
-    sheet = config.CHAT_REVIEW_SHEET_ID
-    token = google_chat.access_token(google_chat.SHEETS_SCOPE)
-    if not common.opt_in_on(config.CHAT_REVIEW_FILE):
-        return []  # switched off while the token was minted: the Sheet is not read
-    rows = google_chat.read_rows(sheet, token, config.CHAT_REVIEW_SHEET_MAX_ROWS)
-    now = int(time.time())
-    done, updates = [], []
-    for row, cells in rows:
-        status = cells[google_chat.COLUMNS.index("status")]
-        if status == "queued" and take and len(done) < config.CHAT_REVIEW_PULL_MAX:
-            try:
-                outcome, update = intake(cells, now)
-            except (FleetError, OSError) as exc:
-                log("intake-failed", why=common.scrubbed_line(exc, 200))
-                continue
-            done.append(outcome)
-        elif status in ("queued", "taken"):
-            key = _row_key(cells[0])
-            record = read_record(key) if key else None
-            if record is None or record.get("source") != "chat":
-                continue
-            update = _row_status(record)
+def _save_marker(space: str, after_us: int, floor_us: int, member: bool, complete: bool = True) -> None:
+    """after_us: how far the conversation was read; floor_us: nothing created before it is ever read (its first read,
+    or the last pass the app was not a member); complete: whether that read reached the newest message, so the next
+    one may reach back by the overlap without stalling on a backlog."""
+    with _folder(READS) as fd:
+        markers.replace(fd, _marker_name(space), {"state": "read", "space": space, "after_us": int(after_us),
+                                                  "floor_us": int(floor_us), "member": member,
+                                                  "complete": complete})
+
+
+def _senders_in(space: str, token: str, known: dict) -> dict:
+    """The Chat user name of each CHAT_REVIEW_SENDERS person who is a member of space, to their email, asked of Chat
+    once a pass and only when a message there mentions the app."""
+    if space not in known:
+        found = {}
+        for email in config.CHAT_REVIEW_SENDERS:
+            user = google_chat.member_user(space, email, token)
+            if user is not None:
+                found.setdefault(user, email.lower())
+        known[space] = found
+    return known[space]
+
+
+def _ignored(name: str, why: str) -> str:
+    log("ignored", why=why, message=_digest(f"message:{name}")[:12])
+    return "ignored"
+
+
+def take_message(message: dict, space: str, token: str, known: dict, now: int) -> str:
+    """Take one message that mentions the app, once: a review request from an allowed sender becomes a queued review,
+    anything else from them the fixed help reply, and anything from a person not allowed the fixed refusal, each as
+    a record made create-exclusive, so a message read again (the overlap of each read, or after a kill) is "seen
+    before". A bot, a message too old or with no thread in its space gets nothing. What happened, for the log."""
+    name = message["name"]
+    named = MESSAGE_NAME.fullmatch(name)
+    if named is None or named.group(1) != space:
+        return _ignored(name, "a message with no name in its space")
+    key = _message_key(name)
+    if read_record(key) is not None:
+        return "seen before"
+    if message["sender_type"] != "HUMAN":
+        return _ignored(name, "a message from no human")
+    at = message["created_us"] // 1_000_000
+    if at > now + CLOCK_SKEW_SECONDS:
+        return _ignored(name, "a message with no time it was sent")
+    if now - at > config.CHAT_REVIEW_QUEUE_MAX_SECONDS:
+        return _ignored(name, "a message that waited too long")
+    thread = message["thread"]
+    if google_chat.THREAD.fullmatch(thread) is None or not thread.startswith(space + "/"):
+        return _ignored(name, "a message with no thread in its space")
+    record = {"message": name, "space": space, "thread": thread, "source": "chat", "at": at}
+    email = _senders_in(space, token, known).get(message["sender"])
+    if email is None:
+        # Who they are is not kept: the record holds only the message's names and the fixed reply.
+        record = {**record, "state": "reply", "kind": "refusal", "reply": SENDER_REFUSED, "outcome": "not-allowed"}
+    else:
+        record = {**record, "requester": email, "requester_name": display_name(message["sender_name"])}
+        asked = parse_request(message["argument"])
+        if asked is None:
+            record = {**record, "state": "reply", "kind": "help", "reply": HELP, "outcome": "help"}
         else:
-            continue
-        if (status, cells[google_chat.COLUMNS.index("run")]) != update:
-            updates.append((row, *update))
-    if updates and common.opt_in_on(config.CHAT_REVIEW_FILE):
-        google_chat.write_statuses(sheet, token, updates)
+            record = {**record, "state": "queued", "kind": "review", "repo": asked[0], "number": asked[1]}
+    if not _create(key, record):
+        return "seen before"
+    log("received", **_logged(key, record), kind=record["kind"])
+    return record["kind"]
+
+
+def read_space(space: str, token: str, known: dict, room: int, now: int) -> list:
+    """Read one conversation's new messages, only while the app is a member of it, and take at most room of those
+    that mention the app. Its read marker says how far it was read: a first read only sets it to now, and each read
+    after one that reached the newest message starts CHAT_REVIEW_READ_OVERLAP_SECONDS before it, so a message Chat
+    lists late is still seen, and the records make the overlap harmless; one cut short (by the page cap, or by room
+    at a message it could not take) goes on exactly where it stopped. It never reads from before its first read or
+    the app joining, nor further back than the queue limit. A message that does not mention the app is never kept or
+    logged. What happened to each message taken."""
+    marker = _read_marker(space)
+    now_us = max(int(time.time() * 1_000_000), now * 1_000_000)
+    app_user = google_chat.app_member(space, token)
+    if app_user is None:
+        if marker is None or marker.get("member") is not False:
+            log("not-a-member", space=space)
+        _save_marker(space, now_us, now_us, False)  # nothing from while it was out is ever read
+        return []
+    if marker is None or type(marker.get("after_us")) is not int or type(marker.get("floor_us")) is not int:
+        _save_marker(space, now_us, now_us, True)  # the first read: nothing from before it is answered
+        return []
+    if marker.get("member") is False:
+        log("member", space=space)
+    newest, floor = marker["after_us"], marker["floor_us"]
+    overlap = config.CHAT_REVIEW_READ_OVERLAP_SECONDS * 1_000_000 if marker.get("complete") is not False else 0
+    after = max(newest - overlap, floor, now_us - config.CHAT_REVIEW_QUEUE_MAX_SECONDS * 1_000_000)
+    done, page, complete = [], None, False
+    try:
+        for _ in range(config.CHAT_REVIEW_LIST_PAGES):
+            if not common.opt_in_on(config.CHAT_REVIEW_FILE):
+                break
+            messages, page = google_chat.list_messages(space, after, app_user, token, page)
+            for message in messages:
+                if message["mentions"]:
+                    if sum(outcome in TAKEN for outcome in done) >= room:
+                        newest = message["created_us"] - 1  # the next read starts with this one
+                        return done
+                    done.append(take_message(message, space, token, known, now))
+                newest = max(newest, message["created_us"])
+            if page is None:
+                complete = True
+                break
+    finally:
+        _save_marker(space, newest, floor, True, complete)
     return done
+
+
+def _read_stopped(conn) -> None:
+    """Your read authorization failed: one headmaster event saying what to run, however many passes fail, since the
+    stop's office marker names the event it raised; reading resumes once the authorization works again."""
+    with _folder(READS) as fd:
+        if markers.publish(fd, READ_STOPPED, {"state": "stopped", "episode": secrets.token_hex(8),
+                                              "at": int(time.time())}):
+            log("read-stopped")
+        stopped = _read(fd, READ_STOPPED) or {}
+    episode = stopped.get("episode")
+    if not isinstance(episode, str) or re.fullmatch(r"[0-9a-f]{16}", episode) is None:
+        return
+    with contextlib.suppress(StoreError):
+        pensieve.add_event(conn, DESK, "chat-review.read-stopped", "headmaster", READ_STOPPED_EVENT,
+                           dedupe_key=f"chat-review:read-stopped:{episode}")
+
+
+def _read_resumed() -> None:
+    with _folder(READS) as fd:
+        if safefs.lstat(fd, READ_STOPPED) is not None:
+            os.unlink(READ_STOPPED, dir_fd=fd)
+            log("read-resumed")
+
+
+def read_chat(conn, now: Optional[int] = None) -> tuple:
+    """Read every allowed conversation the app is a member of once, with your read-only authorization, and take up to
+    CHAT_REVIEW_PULL_MAX messages that mention the app. (what happened to each, the read's trouble or None). When the
+    authorization fails it stops with its one event and reads nothing; nothing broader is ever tried."""
+    try:
+        token = google_chat.read_token()
+    except google_chat.ReadAuthError:
+        _read_stopped(conn)
+        return [], f"reading stopped: run {google_chat.AUTHORIZE_HELPER} <client.json> again"
+    except FleetError as exc:
+        why = common.scrubbed_line(exc, 300)
+        log("read-failed", why=why)
+        return [], why
+    _read_resumed()
+    if not common.opt_in_on(config.CHAT_REVIEW_FILE):
+        return [], None  # switched off while the token was minted: nothing is read
+    now = int(time.time()) if now is None else now
+    done, known, trouble = [], {}, None
+    for space in config.CHAT_REVIEW_SPACES:
+        room = config.CHAT_REVIEW_PULL_MAX - sum(outcome in TAKEN for outcome in done)
+        if room <= 0 or not common.opt_in_on(config.CHAT_REVIEW_FILE):
+            break  # switched off part way: no further conversation is read
+        try:
+            done += read_space(space, token, known, room, now)
+        except (FleetError, OSError) as exc:  # one conversation's trouble never stops the others
+            trouble = common.scrubbed_line(exc, 300) if isinstance(exc, FleetError) else type(exc).__name__
+            log("read-failed", space=space, why=trouble)
+    return done, trouble
 
 
 def settle(conn, now: Optional[int] = None, only_hand: bool = False) -> list:
@@ -1042,10 +1129,10 @@ def sweep_hand() -> None:
 
 
 def run_pass(conn_factory: Callable = common.connect) -> dict:
-    """One pass of the chat-review job. Off: no token, no Sheets call and no Chat call, only the runs by hand a kill
-    left are finished (sweep_hand). On with a setting unfilled: the same, then refused, naming each setting.
-    Otherwise, under the job's own lock: the Sheet read once to take queued rows, every open request moved on, and the
-    Sheet's statuses brought up to date once more when a Chat request ended."""
+    """One pass of the chat-review job. Off: no token, no Chat call, only the runs by hand a kill left are finished
+    (sweep_hand). On with a setting unfilled: the same, then refused, naming each setting. Otherwise, under the job's
+    own lock: every allowed conversation the app is in read once for new messages that mention it (read_chat), then
+    every open request moved on."""
     if not common.opt_in_on(config.CHAT_REVIEW_FILE):
         sweep_hand()
         return {"state": "off"}
@@ -1061,22 +1148,13 @@ def run_pass(conn_factory: Callable = common.connect) -> dict:
         except safefs.Busy:
             return {"state": "busy"}
         prune()
-        try:
-            taken, sheet_error = sync_sheet(take=True), None
-        except FleetError as exc:  # replies and queued reviews still move on
-            taken, sheet_error = [], common.scrubbed_line(exc, 300)
-            log("sheet-failed", why=sheet_error)
         conn = conn_factory()
         try:
+            taken, read_error = read_chat(conn)  # replies and queued reviews move on whatever the read did
             settled = settle(conn)
         finally:
             conn.close()
-        if "done" in settled and common.opt_in_on(config.CHAT_REVIEW_FILE):
-            try:
-                sync_sheet(take=False)
-            except FleetError as exc:  # the next pass marks them
-                log("sheet-failed", why=common.scrubbed_line(exc, 300))
-    return {"state": "ran", "taken": taken, "settled": settled, "sheet_error": sheet_error}
+    return {"state": "ran", "taken": taken, "settled": settled, "read_error": read_error}
 
 
 # By hand
@@ -1119,7 +1197,7 @@ def main() -> int:
         message = common.scrubbed_line(exc, 600) if not isinstance(exc, OSError) else type(exc).__name__
         sys.stdout.write(json.dumps({"at": stamp, "ok": False, "error": message}, ensure_ascii=True) + "\n")
         return 1
-    if result["state"] == "ran" and (result["taken"] or result["settled"] or result["sheet_error"]):
+    if result["state"] == "ran" and (result["taken"] or result["settled"] or result["read_error"]):
         sys.stdout.write(json.dumps({"at": stamp, "ok": True, "data": result}, ensure_ascii=True) + "\n")
     return 0
 
