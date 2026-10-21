@@ -94,10 +94,11 @@ MESSAGE_NAME = re.compile(r"(spaces/[A-Za-z0-9_-]{1,100})/messages/[A-Za-z0-9_.-
 CLOCK_SKEW_SECONDS = 300
 _PR_LINK = r"https://github\.com/([A-Za-z0-9._-]{1,100})/([A-Za-z0-9._-]{1,100})/pull/([1-9][0-9]{0,9})"
 PR_LINK = re.compile(_PR_LINK)
-# A PR link inside a message, however the words around it run. Chat may hand a link over as <url> or <url|label>; the
-# label is read with it, so a link shown twice is one and a label naming another PR is a second link.
-# The link must start a word (or follow an opening bracket or quote), so one inside another address is no link.
-PR_IN_TEXT = re.compile(r"(?<![^\s<(\[\"':])" + _PR_LINK + r"(?![0-9])")
+# A PR link inside a message is a whole word of it: the link, then at most /files, /commits or /checks and a query or
+# fragment, with the brackets, quotes and sentence marks around it let go. One inside another address, or run into
+# other characters, is no link. Chat may hand a link over as <url> or <url|label>: the target is the link, and a label
+# that names another PR is an ambiguity, so the message is no request.
+PR_WORD = re.compile(_PR_LINK + r"(?:/(?:files|commits|checks))?(?:[?#]\S*)?")
 ANY_ADDRESS = re.compile(r"https?://\S*")
 LINK_MARKUP = re.compile(r"<(https?://[^\s<>|]*)(?:\|([^<>\n]*))?>")
 REVIEW_WORD = re.compile(r"\breview(?:s|ing)?\b", re.IGNORECASE)
@@ -250,23 +251,35 @@ def _space_allowed(space: str) -> bool:
 # The request grammar
 
 
+def _pr_words(text: str) -> list:
+    """The (owner, repo, number) of each word of text that is a PR link."""
+    found = []
+    for word in text.split():
+        match = PR_WORD.fullmatch(word.lstrip("<([\"'").rstrip(")]>\"'.,;:!?"))
+        if match is not None:
+            found.append(match.group(1, 2, 3))
+    return found
+
+
 def parse_request(text: object) -> Optional[tuple]:
     """(repo, number) when text, with the app mention already out, asks for a review: exactly one GitHub PR link, for an
-    allowed repo, and the word review (or reviews, reviewing) outside the link, else None. Nothing else in the text is
-    read, kept or passed on; only the link rebuilt from what the pattern matched is."""
+    allowed repo, and the word review (or reviews, reviewing) outside every address and link label, else None. Nothing
+    else in the text is read, kept or passed on; only the link rebuilt from what the pattern matched is."""
     if not isinstance(text, str):
         return None
-    # A link with a label reads as the link, plus the label when it is not just the link again, so a label that names
-    # another PR counts as a second link.
-    original = text
-    text = LINK_MARKUP.sub(lambda found: found.group(1) if found.group(2) in (None, found.group(1))
-                           else f"{found.group(1)} {found.group(2)}", original)
-    links = list(PR_IN_TEXT.finditer(text))
-    # The review word is looked for outside every address, with its path, query and fragment, and outside any label.
-    words = ANY_ADDRESS.sub(" ", LINK_MARKUP.sub(" ", original))
-    if len(links) != 1 or REVIEW_WORD.search(words) is None:
+    links = []
+    for markup in LINK_MARKUP.finditer(text):
+        target = PR_WORD.fullmatch(markup.group(1))
+        named = [one for one in _pr_words(markup.group(2) or "") if target is None or one != target.group(1, 2, 3)]
+        if target is None and named:
+            return None  # a link to somewhere else labelled as a PR
+        if target is not None:
+            links += [target.group(1, 2, 3), *named]
+    plain = LINK_MARKUP.sub(" ", text)
+    links += _pr_words(plain)
+    if len(links) != 1 or REVIEW_WORD.search(ANY_ADDRESS.sub(" ", plain)) is None:
         return None
-    return _allowed_pr(*links[0].group(1, 2, 3))
+    return _allowed_pr(*links[0])
 
 
 def parse_pr_url(url: object) -> Optional[tuple]:
