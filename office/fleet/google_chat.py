@@ -308,15 +308,25 @@ def _space(space: str) -> str:
 
 
 def _read(url: str, token: str) -> dict:
+    """One Chat read with your read token. Chat refusing the token itself (HTTP 401) is a ReadAuthError, so reading
+    stops as it does when the refresh is refused."""
     if not _is_read_token(token):
         raise GoogleError("Chat is read only with the read-only authorization")
-    return send(url, token, None)
+    try:
+        return send(url, token, None)
+    except ReadAuthError:
+        raise
+    except GoogleError as exc:
+        if exc.status == 401:
+            raise ReadAuthError(f"Chat refused the read-only authorization (HTTP 401): run {AUTHORIZE_HELPER}"
+                                " <client.json> again", status=401) from None
+        raise
 
 
 def _joined(answer: dict, space: str, kind: str) -> Optional[str]:
     """The member's user name when answer is a joined membership of that space of that kind (HUMAN or BOT)."""
-    member = answer.get("member")
-    name = member.get("name") if isinstance(member, dict) else None
+    member = answer.get("member") if isinstance(answer.get("member"), dict) else {}
+    name = member.get("name")
     if not isinstance(answer.get("name"), str) or not answer["name"].startswith(space + "/members/") \
             or answer.get("state") != "JOINED" or member.get("type") != kind \
             or not isinstance(name, str) or USER.fullmatch(name) is None:
@@ -324,16 +334,17 @@ def _joined(answer: dict, space: str, kind: str) -> Optional[str]:
     return name
 
 
-def app_member(space: str, token: str) -> Optional[str]:
-    """The app's user name in space when the app is a joined member of it, else None: spaces.members.get of
-    spaces/<id>/members/app, with your read token."""
+def app_member(space: str, token: str) -> Optional[tuple]:
+    """(the app's user name in space, the microsecond its membership began or None) when the app is a joined member
+    of it, else None: spaces.members.get of spaces/<id>/members/app, with your read token."""
     try:
         answer = _read(f"{CHAT_ROOT}/{_space(space)}/members/app", token)
     except GoogleError as exc:
         if exc.status in (403, 404):  # not a member, or a conversation you are not in
             return None
         raise
-    return _joined(answer, space, "BOT")
+    name = _joined(answer, space, "BOT")
+    return None if name is None else (name, time_us(answer.get("createTime")))
 
 
 def member_user(space: str, email: str, token: str) -> Optional[str]:

@@ -157,10 +157,12 @@ def exchange(client: tuple, code: str, verifier: str, redirect: str, send=post) 
     if not isinstance(granted, str) or sorted(set(granted.split())) != sorted(SCOPES):
         try:
             send(REVOKE_URL, {"token": refresh})
+            outcome = "it was revoked"
         except Failed:
-            pass
+            outcome = ("revoking it failed, so remove the app's access yourself in your Google account's third-party"
+                       " access page")
         raise Failed("the grant was not for exactly the two read-only Chat scopes (allow both, and check the consent"
-                     " screen lists only them), so it was revoked and nothing was stored")
+                     f" screen lists only them). Nothing was stored, and {outcome}")
     return refresh
 
 
@@ -193,6 +195,8 @@ def listener(state: str):
     found: dict = {}
 
     class Back(http.server.BaseHTTPRequestHandler):
+        timeout = 10  # a connection that sends no request is dropped, so it cannot hold the wait open
+
         def do_GET(self):  # noqa: N802 - http.server's own name
             if self.client_address[0] == "127.0.0.1" and not found:
                 query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)

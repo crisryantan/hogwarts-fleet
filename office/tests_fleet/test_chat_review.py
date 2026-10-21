@@ -101,6 +101,8 @@ class FakeGoogle:
         self.posted = {}  # space: the messages in it, as spaces.messages.list gives them
         self.members = {SPACE: {SENDER: SENDER_USER, LEAD: LEAD_USER, "stranger@example.com": STRANGER_USER}}
         self.app_in = {SPACE}
+        self.joined = time.time() - 86400  # when the app's membership began
+        self.list_fail = {}  # space: (the page it fails at, the HTTP status)
         self.fail_chat = False
         self.refresh_status = None  # the HTTP status the refresh is refused with
         self.granted = " ".join(google_chat.READ_SCOPES)
@@ -137,7 +139,8 @@ class FakeGoogle:
                     if space not in self.app_in:
                         raise google_chat.GoogleError("Google answered HTTP 404", status=404)
                     return {"name": f"{space}/members/{APP_USER[6:]}", "state": "JOINED",
-                            "member": {"name": APP_USER, "type": "BOT"}}
+                            "member": {"name": APP_USER, "type": "BOT"},
+                            "createTime": google_chat.rfc3339(int(self.joined * 1e6))}
                 user = self.members.get(space, {}).get(who)
                 if user is None:
                     raise google_chat.GoogleError("Google answered HTTP 404", status=404)
@@ -151,6 +154,9 @@ class FakeGoogle:
                             key=lambda item: item["createTime"])
             start = int(query.get("pageToken", ["p0"])[0][1:])
             size = int(query["pageSize"][0])
+            if space in self.list_fail and start >= self.list_fail[space][0]:
+                status = self.list_fail[space][1]
+                raise google_chat.GoogleError(f"Google answered HTTP {status}", status=status)
             answer = {"messages": listed[start:start + size]}
             if start + size < len(listed):
                 answer["nextPageToken"] = f"p{start + size}"
@@ -499,6 +505,10 @@ class IntakeTests(ChatCase):
         ignored = [line for line in self.log_lines() if line["event"] == "ignored"]
         self.assertEqual(len(ignored), 4)
         self.assertNotIn("spaces/BBBB", json.dumps(ignored))
+        # The message an hour ahead never pushed the read marker past what comes next.
+        self.deliver(msg(message="m6", at=time.time() + 1))
+        self.assertEqual(self.run_pass()["taken"].count("review"), 1)
+        self.assertEqual([record["message"] for record in self.records()], [f"{SPACE}/messages/m6"])
 
     def test_a_review_killed_part_way_is_answered_once_and_never_run_again(self):
         self.deliver(msg())
@@ -646,6 +656,49 @@ class ReadTests(ChatCase):
         self.assertEqual(self.run_pass()["taken"], ["help"])  # on from the message it stopped at
         self.assertEqual(len(self.records()), 2)
 
+    def test_nothing_from_before_the_app_joined_is_read(self):
+        now = time.time()
+        self.google.joined = now - 5  # it left and was added back since the last read
+        self.deliver(msg(message="m1", at=now - 20), msg(message="m2", at=now - 1))
+        self.assertEqual(self.run_pass()["taken"], ["review"])
+        [record] = self.records()
+        self.assertEqual(record["message"], f"{SPACE}/messages/m2")
+
+    def test_a_read_cut_short_never_skips_a_message_sharing_its_last_microsecond(self):
+        self.patch(config, "CHAT_REVIEW_LIST_PAGES", 1)
+        self.patch(google_chat, "PAGE_SIZE", 2)
+        now = time.time() - 10
+        self.deliver(msg(text="chatter", mention=False, message="q0", at=now),
+                     msg(text="chatter", mention=False, message="q1", at=now + 1), msg(message="m1", at=now + 1))
+        self.assertEqual(self.run_pass()["taken"], [])
+        self.assertEqual(self.run_pass()["taken"], ["review"])
+
+    def test_the_pull_max_holds_across_conversations_when_one_fails_part_way(self):
+        other = "spaces/DDDD"
+        self.patch(config, "CHAT_REVIEW_SPACES", (SPACE, other))
+        self.patch(config, "CHAT_REVIEW_PULL_MAX", 2)
+        self.patch(google_chat, "PAGE_SIZE", 1)
+        self.google.app_in = {SPACE, other}
+        self.google.members[other] = {SENDER: SENDER_USER}
+        started = int((time.time() - 60) * 1e6)
+        chat_review._save_marker(other, started, started, True)
+        now = time.time()
+        self.google.list_fail[SPACE] = (1, 503)
+        self.deliver(msg(text="hello", message="h1", at=now - 3), msg(text="hello", message="h2", at=now - 2))
+        self.deliver(msg(text="hello", message="d1", space=other, at=now - 3),
+                     msg(text="hello", message="d2", space=other, at=now - 2))
+        result = self.run_pass()
+        self.assertEqual(result["taken"], ["help", "help"])
+        self.assertIn("HTTP 503", result["read_error"])
+        self.assertEqual(len(self.records()), 2)
+
+    def test_chat_refusing_the_read_token_stops_reading_with_the_event(self):
+        self.google.list_fail[SPACE] = (0, 401)
+        self.deliver(msg())
+        self.assertIn("scripts/chat-review-authorize.py", self.run_pass()["read_error"])
+        self.run_pass()
+        self.assertEqual(len(self.events()), 1)
+
     def test_pages_are_capped_and_the_next_pass_goes_on(self):
         self.patch(config, "CHAT_REVIEW_LIST_PAGES", 1)
         self.patch(google_chat, "PAGE_SIZE", 2)
@@ -653,6 +706,7 @@ class ReadTests(ChatCase):
         self.deliver(*[msg(text="chatter", mention=False, message=f"q{index}", at=now - 10 + index)
                        for index in range(3)], msg(message="m9", at=now - 1))
         self.assertEqual(self.run_pass()["taken"], [])
+        self.assertEqual(self.run_pass()["taken"], [])  # each pass goes on from its last message, read again
         self.assertEqual(self.run_pass()["taken"], ["review"])
 
     def test_a_refused_read_authorization_stops_reading_with_one_event(self):

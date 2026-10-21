@@ -917,31 +917,35 @@ def take_message(message: dict, space: str, token: str, known: dict, now: int) -
     return record["kind"]
 
 
-def read_space(space: str, token: str, known: dict, room: int, now: int) -> list:
-    """Read one conversation's new messages, only while the app is a member of it, and take at most room of those
-    that mention the app. Its read marker says how far it was read: a first read only sets it to now, and each read
-    after one that reached the newest message starts CHAT_REVIEW_READ_OVERLAP_SECONDS before it, so a message Chat
-    lists late is still seen, and the records make the overlap harmless; one cut short (by the page cap, or by room
-    at a message it could not take) goes on exactly where it stopped. It never reads from before its first read or
-    the app joining, nor further back than the queue limit. A message that does not mention the app is never kept or
-    logged. What happened to each message taken."""
+def read_space(space: str, token: str, known: dict, done: list, room: int, now: int) -> None:
+    """Read one conversation's new messages, only while the app is a member of it, and take those that mention the
+    app until done (this pass's outcomes, shared by every conversation) holds room records. Its read marker says how
+    far it was read: a first read only sets it to now, and each read after one that reached the newest message starts
+    CHAT_REVIEW_READ_OVERLAP_SECONDS before it, so a message Chat lists late is still seen, and the records make the
+    overlap harmless; one cut short (by the page cap, or by room at a message it could not take) goes on from just
+    before where it stopped, so a message sharing that microsecond is not lost. It never reads from before its first
+    read or the app's current membership began, nor further back than the queue limit, and a message time ahead of
+    this Mac's clock never moves the marker. A message that does not mention the app
+    is never kept or logged."""
     marker = _read_marker(space)
     now_us = max(int(time.time() * 1_000_000), now * 1_000_000)
-    app_user = google_chat.app_member(space, token)
-    if app_user is None:
+    member = google_chat.app_member(space, token)
+    if member is None:
         if marker is None or marker.get("member") is not False:
             log("not-a-member", space=space)
         _save_marker(space, now_us, now_us, False)  # nothing from while it was out is ever read
-        return []
+        return
+    app_user, joined = member
     if marker is None or type(marker.get("after_us")) is not int or type(marker.get("floor_us")) is not int:
         _save_marker(space, now_us, now_us, True)  # the first read: nothing from before it is answered
-        return []
+        return
     if marker.get("member") is False:
         log("member", space=space)
-    newest, floor = marker["after_us"], marker["floor_us"]
+    newest = marker["after_us"]
+    floor = max(marker["floor_us"], joined or 0)
     overlap = config.CHAT_REVIEW_READ_OVERLAP_SECONDS * 1_000_000 if marker.get("complete") is not False else 0
     after = max(newest - overlap, floor, now_us - config.CHAT_REVIEW_QUEUE_MAX_SECONDS * 1_000_000)
-    done, page, complete = [], None, False
+    page, complete, waiting = None, False, None
     try:
         for _ in range(config.CHAT_REVIEW_LIST_PAGES):
             if not common.opt_in_on(config.CHAT_REVIEW_FILE):
@@ -950,16 +954,20 @@ def read_space(space: str, token: str, known: dict, room: int, now: int) -> list
             for message in messages:
                 if message["mentions"]:
                     if sum(outcome in TAKEN for outcome in done) >= room:
-                        newest = message["created_us"] - 1  # the next read starts with this one
-                        return done
+                        waiting = message["created_us"]  # no room left: the next read starts with this one
+                        return
                     done.append(take_message(message, space, token, known, now))
-                newest = max(newest, message["created_us"])
+                if message["created_us"] <= now_us:  # a time ahead of this Mac's clock never moves the marker
+                    newest = max(newest, message["created_us"])
             if page is None:
                 complete = True
                 break
     finally:
+        # Cut short (the page cap, no room, a failure): the next read lists the last microsecond read again, or the
+        # waiting message's, so a message sharing it is never skipped.
+        if not complete:
+            newest = (waiting if waiting is not None else newest) - 1
         _save_marker(space, newest, floor, True, complete)
-    return done
 
 
 def _read_stopped(conn) -> None:
@@ -998,20 +1006,23 @@ def read_chat(conn, now: Optional[int] = None) -> tuple:
         why = common.scrubbed_line(exc, 300)
         log("read-failed", why=why)
         return [], why
-    _read_resumed()
     if not common.opt_in_on(config.CHAT_REVIEW_FILE):
         return [], None  # switched off while the token was minted: nothing is read
     now = int(time.time()) if now is None else now
     done, known, trouble = [], {}, None
     for space in config.CHAT_REVIEW_SPACES:
-        room = config.CHAT_REVIEW_PULL_MAX - sum(outcome in TAKEN for outcome in done)
-        if room <= 0 or not common.opt_in_on(config.CHAT_REVIEW_FILE):
-            break  # switched off part way: no further conversation is read
+        if sum(outcome in TAKEN for outcome in done) >= config.CHAT_REVIEW_PULL_MAX \
+                or not common.opt_in_on(config.CHAT_REVIEW_FILE):
+            break  # this pass's share taken, or switched off part way: no further conversation is read
         try:
-            done += read_space(space, token, known, room, now)
+            read_space(space, token, known, done, config.CHAT_REVIEW_PULL_MAX, now)
+        except google_chat.ReadAuthError:  # Chat refused the token itself: reading stops as a refused refresh does
+            _read_stopped(conn)
+            return done, f"reading stopped: run {google_chat.AUTHORIZE_HELPER} <client.json> again"
         except (FleetError, OSError) as exc:  # one conversation's trouble never stops the others
             trouble = common.scrubbed_line(exc, 300) if isinstance(exc, FleetError) else type(exc).__name__
             log("read-failed", space=space, why=trouble)
+    _read_resumed()  # Chat took the read token this pass, so a stop it was under is over
     return done, trouble
 
 
