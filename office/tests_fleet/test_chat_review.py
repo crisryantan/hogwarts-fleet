@@ -410,6 +410,14 @@ class CodeGsTests(ChatCase):
         self.assertEqual(manifest["urlFetchWhitelist"], ["https://oauth2.googleapis.com/",
                                                          "https://sheets.googleapis.com/"])
 
+    def test_the_manifest_is_a_workspace_add_on_for_chat(self):
+        manifest = json.loads(MANIFEST.read_text())
+        # Chat apps set up in the current console are add-ons: without addOns.chat Chat reports a broken manifest.
+        self.assertEqual(manifest["addOns"]["chat"], {})
+        self.assertEqual(manifest["addOns"]["common"]["name"], "Hermione (Staff Engineer)")
+        self.assertTrue(manifest["addOns"]["common"]["logoUrl"].startswith("https://"))
+        self.assertNotIn("chat", manifest)
+
 
 class IntakeTests(ChatCase):
     def test_an_allowed_row_is_reviewed_answered_in_its_thread_and_marked_done(self):

@@ -576,7 +576,10 @@ In Google Cloud, with an account that may administer the project:
    in the editor's settings first). In Project Settings, Script Properties, set `SHEET_ID`, `ALLOWED_SENDERS`,
    `ALLOWED_SPACES` and `ALLOWED_REPOS` (each list comma-separated), and `WRITER_KEY`: open the writer key file, copy
    its whole text into the value, save, then delete the downloaded file and copy something else so the key leaves
-   your clipboard. Deploy it (Deploy, New deployment) and note the deployment id.
+   your clipboard. Deploy it (Deploy, New deployment, type Add-on) and note the deployment id. The manifest's
+   `addOns` section is what lets Chat call the script: the console builds Chat apps as Workspace add-ons, and
+   without it every message ends in "not responding" with a broken-manifest error in the project's logs. After
+   pasting a new `Code.gs` or manifest, use Deploy, Manage deployments, edit, New version, so the id stays the same.
 6. In the Chat API's configuration, name the app `Hermione (Staff Engineer)`, let it join spaces, set its connection
    to the Apps Script project with that deployment id, and make it visible to named people only. Install it in a
    test space first. Each person who messages it is asked once to let it connect to an external service, the one

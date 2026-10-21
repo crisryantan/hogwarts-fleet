@@ -9,5 +9,11 @@
     "https://oauth2.googleapis.com/",
     "https://sheets.googleapis.com/"
   ],
-  "chat": {}
+  "addOns": {
+    "common": {
+      "name": "Hermione (Staff Engineer)",
+      "logoUrl": "https://raw.githubusercontent.com/crisryantan/hogwarts-fleet/main/office/assets/avatars/png/hermione-128.png"
+    },
+    "chat": {}
+  }
 }
