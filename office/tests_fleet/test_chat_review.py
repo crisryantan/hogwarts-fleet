@@ -1245,8 +1245,8 @@ class GrammarTests(ChatCase):
         self.deliver(msg(text=f"another one {URL}", message="m1", thread=f"{SPACE}/threads/t1"),
                      msg(text=f"merge {URL}", message="m2", thread=f"{SPACE}/threads/t2"))
         self.assertEqual(self.run_pass()["taken"], ["review", "review"])
-        plain, other = [ack["text"] for ack in sorted(self.google.acks, key=lambda ack: ack["thread"])]
-        self.assertIn(plain, chat_review.ACKS)
+        plain, other = [MENTION.sub("", ack["text"]) for ack in sorted(self.google.acks, key=lambda ack: ack["thread"])]
+        self.assertIn(plain, acks(chat_review.ACKS))
         self.assertTrue(other.endswith(" " + chat_review.REVIEW_ONLY))
         self.assertEqual(len(self.turns), 2)
 
