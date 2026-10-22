@@ -65,6 +65,9 @@ MAX_BUDGET_USD = {"hermione": "2.00", "ron": "0.25", "portrait": "2.00"}
 CODEX_ACCESS = {"harry": "write", "moody": "read"}
 # Read-only tool folders: Homebrew, and Xcode and the Command Line Tools, where /usr/bin/python3 and git live.
 CODEX_EXTRA_READS = ("/opt/homebrew", "/Applications/Xcode.app", "/Library/Developer")
+# A chat review turn's only tool folder: where the Codex CLI is installed. Its sandbox helper starts codex again
+# inside the sandbox, so without this read the turn fails before it reads anything.
+CODEX_CHAT_READS = ("/opt/homebrew",)
 # Only these desks may write their own outbox.
 CODEX_OUTBOX_WRITERS = ("harry",)
 # Dependency folders a worktree may borrow, read-only, from the repo folder (see fleet/toolchain.py).

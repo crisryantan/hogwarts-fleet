@@ -233,6 +233,8 @@ FINDING = re.compile(r"([BN])([1-9][0-9]?) (\S.*)")
 FIELDS = {"B": 3, "N": 2}
 # A finding's place: a file path, which may hold spaces, then its line or lines.
 PLACE = re.compile(r"\S(?:.{0,198}\S)?:[1-9][0-9]*(?:[-,][1-9][0-9]*)*")
+# What a finding that repeats the PR's own text at length says in its place, wherever it is posted.
+WITHHELD = "(withheld: this finding repeated the PR's own text at length)"
 # Or, for a finding about the PR's own text, its title or description, with at most a short section name after it.
 PR_TEXT_PLACE = re.compile(r"PR (?:title|description)(?: \([^()|]{1,40}\))?")
 LINE_SUFFIX = re.compile(r":[1-9][0-9]*(?:[-,][1-9][0-9]*)*$")
@@ -736,9 +738,25 @@ def parse_block(text: object, repo: str, number: int, sha: str, untrusted: str =
     non_blocking = _findings(body[split + 1:-1], "N")
     if (verdict.group(1) == "CHANGES") != bool(blocking):
         raise Unusable("the verdict does not match the blocking findings")
-    if _echoes([_echo_text(line, paths) for line in body[1:split] + body[split + 1:-1]], untrusted):
-        raise Unusable("a finding repeats the PR's own text")
+    blocking = _withheld(blocking, body[1:split], paths, untrusted)
+    non_blocking = _withheld(non_blocking, body[split + 1:-1], paths, untrusted)
     return verdict.group(1), blocking, non_blocking
+
+
+def _withheld(found: list, lines: list, paths: frozenset, untrusted: str) -> list:
+    """found with each finding that repeats ECHO_MAX characters in a row of the PR's own text replaced by WITHHELD,
+    keeping its number, and its place only when that is a file the diff touches or the PR's title or description. The
+    rest of the review stands, but a review holding one is never an approval (github_event)."""
+    kept = []
+    for item, line in zip(found, lines):
+        if not _echoes([_echo_text(line, paths)], untrusted):
+            kept.append(item)
+            continue
+        number = item.split(" ", 1)[0]
+        place = FINDING.fullmatch(line).group(3).split("|", 1)[0].strip()
+        named = LINE_SUFFIX.sub("", place) in paths or PR_TEXT_PLACE.fullmatch(place) is not None
+        kept.append(f"{number} {defanged(scrubbed(place))} | {WITHHELD}" if named else f"{number} {WITHHELD}")
+    return kept
 
 
 def _flat(text: str) -> str:
@@ -994,12 +1012,13 @@ def intake_on(record: dict) -> bool:
     return record.get("source") != "chat" or common.opt_in_on(config.CHAT_REVIEW_FILE)
 
 
-def github_event(verdict: str, blocking: list) -> str:
+def github_event(verdict: str, blocking: list, non_blocking: list = ()) -> str:
     """The PR review's event: REQUEST_CHANGES for a CHANGES verdict, APPROVE for a PASS with no blocking finding while
     both chat-review-github and chat-review-approve are on (read now), else COMMENT."""
     if verdict == "CHANGES" and blocking:
         return "REQUEST_CHANGES"
-    if verdict == "PASS" and not blocking and github_on() and approve_on():
+    if verdict == "PASS" and not blocking and not any(item.endswith(WITHHELD) for item in non_blocking) \
+            and github_on() and approve_on():
         return "APPROVE"
     return "COMMENT"
 
@@ -1021,7 +1040,7 @@ def post_github(key: str, record: dict, poster: Callable = None) -> dict:
             return _end(key, record, "reviewed", github="already")
     body = github_body(display_name(record.get("requester_name")), sha, record["verdict"], record.get("blocking", []),
                        record.get("non_blocking", []), app)
-    event = github_event(record["verdict"], record.get("blocking", []))
+    event = github_event(record["verdict"], record.get("blocking", []), record.get("non_blocking", []))
     try:
         try:
             posted = poster(repo, number, sha, body, event)

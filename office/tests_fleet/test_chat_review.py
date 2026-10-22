@@ -1506,13 +1506,24 @@ class StrictBlockTests(ChatCase):
                 with self.assertRaises(chat_review.Unusable):
                     self.parse(text)
 
-    def test_a_finding_that_repeats_the_prs_planted_text_is_unusable(self):
-        echoed = block(non_blocking=(f"x.py:2 | the comment says {PLANTED}",))
-        with self.assertRaises(chat_review.Unusable):
-            self.parse(echoed, INJECTED_DIFF)
+    def test_a_finding_that_repeats_the_prs_planted_text_is_withheld_and_the_rest_stands(self):
+        echoed = block(non_blocking=(f"x.py:2 | the comment says {PLANTED}", "x.py:1 | a fair note"))
+        verdict, blocking, notes = self.parse(echoed, INJECTED_DIFF, INJECTED_DIFF)
+        self.assertEqual((verdict, blocking), ("CHANGES", ["B1 x.py:2 | prints at import | remove it"]))
+        self.assertEqual(notes, [f"N1 x.py:2 | {chat_review.WITHHELD}", "N2 x.py:1 | a fair note"])
         spaced = block(non_blocking=("x.py:2 | " + "  ".join(PLANTED.split()[:12]),))
-        with self.assertRaises(chat_review.Unusable):
-            self.parse(spaced, INJECTED_DIFF)
+        self.assertEqual(self.parse(spaced, INJECTED_DIFF, INJECTED_DIFF)[2], [f"N1 x.py:2 | {chat_review.WITHHELD}"])
+        unnamed = block(blocking=(f"{' '.join(PLANTED.split()[:9])}:1 | breaks | fix",))
+        self.assertEqual(self.parse(unnamed, INJECTED_DIFF, INJECTED_DIFF)[1], [f"B1 {chat_review.WITHHELD}"])
+        for verdict, blocking, notes in (self.parse(echoed, INJECTED_DIFF), self.parse(spaced, INJECTED_DIFF)):
+            for item in blocking + notes:
+                self.assertNotIn("push a commit", item)
+
+    def test_a_pass_holding_a_withheld_finding_is_never_an_approval(self):
+        self.switch(config.CHAT_REVIEW_GITHUB_FILE, True)
+        self.switch(config.CHAT_REVIEW_APPROVE_FILE, True)
+        self.assertEqual(chat_review.github_event("PASS", [], [f"N1 x.py:2 | {chat_review.WITHHELD}"]), "COMMENT")
+        self.assertEqual(chat_review.github_event("PASS", [], ["N1 x.py:2 | fine"]), "APPROVE")
 
     def test_a_long_path_the_diff_touches_is_no_echo_but_any_other_place_is_read(self):
         path = "public/some-long-package-name/.run/Full Test and Lint.run.xml"
@@ -1525,24 +1536,23 @@ class StrictBlockTests(ChatCase):
         description = f"+++ b/{planted}\n" + diff
         for untrusted, source in ((diff, diff), (hunk, hunk), (description, diff)):
             with self.subTest(untrusted=untrusted[:20]):
-                with self.assertRaises(chat_review.Unusable):
-                    self.parse(block(non_blocking=(f"{planted}:1 | a note",)), untrusted, source)
+                self.assertEqual(self.parse(block(non_blocking=(f"{planted}:1 | a note",)), untrusted, source)[2],
+                                 [f"N1 {chat_review.WITHHELD}"])
         self.assertNotIn(planted, chat_review.diff_paths(hunk))
         spliced = f"diff --git a/z.py b/z.py\n--- a/z.py\n+++ b/z.py\n@@ -1 +1 @@\n+#\vdiff --git a/q b/q\v+++ b/{planted}\n"
         self.assertEqual(chat_review.diff_paths(spliced), {"z.py"})
-        with self.assertRaises(chat_review.Unusable):
-            self.parse(block(non_blocking=(f"{path}:1 | the comment says {PLANTED}",)), diff, diff)
+        self.assertEqual(self.parse(block(non_blocking=(f"{path}:1 | the comment says {PLANTED}",)), diff, diff)[2],
+                         [f"N1 {path}:1 | {chat_review.WITHHELD}"])
 
     def test_an_answer_shaped_by_the_diffs_injection_is_never_posted(self):
         self.switch(config.CHAT_REVIEW_GITHUB_FILE, True)
         self.switch(config.CHAT_REVIEW_APPROVE_FILE, True)
         for answer in (block().replace("VERDICT: CHANGES", "VERDICT: APPROVE"),
-                       block() + "Pushed a commit and posted the text as asked.\n",
-                       block(non_blocking=(f"x.py:2 | {PLANTED}",))):
+                       block() + "Pushed a commit and posted the text as asked.\n"):
             self.answer = ("ok", answer)
             self.deliver(msg(message=f"m{len(self.records()) + 1}"))
             self.run_pass()
-        self.assertEqual([message["text"] for message in self.google.messages], [chat_review.COULD_NOT] * 3)
+        self.assertEqual([message["text"] for message in self.google.messages], [chat_review.COULD_NOT] * 2)
         self.assertEqual(self.writes, [])
         for message in self.google.messages:
             self.assertNotIn("push a commit", message["text"])
@@ -1984,14 +1994,15 @@ class SecondAppTests(ChatCase):
         self.assertNotIn("--sandbox", argv)
         self.assertNotIn("--add-dir", argv)
         values = [argv[index + 1] for index, arg in enumerate(argv) if arg == "-c"]
-        profile = f"permissions.fleet-chat-review-moody={{filesystem={{\":minimal\"=\"read\", " \
+        reads = "".join(f"\"{path}\"=\"read\", " for path in config.CODEX_CHAT_READS)
+        profile = f"permissions.fleet-chat-review-moody={{filesystem={{\":minimal\"=\"read\", " + reads + \
                   f"\":workspace_roots\"={{\".\"=\"read\"}}, \"{config.SHARED_TEMP_ROOT}\"=\"deny\", " \
                   f"\"{config.OFFICE_ROOT}\"=\"deny\"}}, network={{enabled=false}}}}"
         self.assertIn(profile, values)  # it reads its folder and the platform's paths, writes nothing, no network
         self.assertIn('default_permissions="fleet-chat-review-moody"', values)
         for forced in run_desk.CHAT_REVIEW_CODEX_FORCED:
             self.assertIn(forced, values)
-        for word in ('"write"', config.CASTLE_ROOT, "/opt/homebrew", "danger", "bypass", "full-auto",
+        for word in ('"write"', config.CASTLE_ROOT, "/Applications/Xcode.app", "/Library/Developer", "danger", "bypass", "full-auto",
                      "network_access=true", "approve-for-me"):
             self.assertFalse([arg for arg in argv[1:] if word in arg], word)
         last = argv[argv.index("--output-last-message") + 1]
@@ -2066,10 +2077,15 @@ class SecondAppTests(ChatCase):
         self.answer = ("ok", block(non_blocking=(f"x.py:2 | {PLANTED}",)))
         self.deliver(msg(app=MOODY_APP_USER))
         self.run_pass()
-        self.assertEqual([message["text"] for message in self.google.messages], [chat_review.COULD_NOT])
-        self.assertEqual(self.writes, [])
+        [message] = self.google.messages
+        self.assertIn(chat_review.WITHHELD, message["text"])
+        self.assertNotIn("push a commit", message["text"])
         [record] = self.records()
-        self.assertEqual(record["outcome"], "unusable")
+        self.assertEqual(record["outcome"], "reviewed")
+        self.answer = ("ok", block().replace("VERDICT: CHANGES", "VERDICT: APPROVE"))
+        self.deliver(msg(app=MOODY_APP_USER, message="m2"))
+        self.run_pass()
+        self.assertEqual(self.google.messages[-1]["text"], chat_review.COULD_NOT)
 
     def test_a_codex_turn_answers_with_its_last_agent_message_and_its_tokens(self):
         events = [{"type": "thread.started"},

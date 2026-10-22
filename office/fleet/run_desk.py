@@ -1268,11 +1268,13 @@ def last_message_name(run_id: str) -> str:
 
 def chat_review_permissions(desk: str) -> list:
     """The -c overrides that define and select a Codex chat review turn's permission profile: Codex's ":minimal"
-    platform paths read, so its shell can start, and its working folder, which holds only the review input, read;
-    nothing written anywhere; the shared temp folder and the office denied; no network. None of the desk's own reads
-    (the castle, its tasks, the toolchain folders) is granted."""
+    platform paths read, so its shell can start, the folder Codex is installed in (CODEX_CHAT_READS) read, so its
+    sandbox helper can start it, and its working folder, which holds only the review input, read; nothing written
+    anywhere; the shared temp folder and the office denied; no network. None of the desk's own reads (the castle, its
+    tasks, the other toolchain folders) is granted."""
     name = f"fleet-chat-review-{desk}"
-    entries = ['":minimal"="read"', '":workspace_roots"={"."="read"}',
+    entries = ['":minimal"="read"', *(f'{_toml_path(path)}="read"' for path in config.CODEX_CHAT_READS),
+               '":workspace_roots"={"."="read"}',
                f'{_toml_path(config.SHARED_TEMP_ROOT)}="deny"', f'{_toml_path(config.OFFICE_ROOT)}="deny"']
     table = "{filesystem={" + ", ".join(entries) + "}, network={enabled=false}}"
     return ["-c", f"permissions.{name}={table}", "-c", f'default_permissions="{name}"']
