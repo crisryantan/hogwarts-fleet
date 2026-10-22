@@ -168,7 +168,10 @@ BRIEF = (
 HEADER = re.compile(r"REVIEW PR ([A-Za-z0-9._-]{1,100}/[A-Za-z0-9._-]{1,100})#([1-9][0-9]{0,9}) @ ([0-9a-f]{40})")
 FINDING = re.compile(r"([BN])([1-9][0-9]?) (\S.*)")
 # The fields of a finding, split on |: a blocking one has its place, what breaks and the fix, a note its place and text.
+# More pipes than that (a union type, a shell pipe) are part of the text, but no field is ever empty.
 FIELDS = {"B": 3, "N": 2}
+# A finding's place: a file path, which may hold spaces, then its line or lines.
+PLACE = re.compile(r"\S(?:.{0,198}\S)?:[1-9][0-9]*(?:[-,][1-9][0-9]*)*")
 # Google credentials the shared scrub has no shape for: OAuth access and refresh tokens, API keys, client secrets.
 GOOGLE_SECRET = re.compile(r"(?<![A-Za-z0-9_-])(?:ya29\.[A-Za-z0-9._-]{10,}|AIza[0-9A-Za-z_-]{30,}"
                            r"|1//[0-9A-Za-z_-]{20,}|GOCSPX-[0-9A-Za-z_-]{10,})")
@@ -607,7 +610,7 @@ def _findings(lines: list, letter: str) -> list:
         if match is None or match.group(1) != letter or int(match.group(2)) != expected:
             raise Unusable("a line in the block is not a finding in order")
         fields = [field.strip() for field in match.group(3).split("|")]
-        if len(fields) != FIELDS[letter] or not all(fields) or any(char.isspace() for char in fields[0]):
+        if len(fields) < FIELDS[letter] or not all(fields) or PLACE.fullmatch(fields[0]) is None:
             raise Unusable("a finding does not have its fields")
         cleaned = defanged(scrubbed(match.group(3)))
         if not cleaned:

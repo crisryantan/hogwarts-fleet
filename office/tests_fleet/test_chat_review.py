@@ -369,7 +369,7 @@ class SwitchAndConfigTests(ChatCase):
 
 class NoOpAppTests(ChatCase):
     """Code.gs runs in Apps Script, not here, so these hold its source and manifest to the rules: every handler answers
-    with an empty acknowledgement and does nothing else, and the manifest asks for no scope, so no one who writes to
+    with null, the empty response, and does nothing else, and the manifest asks for no scope, so no one who writes to
     the app is ever asked to authorize anything."""
 
     HANDLERS = ("onMessage", "onAddedToSpace", "onRemovedFromSpace", "onAppCommand")
@@ -377,8 +377,8 @@ class NoOpAppTests(ChatCase):
     def code(self) -> str:
         return re.sub(r"/\*.*?\*/", "", CODE_GS.read_text(), flags=re.S).strip()
 
-    def test_every_handler_returns_an_empty_acknowledgement_and_nothing_else(self):
-        expected = "\n\n".join(f"function {name}(event) {{\n  return {{}};\n}}" for name in self.HANDLERS)
+    def test_every_handler_returns_null_and_nothing_else(self):
+        expected = "\n\n".join(f"function {name}(event) {{\n  return null;\n}}" for name in self.HANDLERS)
         self.assertEqual(self.code(), expected)
         self.assertNotIn("//", self.code())
 
@@ -1383,6 +1383,12 @@ class StrictBlockTests(ChatCase):
         self.assertEqual(self.parse(block(verdict="PASS", blocking=(), non_blocking=())), ("PASS", [], []))
         self.assertEqual(self.parse(block(), INJECTED_DIFF)[0], "CHANGES")  # a short quote of code is fine
 
+    def test_a_place_with_spaces_and_text_with_pipes_parse(self):
+        spaced = block(blocking=("a dir/Run tests.xml:1 | breaks when x | y | guard it",),
+                       non_blocking=("b.ts:3-9 | returns string | undefined",))
+        self.assertEqual(self.parse(spaced), ("CHANGES", ["B1 a dir/Run tests.xml:1 | breaks when x | y | guard it"],
+                                              ["N1 b.ts:3-9 | returns string | undefined"]))
+
     def test_anything_else_is_unusable(self):
         good = block()
         for text in (
@@ -1399,6 +1405,8 @@ class StrictBlockTests(ChatCase):
             good.replace("B1 x.py:2 | prints at import | remove it", "B1 just some words with no fields"),
             good.replace("B1 x.py:2 | prints at import | remove it", "B1 x.py:2 | prints at import"),
             good.replace("N1 x.py:1 |", "N1 x.py 1 |"),
+            good.replace("N1 x.py:1 |", "N1 x.py:1 | |"),
+            good.replace("B1 x.py:2 |", "B1 x.py:2 | |"),
             block(verdict="PASS"),
             block(verdict="CHANGES", blocking=()),
             block(blocking=[f"f{index}" for index in range(chat_review.FINDINGS_MAX + 1)]),
