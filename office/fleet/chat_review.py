@@ -26,9 +26,9 @@ Anyone in the company's Chat can send an app text, so everything here treats a m
   words, in a thread where the app already took a review request still on record, is a follow-up: a queued review of
   that request's PR (the newest one's), under the same lists and caps. Anything else from them (no review word, two
   links, a repo not listed, a follow-up in a thread the app never reviewed) gets the app's fixed help reply, and a
-  person not on the list the fixed refusal. In a thread where the app has the newest review request of any app, a
-  follow-up of at most UNMENTIONED_WORDS_MAX words that mentions no one at all is taken too, from an allowed sender
-  only; any other message there that does not mention the app is dropped like any other. Each is taken once
+  person not on the list the fixed refusal. In a thread only this app took review requests in, a follow-up of at most
+  UNMENTIONED_WORDS_MAX words that starts as an instruction and mentions no one at all is taken too, from an allowed
+  sender only; any other message there that does not mention the app is dropped like any other. Each is taken once
   per app, even across kills and the overlap of each read: its record, named by a digest of the app and the Chat
   message's name, is made create-exclusive, and a message whose record for that app exists is never taken by it
   again. At most CHAT_REVIEW_PULL_MAX are taken a pass, across every app, and one waiting longer than
@@ -582,25 +582,22 @@ def _taken_us(record: dict) -> int:
 
 
 def _owners(space: str, before_us: Optional[int] = None) -> dict:
-    """Each thread of space to the app of the newest review request any app took from Chat there, still on record, of
-    those from messages created before before_us when it is given. Two from one message (to both apps) go to the app
-    first in CHAT_REVIEW_APPS."""
-    order = list(config.CHAT_REVIEW_APPS) if isinstance(config.CHAT_REVIEW_APPS, dict) else []
-    newest: dict = {}
+    """Each thread of space where only one app took review requests from Chat, still on record, to that app, of those
+    from messages created before before_us when it is given. A thread two apps reviewed has no owner, so a follow-up
+    there must mention the app it is for."""
+    apps: dict = {}
     for _, record in _records():
         thread, owner = record.get("thread"), record.get("app", DEFAULT_APP)
         if record.get("source") != "chat" or record.get("kind") != "review" or record.get("space") != space \
                 or not isinstance(thread, str) or (before_us is not None and _taken_us(record) >= before_us):
             continue
-        rank = (_taken_us(record), -order.index(owner) if owner in order else -len(order))
-        if thread not in newest or rank >= newest[thread][0]:
-            newest[thread] = (rank, owner)
-    return {thread: owner for thread, (_, owner) in newest.items()}
+        apps.setdefault(thread, set()).add(owner)
+    return {thread: next(iter(owners)) for thread, owners in apps.items() if len(owners) == 1}
 
 
 def listening_threads(space: str, app: str) -> frozenset:
-    """The threads of space where the newest review request is app's (_owners): there app also takes a short follow-up
-    that mentions no one."""
+    """The threads of space where only app took review requests (_owners): there app also takes a short follow-up that
+    mentions no one."""
     return frozenset(thread for thread, owner in _owners(space).items() if owner == app)
 
 
@@ -846,8 +843,13 @@ def _withheld(found: list, lines: list, paths: frozenset, untrusted: str) -> lis
             continue
         number = item.split(" ", 1)[0]
         place = FINDING.fullmatch(line).group(3).split("|", 1)[0].strip()
-        named = LINE_SUFFIX.sub("", place) in paths or PR_TEXT_PLACE.fullmatch(place) is not None
-        kept.append(f"{number} {defanged(scrubbed(place))} | {WITHHELD}" if named else f"{number} {WITHHELD}")
+        text_place = PR_TEXT_PLACE.fullmatch(place)
+        if LINE_SUFFIX.sub("", place) in paths:
+            kept.append(f"{number} {defanged(scrubbed(place))} | {WITHHELD}")
+        elif text_place is not None:  # its bare name only: a section label could carry the echo
+            kept.append(f"{number} {place.split(' (', 1)[0]} | {WITHHELD}")
+        else:
+            kept.append(f"{number} {WITHHELD}")
     return kept
 
 
@@ -1362,7 +1364,7 @@ def take_message(message: dict, space: str, token: str, known: dict, now: int, a
     review by its desk, anything else from them the app's fixed help reply, and anything from a person not allowed
     the fixed refusal, each as a record made create-exclusive, so a message read again (the overlap of each read, or
     after a kill) is "seen before". A bot, a message too old or with no thread in its space gets nothing. What
-    happened, for the log. A message that mentions no one, in a thread where app has the newest review request
+    happened, for the log. A message that mentions no one, in a thread where only app took review requests
     (listening), is taken only as a follow-up from an allowed sender: anything else of it is ignored, with no reply,
     no record and no log line."""
     name, mentioned = message["name"], message["mentions"] is True
@@ -1390,7 +1392,7 @@ def take_message(message: dict, space: str, token: str, known: dict, now: int, a
               "at_us": message["created_us"]}
     email = _senders_in(space, token, known).get(message["sender"])
     if not mentioned:
-        # Only the app with the newest request in the thread before this message takes it.
+        # Only the one app that took requests in the thread before this message takes it.
         asked = earlier_request(space, thread, app, message["created_us"]) if email is not None \
             and parse_unmentioned(message["argument"]) \
             and _owners(space, message["created_us"]).get(thread) == app else None
@@ -1431,8 +1433,8 @@ def read_space(space: str, token: str, known: dict, done: list, room: int, now: 
     before where it stopped, so a message sharing that microsecond is not lost. It never reads from before its first
     read or the app's current membership began, nor further back than the queue limit, and a message time ahead of
     this Mac's clock never moves the marker. A message that does not mention the app is never kept or logged, but for
-    a short follow-up that mentions no one, from an allowed sender, in a thread where the app has the newest review
-    request (listening_threads), which take_message takes as a review."""
+    a short follow-up that mentions no one, from an allowed sender, in a thread where only the app took review
+    requests (listening_threads), which take_message takes as a review."""
     marker = _read_marker(space, app)
     now_us = max(int(time.time() * 1_000_000), now * 1_000_000)
     member = google_chat.app_member(space, token)

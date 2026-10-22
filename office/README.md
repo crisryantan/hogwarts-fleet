@@ -563,10 +563,10 @@ never logged, but for the short thread follow-up below. Of those that mention it
   PR, the newest one's when there are several, under the same sender, space and repo lists and caps. So "review
   again" or "approve" works in a thread the app already reviewed. A follow-up never names another PR, and only the
   app's own requests count, so a thread only the other app reviewed is no thread this one reviewed. In a thread
-  where the app has the newest review request of either app (one message to both leaves it to the first app in
-  `CHAT_REVIEW_APPS`), a follow-up needs no mention either: a message there that mentions no one at all, from an
-  allowed sender, with no link, at most 8 words and one of those words, is the same follow-up, so "review again"
-  works without tagging the app. Any other message there that does not mention the app is dropped like any other:
+  only this app ever reviewed (one the other app reviewed too needs a mention), a follow-up needs no mention either:
+  a message there that mentions no one at all, from an allowed sender, with no link, at most 8 words and starting
+  as an instruction (review, re-review, another review or approve, after an optional please or can you), is the same
+  follow-up, so "review again" works without tagging the app. Any other message there that does not mention the app is dropped like any other:
   no reply, no record, no log line;
 - anything else from them, a question, a task, no review word, two or more PR links, a repo that is not listed or a
   follow-up in a thread the app never reviewed, gets the app's one fixed help text saying it does code reviews only;

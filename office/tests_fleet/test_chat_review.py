@@ -1515,6 +1515,9 @@ class StrictBlockTests(ChatCase):
         self.assertEqual(notes, [f"N1 x.py:2 | {chat_review.WITHHELD}", "N2 x.py:1 | a fair note"])
         spaced = block(non_blocking=("x.py:2 | " + "  ".join(PLANTED.split()[:12]),))
         self.assertEqual(self.parse(spaced, INJECTED_DIFF, INJECTED_DIFF)[2], [f"N1 x.py:2 | {chat_review.WITHHELD}"])
+        labelled = block(non_blocking=(f"PR description ({' '.join(PLANTED.split()[:4])}) | {PLANTED}",))
+        self.assertEqual(self.parse(labelled, INJECTED_DIFF, INJECTED_DIFF)[2],
+                         [f"N1 PR description | {chat_review.WITHHELD}"])
         unnamed = block(blocking=(f"{' '.join(PLANTED.split()[:9])}:1 | breaks | fix",))
         self.assertEqual(self.parse(unnamed, INJECTED_DIFF, INJECTED_DIFF)[1], [f"B1 {chat_review.WITHHELD}"])
         for verdict, blocking, notes in (self.parse(echoed, INJECTED_DIFF), self.parse(spaced, INJECTED_DIFF)):
@@ -2075,25 +2078,21 @@ class UnmentionedFollowUpTests(ChatCase):
         self.assertEqual([outcome for outcome in self.run_pass()["taken"] if outcome != "seen before"], [])
         self.assertEqual((len(self.turns), len(self.records())), (1, 1))
 
-    def test_an_unmentioned_follow_up_goes_to_the_app_with_the_newest_request_in_the_thread(self):
+    def test_a_thread_both_apps_reviewed_needs_a_mention_for_a_follow_up(self):
         self.second_app()
         now = time.time()
         self.reviewed(message="m1", at=now - 8)  # Hermione first
-        self.reviewed(app=MOODY_APP_USER, message="m2", at=now - 4)  # then Moody, newer
-        self.assertEqual(self.quiet("can you approve"), ["review"])
-        [record] = [record for record in self.records() if record["message"].endswith("/q1")]
-        self.assertEqual(record["app"], "moody")
-        self.assertEqual([turn["desk"] for turn in self.turns], ["hermione", "moody", "moody"])
+        self.reviewed(app=MOODY_APP_USER, message="m2", at=now - 4)  # then Moody
+        self.assertEqual(self.quiet("can you approve"), [])
+        self.assertEqual([turn["desk"] for turn in self.turns], ["hermione", "moody"])
         self.assertEqual(chat_review.listening_threads(SPACE, "hermione"), frozenset())
-        self.assertEqual(chat_review.listening_threads(SPACE, "moody"), frozenset({THREAD}))
+        self.assertEqual(chat_review.listening_threads(SPACE, "moody"), frozenset())
 
-    def test_one_message_to_both_apps_leaves_the_thread_to_the_first_app(self):
+    def test_one_message_to_both_apps_leaves_the_thread_to_neither(self):
         self.second_app()
         self.reviewed(also=(MOODY_APP_USER,))
-        self.assertEqual(self.quiet("review again"), ["review"])
-        [record] = [record for record in self.records() if record["message"].endswith("/q1")]
-        self.assertEqual(record["app"], "hermione")
-        self.assertEqual(sorted(turn["desk"] for turn in self.turns), ["hermione", "hermione", "moody"])
+        self.assertEqual(self.quiet("review again"), [])
+        self.assertEqual(sorted(turn["desk"] for turn in self.turns), ["hermione", "moody"])
 
     def test_list_messages_gives_back_an_unmentioned_message_only_in_a_listened_thread(self):
         google_chat._READ["hermione"] = {"token": USER_TOKEN, "until": int(time.time()) + 3600}
