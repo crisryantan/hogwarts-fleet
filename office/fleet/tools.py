@@ -14,7 +14,8 @@
       in your own terminal (no --yes), before the round's checks read it.
   fleet review pr <PR link> --requested-by <email>
       The chat review of one PR of a repo in CHAT_REVIEW_REPOS, run now (fleet/chat_review.py): Hermione, Read only,
-      under the chat review caps and locks, posted on the PR as a COMMENT review only while chat-review-github is on.
+      under the chat review caps and locks, posted on the PR only while chat-review-github is on (an APPROVE for a
+      clean pass only while chat-review-approve is on too).
   fleet feed --desk <name> | --all
   fleet go-wait <go-task-id> [--since <key>]
       Waits, read only, until that go task changes where it stands, then prints one line with the key for the next

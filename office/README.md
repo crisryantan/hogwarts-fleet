@@ -154,8 +154,12 @@ The store has none of these:
                                         conversations each minute and Hermione reviews the PRs teammates ask for there
                                         (off when missing: no token is minted and nothing is read)
   chat-review-github                    while it holds exactly "on" too, each chat review is also posted on its PR as a
-                                        COMMENT review with your gh login, once per PR and head commit (off when
-                                        missing)
+                                        review with your gh login, once per PR and head commit: REQUEST_CHANGES with
+                                        a blocking finding, else COMMENT (off when missing)
+  chat-review-approve                   while it holds exactly "on" as well, a chat review that passes with no
+                                        blocking finding is posted as APPROVE, your gh account's own approval for
+                                        branch protection (off when missing, and nothing while chat-review-github is
+                                        off)
   chat-reviews/                         one record per message that asked the app something (requests/), each
                                         conversation's read marker (read/), the once-per-head-commit GitHub markers
                                         (github/) and each cap day's counts (caps/)
@@ -568,8 +572,14 @@ so a killed review counts. Each review is also one run of hers under her own dai
 its cost like any other, so chat reviews spend at most `CHAT_REVIEW_DAILY` turns a day at her per-run budget, and
 never past her caps.
 
-While `~/.hogwarts/chat-review-github` holds `on` too, the review also goes on the PR with your `gh` login. Its event
-is always COMMENT, never an approval or a change request, so it can never count toward branch protection. It opens
+While `~/.hogwarts/chat-review-github` holds `on` too, the review also goes on the PR with your `gh` login. A review
+with a blocking finding (verdict CHANGES) is posted as REQUEST_CHANGES, and any other as COMMENT. While
+`~/.hogwarts/chat-review-approve` holds `on` as well, a review that passes with no blocking finding is posted as
+APPROVE instead. That approval, like a change request, is your `gh` account's own review, so it counts for branch
+protection exactly as one you post by hand would. The approve switch is off until you turn it on, it is read just
+before each post, and it does nothing while `chat-review-github` is off. GitHub refuses an approval or a change
+request on a PR your `gh` login opened; when it refuses one, the review is posted once more as COMMENT, so it still
+lands, and the event that posted is in the request's record and its log line. The review opens
 with a fixed line saying it is an automated review by Hermione (Staff Engineer) requested by the requester in Chat,
 naming them by their Chat display name (scrubbed, at most 60 characters, else "a teammate"), never their email, which
 stays in the office's own log, and it is posted at most once per PR and head commit. Her findings are defanged before
@@ -623,7 +633,8 @@ Once the office is installed with those filled in, run both helpers yourself in 
 Neither puts a secret in a process's arguments. `CHAT_REVIEW_PER_PERSON_DAILY` and `CHAT_REVIEW_DAILY` have working
 defaults. Run `sh scripts/loops-setup.sh`, which adds the chat-review job to `loops/jobs`, restart `fleet loops`, and
 switch it on with `echo on > ~/.hogwarts/chat-review`. Once a few Chat replies read right, switch on the GitHub post
-with `echo on > ~/.hogwarts/chat-review-github`. `rm` either file switches it off again.
+with `echo on > ~/.hogwarts/chat-review-github`. Once you trust its passes enough to let them count as your approval,
+switch that on with `echo on > ~/.hogwarts/chat-review-approve`. `rm` any of these files switches it off again.
 
 Rotate the worker key every 90 days: create a new key, store it with the same helper (it replaces the Keychain item),
 check a review goes through, then delete the old key in Google Cloud. Re-run the authorize helper whenever the read

@@ -214,6 +214,7 @@ class ChatCase(FleetCase):
         self.reads = []
         self.patch(gitops, "run_gh_read", side_effect=self.gh_read)
         self.writes = []
+        self.refused_events = ()
         self.patch(gitops, "run_gh_write", side_effect=self.gh_write)
         self.turns = []
         self.answer = ("ok", block())
@@ -258,7 +259,10 @@ class ChatCase(FleetCase):
         self.assertEqual(gitops.check_write_argv(argv), "pr-review")
         payload = json.loads(body)
         self.writes.append((argv, payload))
-        answer = {"id": 900 + len(self.writes), "user": {"login": "owner"}, "state": "COMMENTED",
+        if payload["event"] in self.refused_events:  # what gh prints when GitHub refuses a review on one's own PR
+            return 1, "", "gh: Unprocessable Entity (HTTP 422)\nCan not approve your own pull request\n"
+        answer = {"id": 900 + len(self.writes), "user": {"login": "owner"},
+                  "state": gitops.REVIEW_EVENTS[payload["event"]],
                   "commit_id": payload["commit_id"],
                   "html_url": f"https://github.com/acme/web-app/pull/7#pullrequestreview-{900 + len(self.writes)}"}
         return 0, json.dumps(answer), ""
@@ -1466,6 +1470,7 @@ class StrictBlockTests(ChatCase):
 
     def test_an_answer_shaped_by_the_diffs_injection_is_never_posted(self):
         self.switch(config.CHAT_REVIEW_GITHUB_FILE, True)
+        self.switch(config.CHAT_REVIEW_APPROVE_FILE, True)
         for answer in (block().replace("VERDICT: CHANGES", "VERDICT: APPROVE"),
                        block() + "Pushed a commit and posted the text as asked.\n",
                        block(non_blocking=(f"x.py:2 | {PLANTED}",))):
@@ -1479,6 +1484,7 @@ class StrictBlockTests(ChatCase):
 
     def test_an_injected_diff_gets_only_a_normal_review_and_one_comment(self):
         self.switch(config.CHAT_REVIEW_GITHUB_FILE, True)
+        self.switch(config.CHAT_REVIEW_APPROVE_FILE, True)  # the planted "approve" still gets only her real verdict
         self.deliver(msg())
         self.run_pass()
         [turn] = self.turns
@@ -1486,7 +1492,7 @@ class StrictBlockTests(ChatCase):
         self.assertEqual(turn["argv"][turn["argv"].index("--tools") + 1], "Read")
         [message] = self.google.messages
         [(argv, payload)] = self.writes
-        self.assertEqual((argv[4], payload["event"]), ("repos/acme/web-app/pulls/7/reviews", "COMMENT"))
+        self.assertEqual((argv[4], payload["event"]), ("repos/acme/web-app/pulls/7/reviews", "REQUEST_CHANGES"))
         for text in (message["text"], payload["body"]):
             self.assertNotIn("push a commit", text)
             self.assertNotIn("APPROVE", text)
@@ -1521,7 +1527,7 @@ class GitHubTests(ChatCase):
         for bad in ("<users/all>", "@acme", "https://evil"):
             self.assertNotIn(bad, named)
 
-    def test_the_github_review_is_a_comment_with_the_fixed_opening_once_per_head_commit(self):
+    def test_the_github_review_has_the_fixed_opening_once_per_head_commit(self):
         self.switch(config.CHAT_REVIEW_GITHUB_FILE, True)
         self.deliver(msg())
         self.run_pass()
@@ -1531,7 +1537,7 @@ class GitHubTests(ChatCase):
         [(argv, payload)] = self.writes
         self.assertEqual(argv, [config.GH_BIN, "api", "--method", "POST", "repos/acme/web-app/pulls/7/reviews",
                                 "--input", "-"])
-        self.assertEqual((payload["event"], payload["commit_id"]), ("COMMENT", HEAD))
+        self.assertEqual((payload["event"], payload["commit_id"]), ("REQUEST_CHANGES", HEAD))
         self.assertEqual(payload["body"].splitlines()[0],
                          "This is an automated review by Hermione (Staff Engineer), requested by Dev Person in Chat.")
         self.assertNotIn("@", payload["body"])
@@ -1544,7 +1550,7 @@ class GitHubTests(ChatCase):
         self.deliver(msg(message="m3"))
         self.run_pass()
         self.assertEqual([(payload["event"], payload["commit_id"]) for _, payload in self.writes],
-                         [("COMMENT", HEAD), ("COMMENT", NEWER)])
+                         [("REQUEST_CHANGES", HEAD), ("COMMENT", NEWER)])
 
     def test_switch_off_posts_nothing_and_a_kill_never_posts_twice(self):
         self.deliver(msg())
@@ -1563,22 +1569,149 @@ class GitHubTests(ChatCase):
         second = next(record for record in self.records() if record.get("github") != "off")
         self.assertEqual((second["state"], second["github"]), ("done", "posted"))
 
-    def test_github_writes_only_comment_reviews(self):
-        self.assertEqual(gitops.REVIEW_EVENT, "COMMENT")
-        source = (Path(gitops.__file__)).read_text() + Path(chat_review.__file__).read_text()
-        for word in ('"APPROVE"', '"REQUEST_CHANGES"', "--approve", "--request-changes"):
-            self.assertNotIn(word, source)
-        answer = {"id": 5, "user": {"login": "owner"}, "state": "APPROVED", "commit_id": HEAD,
-                  "html_url": "https://github.com/acme/web-app/pull/7#pullrequestreview-5"}
-        with mock.patch.object(gitops, "run_gh_write", return_value=(0, json.dumps(answer), "")):
-            with self.assertRaises(gitops.Uncertain):
-                gitops.post_pr_review("acme/web-app", 7, HEAD, "text")
+    def events(self) -> list:
+        return [payload["event"] for _, payload in self.writes]
+
+    def test_the_event_comes_from_a_fixed_map_and_nothing_else_runs_gh(self):
+        self.assertEqual(gitops.REVIEW_EVENTS, {"COMMENT": "COMMENTED", "REQUEST_CHANGES": "CHANGES_REQUESTED",
+                                                "APPROVE": "APPROVED"})
+        for event in ("approve", "Approve", "APPROVE ", "DISMISS", "PENDING", "APPROVED", "", None, 1, ["APPROVE"]):
+            with self.subTest(event=event), self.assertRaises(FleetError):
+                gitops.post_pr_review("acme/web-app", 7, HEAD, "text", event)
+        self.assertEqual(self.writes, [])
+        for event in gitops.REVIEW_EVENTS:
+            with self.subTest(event=event):
+                posted = gitops.post_pr_review("acme/web-app", 7, HEAD, "text", event)
+                self.assertEqual((self.writes[-1][1]["event"], posted["event"]), (event, event))
         for argv in ([config.GH_BIN, "api", "--method", "PUT", "repos/acme/web-app/pulls/7/reviews", "--input", "-"],
                      [config.GH_BIN, "api", "--method", "POST", "repos/acme/web-app/pulls/7/reviews/1/events",
                       "--input", "-"],
+                     [config.GH_BIN, "api", "--method", "POST", "repos/acme/web-app/pulls/7/reviews", "--input", "-",
+                      "-f", "event=APPROVE"],
                      [config.GH_BIN, "pr", "review", "7", "--approve"]):
             with self.subTest(argv=argv), self.assertRaises(FleetError):
                 gitops.check_write_argv(argv)
+
+    def test_an_answer_with_another_state_or_commit_is_uncertain(self):
+        for event, state in (("COMMENT", "APPROVED"), ("REQUEST_CHANGES", "COMMENTED"), ("APPROVE", "COMMENTED"),
+                             ("APPROVE", "CHANGES_REQUESTED"), ("APPROVE", "PENDING"), ("APPROVE", None)):
+            answer = {"id": 5, "user": {"login": "owner"}, "state": state, "commit_id": HEAD,
+                      "html_url": "https://github.com/acme/web-app/pull/7#pullrequestreview-5"}
+            with self.subTest(event=event, state=state), \
+                    mock.patch.object(gitops, "run_gh_write", return_value=(0, json.dumps(answer), "")):
+                with self.assertRaises(gitops.Uncertain):
+                    gitops.post_pr_review("acme/web-app", 7, HEAD, "text", event)
+        answer = {"id": 5, "user": {"login": "owner"}, "state": "APPROVED", "commit_id": NEWER,
+                  "html_url": "https://github.com/acme/web-app/pull/7#pullrequestreview-5"}
+        with mock.patch.object(gitops, "run_gh_write", return_value=(0, json.dumps(answer), "")):
+            with self.assertRaises(gitops.Uncertain):
+                gitops.post_pr_review("acme/web-app", 7, HEAD, "text", "APPROVE")
+
+    def test_a_pass_is_a_comment_while_the_approve_switch_is_off(self):
+        self.switch(config.CHAT_REVIEW_GITHUB_FILE, True)
+        self.assertFalse((self.office / config.CHAT_REVIEW_APPROVE_FILE).exists())  # off by default
+        self.answer = ("ok", block(verdict="PASS", blocking=()))
+        self.deliver(msg())
+        self.run_pass()
+        self.assertEqual(self.events(), ["COMMENT"])
+        self.assertEqual(self.records()[0]["github_event"], "COMMENT")
+
+    def test_a_pass_with_the_approve_switch_on_is_an_approval(self):
+        self.switch(config.CHAT_REVIEW_GITHUB_FILE, True)
+        self.switch(config.CHAT_REVIEW_APPROVE_FILE, True)
+        self.answer = ("ok", block(verdict="PASS", blocking=()))
+        self.deliver(msg())
+        self.run_pass()
+        [(_, payload)] = self.writes
+        self.assertEqual((payload["event"], payload["commit_id"]), ("APPROVE", HEAD))
+        self.assertTrue(payload["body"].startswith("This is an automated review by Hermione"))
+        [record] = self.records()
+        self.assertEqual((record["github"], record["github_event"]), ("posted", "APPROVE"))
+        [ended] = [line for line in self.log_lines() if line["event"] == "ended"]
+        self.assertEqual((ended["github"], ended["github_event"]), ("posted", "APPROVE"))
+
+    def test_the_approve_switch_is_read_just_before_the_post(self):
+        self.switch(config.CHAT_REVIEW_GITHUB_FILE, True)
+        self.answer = ("ok", block(verdict="PASS", blocking=()))
+
+        def switched_on_while_she_runs(*args, **kwargs):
+            self.switch(config.CHAT_REVIEW_APPROVE_FILE, True)
+            return self.turn(*args, **kwargs)
+
+        run_desk._report_turn.side_effect = switched_on_while_she_runs
+        self.deliver(msg())
+        self.run_pass()
+        self.assertEqual(self.events(), ["APPROVE"])
+
+    def test_changes_is_a_change_request_whatever_the_approve_switch_says(self):
+        self.switch(config.CHAT_REVIEW_GITHUB_FILE, True)
+        self.deliver(msg())
+        self.run_pass()
+        self.switch(config.CHAT_REVIEW_APPROVE_FILE, True)
+        self.pr["head"]["sha"] = NEWER
+        self.answer = ("ok", block(sha=NEWER))
+        self.deliver(msg(message="m2"))
+        self.run_pass()
+        self.assertEqual(self.events(), ["REQUEST_CHANGES", "REQUEST_CHANGES"])
+        self.assertEqual(chat_review.github_event("CHANGES", ["B1 x.py:2 | a | b"]), "REQUEST_CHANGES")
+        self.assertEqual(chat_review.github_event("PASS", ["B1 x.py:2 | a | b"]), "COMMENT")
+
+    def test_the_approve_switch_alone_posts_nothing(self):
+        self.switch(config.CHAT_REVIEW_APPROVE_FILE, True)
+        self.answer = ("ok", block(verdict="PASS", blocking=()))
+        self.deliver(msg())
+        self.run_pass()
+        self.assertEqual(self.writes, [])
+        self.assertEqual(self.records()[0]["github"], "off")
+        self.assertEqual(chat_review.github_event("PASS", []), "COMMENT")
+
+    def test_a_refused_approval_or_change_request_is_posted_once_as_a_comment(self):
+        self.switch(config.CHAT_REVIEW_GITHUB_FILE, True)
+        self.switch(config.CHAT_REVIEW_APPROVE_FILE, True)
+        self.refused_events = ("APPROVE", "REQUEST_CHANGES")
+        self.deliver(msg())
+        self.run_pass()
+        self.pr["head"]["sha"] = NEWER
+        self.answer = ("ok", block(sha=NEWER, verdict="PASS", blocking=()))
+        self.deliver(msg(message="m2"))
+        self.run_pass()
+        self.assertEqual(self.events(), ["REQUEST_CHANGES", "COMMENT", "APPROVE", "COMMENT"])
+        found = sorted((record["sha"], record["github"], record["github_event"]) for record in self.records())
+        self.assertEqual(found, sorted([(HEAD, "posted", "COMMENT"), (NEWER, "posted", "COMMENT")]))
+        refused = [line["github_event"] for line in self.log_lines() if line["event"] == "github-refused"]
+        self.assertEqual(refused, ["REQUEST_CHANGES", "APPROVE"])
+        self.deliver(msg(sender=LEAD_USER, message="m3"))  # the same head commit again: never a second review
+        self.run_pass()
+        self.assertEqual(len(self.writes), 4)
+
+    def test_a_comment_refused_after_the_fallback_is_refused_and_not_tried_again(self):
+        self.switch(config.CHAT_REVIEW_GITHUB_FILE, True)
+        self.refused_events = ("REQUEST_CHANGES", "COMMENT")
+        self.deliver(msg())
+        self.run_pass()
+        self.assertEqual(self.events(), ["REQUEST_CHANGES", "COMMENT"])
+        [record] = self.records()
+        self.assertEqual((record["github"], record.get("github_event")), ("refused", None))
+        self.assertEqual(os.listdir(self.office / chat_review.DIR / chat_review.GITHUB), [])
+
+    def test_an_uncertain_approval_is_never_posted_again(self):
+        self.switch(config.CHAT_REVIEW_GITHUB_FILE, True)
+        self.switch(config.CHAT_REVIEW_APPROVE_FILE, True)
+        self.answer = ("ok", block(verdict="PASS", blocking=()))
+        tried = []
+
+        def timed_out(argv, body):
+            tried.append(json.loads(body)["event"])
+            raise gitops.Uncertain("gh did not answer in time, so the comment may or may not be posted")
+
+        gitops.run_gh_write.side_effect = timed_out
+        self.deliver(msg())
+        self.run_pass()
+        self.deliver(msg(sender=LEAD_USER, message="m2"))
+        self.run_pass()
+        self.assertEqual(tried, ["APPROVE"])
+        found = {record["requester"]: (record["github"], record.get("github_event")) for record in self.records()}
+        self.assertEqual(found, {SENDER: ("uncertain", None), "lead@example.com": ("already", None)})
 
     def test_the_reads_are_two_fixed_gh_api_shapes(self):
         self.assertEqual(gitops.check_read_argv(gitops.pr_read_argv("acme/web-app", 7)), "pr")

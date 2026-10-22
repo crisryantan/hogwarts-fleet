@@ -16,7 +16,9 @@ This module and run_desk are the only fleet modules that start git or a desk. Th
 commands that write to GitHub, four shapes held exactly by one guard (check_write_argv): gh pr create --draft for the
 review loop's automatic draft PR (open_draft_pr), for a PR follow-up's replies, gh api --method POST to reply in a
 review thread (post_reply) or to comment on the PR (post_pr_comment), and for a chat review, gh api --method POST of
-one PR review whose event is always COMMENT, never an approval or a change request (post_pr_review). The chat review's
+one PR review (post_pr_review) whose event is one of three fixed names, COMMENT, REQUEST_CHANGES or APPROVE, checked
+here against REVIEW_EVENTS and never taken as free text. An APPROVE or REQUEST_CHANGES review is the gh account
+owner's own review, so it counts for branch protection like any review they post by hand. The chat review's
 reads of a PR are two fixed gh api GET shapes (check_read_argv). Each runs in the office with a fixed environment
 and its text on stdin, never in a worktree, so no file a desk wrote can steer it, and nothing gh prints about a login
 reaches an event. Nothing here resolves a thread, requests a review, marks a PR ready or merges: no such shape passes
@@ -62,9 +64,10 @@ _REPO_PART = r"([A-Za-z0-9._-]{1,100}/[A-Za-z0-9._-]{1,100})"
 REPLY_PATH = re.compile(_REPO_PART + r"/pulls/([1-9][0-9]{0,9})/comments/([1-9][0-9]{0,19})/replies")
 PR_COMMENT_PATH = re.compile(_REPO_PART + r"/issues/([1-9][0-9]{0,9})/comments")
 COMMENT_ID = re.compile(r"[1-9][0-9]{0,19}")
-# A chat review's one write shape: a PR review, always event COMMENT, at one head commit.
+# A chat review's one write shape: a PR review at one head commit. Its event is one of these, each with the state
+# GitHub's answer must carry.
 PR_REVIEW_PATH = re.compile(_REPO_PART + r"/pulls/([1-9][0-9]{0,9})/reviews")
-REVIEW_EVENT = "COMMENT"
+REVIEW_EVENTS = {"COMMENT": "COMMENTED", "REQUEST_CHANGES": "CHANGES_REQUESTED", "APPROVE": "APPROVED"}
 # A chat review's two reads: a PR's metadata, and the diff of its base and head commits.
 PR_READ_PATH = re.compile(_REPO_PART + r"/pulls/([1-9][0-9]{0,9})")
 COMPARE_PATH = re.compile(_REPO_PART + r"/compare/([0-9a-f]{40})\.\.\.([0-9a-f]{40})")
@@ -431,7 +434,7 @@ def check_write_argv(argv: object, repo: Optional[str] = None) -> str:
     comment or a chat review's PR review, each rebuilt from its parts and compared whole, and, when repo is given,
     aimed at that repo only. Which one it is ("draft-pr", "reply", "pr-comment" or "pr-review"), or a FleetError for
     anything else: a ready or merged PR, a resolved thread, a review request, a mutation, another method, another
-    repo, another path or an extra flag. A PR review's event is fixed by post_pr_review, never by its caller."""
+    repo, another path or an extra flag. A PR review's event is checked by post_pr_review against REVIEW_EVENTS."""
     if isinstance(argv, list) and argv[:4] == [config.GH_BIN, "pr", "create", "--draft"]:
         check_draft_pr_argv(argv)
         if repo is not None and argv[5].lower() != repo.lower():
@@ -460,7 +463,7 @@ def check_write_argv(argv: object, repo: Optional[str] = None) -> str:
 
 
 def pr_review_argv(repo: str, number: int) -> list:
-    """gh api for one review on a PR, with its JSON on stdin. post_pr_review fixes the event to COMMENT."""
+    """gh api for one review on a PR, with its JSON on stdin. post_pr_review checks the event in that JSON."""
     number = ids.check_int(number, "PR number", minimum=1, maximum=9999999999)
     return [config.GH_BIN, "api", "--method", "POST", f"repos/{ids.check('repo', repo)}/pulls/{number}/reviews",
             "--input", "-"]
@@ -550,21 +553,23 @@ def post_pr_comment(repo: str, number: int, text: str) -> dict:
     return _post(pr_comment_argv(repo, number), text, repo, number, "issuecomment-")
 
 
-def post_pr_review(repo: str, number: int, sha: str, text: str) -> dict:
-    """Post one review on a PR at commit sha, its event always COMMENT, so it never approves or requests changes and
-    never counts toward branch protection. {"id", "url", "login"} of the review GitHub made, which must be a
-    COMMENTED review at that commit; Refused when it surely was not posted, Uncertain for anything that does not say."""
+def post_pr_review(repo: str, number: int, sha: str, text: str, event: str) -> dict:
+    """Post one review on a PR at commit sha, its event one of REVIEW_EVENTS (anything else is a FleetError before
+    gh runs). {"id", "url", "login", "event"} of the review GitHub made, which must carry the state that event maps
+    to, at that commit; Refused when it surely was not posted, Uncertain for anything that does not say."""
+    if not isinstance(event, str) or event not in REVIEW_EVENTS:
+        raise FleetError("a PR review's event is COMMENT, REQUEST_CHANGES or APPROVE")
     sha = ids.check("sha", sha)
-    payload = {"commit_id": sha, "event": REVIEW_EVENT, "body": _comment_text(text)}
+    payload = {"commit_id": sha, "event": event, "body": _comment_text(text)}
     answer = _write(pr_review_argv(repo, number), payload, repo)
     review_id, login = _made(answer)
-    if answer.get("state") != "COMMENTED" or answer.get("commit_id") != sha:
-        raise Uncertain("GitHub's answer is not a comment review at that commit")
+    if answer.get("state") != REVIEW_EVENTS[event] or answer.get("commit_id") != sha:
+        raise Uncertain(f"GitHub's answer is not a {REVIEW_EVENTS[event]} review at that commit")
     url = f"https://github.com/{repo}/pull/{number}#pullrequestreview-{review_id}"
     html_url = answer.get("html_url")
     if not isinstance(html_url, str) or html_url.lower() != url.lower():
         raise Uncertain("gh's answer links somewhere else, so the review may or may not be posted where it should")
-    return {"id": str(review_id), "url": html_url, "login": login}
+    return {"id": str(review_id), "url": html_url, "login": login, "event": event}
 
 
 # A chat review's reads of a PR

@@ -36,10 +36,14 @@ Anyone in the company's Chat can send the app text, so everything here treats a 
 - An accepted request is acknowledged first in its thread with one of a few fixed lines, picked by the message's own
   digest, and a fixed line saying a review is all she does. Her verdict line and findings, scrubbed and cut, go back
   as the app to the message's thread. Then, while the office
-  file chat-review-github holds "on" too, the same review goes on the PR with your gh login as a review whose event is
-  always COMMENT (gitops.post_pr_review), opening with a fixed line naming the requester by Chat display name, never
-  email, at most once per PR and head commit (a marker made create-exclusive before it is posted, never posted again
-  after a kill).
+  file chat-review-github holds "on" too, the same review goes on the PR with your gh login (gitops.post_pr_review),
+  opening with a fixed line naming the requester by Chat display name, never email, at most once per PR and head
+  commit (a marker made create-exclusive before it is posted, never posted again after a kill). Its event is
+  REQUEST_CHANGES for a CHANGES verdict; APPROVE for a PASS with no blocking finding while the office file
+  chat-review-approve holds "on" as well, read just before the post; else COMMENT. An APPROVE or REQUEST_CHANGES review
+  is your gh account's own review, so it counts for branch protection. GitHub refuses both on a PR your gh login
+  opened, and a refused one is posted once more as COMMENT under the same marker; the event that posted is the
+  record's github_event and is in its log line.
 - Each reply carries a request id made from its record, so a reply sent again after a kill is the same Chat message.
   It goes as the app (spaces.messages.create with the chat.bot scope, the worker service account's token, which never
   reads) in the request's thread.
@@ -387,7 +391,8 @@ def log(event: str, **fields) -> None:
 def _logged(key: str, record: dict) -> dict:
     return {"request": key[:12], "requester": record.get("requester"), "source": record.get("source"),
             "repo": record.get("repo"), "number": record.get("number"), "sha": record.get("sha"),
-            "outcome": record.get("outcome"), "verdict": record.get("verdict"), "cost_usd": record.get("cost_usd")}
+            "outcome": record.get("outcome"), "verdict": record.get("verdict"), "cost_usd": record.get("cost_usd"),
+            "github": record.get("github"), "github_event": record.get("github_event")}
 
 
 def _end(key: str, record: dict, outcome: str, **fields) -> dict:
@@ -830,16 +835,31 @@ def github_on() -> bool:
     return common.opt_in_on(config.CHAT_REVIEW_GITHUB_FILE)
 
 
+def approve_on() -> bool:
+    return common.opt_in_on(config.CHAT_REVIEW_APPROVE_FILE)
+
+
 def intake_on(record: dict) -> bool:
     """Whether a request may move on now: one from Chat only while the intake is on, read again before each step that
     reaches outside the office; one by hand always."""
     return record.get("source") != "chat" or common.opt_in_on(config.CHAT_REVIEW_FILE)
 
 
+def github_event(verdict: str, blocking: list) -> str:
+    """The PR review's event: REQUEST_CHANGES for a CHANGES verdict, APPROVE for a PASS with no blocking finding while
+    both chat-review-github and chat-review-approve are on (read now), else COMMENT."""
+    if verdict == "CHANGES" and blocking:
+        return "REQUEST_CHANGES"
+    if verdict == "PASS" and not blocking and github_on() and approve_on():
+        return "APPROVE"
+    return "COMMENT"
+
+
 def post_github(key: str, record: dict, poster: Callable = None) -> dict:
     """Post the review on the PR once per (PR, head commit), only while chat-review-github is on: a marker made
-    create-exclusive first, so a second request, or this one after a kill, never posts it again. The record as it
-    ends."""
+    create-exclusive first, so a second request, or this one after a kill, never posts it again. A REQUEST_CHANGES or
+    APPROVE review GitHub refuses (it refuses both on a PR the gh login opened) is posted once more as COMMENT, under
+    the same marker. The record as it ends, with the event that posted in github_event."""
     poster = poster or gitops.post_pr_review
     repo, number, sha = record["repo"], record["number"], record["sha"]
     if not intake_on(record):
@@ -852,8 +872,16 @@ def post_github(key: str, record: dict, poster: Callable = None) -> dict:
             return _end(key, record, "reviewed", github="already")
     body = github_body(display_name(record.get("requester_name")), sha, record["verdict"], record.get("blocking", []),
                        record.get("non_blocking", []))
+    event = github_event(record["verdict"], record.get("blocking", []))
     try:
-        posted = poster(repo, number, sha, body)
+        try:
+            posted = poster(repo, number, sha, body, event)
+        except gitops.Refused as exc:
+            if event == "COMMENT":
+                raise
+            log("github-refused", request=key[:12], github_event=event, why=common.scrubbed_line(exc, 200))
+            event = "COMMENT"  # surely not posted, so the one try as COMMENT cannot make a second review
+            posted = poster(repo, number, sha, body, event)
     except gitops.Refused as exc:
         with _folder(GITHUB) as fd, contextlib.suppress(OSError):
             os.unlink(name, dir_fd=fd)  # surely not posted, so a later request may post it
@@ -863,8 +891,9 @@ def post_github(key: str, record: dict, poster: Callable = None) -> dict:
             markers.replace(fd, name, {"state": "uncertain", "request": key, "at": int(time.time())})
         return _end(key, record, "reviewed", github="uncertain", github_why=common.scrubbed_line(exc, 200))
     with _folder(GITHUB) as fd:
-        markers.replace(fd, name, {"state": "posted", "request": key, "url": posted["url"], "at": int(time.time())})
-    return _end(key, record, "reviewed", github="posted", github_url=posted["url"])
+        markers.replace(fd, name, {"state": "posted", "request": key, "url": posted["url"], "event": event,
+                                   "at": int(time.time())})
+    return _end(key, record, "reviewed", github="posted", github_url=posted["url"], github_event=event)
 
 
 def _github_or_done(key: str, record: dict) -> dict:
@@ -883,7 +912,8 @@ def _resume_github(key: str, record: dict) -> dict:
     if not begun:
         return post_github(key, record)
     if marker is not None and marker.get("request") == key and marker["state"] == "posted":
-        return _end(key, record, "reviewed", github="posted", github_url=marker.get("url"))
+        return _end(key, record, "reviewed", github="posted", github_url=marker.get("url"),
+                    github_event=marker.get("event"))
     if marker is not None and marker.get("request") != key:
         return _end(key, record, "reviewed", github="already")
     return _end(key, record, "reviewed", github="uncertain")

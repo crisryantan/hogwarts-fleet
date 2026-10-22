@@ -160,13 +160,18 @@ GO_UPDATES_FILE = "auto-go-updates"
 # replying in their Chat thread. Off, the job reads nothing and mints no token. echo on > ~/.hogwarts/chat-review
 CHAT_REVIEW_FILE = "chat-review"
 # While this second office file holds "on" too, each chat review is also posted on the PR as a review with your gh
-# login, always event COMMENT, at most once per PR and head commit. echo on > ~/.hogwarts/chat-review-github
+# login, at most once per PR and head commit: REQUEST_CHANGES when it has a blocking finding, else COMMENT.
+# echo on > ~/.hogwarts/chat-review-github
 CHAT_REVIEW_GITHUB_FILE = "chat-review-github"
+# While this third office file holds "on" as well, a chat review that passes with no blocking finding is posted as
+# APPROVE instead of COMMENT. It is your gh account's own approval, so it counts for branch protection. Off by default,
+# and it does nothing while chat-review-github is off. echo on > ~/.hogwarts/chat-review-approve
+CHAT_REVIEW_APPROVE_FILE = "chat-review-approve"
 # Every office opt-in file. common.opt_in_on reads only these names, so a typo never reads another office file as a
 # switch, every switch is read through that one reader, and a name not listed here always reads off.
 OPT_IN_FILES = (AUTO_DRAFT_PR_FILE, AUTO_PORTRAIT_FILE, PR_FOLLOWUP_FILE, AUTO_CLOSE_FILE, WORKTREE_CLEANUP_FILE,
                 OWL_REPORTS_FILE, CROSS_FAMILY_FAILOVER_FILE, ORCHESTRATOR_FILE, GO_UPDATES_FILE, CHAT_REVIEW_FILE,
-                CHAT_REVIEW_GITHUB_FILE)
+                CHAT_REVIEW_GITHUB_FILE, CHAT_REVIEW_APPROVE_FILE)
 # Review rounds of one follow-up, apart from the task's REVIEW_ROUND_CAP, and the follow-ups one task may take.
 FOLLOWUP_ROUND_CAP = 2
 FOLLOWUP_MAX_PER_TASK = 5
