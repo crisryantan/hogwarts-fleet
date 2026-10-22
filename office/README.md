@@ -551,24 +551,27 @@ never logged, but for the short thread follow-up below. Of those that mention it
 
 - one from a person whose membership of that conversation belongs to an email in `CHAT_REVIEW_SENDERS`, whose text,
   once the app mentions are out, holds exactly one GitHub PR link (`https://github.com/<owner>/<repo>/pull/<n>`, bare
-  or in `<>`) for a repo in `CHAT_REVIEW_REPOS` and the word review (also reviews or reviewing) or an approve word
-  (approve, approves, approved, approving or approval), any letter case, outside the link, becomes a queued review.
-  Every other word is ignored: never kept, never logged, never shown to the reviewer, which gets only the link rebuilt
+  or in `<>`) for a repo in `CHAT_REVIEW_REPOS` becomes a queued review, whatever its other words are: the apps do code
+  reviews and nothing else, so a mention with a PR link is a review request. Every other word is ignored: never kept, never logged, never shown to the reviewer, which gets only the link rebuilt
   from what matched. The thread first gets a short fixed acknowledgement as that app, one of its desk's few lines,
   picked by the request's own digest, never echoing the message. A message that also asks to fix or merge gets the
   desk's line saying a review is all it does, and still gets the review and nothing more. An approve word only asks
   for the review: whether it approves is its verdict and the switches below, nothing the message says;
-- one from them with no link or address at all and one of those words, in a thread where the same app already took
+- one from them with no link or address at all and the word review (also reviews or reviewing) or an approve word
+  (approve, approves, approved, approving or approval), any letter case, in a thread where the same app already took
   a review request whose record is still kept, whatever came of it, is a follow-up: a queued review of that request's
   PR, the newest one's when there are several, under the same sender, space and repo lists and caps. So "review
   again" or "approve" works in a thread the app already reviewed. A follow-up never names another PR, and only the
   app's own requests count, so a thread only the other app reviewed is no thread this one reviewed. In a thread
-  only this app ever reviewed (one the other app reviewed too needs a mention), a follow-up needs no mention either:
-  a message there that mentions no one at all, from an allowed sender, with no link, at most 8 words and starting
-  as an instruction (review, re-review, another review or approve, after an optional please or can you), is the same
-  follow-up, so "review again" works without tagging the app. Any other message there that does not mention the app is dropped like any other:
-  no reply, no record, no log line;
-- anything else from them, a question, a task, no review word, two or more PR links, a repo that is not listed or a
+  only this app took mentions in, a review or a help reply to an allowed sender (one the other app took a mention in
+  too needs a mention), a message needs no mention either: one that mentions no one at all, from an allowed sender,
+  with at most 8 words outside its addresses and starting as an instruction (review, re-review, another review or
+  approve, after an optional please or can you) is taken. With exactly one PR link for a repo in `CHAT_REVIEW_REPOS`
+  ("Review PR <link>") it is a review request for that PR, so a link sent after a help reply, without tagging the app,
+  works; with no link at all it is the same follow-up as above, so "review again" works without tagging the app, and
+  with no earlier request in the thread it is dropped. Any other message there that does not mention the app is dropped
+  like any other: no reply, no record, no log line;
+- anything else from them, a question or a task with no PR link, two or more PR links, a repo that is not listed or a
   follow-up in a thread the app never reviewed, gets the app's one fixed help text saying it does code reviews only;
 - a person not on the list gets one fixed refusal, and who they are is not kept;
 - a bot, or a message older than `CHAT_REVIEW_QUEUE_MAX_SECONDS`, gets nothing.

@@ -21,14 +21,17 @@ Anyone in the company's Chat can send an app text, so everything here treats a m
   follow-ups below. Of those that mention it,
   one from a human whose Chat user is the member of that conversation with an email in CHAT_REVIEW_SENDERS, whose
   text, once the app mention is taken out, has exactly one GitHub PR link (https://github.com/<owner>/<repo>/pull/<n>,
-  bare or in <>), for an allowlisted repo, and the word review or an approve word outside it, becomes a queued review
-  and the rest of the text is ignored, never kept, logged or passed on. One with no link at all and one of those
-  words, in a thread where the app already took a review request still on record, is a follow-up: a queued review of
-  that request's PR (the newest one's), under the same lists and caps. Anything else from them (no review word, two
-  links, a repo not listed, a follow-up in a thread the app never reviewed) gets the app's fixed help reply, and a
-  person not on the list the fixed refusal. In a thread only this app took review requests in, a follow-up of at most
-  UNMENTIONED_WORDS_MAX words that starts as an instruction and mentions no one at all is taken too, from an allowed
-  sender only; any other message there that does not mention the app is dropped like any other. Each is taken once
+  bare or in <>), for an allowlisted repo, becomes a queued review whatever its other words are (the apps review and
+  nothing else) and the rest of the text is ignored, never kept, logged or passed on. One with no link at all and the
+  word review or an approve word, in a thread where the app already took a review request still on record, is a
+  follow-up: a queued review of that request's PR (the newest one's), under the same lists and caps. Anything else from
+  them (no link or no word, two links, a repo not listed, a follow-up in a thread the app never reviewed) gets the
+  app's fixed help reply, and a person not on the list the fixed refusal. In a thread only this app took mentions in
+  (a review, or a help reply to an allowed sender), a message that mentions no one at all and has at most
+  UNMENTIONED_WORDS_MAX words outside its addresses, and that starts as an instruction, is taken too, from an allowed
+  sender only: with exactly one PR link for an allowlisted repo it is a review of that PR, with no link at all a
+  follow-up of the thread's earlier review request (none: dropped); any other message there that does not mention the
+  app is dropped like any other. Each is taken once
   per app, even across kills and the overlap of each read: its record, named by a digest of the app and the Chat
   message's name, is made create-exclusive, and a message whose record for that app exists is never taken by it
   again. At most CHAT_REVIEW_PULL_MAX are taken a pass, across every app, and one waiting longer than
@@ -139,9 +142,11 @@ OTHER_WORK = re.compile(r"(?:^|[,.;:!&]|\b(?:and|then|also|please|pls|plz|you)\b
                         r"|to)\s+)*(?:fix|change|update|edit|patch|rewrite|refactor|implement|address|resolve|commit"
                         r"|push|merge|deploy|run|build)\b", re.IGNORECASE | re.MULTILINE)
 NEGATION = re.compile(r"\b(?:don'?t|do not|doesn'?t|never|no need|without|not)\b", re.IGNORECASE)
-# The most words a message that does not mention the app may have and still be a thread follow-up.
+# The most words, outside its addresses, a message that does not mention the app may have and still be taken in a thread
+# the app took a mention in.
 UNMENTIONED_WORDS_MAX = 8
-# An unmentioned follow-up also starts as an instruction, so "thanks for the review" or "already approved" is chatter.
+# An unmentioned message also starts as an instruction, so "thanks for the review" or "already approved" is chatter;
+# "review <link>" and "review PR <link>" start as one.
 UNMENTIONED_START = re.compile(r"(?:(?:please|pls|plz|ok|okay|hey|can you|could you|would you)[,!]?\s+)*"
                                r"(?:(?:do|run)\s+)?(?:(?:another|one more|a new)\s+review|re-?review|review|approve)\b",
                                re.IGNORECASE)
@@ -155,7 +160,7 @@ ECHO_MAX = 40
 
 # The fixed replies. Nothing a requester wrote is ever in one. The help reply names the app as its settings spell it
 # (help_text), and each desk says what it does in its own words (Voice.does).
-HELP = ("I'm {name}, and {does}. Mention me with a GitHub PR link and the word review, for a repo I take, and one PR"
+HELP = ("I'm {name}, and {does}. Mention me with a GitHub PR link, for a repo I take, and one PR"
         " link per message. In a thread where I already reviewed a PR, \"review again\" or \"approve\" works without"
         " the link, and I approve only when my review passes. I don't answer questions or fix, merge, build, run or"
         " deploy anything.")
@@ -436,26 +441,30 @@ def _asks(text: str) -> bool:
     return REVIEW_WORD.search(plain) is not None or APPROVE_WORD.search(plain) is not None
 
 
-def parse_request(text: object) -> Optional[tuple]:
-    """(repo, number) when text, with the app mention already out, asks for a review: exactly one GitHub PR link, for an
-    allowed repo, and the word review (or reviews, reviewing) or an approve word (approve, approves, approved,
-    approving, approval) outside every address and link label, else None. Nothing else in the text is read, kept or
-    passed on; only the link rebuilt from what the pattern matched is."""
-    if not isinstance(text, str):
-        return None
+def _links(text: str) -> Optional[tuple]:
+    """(each (owner, repo, number) of text's PR links, text without its link markup), or None when a link to somewhere
+    else is labelled as a PR."""
     links = []
     for markup in LINK_MARKUP.finditer(text):
         target = PR_WORD.fullmatch(markup.group(1))
         named = [one for one in _pr_words(markup.group(2) or "") if target is None or one != target.group(1, 2, 3)]
         if target is None and named:
-            return None  # a link to somewhere else labelled as a PR
+            return None
         if target is not None:
             links += [target.group(1, 2, 3), *named]
     plain = LINK_MARKUP.sub(" ", text)
-    links += _pr_words(plain)
-    if len(links) != 1 or not _asks(plain):
+    return links + _pr_words(plain), plain
+
+
+def parse_request(text: object) -> Optional[tuple]:
+    """(repo, number) when text, with the app mention already out, asks for a review: exactly one GitHub PR link, for an
+    allowed repo, whatever the words around it, since the apps review and nothing else. A link label that names another
+    PR, two links, a link to a repo not listed and a link to anywhere else are no request. Nothing else in the text is
+    read, kept or passed on; only the link rebuilt from what the pattern matched is."""
+    found = _links(text) if isinstance(text, str) else None
+    if found is None or len(found[0]) != 1:
         return None
-    return _allowed_pr(*links[0])
+    return _allowed_pr(*found[0][0])
 
 
 def parse_follow_up(text: object) -> bool:
@@ -490,11 +499,30 @@ def _allowed_pr(owner: str, name: str, number: str) -> Optional[tuple]:
     return None if listed is None else (listed, int(number))
 
 
+def _short_instruction(text: object) -> bool:
+    """Whether a message that mentions no one is short (at most UNMENTIONED_WORDS_MAX words outside its addresses) and
+    starts as an instruction (UNMENTIONED_START)."""
+    if not isinstance(text, str):
+        return False
+    words = ANY_ADDRESS.sub(" ", LINK_MARKUP.sub(" ", text)).split()
+    return len(words) <= UNMENTIONED_WORDS_MAX and UNMENTIONED_START.match(text.strip()) is not None
+
+
 def parse_unmentioned(text: object) -> bool:
-    """Whether a message that mentions no one is a follow-up in a thread the app reviewed: a follow-up (parse_follow_up)
-    of at most UNMENTIONED_WORDS_MAX words that starts as an instruction (UNMENTIONED_START)."""
-    return isinstance(text, str) and len(text.split()) <= UNMENTIONED_WORDS_MAX \
-        and UNMENTIONED_START.match(text.strip()) is not None and parse_follow_up(text)
+    """Whether a message that mentions no one is a follow-up in a thread the app took a mention in: a follow-up
+    (parse_follow_up) that is a short instruction (_short_instruction)."""
+    return _short_instruction(text) and parse_follow_up(text)
+
+
+def parse_unmentioned_request(text: object) -> Optional[tuple]:
+    """(repo, number) when a message that mentions no one is a review request in a thread the app took a mention in: a
+    short instruction (_short_instruction) with exactly one PR link, for an allowed repo (parse_request)."""
+    return parse_request(text) if _short_instruction(text) else None
+
+
+def unmentioned_asks(text: object) -> bool:
+    """Whether a message that mentions no one is worth taking in such a thread: a follow-up or a request."""
+    return parse_unmentioned(text) or parse_unmentioned_request(text) is not None
 
 
 # Office records
@@ -582,13 +610,14 @@ def _taken_us(record: dict) -> int:
 
 
 def _owners(space: str, before_us: Optional[int] = None) -> dict:
-    """Each thread of space where only one app took review requests from Chat, still on record, to that app, of those
-    from messages created before before_us when it is given. A thread two apps reviewed has no owner, so a follow-up
-    there must mention the app it is for."""
+    """Each thread of space where only one app took a mention from Chat that became a review or a help reply (a refusal
+    is a sender who is not allowed), still on record, to that app, of those from messages created before before_us when
+    it is given. A thread two apps took mentions in has no owner, so a message there must mention the app it is for."""
     apps: dict = {}
     for _, record in _records():
         thread, owner = record.get("thread"), record.get("app", DEFAULT_APP)
-        if record.get("source") != "chat" or record.get("kind") != "review" or record.get("space") != space \
+        if record.get("source") != "chat" or record.get("kind") not in ("review", "help") \
+                or record.get("mentioned") is False or record.get("space") != space \
                 or not isinstance(thread, str) or (before_us is not None and _taken_us(record) >= before_us):
             continue
         apps.setdefault(thread, set()).add(owner)
@@ -596,8 +625,8 @@ def _owners(space: str, before_us: Optional[int] = None) -> dict:
 
 
 def listening_threads(space: str, app: str) -> frozenset:
-    """The threads of space where only app took review requests (_owners): there app also takes a short follow-up that
-    mentions no one."""
+    """The threads of space where only app took mentions (_owners): there app also takes a short review request or
+    follow-up that mentions no one."""
     return frozenset(thread for thread, owner in _owners(space).items() if owner == app)
 
 
@@ -1364,9 +1393,9 @@ def take_message(message: dict, space: str, token: str, known: dict, now: int, a
     review by its desk, anything else from them the app's fixed help reply, and anything from a person not allowed
     the fixed refusal, each as a record made create-exclusive, so a message read again (the overlap of each read, or
     after a kill) is "seen before". A bot, a message too old or with no thread in its space gets nothing. What
-    happened, for the log. A message that mentions no one, in a thread where only app took review requests
-    (listening), is taken only as a follow-up from an allowed sender: anything else of it is ignored, with no reply,
-    no record and no log line."""
+    happened, for the log. A message that mentions no one, in a thread where only app took mentions (listening), is
+    taken only as a short review request or follow-up from an allowed sender: anything else of it is ignored, with no
+    reply, no record and no log line."""
     name, mentioned = message["name"], message["mentions"] is True
 
     def ignored(why: str) -> str:
@@ -1392,15 +1421,18 @@ def take_message(message: dict, space: str, token: str, known: dict, now: int, a
               "at_us": message["created_us"]}
     email = _senders_in(space, token, known).get(message["sender"])
     if not mentioned:
-        # Only the one app that took requests in the thread before this message takes it.
-        asked = earlier_request(space, thread, app, message["created_us"]) if email is not None \
-            and parse_unmentioned(message["argument"]) \
-            and _owners(space, message["created_us"]).get(thread) == app else None
+        # Only the one app that took a mention in the thread before this message takes it.
+        asked, follow_up = None, False
+        if email is not None and _owners(space, message["created_us"]).get(thread) == app:
+            asked = parse_unmentioned_request(message["argument"])
+            if asked is None and parse_unmentioned(message["argument"]):
+                asked = earlier_request(space, thread, app, message["created_us"])
+                follow_up = asked is not None
         if asked is None:
             return "ignored"
         record = {**record, "requester": email, "requester_name": display_name(message["sender_name"]),
-                  "state": "queued", "kind": "review", "repo": asked[0], "number": asked[1], "follow_up": True,
-                  "mentioned": False, "other_work": asks_other_work(message["argument"])}
+                  "state": "queued", "kind": "review", "repo": asked[0], "number": asked[1], "mentioned": False,
+                  "other_work": asks_other_work(message["argument"]), **({"follow_up": True} if follow_up else {})}
     elif email is None:
         # Who they are is not kept: the record holds only the message's names and the fixed reply.
         record = {**record, "state": "reply", "kind": "refusal", "reply": SENDER_REFUSED, "outcome": "not-allowed"}
@@ -1433,8 +1465,8 @@ def read_space(space: str, token: str, known: dict, done: list, room: int, now: 
     before where it stopped, so a message sharing that microsecond is not lost. It never reads from before its first
     read or the app's current membership began, nor further back than the queue limit, and a message time ahead of
     this Mac's clock never moves the marker. A message that does not mention the app is never kept or logged, but for
-    a short follow-up that mentions no one, from an allowed sender, in a thread where only the app took review
-    requests (listening_threads), which take_message takes as a review."""
+    a short request or follow-up that mentions no one, from an allowed sender, in a thread where only the app took
+    mentions (listening_threads), which take_message takes as a review."""
     marker = _read_marker(space, app)
     now_us = max(int(time.time() * 1_000_000), now * 1_000_000)
     member = google_chat.app_member(space, token)
@@ -1464,14 +1496,14 @@ def read_space(space: str, token: str, known: dict, done: list, room: int, now: 
             listened = False
             for message in messages:
                 if message["mentions"] or (message.get("listening") is True
-                                           and parse_unmentioned(message.get("argument"))):
+                                           and unmentioned_asks(message.get("argument"))):
                     if sum(outcome in TAKEN for outcome in done) >= room:
                         waiting = min(message["created_us"], now_us)  # no room: the next read starts here
                         return
                     outcome = take_message(message, space, token, known, now, app)
                     if message["mentions"] or outcome != "ignored":  # an unmentioned one ignored leaves no trace
                         done.append(outcome)
-                    if outcome == "review" and message["thread"] not in threads:
+                    if outcome in ("review", "help") and message["thread"] not in threads:
                         threads = listening_threads(space, app)
                         listened = message["thread"] in threads
                 if message["created_us"] <= now_us:  # a time ahead of this Mac's clock never moves the marker
