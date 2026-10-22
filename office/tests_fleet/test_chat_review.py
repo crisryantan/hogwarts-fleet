@@ -2217,15 +2217,33 @@ class UnmentionedFollowUpTests(ChatCase):
         self.assertNotIn(SECRET_MARK, self.office_text())
         self.assertNotIn(SECRET_MARK, json.dumps(self.log_lines()))
 
-    def test_a_help_reply_to_both_apps_and_an_unmentioned_request_after_it_in_one_pass_is_taken_by_neither(self):
+    def test_an_unmentioned_request_taken_before_the_other_apps_mention_is_recorded_is_dropped_unanswered(self):
         self.second_app()
-        now = time.time()
-        self.deliver(msg(text="what is this?", message="h1", also=(MOODY_APP_USER,), at=now - 4),
-                     msg(text=f"Review PR {URL}", message="q1", mention=False, at=now - 2))
-        self.assertEqual(self.run_pass()["taken"], ["help", "help"])
-        self.run_pass()  # the overlap lists them again, when each app's record is made
-        self.assertEqual(self.run_pass()["taken"], ["seen before", "seen before"])
-        self.assertEqual((self.turns, len(self.records())), ([], 2))
+        now = time.time() - 30
+        t0, t1, t2 = (f"{SPACE}/threads/s{index}" for index in range(3))
+        self.deliver(
+            # One message to both apps, then a request: Hermione reads first and takes it before Moody records his.
+            msg(text="what is this?", message="h0", also=(MOODY_APP_USER,), at=now + 1, thread=t0),
+            msg(text=f"Review PR {URL}", message="q0", mention=False, at=now + 2, thread=t0),
+            # A help reply from Hermione alone, then a request: hers.
+            msg(text="what is this?", message="h1", at=now + 3, thread=t1),
+            msg(text=f"Review PR {URL}", message="q1", mention=False, at=now + 4, thread=t1),
+            # A help reply from each app in separate messages, then a request.
+            msg(text="what is this?", message="h2", at=now + 5, thread=t2),
+            msg(text="what is this?", message="h3", app=MOODY_APP_USER, at=now + 6, thread=t2),
+            msg(text=f"Review PR {URL}", message="q2", mention=False, at=now + 7, thread=t2))
+        self.run_pass()
+        self.run_pass()
+        found = {record["message"][-2:]: record for record in self.records() if record["message"][-2] == "q"}
+        self.assertEqual([(name, record["state"], record["outcome"], record["kind"], record["app"])
+                          for name, record in sorted(found.items())],
+                         [("q0", "done", "not-owned", "dropped", "hermione"),
+                          ("q1", "done", "reviewed", "review", "hermione"),
+                          ("q2", "done", "not-owned", "dropped", "hermione")])
+        # Only the thread one app took a mention in was reviewed and acknowledged.
+        [turn] = self.turns
+        self.assertEqual(turn["desk"], "hermione")
+        self.assertEqual([ack["thread"] for ack in self.google.acks], [t1])
 
     def test_one_message_to_both_apps_leaves_the_thread_to_neither(self):
         self.second_app()

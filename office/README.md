@@ -569,7 +569,8 @@ never logged, but for the short thread follow-up below. Of those that mention it
   approve, after an optional please or can you) is taken. With exactly one PR link for a repo in `CHAT_REVIEW_REPOS`
   ("Review PR <link>") it is a review request for that PR, so a link sent after a help reply, without tagging the app,
   works; with no link at all it is the same follow-up as above, so "review again" works without tagging the app, and
-  with no earlier request in the thread it is dropped. Any other message there that does not mention the app is dropped
+  with no earlier request in the thread it is dropped. It is checked again before it runs, and dropped unanswered if the
+  other app took a mention in the thread meanwhile. Any other message there that does not mention the app is dropped
   like any other: no reply, no record, no log line;
 - anything else from them, a question or a task with no PR link, two or more PR links, a repo that is not listed or a
   follow-up in a thread the app never reviewed, gets the app's one fixed help text saying it does code reviews only;

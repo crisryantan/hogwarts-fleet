@@ -30,7 +30,8 @@ Anyone in the company's Chat can send an app text, so everything here treats a m
   (a review, or a help reply to an allowed sender), a message that mentions no one at all and has at most
   UNMENTIONED_WORDS_MAX words outside its addresses, and that starts as an instruction, is taken too, from an allowed
   sender only: with exactly one PR link for an allowlisted repo it is a review of that PR, with no link at all a
-  follow-up of the thread's earlier review request (none: dropped); any other message there that does not mention the
+  follow-up of the thread's earlier review request (none: dropped), and it is checked again before it runs, so one the
+  other app's mention of the thread overtook is dropped unanswered; any other message there that does not mention the
   app is dropped like any other. Each is taken once
   per app, even across kills and the overlap of each read: its record, named by a digest of the app and the Chat
   message's name, is made create-exclusive, and a message whose record for that app exists is never taken by it
@@ -622,6 +623,12 @@ def _owners(space: str, before_us: Optional[int] = None) -> dict:
             continue
         apps.setdefault(thread, set()).add(owner)
     return {thread: next(iter(owners)) for thread, owners in apps.items() if len(owners) == 1}
+
+
+def _still_listening(record: dict) -> bool:
+    """Whether the thread of a queued request that mentioned no one is still the app's alone, as of that message: the
+    other app's mention of it may be recorded only after this one was taken, so this is asked again before it runs."""
+    return _owners(record["space"], _taken_us(record)).get(record["thread"]) == app_of(record)
 
 
 def listening_threads(space: str, app: str) -> frozenset:
@@ -1466,9 +1473,7 @@ def read_space(space: str, token: str, known: dict, done: list, room: int, now: 
     read or the app's current membership began, nor further back than the queue limit, and a message time ahead of
     this Mac's clock never moves the marker. A message that does not mention the app is never kept or logged, but for
     a short request or follow-up that mentions no one, from an allowed sender, in a thread where only the app took
-    mentions (listening_threads), which take_message takes as a review. Not in a thread where this read just took a
-    message that mentions someone else besides the app: the other app's record of it may not be made yet, so whether
-    the thread is the app's alone is not known until a later pass, which reads the message again."""
+    mentions (listening_threads), which take_message takes as a review."""
     marker = _read_marker(space, app)
     now_us = max(int(time.time() * 1_000_000), now * 1_000_000)
     member = google_chat.app_member(space, token)
@@ -1490,7 +1495,6 @@ def read_space(space: str, token: str, known: dict, done: list, room: int, now: 
     overlap = config.CHAT_REVIEW_READ_OVERLAP_SECONDS * 1_000_000 if marker.get("complete") is not False else 0
     after = max(newest - overlap, floor, now_us - config.CHAT_REVIEW_QUEUE_MAX_SECONDS * 1_000_000)
     page, complete, waiting = None, False, None
-    shared: set = set()  # threads where this read took a message that mentions the app and someone else too
     try:
         for _ in range(config.CHAT_REVIEW_LIST_PAGES):
             if not common.opt_in_on(config.CHAT_REVIEW_FILE):
@@ -1498,14 +1502,12 @@ def read_space(space: str, token: str, known: dict, done: list, room: int, now: 
             messages, page = google_chat.list_messages(space, after, app_user, token, page, threads)
             listened = False
             for message in messages:
-                if message["mentions"] or (message.get("listening") is True and message["thread"] not in shared
+                if message["mentions"] or (message.get("listening") is True
                                            and unmentioned_asks(message.get("argument"))):
                     if sum(outcome in TAKEN for outcome in done) >= room:
                         waiting = min(message["created_us"], now_us)  # no room: the next read starts here
                         return
                     outcome = take_message(message, space, token, known, now, app)
-                    if message["mentions"] and message.get("shared") is True and outcome != "seen before":
-                        shared.add(message["thread"])
                     if message["mentions"] or outcome != "ignored":  # an unmentioned one ignored leaves no trace
                         done.append(outcome)
                     if outcome in ("review", "help") and message["thread"] not in threads:
@@ -1639,6 +1641,9 @@ def settle(conn, now: Optional[int] = None, only_hand: bool = False) -> list:
             elif state == "queued" and now - int(record.get("at", 0)) > config.CHAT_REVIEW_QUEUE_MAX_SECONDS:
                 record = _save(key, {**record, "state": "reply", "reply": COULD_NOT, "outcome": "expired"})
                 done.append(_send_reply(key, record)["state"])
+            elif state == "queued" and record.get("mentioned") is False and not _still_listening(record):
+                # The other app took a mention in the thread after this was taken, maybe in the same pass.
+                done.append(_end(key, {**record, "kind": "dropped"}, "not-owned")["state"])
             elif state == "queued":
                 record = _acknowledge(key, record)
                 if reviews < config.CHAT_REVIEW_PER_PASS:
