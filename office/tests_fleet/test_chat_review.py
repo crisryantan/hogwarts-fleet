@@ -1853,7 +1853,9 @@ class FollowUpTests(ChatCase):
                 self.assertTrue(chat_review.parse_follow_up(text))
         for text in ("thanks", "can you merge it", "disapprove", "preview again", f"approve {URL}",
                      "approve https://example.org/x", "<https://example.org|approve>",
-                     "approve https://github.com/acme/web-app/pull/8", "", None, 7):
+                     "approve https://github.com/acme/web-app/pull/8", "approve HTTPS://github.com/acme/web-app/pull/8",
+                     "approve Https://example.org", "approve github.com/acme/web-app/pull/8", "approve acme/web-app/pull/8",
+                     "approve www.example.org", "", None, 7):
             with self.subTest(text=text):
                 self.assertFalse(chat_review.parse_follow_up(text))
 
@@ -1951,6 +1953,13 @@ class FollowUpTests(ChatCase):
         self.assertEqual(self.follow("approve", message="m5", app=MOODY_APP_USER), ["review"])
         moody = [record for record in self.records() if record["message"].endswith("/m5")][0]
         self.assertEqual((moody["app"], moody["number"]), ("moody", 8))
+
+    def test_the_newest_request_wins_to_the_microsecond(self):
+        now = time.time()
+        self.deliver(msg(text="review https://github.com/acme/web-app/pull/8", message="m1", at=int(now) - 5 + 0.9),
+                     msg(message="m0", at=int(now) - 5 + 0.1))  # PR 7 first, then PR 8, in the same second
+        self.run_pass()
+        self.assertEqual(chat_review.earlier_request(SPACE, THREAD, "hermione"), ("acme/web-app", 8))
 
     def test_a_follow_up_through_the_second_app(self):
         self.second_app()
@@ -2138,6 +2147,26 @@ class UpgradeTests(ChatCase):
                 self.assertEqual(self.github(f"m-{state}"), ("already", None))
         self.assertEqual(self.events(), ["COMMENT"])
 
+    def test_a_comment_whose_marker_does_not_say_how_it_was_posted_is_never_upgraded(self):
+        self.ask("m1")
+        name = chat_review._github_marker("acme/web-app", 7, HEAD, "hermione")
+        with chat_review._folder(chat_review.GITHUB) as fd:  # as an older office wrote it
+            first = chat_review._read(fd, name)
+            chat_review.markers.replace(fd, name, {key: value for key, value in first.items() if key != "refused"})
+        self.switch(config.CHAT_REVIEW_APPROVE_FILE, True)
+        self.ask("m2")
+        self.assertEqual(self.github("m2"), ("already", None))
+        self.assertEqual(self.events(), ["COMMENT"])
+
+    def test_a_fallback_comment_is_never_upgraded(self):
+        self.switch(config.CHAT_REVIEW_APPROVE_FILE, True)
+        self.refused_events = ("APPROVE",)
+        self.ask("m1")
+        self.refused_events = ()
+        self.ask("m2")
+        self.assertEqual(self.events(), ["APPROVE", "COMMENT"])
+        self.assertEqual(self.github("m2"), ("already", None))
+
     def test_a_kill_before_the_upgrade_reaches_github_never_posts_it(self):
         self.ask("m1")
         self.switch(config.CHAT_REVIEW_APPROVE_FILE, True)
@@ -2162,7 +2191,8 @@ class UpgradeTests(ChatCase):
         with mock.patch.object(chat_review, "_end", side_effect=real):
             self.run_pass()
         self.assertEqual(self.github("m2"), ("posted", "APPROVE"))
-        # Killed between its own marker and the first marker's update: still never a second APPROVE.
+        # Killed between its own marker and the first marker's update: resuming repairs the first, and there is still
+        # never a second APPROVE.
         name = chat_review._github_marker("acme/web-app", 7, HEAD, "hermione")
         with chat_review._folder(chat_review.GITHUB) as fd:
             first = chat_review._read(fd, name)
@@ -2170,6 +2200,22 @@ class UpgradeTests(ChatCase):
             chat_review.markers.replace(fd, name, {**first, "event": "COMMENT"})
         self.ask("m3")
         self.assertEqual(self.github("m3"), ("already", None))
+        self.assertEqual(self.events(), ["COMMENT", "APPROVE"])
+
+    def test_a_kill_before_the_first_marker_says_upgraded_is_repaired_on_resume(self):
+        self.ask("m1")
+        self.switch(config.CHAT_REVIEW_APPROVE_FILE, True)
+        real = chat_review._mark_upgraded
+        with mock.patch.object(chat_review, "_mark_upgraded", side_effect=SystemExit(143)), \
+                self.assertRaises(SystemExit):
+            self.ask("m2")
+        with mock.patch.object(chat_review, "_mark_upgraded", side_effect=real):
+            self.run_pass()
+        self.assertEqual(self.github("m2"), ("posted", "APPROVE"))
+        name = chat_review._github_marker("acme/web-app", 7, HEAD, "hermione")
+        with chat_review._folder(chat_review.GITHUB) as fd:
+            self.assertEqual(chat_review._read(fd, name)["event"], "APPROVE")
+        self.ask("m3")
         self.assertEqual(self.events(), ["COMMENT", "APPROVE"])
 
     def test_a_kill_after_the_first_post_still_reports_the_comment_once_upgraded(self):

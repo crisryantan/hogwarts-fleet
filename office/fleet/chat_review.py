@@ -130,6 +130,8 @@ REVIEW_WORD = re.compile(r"\breview(?:s|ing)?\b", re.IGNORECASE)
 # An approve word asks for a review just as the review word does: whether it approves is the desk's parsed verdict and
 # the switches alone.
 APPROVE_WORD = re.compile(r"\bapprov(?:e|es|ed|ing|al)\b", re.IGNORECASE)
+# Anything in a follow-up that could name a PR, in any letter case: a scheme, a host or a PR path.
+LINKISH = re.compile(r"://|github\.com|/pulls?/|\bwww\.", re.IGNORECASE)
 # A request that also asks for work beyond the review: its acknowledgement then says a review is all the desk does. A
 # work word counts only as an instruction (at the start, or after "and", "then", "please", "you" or a sentence mark), so
 # "review the fix" or "review these changes" is a plain review.
@@ -456,7 +458,7 @@ def parse_follow_up(text: object) -> bool:
     """Whether text, with the app mention already out, asks for another review of the PR its thread is about: no
     address or link of any kind, so it never names a PR, and the review word or an approve word. Nothing else in the
     text is read, kept or passed on."""
-    if not isinstance(text, str) or ANY_ADDRESS.search(text) is not None or LINK_MARKUP.search(text) is not None:
+    if not isinstance(text, str) or LINKISH.search(text) is not None or LINK_MARKUP.search(text) is not None:
         return False
     return _asks(text)
 
@@ -552,10 +554,10 @@ def earlier_request(space: str, thread: str, app: str) -> Optional[tuple]:
     """(repo, number) of the newest review request app took from Chat in that space and thread that is still on record
     (CHAT_REVIEW_KEEP_SECONDS), whatever its outcome, when its repo is still allowed, else None. Only app's own
     records count, so a thread another app reviewed is no thread this one reviewed."""
-    for _, record in reversed(_records()):
-        if record.get("app", DEFAULT_APP) != app or record.get("source") != "chat" or record.get("kind") != "review" \
-                or record.get("space") != space or record.get("thread") != thread:
-            continue
+    found = [record for _, record in _records() if record.get("app", DEFAULT_APP) == app
+             and record.get("source") == "chat" and record.get("kind") == "review" and record.get("space") == space
+             and record.get("thread") == thread]
+    for record in sorted(found, key=_taken_us, reverse=True)[:1]:
         repo, number = record.get("repo"), record.get("number")
         if not isinstance(repo, str) or type(number) is not int or not 1 <= number <= 9999999999 \
                 or not _repo_ok(repo):
@@ -565,6 +567,14 @@ def earlier_request(space: str, thread: str, app: str) -> Optional[tuple]:
     return None
 
 
+def _taken_us(record: dict) -> int:
+    """When the record's message was created, to the microsecond where it says, else to the second."""
+    at_us, at = record.get("at_us"), record.get("at")
+    if type(at_us) is int:
+        return at_us
+    return at * 1_000_000 if type(at) is int else 0
+
+
 def listening_threads(space: str, app: str) -> frozenset:
     """The threads of space where the newest review request any app took from Chat, still on record, is app's: there
     app also takes a short follow-up that mentions no one. Two requests taken in the same second (one message to both
@@ -572,11 +582,11 @@ def listening_threads(space: str, app: str) -> frozenset:
     order = list(config.CHAT_REVIEW_APPS) if isinstance(config.CHAT_REVIEW_APPS, dict) else []
     newest: dict = {}
     for _, record in _records():
-        thread, owner, at = record.get("thread"), record.get("app", DEFAULT_APP), record.get("at")
+        thread, owner = record.get("thread"), record.get("app", DEFAULT_APP)
         if record.get("source") != "chat" or record.get("kind") != "review" or record.get("space") != space \
-                or not isinstance(thread, str) or type(at) is not int:
+                or not isinstance(thread, str):
             continue
-        rank = (at, -order.index(owner) if owner in order else -len(order))
+        rank = (_taken_us(record), -order.index(owner) if owner in order else -len(order))
         if thread not in newest or rank >= newest[thread][0]:
             newest[thread] = (rank, owner)
     return frozenset(thread for thread, (_, owner) in newest.items() if owner == app)
@@ -1115,9 +1125,9 @@ def post_github(key: str, record: dict, poster: Callable = None) -> dict:
         if not markers.publish(fd, name, {"state": "posting", "request": key, "at": int(time.time())}):
             marker = _read(fd, name)
             # Posting or uncertain still blocks, and so does a COMMENT GitHub took only after refusing an approval
-            # or change request, since it refuses an APPROVE there too.
+            # or change request, since it refuses an APPROVE there too, or one whose marker does not say (older).
             if marker is None or marker.get("request") == key or marker["state"] != "posted" \
-                    or marker.get("event") != "COMMENT" or marker.get("refused") is not None:
+                    or marker.get("event") != "COMMENT" or "refused" not in marker or marker["refused"] is not None:
                 return _end(key, record, "reviewed", github="already")
             return _upgrade(key, record, poster)
     body = github_body(display_name(record.get("requester_name")), sha, record["verdict"], record.get("blocking", []),
@@ -1179,11 +1189,17 @@ def _upgrade(key: str, record: dict, poster: Callable) -> dict:
     with _folder(GITHUB) as fd:
         markers.replace(fd, upgrade, {"state": "posted", "request": key, "url": posted["url"], "event": "APPROVE",
                                       "at": int(time.time())})
-        first = _read(fd, name)
-        if first is not None:
-            markers.replace(fd, name, {**first, "event": "APPROVE",
-                                       "upgraded": {"from": first.get("event"), "request": key, "url": posted["url"]}})
+    _mark_upgraded(name, key, posted["url"])
     return _end(key, record, "reviewed", github="posted", github_url=posted["url"], github_event="APPROVE")
+
+
+def _mark_upgraded(name: str, key: str, url: object) -> None:
+    """The first marker says the APPROVE followed its COMMENT, once."""
+    with _folder(GITHUB) as fd:
+        first = _read(fd, name)
+        if first is not None and first.get("event") == "COMMENT":
+            markers.replace(fd, name, {**first, "event": "APPROVE",
+                                       "upgraded": {"from": "COMMENT", "request": key, "url": url}})
 
 
 def _github_or_done(key: str, record: dict) -> dict:
@@ -1221,7 +1237,9 @@ def _resume_upgrade(key: str, record: dict) -> dict:
         return post_github(key, record)
     if marker is None or marker.get("request") != key:
         return _end(key, record, "reviewed", github="already" if marker is not None else "uncertain")
-    if marker["state"] == "posted":
+    if marker["state"] == "posted":  # posted, perhaps killed before the first marker said so
+        _mark_upgraded(_github_marker(record["repo"], record["number"], record["sha"], app_of(record)), key,
+                       marker.get("url"))
         return _end(key, record, "reviewed", github="posted", github_url=marker.get("url"), github_event="APPROVE")
     return _end(key, record, "reviewed", github="uncertain")
 
@@ -1356,7 +1374,8 @@ def take_message(message: dict, space: str, token: str, known: dict, now: int, a
     thread = message["thread"]
     if google_chat.THREAD.fullmatch(thread) is None or not thread.startswith(space + "/"):
         return ignored("a message with no thread in its space")
-    record = {"message": name, "space": space, "thread": thread, "source": "chat", "app": app, "at": at}
+    record = {"message": name, "space": space, "thread": thread, "source": "chat", "app": app, "at": at,
+              "at_us": message["created_us"]}
     email = _senders_in(space, token, known).get(message["sender"])
     if not mentioned:
         asked = earlier_request(space, thread, app) if email is not None and parse_unmentioned(message["argument"]) \
