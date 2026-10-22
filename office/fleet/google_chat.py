@@ -430,15 +430,25 @@ def _mentions(message: dict, app_user: str) -> bool:
     return False
 
 
+def _mentions_anyone(message: dict) -> bool:
+    """Whether the message mentions anyone at all, a person or an app."""
+    annotations = message.get("annotations")
+    return any(isinstance(item, dict) and item.get("type") == "USER_MENTION"
+               for item in (annotations if isinstance(annotations, list) else []))
+
+
 def _text(value: object, limit: int) -> str:
     return value[:limit] if isinstance(value, str) else ""
 
 
-def list_messages(space: str, after_us: int, app_user: str, token: str, page: Optional[str] = None) -> tuple:
+def list_messages(space: str, after_us: int, app_user: str, token: str, page: Optional[str] = None,
+                  threads: frozenset = frozenset()) -> tuple:
     """One page of space's messages created after after_us, oldest first, with your read token: (messages, the next
     page's token or None). A message that does not mention the app (app_user) is given back as its time alone, so
     nothing else of it ever leaves here; one that does is its name, time, thread, sender and the text Chat gives with
-    the app mentions taken out (argumentText)."""
+    the app mentions taken out (argumentText). The one exception, for a thread follow-up: a message that mentions no
+    one at all, in one of threads (those where the app has the newest review request), is given back the same way,
+    marked listening, with its whole text."""
     if not isinstance(app_user, str) or USER.fullmatch(app_user) is None:
         raise GoogleError("the app's user name is not a Chat user name")
     query = {"pageSize": PAGE_SIZE, "filter": f'createTime > "{rfc3339(after_us)}"', "orderBy": "createTime ASC"}
@@ -458,15 +468,18 @@ def list_messages(space: str, after_us: int, app_user: str, token: str, page: Op
         at = time_us(item.get("createTime"))
         if at is None:
             continue
-        if not _mentions(item, app_user):
+        thread = item.get("thread") if isinstance(item.get("thread"), dict) else {}
+        mentions = _mentions(item, app_user)
+        listening = not mentions and thread.get("name") in threads and not _mentions_anyone(item)
+        if not mentions and not listening:
             messages.append({"created_us": at, "mentions": False})
             continue
         sender = item.get("sender") if isinstance(item.get("sender"), dict) else {}
-        thread = item.get("thread") if isinstance(item.get("thread"), dict) else {}
-        argument = item.get("argumentText")
+        argument = item.get("argumentText") if mentions else item.get("text")
         if not isinstance(argument, str) or len(argument) > TEXT_MAX:
             argument = ""  # text longer than Chat sends is read as none, never as a cut prefix
-        messages.append({"created_us": at, "mentions": True, "name": _text(item.get("name"), NAME_MAX * 2),
+        messages.append({"created_us": at, "mentions": mentions, "listening": listening,
+                         "name": _text(item.get("name"), NAME_MAX * 2),
                          "thread": _text(thread.get("name"), NAME_MAX * 2),
                          "sender": _text(sender.get("name"), NAME_MAX), "sender_type": _text(sender.get("type"), 20),
                          "sender_name": _text(sender.get("displayName"), NAME_MAX),

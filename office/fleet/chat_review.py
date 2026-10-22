@@ -17,12 +17,18 @@ Anyone in the company's Chat can send an app text, so everything here treats a m
   authorization for that app's project (fleet/google_chat.py: chat.messages.readonly and chat.memberships.readonly,
   nothing that writes). It reads only a conversation that is in CHAT_REVIEW_SPACES and that the app is a member of,
   checked each pass, and only the messages created since the app's read marker for it, a few pages at most. A
-  message that does not mention the app is dropped as it is read: never kept, never logged. Of those that mention it,
+  message that does not mention the app is dropped as it is read, never kept, never logged, but for the thread
+  follow-ups below. Of those that mention it,
   one from a human whose Chat user is the member of that conversation with an email in CHAT_REVIEW_SENDERS, whose
   text, once the app mention is taken out, has exactly one GitHub PR link (https://github.com/<owner>/<repo>/pull/<n>,
-  bare or in <>), for an allowlisted repo, and the word review outside it, becomes a queued review and the rest of
-  the text is ignored, never kept, logged or passed on; anything else from them (no review word, two links, a repo
-  not listed) gets the app's fixed help reply, and a person not on the list the fixed refusal. Each is taken once
+  bare or in <>), for an allowlisted repo, and the word review or an approve word outside it, becomes a queued review
+  and the rest of the text is ignored, never kept, logged or passed on. One with no link at all and one of those
+  words, in a thread where the app already took a review request still on record, is a follow-up: a queued review of
+  that request's PR (the newest one's), under the same lists and caps. Anything else from them (no review word, two
+  links, a repo not listed, a follow-up in a thread the app never reviewed) gets the app's fixed help reply, and a
+  person not on the list the fixed refusal. In a thread where the app has the newest review request of any app, a
+  follow-up of at most UNMENTIONED_WORDS_MAX words that mentions no one at all is taken too, from an allowed sender
+  only; any other message there that does not mention the app is dropped like any other. Each is taken once
   per app, even across kills and the overlap of each read: its record, named by a digest of the app and the Chat
   message's name, is made create-exclusive, and a message whose record for that app exists is never taken by it
   again. At most CHAT_REVIEW_PULL_MAX are taken a pass, across every app, and one waiting longer than
@@ -53,7 +59,8 @@ Anyone in the company's Chat can send an app text, so everything here treats a m
   chat-review-approve holds "on" as well, read just before the post; else COMMENT. An APPROVE or REQUEST_CHANGES review
   is your gh account's own review, so it counts for branch protection. GitHub refuses both on a PR your gh login
   opened, and a refused one is posted once more as COMMENT under the same marker; the event that posted is the
-  record's github_event and is in its log line.
+  record's github_event and is in its log line. The one second post: a later review of the same head commit that is
+  an APPROVE follows a posted COMMENT once, under its own create-exclusive marker; a refused one posts nothing.
 - Each reply carries a request id made from its record, so a reply sent again after a kill is the same Chat message.
   It goes as the app that was mentioned (spaces.messages.create with the chat.bot scope, that app's worker service
   account's token, which never reads) in the request's thread.
@@ -120,13 +127,18 @@ PR_WORD = re.compile(_PR_LINK + r"(?:/(?:files|commits|checks))?(?:[?#]\S*)?")
 ANY_ADDRESS = re.compile(r"https?://\S*")
 LINK_MARKUP = re.compile(r"<(https?://[^\s<>|]*)(?:\|([^<>\n]*))?>")
 REVIEW_WORD = re.compile(r"\breview(?:s|ing)?\b", re.IGNORECASE)
+# An approve word asks for a review just as the review word does: whether it approves is the desk's parsed verdict and
+# the switches alone.
+APPROVE_WORD = re.compile(r"\bapprov(?:e|es|ed|ing|al)\b", re.IGNORECASE)
 # A request that also asks for work beyond the review: its acknowledgement then says a review is all the desk does. A
 # work word counts only as an instruction (at the start, or after "and", "then", "please", "you" or a sentence mark), so
 # "review the fix" or "review these changes" is a plain review.
 OTHER_WORK = re.compile(r"(?:^|[,.;:!&]|\b(?:and|then|also|please|pls|plz|you)\b)\s*(?:(?:also|please|pls|plz|then|just"
                         r"|to)\s+)*(?:fix|change|update|edit|patch|rewrite|refactor|implement|address|resolve|commit"
-                        r"|push|merge|approve|deploy|run|build)\b", re.IGNORECASE | re.MULTILINE)
+                        r"|push|merge|deploy|run|build)\b", re.IGNORECASE | re.MULTILINE)
 NEGATION = re.compile(r"\b(?:don'?t|do not|doesn'?t|never|no need|without|not)\b", re.IGNORECASE)
+# The most words a message that does not mention the app may have and still be a thread follow-up.
+UNMENTIONED_WORDS_MAX = 8
 PR_TEXT_MAX = 20000
 FINDINGS_MAX = 15
 FINDING_MAX = 300
@@ -138,7 +150,9 @@ ECHO_MAX = 40
 # The fixed replies. Nothing a requester wrote is ever in one. The help reply names the app as its settings spell it
 # (help_text), and each desk says what it does in its own words (Voice.does).
 HELP = ("I'm {name}, and {does}. Mention me with a GitHub PR link and the word review, for a repo I take, and one PR"
-        " link per message. I don't answer questions or fix, merge, build, run or deploy anything.")
+        " link per message. In a thread where I already reviewed a PR, \"review again\" or \"approve\" works without"
+        " the link, and I approve only when my review passes. I don't answer questions or fix, merge, build, run or"
+        " deploy anything.")
 # The acknowledgement of an accepted request: one of the desk's lines, picked by the request's own digest, and then,
 # when the request asked for other work too, its line saying a review is all it does. Nothing a requester wrote is
 # ever in one.
@@ -410,10 +424,17 @@ def _pr_words(text: str) -> list:
     return found
 
 
+def _asks(text: str) -> bool:
+    """Whether text, outside every address, holds the review word or an approve word."""
+    plain = ANY_ADDRESS.sub(" ", text)
+    return REVIEW_WORD.search(plain) is not None or APPROVE_WORD.search(plain) is not None
+
+
 def parse_request(text: object) -> Optional[tuple]:
     """(repo, number) when text, with the app mention already out, asks for a review: exactly one GitHub PR link, for an
-    allowed repo, and the word review (or reviews, reviewing) outside every address and link label, else None. Nothing
-    else in the text is read, kept or passed on; only the link rebuilt from what the pattern matched is."""
+    allowed repo, and the word review (or reviews, reviewing) or an approve word (approve, approves, approved,
+    approving, approval) outside every address and link label, else None. Nothing else in the text is read, kept or
+    passed on; only the link rebuilt from what the pattern matched is."""
     if not isinstance(text, str):
         return None
     links = []
@@ -426,9 +447,18 @@ def parse_request(text: object) -> Optional[tuple]:
             links += [target.group(1, 2, 3), *named]
     plain = LINK_MARKUP.sub(" ", text)
     links += _pr_words(plain)
-    if len(links) != 1 or REVIEW_WORD.search(ANY_ADDRESS.sub(" ", plain)) is None:
+    if len(links) != 1 or not _asks(plain):
         return None
     return _allowed_pr(*links[0])
+
+
+def parse_follow_up(text: object) -> bool:
+    """Whether text, with the app mention already out, asks for another review of the PR its thread is about: no
+    address or link of any kind, so it never names a PR, and the review word or an approve word. Nothing else in the
+    text is read, kept or passed on."""
+    if not isinstance(text, str) or ANY_ADDRESS.search(text) is not None or LINK_MARKUP.search(text) is not None:
+        return False
+    return _asks(text)
 
 
 def asks_other_work(text: object) -> bool:
@@ -452,6 +482,12 @@ def _allowed_pr(owner: str, name: str, number: str) -> Optional[tuple]:
         return None
     listed = allowed_repo(repo)
     return None if listed is None else (listed, int(number))
+
+
+def parse_unmentioned(text: object) -> bool:
+    """Whether a message that mentions no one is a follow-up in a thread the app reviewed: a follow-up (parse_follow_up)
+    of at most UNMENTIONED_WORDS_MAX words."""
+    return isinstance(text, str) and len(text.split()) <= UNMENTIONED_WORDS_MAX and parse_follow_up(text)
 
 
 # Office records
@@ -510,6 +546,40 @@ def _records() -> list:
                 if record is not None:
                     found.append((name[:-5], record))
     return sorted(found, key=lambda item: (item[1].get("at", 0), item[0]))
+
+
+def earlier_request(space: str, thread: str, app: str) -> Optional[tuple]:
+    """(repo, number) of the newest review request app took from Chat in that space and thread that is still on record
+    (CHAT_REVIEW_KEEP_SECONDS), whatever its outcome, when its repo is still allowed, else None. Only app's own
+    records count, so a thread another app reviewed is no thread this one reviewed."""
+    for _, record in reversed(_records()):
+        if record.get("app", DEFAULT_APP) != app or record.get("source") != "chat" or record.get("kind") != "review" \
+                or record.get("space") != space or record.get("thread") != thread:
+            continue
+        repo, number = record.get("repo"), record.get("number")
+        if not isinstance(repo, str) or type(number) is not int or not 1 <= number <= 9999999999 \
+                or not _repo_ok(repo):
+            return None
+        listed = allowed_repo(repo)
+        return None if listed is None else (listed, number)
+    return None
+
+
+def listening_threads(space: str, app: str) -> frozenset:
+    """The threads of space where the newest review request any app took from Chat, still on record, is app's: there
+    app also takes a short follow-up that mentions no one. Two requests taken in the same second (one message to both
+    apps) go to the app first in CHAT_REVIEW_APPS."""
+    order = list(config.CHAT_REVIEW_APPS) if isinstance(config.CHAT_REVIEW_APPS, dict) else []
+    newest: dict = {}
+    for _, record in _records():
+        thread, owner, at = record.get("thread"), record.get("app", DEFAULT_APP), record.get("at")
+        if record.get("source") != "chat" or record.get("kind") != "review" or record.get("space") != space \
+                or not isinstance(thread, str) or type(at) is not int:
+            continue
+        rank = (at, -order.index(owner) if owner in order else -len(order))
+        if thread not in newest or rank >= newest[thread][0]:
+            newest[thread] = (rank, owner)
+    return frozenset(thread for thread, (_, owner) in newest.items() if owner == app)
 
 
 def log(event: str, **fields) -> None:
@@ -998,6 +1068,11 @@ def _github_marker(repo: str, number: int, sha: str, app: str) -> str:
     return f"{_digest(_scoped(app, f'{repo.lower()}#{number}@{sha}'))}.json"
 
 
+def _upgrade_marker(repo: str, number: int, sha: str, app: str) -> str:
+    """The marker of the one APPROVE that may follow a COMMENT the app posted on the PR at that head commit."""
+    return f"{_digest(_scoped(app, f'{repo.lower()}#{number}@{sha}:approve'))}.json"
+
+
 def github_on() -> bool:
     return common.opt_in_on(config.CHAT_REVIEW_GITHUB_FILE)
 
@@ -1027,7 +1102,8 @@ def post_github(key: str, record: dict, poster: Callable = None) -> dict:
     """Post the review on the PR once per (app, PR, head commit), only while chat-review-github is on: a marker made
     create-exclusive first, so a second request to that app, or this one after a kill, never posts it again. A
     REQUEST_CHANGES or APPROVE review GitHub refuses (it refuses both on a PR the gh login opened) is posted once more
-    as COMMENT, under the same marker. The record as it ends, with the event that posted in github_event."""
+    as COMMENT, under the same marker. The one exception to once: a COMMENT posted may be followed by one APPROVE
+    (_upgrade). The record as it ends, with the event that posted in github_event."""
     poster = poster or gitops.post_pr_review
     repo, number, sha, app = record["repo"], record["number"], record["sha"], app_of(record)
     if not intake_on(record):
@@ -1037,10 +1113,17 @@ def post_github(key: str, record: dict, poster: Callable = None) -> dict:
     name = _github_marker(repo, number, sha, app)
     with _folder(GITHUB) as fd:
         if not markers.publish(fd, name, {"state": "posting", "request": key, "at": int(time.time())}):
-            return _end(key, record, "reviewed", github="already")
+            marker = _read(fd, name)
+            # Posting or uncertain still blocks, and so does a COMMENT GitHub took only after refusing an approval
+            # or change request, since it refuses an APPROVE there too.
+            if marker is None or marker.get("request") == key or marker["state"] != "posted" \
+                    or marker.get("event") != "COMMENT" or marker.get("refused") is not None:
+                return _end(key, record, "reviewed", github="already")
+            return _upgrade(key, record, poster)
     body = github_body(display_name(record.get("requester_name")), sha, record["verdict"], record.get("blocking", []),
                        record.get("non_blocking", []), app)
     event = github_event(record["verdict"], record.get("blocking", []), record.get("non_blocking", []))
+    refused = None
     try:
         try:
             posted = poster(repo, number, sha, body, event)
@@ -1052,7 +1135,7 @@ def post_github(key: str, record: dict, poster: Callable = None) -> dict:
                 with _folder(GITHUB) as fd, contextlib.suppress(OSError):
                     os.unlink(name, dir_fd=fd)
                 return record if not intake_on(record) else _end(key, record, "reviewed", github="off")
-            event = "COMMENT"  # surely not posted, so the one try as COMMENT cannot make a second review
+            refused, event = event, "COMMENT"  # surely not posted, so the one try as COMMENT makes no second review
             posted = poster(repo, number, sha, body, event)
     except gitops.Refused as exc:
         with _folder(GITHUB) as fd, contextlib.suppress(OSError):
@@ -1064,8 +1147,43 @@ def post_github(key: str, record: dict, poster: Callable = None) -> dict:
         return _end(key, record, "reviewed", github="uncertain", github_why=common.scrubbed_line(exc, 200))
     with _folder(GITHUB) as fd:
         markers.replace(fd, name, {"state": "posted", "request": key, "url": posted["url"], "event": event,
-                                   "at": int(time.time())})
+                                   "refused": refused, "at": int(time.time())})
     return _end(key, record, "reviewed", github="posted", github_url=posted["url"], github_event=event)
+
+
+def _upgrade(key: str, record: dict, poster: Callable) -> dict:
+    """The app posted a COMMENT on this PR at this head commit for another request: post this review as APPROVE when
+    it is one (a PASS with no blocking finding, both switches on, read now), at most once per (app, PR, head commit),
+    under its own marker made create-exclusive before the post, so a kill at any point never posts it twice. A
+    refused APPROVE leaves the COMMENT as it is and posts nothing else. Anything but APPROVE is "already"."""
+    repo, number, sha, app = record["repo"], record["number"], record["sha"], app_of(record)
+    if github_event(record["verdict"], record.get("blocking", []), record.get("non_blocking", [])) != "APPROVE":
+        return _end(key, record, "reviewed", github="already")
+    name, upgrade = _github_marker(repo, number, sha, app), _upgrade_marker(repo, number, sha, app)
+    with _folder(GITHUB) as fd:
+        if not markers.publish(fd, upgrade, {"state": "posting", "request": key, "at": int(time.time())}):
+            return _end(key, record, "reviewed", github="already")
+    body = github_body(display_name(record.get("requester_name")), sha, record["verdict"], record.get("blocking", []),
+                       record.get("non_blocking", []), app)
+    try:
+        posted = poster(repo, number, sha, body, "APPROVE")
+    except gitops.Refused as exc:
+        log("github-refused", request=key[:12], github_event="APPROVE", why=common.scrubbed_line(exc, 200))
+        with _folder(GITHUB) as fd, contextlib.suppress(OSError):
+            os.unlink(upgrade, dir_fd=fd)  # surely not posted: the COMMENT stands, and no second one is posted
+        return _end(key, record, "reviewed", github="refused", github_why=common.scrubbed_line(exc, 200))
+    except (FleetError, StoreError) as exc:
+        with _folder(GITHUB) as fd:
+            markers.replace(fd, upgrade, {"state": "uncertain", "request": key, "at": int(time.time())})
+        return _end(key, record, "reviewed", github="uncertain", github_why=common.scrubbed_line(exc, 200))
+    with _folder(GITHUB) as fd:
+        markers.replace(fd, upgrade, {"state": "posted", "request": key, "url": posted["url"], "event": "APPROVE",
+                                      "at": int(time.time())})
+        first = _read(fd, name)
+        if first is not None:
+            markers.replace(fd, name, {**first, "event": "APPROVE",
+                                       "upgraded": {"from": first.get("event"), "request": key, "url": posted["url"]}})
+    return _end(key, record, "reviewed", github="posted", github_url=posted["url"], github_event="APPROVE")
 
 
 def _github_or_done(key: str, record: dict) -> dict:
@@ -1084,10 +1202,27 @@ def _resume_github(key: str, record: dict) -> dict:
     if not begun:
         return post_github(key, record)
     if marker is not None and marker.get("request") == key and marker["state"] == "posted":
+        upgraded = marker.get("upgraded")
         return _end(key, record, "reviewed", github="posted", github_url=marker.get("url"),
-                    github_event=marker.get("event"))
+                    github_event=upgraded.get("from") if isinstance(upgraded, dict) else marker.get("event"))
     if marker is not None and marker.get("request") != key:
-        return _end(key, record, "reviewed", github="already")
+        return _resume_upgrade(key, record)
+    return _end(key, record, "reviewed", github="uncertain")
+
+
+def _resume_upgrade(key: str, record: dict) -> dict:
+    """A request a kill stopped in its GitHub step after another request's post: its upgrade is tried only when its
+    marker is not there, so it never began; one it began is posted or uncertain, never tried again."""
+    upgrade = _upgrade_marker(record["repo"], record["number"], record["sha"], app_of(record))
+    with _folder(GITHUB) as fd:
+        begun = safefs.lstat(fd, upgrade) is not None
+        marker = _read(fd, upgrade) if begun else None
+    if not begun:
+        return post_github(key, record)
+    if marker is None or marker.get("request") != key:
+        return _end(key, record, "reviewed", github="already" if marker is not None else "uncertain")
+    if marker["state"] == "posted":
+        return _end(key, record, "reviewed", github="posted", github_url=marker.get("url"), github_event="APPROVE")
     return _end(key, record, "reviewed", github="uncertain")
 
 
@@ -1197,32 +1332,51 @@ def take_message(message: dict, space: str, token: str, known: dict, now: int, a
     review by its desk, anything else from them the app's fixed help reply, and anything from a person not allowed
     the fixed refusal, each as a record made create-exclusive, so a message read again (the overlap of each read, or
     after a kill) is "seen before". A bot, a message too old or with no thread in its space gets nothing. What
-    happened, for the log."""
-    name = message["name"]
+    happened, for the log. A message that mentions no one, in a thread where app has the newest review request
+    (listening), is taken only as a follow-up from an allowed sender: anything else of it is ignored, with no reply,
+    no record and no log line."""
+    name, mentioned = message["name"], message["mentions"] is True
+
+    def ignored(why: str) -> str:
+        return _ignored(name, why) if mentioned else "ignored"
+
     named = MESSAGE_NAME.fullmatch(name)
     if named is None or named.group(1) != space:
-        return _ignored(name, "a message with no name in its space")
+        return ignored("a message with no name in its space")
     key = _message_key(name, app)
     if read_record(key) is not None:
         return "seen before"
     if message["sender_type"] != "HUMAN":
-        return _ignored(name, "a message from no human")
+        return ignored("a message from no human")
     at = message["created_us"] // 1_000_000
     if at > now + CLOCK_SKEW_SECONDS:
-        return _ignored(name, "a message with no time it was sent")
+        return ignored("a message with no time it was sent")
     if now - at > config.CHAT_REVIEW_QUEUE_MAX_SECONDS:
-        return _ignored(name, "a message that waited too long")
+        return ignored("a message that waited too long")
     thread = message["thread"]
     if google_chat.THREAD.fullmatch(thread) is None or not thread.startswith(space + "/"):
-        return _ignored(name, "a message with no thread in its space")
+        return ignored("a message with no thread in its space")
     record = {"message": name, "space": space, "thread": thread, "source": "chat", "app": app, "at": at}
     email = _senders_in(space, token, known).get(message["sender"])
-    if email is None:
+    if not mentioned:
+        asked = earlier_request(space, thread, app) if email is not None and parse_unmentioned(message["argument"]) \
+            else None
+        if asked is None:
+            return "ignored"
+        record = {**record, "requester": email, "requester_name": display_name(message["sender_name"]),
+                  "state": "queued", "kind": "review", "repo": asked[0], "number": asked[1], "follow_up": True,
+                  "mentioned": False, "other_work": False}
+    elif email is None:
         # Who they are is not kept: the record holds only the message's names and the fixed reply.
         record = {**record, "state": "reply", "kind": "refusal", "reply": SENDER_REFUSED, "outcome": "not-allowed"}
     else:
         record = {**record, "requester": email, "requester_name": display_name(message["sender_name"])}
         asked = parse_request(message["argument"])
+        if asked is None and parse_follow_up(message["argument"]):
+            # A follow-up in a thread where this app already took a review request: the same PR again, never another.
+            asked = earlier_request(space, thread, app)
+            if asked is not None:
+                record = {**record, "follow_up": True}
         if asked is None:
             record = {**record, "state": "reply", "kind": "help", "reply": help_text(app), "outcome": "help"}
         else:
@@ -1243,11 +1397,13 @@ def read_space(space: str, token: str, known: dict, done: list, room: int, now: 
     overlap harmless; one cut short (by the page cap, or by room at a message it could not take) goes on from just
     before where it stopped, so a message sharing that microsecond is not lost. It never reads from before its first
     read or the app's current membership began, nor further back than the queue limit, and a message time ahead of
-    this Mac's clock never moves the marker. A message that does not mention the app
-    is never kept or logged."""
+    this Mac's clock never moves the marker. A message that does not mention the app is never kept or logged, but for
+    a short follow-up that mentions no one, from an allowed sender, in a thread where the app has the newest review
+    request (listening_threads), which take_message takes as a review."""
     marker = _read_marker(space, app)
     now_us = max(int(time.time() * 1_000_000), now * 1_000_000)
     member = google_chat.app_member(space, token)
+    threads = listening_threads(space, app) if member is not None else frozenset()
     if member is None:
         if marker is None or marker.get("member") is not False:
             log("not-a-member", space=space, app=app)
@@ -1269,13 +1425,16 @@ def read_space(space: str, token: str, known: dict, done: list, room: int, now: 
         for _ in range(config.CHAT_REVIEW_LIST_PAGES):
             if not common.opt_in_on(config.CHAT_REVIEW_FILE):
                 break
-            messages, page = google_chat.list_messages(space, after, app_user, token, page)
+            messages, page = google_chat.list_messages(space, after, app_user, token, page, threads)
             for message in messages:
-                if message["mentions"]:
+                if message["mentions"] or (message.get("listening") is True
+                                           and parse_unmentioned(message.get("argument"))):
                     if sum(outcome in TAKEN for outcome in done) >= room:
                         waiting = min(message["created_us"], now_us)  # no room: the next read starts here
                         return
-                    done.append(take_message(message, space, token, known, now, app))
+                    outcome = take_message(message, space, token, known, now, app)
+                    if message["mentions"] or outcome != "ignored":  # an unmentioned one ignored leaves no trace
+                        done.append(outcome)
                 if message["created_us"] <= now_us:  # a time ahead of this Mac's clock never moves the marker
                     newest = max(newest, message["created_us"])
             if page is None:

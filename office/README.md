@@ -547,18 +547,29 @@ while that app is a member of it: each pass first asks Chat for the app's own me
 conversation in the office. A first read only sets it, so nothing from before is answered, and each read lists the
 messages created since it (back by `CHAT_REVIEW_READ_OVERLAP_SECONDS`, for a message Chat lists a little late), at
 most `CHAT_REVIEW_LIST_PAGES` pages. A message that does not mention the app is dropped as it is read: never kept,
-never logged. Of those that mention it:
+never logged, but for the short thread follow-up below. Of those that mention it:
 
 - one from a person whose membership of that conversation belongs to an email in `CHAT_REVIEW_SENDERS`, whose text,
   once the app mentions are out, holds exactly one GitHub PR link (`https://github.com/<owner>/<repo>/pull/<n>`, bare
-  or in `<>`) for a repo in `CHAT_REVIEW_REPOS` and the word review (also reviews or reviewing, any letter case)
-  outside the link, becomes a queued review. Every other word is ignored: never kept, never logged, never shown to the
-  reviewer, which gets only the link rebuilt from what matched. The thread first gets a short fixed acknowledgement as
-  that app, one of its desk's few lines, picked by the request's own digest, never echoing the message. A message that
-  also asks to fix or merge gets the desk's line saying a review is all it does, and still gets the review and
-  nothing more;
-- anything else from them, a question, a task, no review word, two or more PR links or a repo that is not listed,
-  gets the app's one fixed help text saying it does code reviews only;
+  or in `<>`) for a repo in `CHAT_REVIEW_REPOS` and the word review (also reviews or reviewing) or an approve word
+  (approve, approves, approved, approving or approval), any letter case, outside the link, becomes a queued review.
+  Every other word is ignored: never kept, never logged, never shown to the reviewer, which gets only the link rebuilt
+  from what matched. The thread first gets a short fixed acknowledgement as that app, one of its desk's few lines,
+  picked by the request's own digest, never echoing the message. A message that also asks to fix or merge gets the
+  desk's line saying a review is all it does, and still gets the review and nothing more. An approve word only asks
+  for the review: whether it approves is its verdict and the switches below, nothing the message says;
+- one from them with no link or address at all and one of those words, in a thread where the same app already took
+  a review request whose record is still kept, whatever came of it, is a follow-up: a queued review of that request's
+  PR, the newest one's when there are several, under the same sender, space and repo lists and caps. So "review
+  again" or "approve" works in a thread the app already reviewed. A follow-up never names another PR, and only the
+  app's own requests count, so a thread only the other app reviewed is no thread this one reviewed. In a thread
+  where the app has the newest review request of either app (one message to both leaves it to the first app in
+  `CHAT_REVIEW_APPS`), a follow-up needs no mention either: a message there that mentions no one at all, from an
+  allowed sender, with no link, at most 8 words and one of those words, is the same follow-up, so "review again"
+  works without tagging the app. Any other message there that does not mention the app is dropped like any other:
+  no reply, no record, no log line;
+- anything else from them, a question, a task, no review word, two or more PR links, a repo that is not listed or a
+  follow-up in a thread the app never reviewed, gets the app's one fixed help text saying it does code reviews only;
 - a person not on the list gets one fixed refusal, and who they are is not kept;
 - a bot, or a message older than `CHAT_REVIEW_QUEUE_MAX_SECONDS`, gets nothing.
 
@@ -607,8 +618,14 @@ request on a PR your `gh` login opened; when it refuses one, the review is poste
 lands, and the event that posted is in the request's record and its log line. The review opens with a fixed line
 saying it is an automated review by the app (its name as its settings spell it) requested by the requester in Chat,
 naming them by their Chat display name (scrubbed, at most 60 characters, else "a teammate"), never their email, which
-stays in the office's own log, and it is posted at most once per app, PR and head commit. Findings are defanged before
-they are posted, so no mention or link markup in them survives in either place.
+stays in the office's own log, and it is posted at most once per app, PR and head commit, with one exception: when the
+app posted a COMMENT there (a pass while the approve switch was off), a later review of that same head commit that
+is an APPROVE is posted once more, so asking it to approve after turning the switch on works. That second post has
+its own create-exclusive marker, made before it is posted, so a kill never posts it twice, and nothing else is ever
+posted a second time: no second COMMENT, REQUEST_CHANGES or APPROVE, nothing after a change request, nothing while
+the first post is still in flight or uncertain, and nothing over a COMMENT GitHub took only after refusing an approval
+or change request. When GitHub refuses that APPROVE, the COMMENT stands and nothing else is posted. Findings are
+defanged before they are posted, so no mention or link markup in them survives in either place.
 
 Every request, its app, its outcome and its cost is one JSON line in `logs/chat-review.log`, and its record stays in
 `chat-reviews/requests/` for 30 days. `fleet review pr <link> --requested-by <email>` runs Hermione's review from your
