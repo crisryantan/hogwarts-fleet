@@ -2049,6 +2049,17 @@ class SecondAppTests(ChatCase):
         self.assertEqual(os.listdir(self.office / "runs" / "moody"), [])
         self.assertEqual(len(self.turns), 1)
 
+    def test_both_briefs_give_the_same_block_and_place_rule(self):
+        for brief in (chat_review.BRIEF, chat_review.MOODY_BRIEF):
+            self.assertIn("exactly PR title or PR description", brief)
+            self.assertIn("VERDICT: PASS | CHANGES", brief)
+        self.second_app()
+        self.answer = ("ok", block(non_blocking=("PR description | says more than the diff does",)))
+        self.deliver(msg(app=MOODY_APP_USER))
+        self.run_pass()
+        [record] = self.records()
+        self.assertEqual((record["app"], record["outcome"]), ("moody", "reviewed"))
+
     def test_moodys_answer_is_read_strictly_like_hermiones(self):
         self.second_app()
         self.switch(config.CHAT_REVIEW_GITHUB_FILE, True)
