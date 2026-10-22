@@ -1,16 +1,18 @@
-"""Store the chat review worker's service account key in your login Keychain, or replace it when you rotate it.
+"""Store a chat review app's worker service account key in your login Keychain, or replace it when you rotate it.
 
-Run it yourself in Terminal, from your clone of the kit, right after you download the worker service account's JSON key
-from Google Cloud:
-  /usr/bin/python3 -I -B scripts/chat-review-store-key.py <downloaded key.json>
+Run it yourself in Terminal, from your clone of the kit, right after you download the app's worker service account's
+JSON key from Google Cloud:
+  /usr/bin/python3 -I -B scripts/chat-review-store-key.py [--app <desk>] <downloaded key.json>
 
-It reads CHAT_REVIEW_SERVICE_ACCOUNT and CHAT_REVIEW_KEYCHAIN_SERVICE from the installed office's fleet/config.py
-(~/.hogwarts), without running it, and refuses a key whose client_email is not that service account, so no other
-account's key can land here by mistake. It stores the private key's PKCS#8 body (base64) as a generic
-password in your login Keychain, service CHAT_REVIEW_KEYCHAIN_SERVICE and account the service account's email, by
-driving /usr/bin/security -i over its stdin: the key is never in any process's argv, a file this writes, or its
-output. An item already there is replaced (-U), which is how a rotated key goes in. It then reads the item back to
-check it, and tells you to delete the downloaded file. It prints OK or FAILED and exits 1 on any failure.
+--app names the app by its desk in CHAT_REVIEW_APPS (moody for the second app); without it the key is Hermione's. It
+reads that app's service account and key Keychain service settings, as CHAT_REVIEW_APPS names them, from the installed
+office's fleet/config.py (~/.hogwarts), without running it, refuses a Keychain service another app's setting also
+names, and refuses a key whose client_email is not that service account, so no other account's key can land here by
+mistake. It stores the private key's PKCS#8 body (base64) as a generic password in your login Keychain, service the
+app's key Keychain service and account the service account's email, by driving /usr/bin/security -i over its stdin:
+the key is never in any process's argv, a file this writes, or its output. An item already there is replaced (-U),
+which is how a rotated key goes in. It then reads the item back to check it, and tells you to delete the downloaded
+file. It prints OK or FAILED and exits 1 on any failure.
 """
 import ast
 import base64
@@ -28,15 +30,17 @@ SERVICE_ACCOUNT = re.compile(r"[a-z][a-z0-9-]{4,28}[a-z0-9]@[a-z][a-z0-9-]{4,28}
 KEYCHAIN_SERVICE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,99}")
 PEM = re.compile(r"-----BEGIN PRIVATE KEY-----\n?([A-Za-z0-9+/=\n]+?)\n?-----END PRIVATE KEY-----\n?")
 BODY = re.compile(rb"[A-Za-z0-9+/]{400,8000}={0,2}")
+APP = re.compile(r"[a-z][a-z0-9-]{0,39}")
+DEFAULT_APP = "hermione"
+USAGE = "usage: /usr/bin/python3 -I -B scripts/chat-review-store-key.py [--app <desk>] <downloaded key.json>"
 
 
 class Failed(Exception):
     pass
 
 
-def office_settings(office: str) -> tuple:
-    """(Keychain service, service account email) as the installed office's fleet/config.py sets them, read as text."""
-    path = os.path.join(office, "fleet", "config.py")
+def office_values(path: str) -> dict:
+    """Every top-level setting of the config file at path that is a plain literal, read as text, never run."""
     try:
         with open(path, encoding="utf-8") as handle:
             tree = ast.parse(handle.read())
@@ -44,17 +48,48 @@ def office_settings(office: str) -> tuple:
         raise Failed(f"could not read {path}. Install the office from this clone first") from None
     found = {}
     for node in tree.body:
-        if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
-            if node.targets[0].id in ("CHAT_REVIEW_KEYCHAIN_SERVICE", "CHAT_REVIEW_SERVICE_ACCOUNT"):
-                try:
-                    found[node.targets[0].id] = ast.literal_eval(node.value)
-                except ValueError:
-                    pass
-    service, account = found.get("CHAT_REVIEW_KEYCHAIN_SERVICE"), found.get("CHAT_REVIEW_SERVICE_ACCOUNT")
+        if isinstance(node, ast.Assign) and len(node.targets) == 1:
+            target, value = node.targets[0], node.value
+        elif isinstance(node, ast.AnnAssign) and node.value is not None:
+            target, value = node.target, node.value
+        else:
+            continue
+        if isinstance(target, ast.Name):
+            try:
+                found[target.id] = ast.literal_eval(value)
+            except ValueError:
+                pass
+    return found
+
+
+def app_names(found: dict, app: str, path: str) -> dict:
+    """The names of the settings of app, from CHAT_REVIEW_APPS."""
+    apps = found.get("CHAT_REVIEW_APPS")
+    names = apps.get(app) if isinstance(apps, dict) else None
+    if not isinstance(names, dict) or not all(isinstance(names.get(field), str) for field in
+                                              ("read_keychain", "service_account", "keychain")):
+        listed = ", ".join(sorted(apps)) if isinstance(apps, dict) else "none"
+        raise Failed(f"{app} is not a chat review app in CHAT_REVIEW_APPS in {path} (it lists: {listed})")
+    return names
+
+
+def office_settings(office: str, app: str = DEFAULT_APP) -> tuple:
+    """(Keychain service, service account email) of app as the installed office's fleet/config.py sets them, read as
+    text. Refused when that Keychain service is unfilled or another app's setting names it too."""
+    path = os.path.join(office, "fleet", "config.py")
+    found = office_values(path)
+    names = app_names(found, app, path)
+    service, account = found.get(names["keychain"]), found.get(names["service_account"])
     if not isinstance(service, str) or KEYCHAIN_SERVICE.fullmatch(service) is None:
-        raise Failed(f"CHAT_REVIEW_KEYCHAIN_SERVICE in {path} is not filled in yet")
+        raise Failed(f"{names['keychain']} in {path} is not filled in yet")
     if not isinstance(account, str) or SERVICE_ACCOUNT.fullmatch(account) is None:
-        raise Failed(f"CHAT_REVIEW_SERVICE_ACCOUNT in {path} is not filled in yet")
+        raise Failed(f"{names['service_account']} in {path} is not filled in yet")
+    for other, settings in found["CHAT_REVIEW_APPS"].items():
+        for field in ("read_keychain", "keychain"):
+            name = settings.get(field) if isinstance(settings, dict) else None
+            if (other, field) != (app, "keychain") and isinstance(name, str) and found.get(name) == service:
+                raise Failed(f"{names['keychain']} in {path} must differ from {name}, so no two authorizations share"
+                             " an item")
     return service, account
 
 
@@ -67,7 +102,7 @@ def key_body(raw: bytes, account: str) -> bytes:
     if not isinstance(key, dict) or key.get("type") != "service_account":
         raise Failed("that file is not a service account key")
     if key.get("client_email") != account:
-        raise Failed("that key is not for CHAT_REVIEW_SERVICE_ACCOUNT, the worker service account")
+        raise Failed("that key is not for the app's worker service account")
     match = PEM.fullmatch(key.get("private_key", "")) if isinstance(key.get("private_key"), str) else None
     body = match.group(1).replace("\n", "").encode("ascii") if match else b""
     try:
@@ -97,15 +132,26 @@ def store(service: str, account: str, body: bytes, home: str, run=subprocess.run
         raise Failed("the key did not read back from your login Keychain as it was stored")
 
 
+def parse_args(argv: list) -> tuple:
+    """(app, key file path) from [--app <desk>] <file>, else None."""
+    if len(argv) == 1 and not argv[0].startswith("-"):
+        return DEFAULT_APP, argv[0]
+    if len(argv) == 3 and argv[0] == "--app" and APP.fullmatch(argv[1]) and not argv[2].startswith("-"):
+        return argv[1], argv[2]
+    return None
+
+
 def main(argv: list) -> int:
-    if len(argv) != 1:
-        print("usage: /usr/bin/python3 -I -B scripts/chat-review-store-key.py <downloaded key.json>")
+    parsed = parse_args(argv)
+    if parsed is None:
+        print(USAGE)
         return 2
-    path = argv[0]
+    app, path = parsed
     home = os.path.expanduser("~")
     try:
-        service, account = office_settings(os.path.join(home, ".hogwarts"))
-        print(f"   OK      the worker service account is {account}, stored under Keychain service {service}")
+        service, account = office_settings(os.path.join(home, ".hogwarts"), app)
+        print(f"   OK      the {app} app's worker service account is {account}, stored under Keychain service"
+              f" {service}")
         try:
             with open(path, "rb") as handle:
                 raw = handle.read(KEY_MAX_BYTES + 1)

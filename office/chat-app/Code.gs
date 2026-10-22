@@ -1,5 +1,6 @@
 /**
- * Hermione (Staff Engineer): the chat review app's Apps Script connection. It does nothing.
+ * The Apps Script connection of every chat review app, Hermione's and Moody's alike. It does nothing. Each app's
+ * project gets this same file; only the manifest's addOns.common name and logoUrl differ from app to app.
  *
  * Chat calls these handlers, the Workspace add-on's Chat triggers, for each message, each time the app is added to or
  * removed from a conversation, and for each app command. Every one answers with null, the empty response Google
@@ -7,8 +8,8 @@
  * and calls no Google service, and the manifest asks for no scope, so no one who writes to the app is ever asked to
  * authorize anything.
  *
- * The reviews happen on the owner's Mac. Its chat-review job reads new messages in the conversations the app is a
- * member of with the owner's own read-only authorization, and replies in the thread as the app.
+ * The reviews happen on the owner's Mac. Its chat-review job reads new messages in the conversations each app is a
+ * member of with the owner's own read-only authorization, and replies in the thread as the app that was mentioned.
  */
 
 function onMessage(event) {

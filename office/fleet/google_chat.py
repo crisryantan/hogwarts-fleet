@@ -1,22 +1,26 @@
-"""Google for chat reviews: new messages read from the Chat app's conversations with your own read-only authorization,
-replies posted as the app, and the access tokens of each.
+"""Google for chat reviews: new messages read from each Chat app's conversations with your own read-only authorization,
+replies posted as the app that was mentioned, and the access tokens of each.
 
-Nothing here listens on the network. The chat-review job (fleet/chat_review.py) calls out, over HTTPS, to two Google
-hosts, with two separate authorizations that never stand in for each other:
-- Reading is yours, read only. A Desktop OAuth client's id and secret and the refresh token
-  scripts/chat-review-authorize.py got for exactly READ_SCOPES (chat.messages.readonly and chat.memberships.readonly)
-  sit in your login Keychain as one generic password (service CHAT_REVIEW_USER_KEYCHAIN_SERVICE, account
-  USER_TOKEN_ACCOUNT). read_token trades them at the OAuth token endpoint for a short-lived access token and refuses one
-  whose granted scopes are anything but those two. With it this module only reads Chat: spaces.members.get (the app's
-  own membership, spaces/<id>/members/app, and an allowlisted sender's, by email) and spaces.messages.list.
-- Sending is the app's. The worker service account's one JSON key (CHAT_REVIEW_SERVICE_ACCOUNT) is a generic password
-  too (service CHAT_REVIEW_KEYCHAIN_SERVICE, account the service account's email), stored there by
-  scripts/chat-review-store-key.py as the base64 of its PKCS#8 body. access_token signs a JWT bearer grant (RS256)
-  for the chat.bot scope alone with it, and with that token this module only posts spaces.messages.create in a
-  request's thread.
-send refuses a Chat read with anything but the read token it minted, and a Chat post with anything but an app token
-it minted, so the read token never sends and the app's never reads. run_desk.keychain_output reads both Keychain items
-with /usr/bin/security, and run_desk.openssl_sign_output signs with /usr/bin/openssl, which gets the key on its stdin.
+The chat review serves one Chat app per reviewing desk (config.CHAT_REVIEW_APPS), each in its own Google Cloud project,
+and every function here that touches a credential is told which app it is for. Nothing here listens on the network.
+The chat-review job (fleet/chat_review.py) calls out, over HTTPS, to two Google hosts, with two kinds of authorization
+per app that never stand in for each other or for another app's:
+- Reading is yours, read only. For each app, a Desktop OAuth client of its project, its id and secret and the refresh
+  token scripts/chat-review-authorize.py got for exactly READ_SCOPES (chat.messages.readonly and
+  chat.memberships.readonly) sit in your login Keychain as one generic password (service the app's read Keychain
+  service, account USER_TOKEN_ACCOUNT). read_token trades them at the OAuth token endpoint for a short-lived access
+  token and refuses one whose granted scopes are anything but those two. It is per app because Chat answers
+  spaces/<id>/members/app with the membership of the app of the project the OAuth client belongs to. With it this
+  module only reads Chat: spaces.members.get (that app's own membership, and an allowlisted sender's, by email) and
+  spaces.messages.list.
+- Sending is the app's. Its worker service account's one JSON key is a generic password too (service the app's key
+  Keychain service, account the service account's email), stored there by scripts/chat-review-store-key.py as the
+  base64 of its PKCS#8 body. access_token signs a JWT bearer grant (RS256) for the chat.bot scope alone with it, and
+  with that token this module only posts spaces.messages.create in a request's thread, as that app.
+send refuses a Chat read with anything but a read token it minted, and a Chat post with anything but an app token it
+minted, so a read token never sends and an app's never reads; create_message takes only the named app's own token.
+run_desk.keychain_output reads every Keychain item with /usr/bin/security, and run_desk.openssl_sign_output signs with
+/usr/bin/openssl, which gets the key on its stdin.
 Keys, the refresh token, the client secret and every access token live only in this process's memory: never in argv, a
 log, a file or an error, and no error text a server or a tool printed is kept. Requests go straight to the Google
 hosts, with no proxy, certificates checked and no redirect followed, so a bearer token never goes to any other host.
@@ -54,6 +58,10 @@ JWT_BEARER = "urn:ietf:params:oauth:grant-type:jwt-bearer"
 # The account of the read authorization's Keychain item, as scripts/chat-review-authorize.py stores it.
 USER_TOKEN_ACCOUNT = "chat-review-read-only"
 AUTHORIZE_HELPER = "scripts/chat-review-authorize.py"
+STORE_KEY_HELPER = "scripts/chat-review-store-key.py"
+# The app a helper stores for when it is not told (--app), and the settings each app of CHAT_REVIEW_APPS names.
+DEFAULT_APP = "hermione"
+APP_FIELDS = ("name", "read_keychain", "service_account", "keychain")
 # The signed grant is good for this long; the token Google gives back is kept no longer than that, in memory only.
 GRANT_SECONDS = 600
 TOKEN_MARGIN_SECONDS = 60
@@ -87,6 +95,7 @@ PAGE_TOKEN = re.compile(r"[A-Za-z0-9._~+/=-]{1,2048}")
 NAME_MAX = 200
 TEXT_MAX = 4096
 
+# Tokens in this process's memory only: the app tokens by (app, scope), and the read tokens by app.
 _TOKENS: dict = {}
 _READ: dict = {}
 
@@ -105,6 +114,28 @@ class ReadAuthError(GoogleError):
     until you run scripts/chat-review-authorize.py again; nothing broader is ever tried instead."""
 
 
+# Apps
+
+
+def app_setting(app: str, field: str) -> str:
+    """The name of the config setting that holds field (one of APP_FIELDS) of app, from CHAT_REVIEW_APPS."""
+    names = config.CHAT_REVIEW_APPS.get(app) if isinstance(config.CHAT_REVIEW_APPS, dict) else None
+    name = names.get(field) if isinstance(names, dict) and field in APP_FIELDS else None
+    if not isinstance(name, str) or re.fullmatch(r"CHAT_REVIEW_[A-Z_]{1,60}", name) is None:
+        raise GoogleError(f"{app} is not a chat review app in CHAT_REVIEW_APPS")
+    return name
+
+
+def app_value(app: str, field: str) -> object:
+    """The value of field of app, read from config now."""
+    return getattr(config, app_setting(app, field), None)
+
+
+def helper_command(helper: str, app: str, argument: str) -> str:
+    """How to run a helper for app, as a message names it: --app only for an app other than DEFAULT_APP."""
+    return f"{helper} {argument}" if app == DEFAULT_APP else f"{helper} --app {app} {argument}"
+
+
 # Tokens
 
 
@@ -112,42 +143,42 @@ def _b64url(raw: bytes) -> str:
     return base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
 
 
-def _keychain_service(name: str) -> str:
-    service = getattr(config, name)
+def _keychain_service(app: str, field: str) -> str:
+    name, service = app_setting(app, field), app_value(app, field)
     if not isinstance(service, str) or KEYCHAIN_SERVICE.fullmatch(service) is None:
         raise GoogleError(f"{name} is not a Keychain service name")
     return service
 
 
-def _identity() -> tuple:
-    service, account = _keychain_service("CHAT_REVIEW_KEYCHAIN_SERVICE"), config.CHAT_REVIEW_SERVICE_ACCOUNT
+def _identity(app: str) -> tuple:
+    service, account = _keychain_service(app, "keychain"), app_value(app, "service_account")
     if not isinstance(account, str) or SERVICE_ACCOUNT.fullmatch(account) is None:
-        raise GoogleError("CHAT_REVIEW_SERVICE_ACCOUNT is not a service account email")
+        raise GoogleError(f"{app_setting(app, 'service_account')} is not a service account email")
     return service, account
 
 
-def _key_pem(service: str, account: str) -> bytes:
+def _key_pem(service: str, account: str, app: str) -> bytes:
     """The service account's private key as PEM, read from your login Keychain."""
     code, out = run_desk.keychain_output(service, account)
     body = out.strip()
     if code != 0 or KEY_BODY.fullmatch(body) is None:
         # Nothing security printed is kept.
         raise GoogleError(f"no usable key for {account} is in your login Keychain under service {service} (exit"
-                          f" {code}): store one with scripts/chat-review-store-key.py")
+                          f" {code}): store one with {helper_command(STORE_KEY_HELPER, app, '<key.json>')}")
     lines = [body[index:index + 64] for index in range(0, len(body), 64)]
     return b"-----BEGIN PRIVATE KEY-----\n" + b"\n".join(lines) + b"\n-----END PRIVATE KEY-----\n"
 
 
-def grant(scope: str, now: int) -> str:
-    """A JWT bearer grant for scope, signed RS256 with the service account's key by openssl."""
+def grant(scope: str, now: int, app: str) -> str:
+    """A JWT bearer grant for scope, signed RS256 with app's service account's key by openssl."""
     if scope not in SCOPES:
         raise GoogleError("the app's token is only for the chat.bot scope")
-    service, account = _identity()
+    service, account = _identity(app)
     header = {"alg": "RS256", "typ": "JWT"}
     claims = {"iss": account, "scope": scope, "aud": TOKEN_URL, "iat": now, "exp": now + GRANT_SECONDS}
     signing_input = ".".join(_b64url(json.dumps(part, separators=(",", ":"), sort_keys=True).encode("ascii"))
                              for part in (header, claims))
-    code, signature = run_desk.openssl_sign_output(_key_pem(service, account), signing_input.encode("ascii"))
+    code, signature = run_desk.openssl_sign_output(_key_pem(service, account, app), signing_input.encode("ascii"))
     if code != 0 or not 128 <= len(signature) <= 1024:
         raise GoogleError(f"openssl could not sign the token grant (exit {code})")
     return f"{signing_input}.{_b64url(signature)}"
@@ -162,23 +193,24 @@ def _bearer(answer: dict) -> tuple:
     return token, lasts
 
 
-def access_token(scope: str) -> str:
-    """The app's short-lived access token for scope, minted from a signed grant, kept in this process's memory only.
-    It only sends."""
+def access_token(scope: str, app: str) -> str:
+    """app's short-lived access token for scope, minted from a signed grant, kept in this process's memory only. It
+    only sends, as that app."""
     now = int(time.time())
-    held = _TOKENS.get(scope)
+    held = _TOKENS.get((app, scope))
     if held is not None and held[1] - TOKEN_MARGIN_SECONDS > now:
         return held[0]
-    token, lasts = _bearer(send(TOKEN_URL, None, {"grant_type": JWT_BEARER, "assertion": grant(scope, now)}))
-    if token == _READ.get("token"):
-        raise GoogleError("Google gave the app the read token")
-    _TOKENS[scope] = (token, now + min(lasts, GRANT_SECONDS))
+    token, lasts = _bearer(send(TOKEN_URL, None, {"grant_type": JWT_BEARER, "assertion": grant(scope, now, app)}))
+    if _is_read_token(token) or any(token == found[0] for key, found in _TOKENS.items() if key[0] != app):
+        raise GoogleError("Google gave the app a read token or another app's token")
+    _TOKENS[(app, scope)] = (token, now + min(lasts, GRANT_SECONDS))
     return token
 
 
-def _read_authorization() -> dict:
-    """Your read authorization's client id, client secret and refresh token, read from your login Keychain."""
-    service = _keychain_service("CHAT_REVIEW_USER_KEYCHAIN_SERVICE")
+def _read_authorization(app: str) -> dict:
+    """Your read authorization for app's project: its client id, client secret and refresh token, read from your login
+    Keychain."""
+    service = _keychain_service(app, "read_keychain")
     code, out = run_desk.keychain_output(service, USER_TOKEN_ACCOUNT)
     blob = out.strip()
     stored = None
@@ -193,18 +225,23 @@ def _read_authorization() -> dict:
                                                                       ("refresh_token", REFRESH_TOKEN))):
         # Nothing security printed is kept.
         raise ReadAuthError(f"no usable read-only Chat authorization is in your login Keychain under service {service}"
-                            f" (exit {code}): run {AUTHORIZE_HELPER} <client.json>")
+                            f" (exit {code}): run {authorize_command(app)}")
     return stored
 
 
-def read_token() -> str:
-    """Your short-lived read-only access token, minted from the stored refresh token, kept in this process's memory
-    only. ReadAuthError when the authorization is missing, refused, or granted any scope but READ_SCOPES; GoogleError
-    when Google could not be asked. It only reads."""
+def authorize_command(app: str) -> str:
+    return helper_command(AUTHORIZE_HELPER, app, "<client.json>")
+
+
+def read_token(app: str) -> str:
+    """Your short-lived read-only access token for app's project, minted from its stored refresh token, kept in this
+    process's memory only. ReadAuthError when the authorization is missing, refused, or granted any scope but
+    READ_SCOPES; GoogleError when Google could not be asked. It only reads."""
     now = int(time.time())
-    if _READ and _READ["until"] - TOKEN_MARGIN_SECONDS > now:
-        return _READ["token"]
-    stored = _read_authorization()
+    held = _READ.get(app)
+    if held is not None and held["until"] - TOKEN_MARGIN_SECONDS > now:
+        return held["token"]
+    stored = _read_authorization(app)
     try:
         answer = send(TOKEN_URL, None, {"grant_type": "refresh_token", "client_id": stored["client_id"],
                                         "client_secret": stored["client_secret"],
@@ -212,16 +249,16 @@ def read_token() -> str:
     except GoogleError as exc:
         if exc.status in (400, 401, 403):  # invalid_grant (revoked or expired) or invalid_client
             raise ReadAuthError(f"Google refused the read-only Chat authorization (HTTP {exc.status}): run"
-                                f" {AUTHORIZE_HELPER} <client.json> again") from None
+                                f" {authorize_command(app)} again") from None
         raise
     granted = answer.get("scope")
     if not isinstance(granted, str) or sorted(set(granted.split())) != sorted(READ_SCOPES):
         raise ReadAuthError("the read-only Chat authorization is not for exactly the two read scopes: run"
-                            f" {AUTHORIZE_HELPER} <client.json> again")
+                            f" {authorize_command(app)} again")
     token, lasts = _bearer(answer)
-    if any(token == held[0] for held in _TOKENS.values()):
-        raise GoogleError("Google gave the read authorization the app's token")
-    _READ.update({"token": token, "until": now + min(lasts, 3600)})
+    if _is_app_token(token) or any(token == found["token"] for key, found in _READ.items() if key != app):
+        raise GoogleError("Google gave the read authorization an app's token or another app's read token")
+    _READ[app] = {"token": token, "until": now + min(lasts, 3600)}
     return token
 
 
@@ -231,11 +268,12 @@ def forget_tokens() -> None:
 
 
 def _is_read_token(token: object) -> bool:
-    return bool(_READ) and token == _READ.get("token")
+    return any(token == found["token"] for found in _READ.values())
 
 
-def _is_app_token(token: object) -> bool:
-    return any(token == held[0] for held in _TOKENS.values())
+def _is_app_token(token: object, app: Optional[str] = None) -> bool:
+    """Whether token is an app token this process minted: any app's, or with app, that app's own."""
+    return any(token == found[0] for key, found in _TOKENS.items() if app is None or key[0] == app)
 
 
 # HTTPS
@@ -308,7 +346,7 @@ def _space(space: str) -> str:
 
 
 def _read(url: str, token: str) -> dict:
-    """One Chat read with your read token. Chat refusing the token itself (HTTP 401) is a ReadAuthError, so reading
+    """One Chat read with a read token. Chat refusing the token itself (HTTP 401) is a ReadAuthError, so reading
     stops as it does when the refresh is refused."""
     if not _is_read_token(token):
         raise GoogleError("Chat is read only with the read-only authorization")
@@ -318,8 +356,9 @@ def _read(url: str, token: str) -> dict:
         raise
     except GoogleError as exc:
         if exc.status == 401:
-            raise ReadAuthError(f"Chat refused the read-only authorization (HTTP 401): run {AUTHORIZE_HELPER}"
-                                " <client.json> again", status=401) from None
+            app = next((key for key, found in _READ.items() if found["token"] == token), DEFAULT_APP)
+            raise ReadAuthError(f"Chat refused the read-only authorization (HTTP 401): run {authorize_command(app)}"
+                                " again", status=401) from None
         raise
 
 
@@ -336,7 +375,8 @@ def _joined(answer: dict, space: str, kind: str) -> Optional[str]:
 
 def app_member(space: str, token: str) -> Optional[tuple]:
     """(the app's user name in space, the microsecond its membership began or None) when the app is a joined member
-    of it, else None: spaces.members.get of spaces/<id>/members/app, with your read token."""
+    of it, else None: spaces.members.get of spaces/<id>/members/app, with your read token for that app's project,
+    which Chat answers with that project's own app."""
     try:
         answer = _read(f"{CHAT_ROOT}/{_space(space)}/members/app", token)
     except GoogleError as exc:
@@ -437,9 +477,9 @@ def list_messages(space: str, after_us: int, app_user: str, token: str, page: Op
 # Sending in Chat, as the app
 
 
-def create_message(space: str, thread: str, text: str, request_id: str, token: str) -> dict:
-    """Post text as the app in thread (a new thread if Chat cannot reply there), once per request_id. The answer's
-    message name, checked to be in that space."""
+def create_message(space: str, thread: str, text: str, request_id: str, token: str, app: str) -> dict:
+    """Post text as app in thread (a new thread if Chat cannot reply there), once per request_id, with app's own
+    token. The answer's message name, checked to be in that space."""
     _space(space)
     if not isinstance(thread, str) or THREAD.fullmatch(thread) is None or not thread.startswith(space + "/"):
         raise GoogleError("the thread is not a thread of that space")
@@ -447,8 +487,8 @@ def create_message(space: str, thread: str, text: str, request_id: str, token: s
         raise GoogleError("the request id is not one the fleet made")
     if not isinstance(text, str) or not text.strip() or len(text) > MESSAGE_MAX_CHARS:
         raise GoogleError(f"a Chat reply is text of at most {MESSAGE_MAX_CHARS} characters")
-    if not _is_app_token(token) or _is_read_token(token):
-        raise GoogleError("Chat is written only as the app")
+    if not _is_app_token(token, app) or _is_read_token(token):
+        raise GoogleError("Chat is written only as the app that was asked, with its own token")
     query = urllib.parse.urlencode({"messageReplyOption": REPLY_OPTION, "requestId": request_id})
     answer = send(f"{CHAT_ROOT}/{space}/messages?{query}", token, {"text": text, "thread": {"name": thread}})
     name = answer.get("name")

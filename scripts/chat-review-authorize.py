@@ -1,17 +1,20 @@
-"""Give the chat review its read-only Chat authorization, or replace it, by signing in as yourself once.
+"""Give a chat review app its read-only Chat authorization, or replace it, by signing in as yourself once.
 
-Run it yourself in Terminal, from your clone of the kit, after you create a Desktop OAuth client in the Google Cloud
-project and download its client JSON:
-  /usr/bin/python3 -I -B scripts/chat-review-authorize.py <downloaded client.json>
+Run it yourself in Terminal, from your clone of the kit, after you create a Desktop OAuth client in the app's Google
+Cloud project and download its client JSON:
+  /usr/bin/python3 -I -B scripts/chat-review-authorize.py [--app <desk>] <downloaded client.json>
 
-It reads CHAT_REVIEW_USER_KEYCHAIN_SERVICE (and CHAT_REVIEW_KEYCHAIN_SERVICE, which must differ) from the installed
-office's fleet/config.py (~/.hogwarts), without running it, and takes only a Desktop ("installed") client. It runs the
+--app names the app by its desk in CHAT_REVIEW_APPS (moody for the second app); without it the authorization is
+Hermione's app's. Each app needs its own, from a client of its own project, since Chat answers an app's membership
+for the app of the project the client belongs to. It reads that app's read Keychain service setting, as
+CHAT_REVIEW_APPS names it, from the installed office's fleet/config.py (~/.hogwarts), without running it, refuses one
+that any other Keychain setting of any app names too, and takes only a Desktop ("installed") client. It runs the
 installed-app loopback flow: it listens on 127.0.0.1 alone, on a port the system picks, prints the Google sign-in link
 to open in your browser, and asks for exactly two scopes, chat.messages.readonly and chat.memberships.readonly, with
 PKCE (S256) and a random state. Once you allow them, Google sends your browser back to that port with a code, which it
 trades, with the PKCE verifier only this process holds, for a refresh token. A grant for any other set of scopes is
 revoked and nothing is stored. It stores the client id, the client secret and the refresh token, as the base64 of one
-JSON object, as a generic password in your login Keychain (service CHAT_REVIEW_USER_KEYCHAIN_SERVICE, account
+JSON object, as a generic password in your login Keychain (service the app's read Keychain service, account
 chat-review-read-only) by driving /usr/bin/security -i over its stdin: none of them is ever in any process's argv, a
 file this writes, or its output, and the access token Google gives back is dropped. An item already there is
 replaced (-U), which is how you re-authorize after a revoke or an expiry. It reads the item back to check it, and
@@ -51,15 +54,17 @@ REFRESH_TOKEN = re.compile(r"[A-Za-z0-9._~+/=-]{20,2048}")
 CODE = re.compile(r"[A-Za-z0-9._~/+=-]{10,2048}")
 RESPONSE_MAX_BYTES = 65536
 DONE_PAGE = b"The chat review's read-only authorization came back to the terminal. You can close this tab.\n"
+APP = re.compile(r"[a-z][a-z0-9-]{0,39}")
+DEFAULT_APP = "hermione"
+USAGE = "usage: /usr/bin/python3 -I -B scripts/chat-review-authorize.py [--app <desk>] <downloaded client.json>"
 
 
 class Failed(Exception):
     pass
 
 
-def office_service(office: str) -> str:
-    """CHAT_REVIEW_USER_KEYCHAIN_SERVICE as the installed office's fleet/config.py sets it, read as text."""
-    path = os.path.join(office, "fleet", "config.py")
+def office_values(path: str) -> dict:
+    """Every top-level setting of the config file at path that is a plain literal, read as text, never run."""
     try:
         with open(path, encoding="utf-8") as handle:
             tree = ast.parse(handle.read())
@@ -67,17 +72,39 @@ def office_service(office: str) -> str:
         raise Failed(f"could not read {path}. Install the office from this clone first") from None
     found = {}
     for node in tree.body:
-        if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
-            if node.targets[0].id in ("CHAT_REVIEW_USER_KEYCHAIN_SERVICE", "CHAT_REVIEW_KEYCHAIN_SERVICE"):
-                try:
-                    found[node.targets[0].id] = ast.literal_eval(node.value)
-                except ValueError:
-                    pass
-    service = found.get("CHAT_REVIEW_USER_KEYCHAIN_SERVICE")
+        if isinstance(node, ast.Assign) and len(node.targets) == 1:
+            target, value = node.targets[0], node.value
+        elif isinstance(node, ast.AnnAssign) and node.value is not None:
+            target, value = node.target, node.value
+        else:
+            continue
+        if isinstance(target, ast.Name):
+            try:
+                found[target.id] = ast.literal_eval(value)
+            except ValueError:
+                pass
+    return found
+
+
+def office_service(office: str, app: str = DEFAULT_APP) -> str:
+    """app's read Keychain service as the installed office's fleet/config.py sets it, read as text. Refused when it is
+    unfilled or any other Keychain setting of any app names it too."""
+    path = os.path.join(office, "fleet", "config.py")
+    found = office_values(path)
+    apps = found.get("CHAT_REVIEW_APPS")
+    names = apps.get(app) if isinstance(apps, dict) else None
+    setting = names.get("read_keychain") if isinstance(names, dict) else None
+    if not isinstance(setting, str):
+        listed = ", ".join(sorted(apps)) if isinstance(apps, dict) else "none"
+        raise Failed(f"{app} is not a chat review app in CHAT_REVIEW_APPS in {path} (it lists: {listed})")
+    service = found.get(setting)
     if not isinstance(service, str) or KEYCHAIN_SERVICE.fullmatch(service) is None:
-        raise Failed(f"CHAT_REVIEW_USER_KEYCHAIN_SERVICE in {path} is not filled in yet")
-    if service == found.get("CHAT_REVIEW_KEYCHAIN_SERVICE"):
-        raise Failed(f"CHAT_REVIEW_USER_KEYCHAIN_SERVICE in {path} must differ from CHAT_REVIEW_KEYCHAIN_SERVICE")
+        raise Failed(f"{setting} in {path} is not filled in yet")
+    for other, settings in apps.items():
+        for field in ("read_keychain", "keychain"):
+            name = settings.get(field) if isinstance(settings, dict) else None
+            if (other, field) != (app, "read_keychain") and isinstance(name, str) and found.get(name) == service:
+                raise Failed(f"{setting} in {path} must differ from {name}, so no two authorizations share an item")
     return service
 
 
@@ -232,15 +259,25 @@ def wait_for_code(server, found: dict, deadline: float) -> str:
     return code
 
 
+def parse_args(argv: list) -> tuple:
+    """(app, client file path) from [--app <desk>] <file>, else None."""
+    if len(argv) == 1 and not argv[0].startswith("-"):
+        return DEFAULT_APP, argv[0]
+    if len(argv) == 3 and argv[0] == "--app" and APP.fullmatch(argv[1]) and not argv[2].startswith("-"):
+        return argv[1], argv[2]
+    return None
+
+
 def main(argv: list) -> int:
-    if len(argv) != 1:
-        print("usage: /usr/bin/python3 -I -B scripts/chat-review-authorize.py <downloaded client.json>")
+    parsed = parse_args(argv)
+    if parsed is None:
+        print(USAGE)
         return 2
-    path = argv[0]
+    app, path = parsed
     home = os.path.expanduser("~")
     try:
-        service = office_service(os.path.join(home, ".hogwarts"))
-        print(f"   OK      the read-only authorization goes in Keychain service {service}")
+        service = office_service(os.path.join(home, ".hogwarts"), app)
+        print(f"   OK      the {app} app's read-only authorization goes in Keychain service {service}")
         try:
             with open(path, "rb") as handle:
                 raw = handle.read(CLIENT_MAX_BYTES + 1)

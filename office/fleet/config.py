@@ -417,32 +417,51 @@ ORCHESTRATOR_LAND_WINDOW_SECONDS = 7 * 86400
 ORCHESTRATOR_KEEP_SECONDS = 14 * 86400
 # How much of an owl's body her context file carries, after it is scrubbed.
 ORCHESTRATOR_BODY_MAX = 4000
-# Chat review requests (fleet/chat_review.py, fleet/google_chat.py). The Chat app's connection is an Apps Script
-# deployment (chat-app/Code.gs) that does nothing and asks no one to authorize anything. The chat-review job
-# reads new messages in the app's conversations itself, with your own read-only authorization: a Desktop OAuth
-# client's id and secret and a refresh token for only chat.messages.readonly and chat.memberships.readonly, stored by
-# scripts/chat-review-authorize.py in your login Keychain (generic password, service
-# CHAT_REVIEW_USER_KEYCHAIN_SERVICE). It replies in Chat as the app, as the worker service account below, whose one
-# JSON key sits in your login Keychain too (service CHAT_REVIEW_KEYCHAIN_SERVICE, account the service account's
-# email). The two services differ, and neither authorization ever does the other's job. Nothing listens on the
-# network. Your private overlay fills the placeholders, and while any is unfilled the job refuses to start and says
-# which.
+# Chat review requests (fleet/chat_review.py, fleet/google_chat.py). Each reviewing desk can be its own Chat app, in
+# its own Google Cloud project, since Google allows one Chat app a project. Every app's connection is an Apps Script
+# deployment of the same chat-app/Code.gs, which does nothing and asks no one to authorize anything. The chat-review
+# job reads new messages in each app's conversations itself, with your own read-only authorization for that app's
+# project: a Desktop OAuth client's id and secret and a refresh token for only chat.messages.readonly and
+# chat.memberships.readonly, stored by scripts/chat-review-authorize.py in your login Keychain (generic password,
+# service the app's read Keychain service). It replies in Chat as the app that was mentioned, as that app's worker
+# service account, whose one JSON key sits in your login Keychain too (service the app's key Keychain service, account
+# the service account's email). Every Keychain service differs, and no authorization ever does another's job. Nothing
+# listens on the network. Your private overlay fills the placeholders. An app whose read Keychain service, service
+# account and key Keychain service are all still placeholders is not served; while every app is unfilled, or one is
+# filled only in part, the job refuses to start and says which.
+# Hermione's app.
+CHAT_REVIEW_NAME = "Hermione (Staff Engineer)"
 CHAT_REVIEW_USER_KEYCHAIN_SERVICE = "<chat-review-user-keychain-service>"
 CHAT_REVIEW_SERVICE_ACCOUNT = "<chat-app-service-account>"
 CHAT_REVIEW_KEYCHAIN_SERVICE = "<chat-review-keychain-service>"
-# Only messages from these people (their Chat email) in these spaces (spaces/<id>), each one the app is a member of,
-# are taken; a person not on the list who mentions the app gets a fixed refusal. Only PRs of these repos (owner/name)
-# are reviewed.
+# Moody's app: its name as the Chat API configuration spells it, then the same three settings for its own project.
+CHAT_REVIEW_MOODY_NAME = "<second-chat-app-name>"
+CHAT_REVIEW_MOODY_USER_KEYCHAIN_SERVICE = "<second-chat-review-user-keychain-service>"
+CHAT_REVIEW_MOODY_SERVICE_ACCOUNT = "<second-chat-app-service-account>"
+CHAT_REVIEW_MOODY_KEYCHAIN_SERVICE = "<second-chat-review-keychain-service>"
+# The apps the chat review serves, keyed by the desk that reviews for each, in the order a pass reads them: the names
+# of the settings above that hold each one's display name, read Keychain service, service account and key Keychain
+# service. The store-key and authorize helpers read this too, as text, so it holds only setting names.
+CHAT_REVIEW_APPS: dict = {
+    "hermione": {"name": "CHAT_REVIEW_NAME", "read_keychain": "CHAT_REVIEW_USER_KEYCHAIN_SERVICE",
+                 "service_account": "CHAT_REVIEW_SERVICE_ACCOUNT", "keychain": "CHAT_REVIEW_KEYCHAIN_SERVICE"},
+    "moody": {"name": "CHAT_REVIEW_MOODY_NAME", "read_keychain": "CHAT_REVIEW_MOODY_USER_KEYCHAIN_SERVICE",
+              "service_account": "CHAT_REVIEW_MOODY_SERVICE_ACCOUNT", "keychain": "CHAT_REVIEW_MOODY_KEYCHAIN_SERVICE"},
+}
+# Only messages from these people (their Chat email) in these spaces (spaces/<id>), each one the mentioned app is a
+# member of, are taken; a person not on the list who mentions an app gets a fixed refusal. Only PRs of these repos
+# (owner/name) are reviewed. Every app shares these lists.
 CHAT_REVIEW_SENDERS: tuple = ("<allowed-sender-email>",)
 CHAT_REVIEW_SPACES: tuple = ("<allowed-chat-space>",)
 CHAT_REVIEW_REPOS: tuple = ("<allowed-repo>",)
-# Reviews per person and for the whole fleet in one cap day (CAP_RESET_UTC_SECONDS), counted before Hermione starts,
-# so a killed review counts. Each is one Hermione turn at her MAX_BUDGET_USD at most.
+# Reviews per person and for the whole fleet in one cap day (CAP_RESET_UTC_SECONDS), whichever app was asked, counted
+# before the desk starts, so a killed review counts. Each is also one run of the reviewing desk under its own daily
+# caps: a Hermione turn at her MAX_BUDGET_USD at most, or a Moody turn, charged as his runs are.
 CHAT_REVIEW_PER_PERSON_DAILY = 3
 CHAT_REVIEW_DAILY = 10
-# Messages that mention the app one pass takes, reviews one job pass runs, and how long a request may wait for a free
-# Hermione run slot (a message older than this is never taken, and a queued request older than this is answered with
-# the fixed failure line).
+# Messages that mention an app one pass takes, across every app, reviews one job pass runs, and how long a request may
+# wait for a free run slot of its desk (a message older than this is never taken, and a queued request older than this
+# is answered with the fixed failure line).
 CHAT_REVIEW_PULL_MAX = 10
 CHAT_REVIEW_PER_PASS = 2
 CHAT_REVIEW_QUEUE_MAX_SECONDS = 2 * 3600
@@ -456,7 +475,9 @@ CHAT_REVIEW_DIFF_MAX_BYTES = 300_000
 CHAT_REVIEW_REPLY_TRIES = 3
 # Hermione's chat review turn: Read only, her settings, her model and budget, and this much of its JSON output read.
 CHAT_REVIEW_OUTPUT_MAX_BYTES = 262144
-# Where each review's private folder is made: outside the office and the castle, so her Read may open it.
+# Moody's: this much of its JSON event stream read, which repeats what his read-only commands printed.
+CHAT_REVIEW_CODEX_OUTPUT_MAX_BYTES = 8 * 1024 * 1024
+# Where each review's private folder is made: outside the office and the castle, so the desk may read it.
 CHAT_REVIEW_ROOT = "/Users/crisryantan/Library/Caches/hogwarts-chat-review"
 # Request records are kept this long after they end, so the owner can see who asked for what.
 CHAT_REVIEW_KEEP_SECONDS = 30 * 86400

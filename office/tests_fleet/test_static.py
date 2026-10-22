@@ -44,6 +44,8 @@ KNOWN_FLAGS = {
     "--mcp-job", "--desk", "-i", "-I", "-B", "-X",
     # run_desk: the task's review lock that fleet build, fleet worktree or the review loop hands a build desk's run
     "--task-lock-fd",
+    # run_desk: a Codex chat review turn runs in its private review folder, which is no git repo
+    "--skip-git-repo-check",
     # Claude's stream-json output, which print mode only writes with --verbose, and fleet feed --all
     "--verbose", "--all",
     # fleet go-wait: the key an earlier wait printed

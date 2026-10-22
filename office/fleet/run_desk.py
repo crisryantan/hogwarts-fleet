@@ -1157,7 +1157,9 @@ def notifications_on() -> bool:
 class ReportTurn(NamedTuple):
     """One headless owl-report turn as owl_report_argv builds it: its argv, the name of its brief file (brief_name, in
     the office runs folder of desk, HOOK_DESK unless set), the brief that file holds while it runs, and the prompt it
-    gets on stdin. timeout and output_max replace the owl report's own when set (a chat review turn's)."""
+    gets on stdin. timeout and output_max replace the owl report's own when set (a chat review turn's). A Codex turn
+    (family codex, a chat review of Moody's) has no brief file: its brief leads its stdin, and brief_name is the
+    last-message file the CLI leaves in that runs folder, removed once it has ended. model is the one it launches."""
     argv: list
     brief_name: str
     brief: str
@@ -1165,6 +1167,8 @@ class ReportTurn(NamedTuple):
     desk: str = config.HOOK_DESK
     timeout: Optional[int] = None
     output_max: Optional[int] = None
+    family: str = "claude"
+    model: Optional[str] = None
 
 
 def owl_report_argv(brief: str, prompt: str, model: str = None, budget: str = None,
@@ -1192,14 +1196,36 @@ def owl_report_argv(brief: str, prompt: str, model: str = None, budget: str = No
 
 
 CHAT_REVIEW_DESK = "hermione"
+# The desks a chat review may run: Hermione (Claude) and Moody (Codex), each for its own Chat app.
+CHAT_REVIEW_DESKS = ("hermione", "moody")
 CHAT_REVIEW_TOOLS = "Read"
 # Her chat review turns run under this settings file in her office folder, not her review settings, which let Read
 # into the castle's tasks and worktrees: it allows nothing beyond the default reads of the working folder.
 CHAT_REVIEW_SETTINGS_FILE = "chat-review-settings.json"
 CHAT_RUN_ID = re.compile(r"chat-[0-9a-f]{16}")
+# What a Codex chat review turn sets whatever the desk's codex.toml says: no approval prompt, no web search, nothing
+# kept, and every feature that could reach past its shell turned off.
+CHAT_REVIEW_CODEX_FORCED = ('approval_policy="never"', 'web_search="disabled"', 'history.persistence="none"',
+                            "check_for_update_on_startup=false", "analytics.enabled=false", "features.hooks=false",
+                            "features.memories=false", "features.apps=false", "features.plugins=false",
+                            "features.remote_plugin=false", "features.tool_suggest=false",
+                            "features.computer_use=false", "features.browser_use=false",
+                            "features.browser_use_external=false", "features.skill_mcp_dependency_install=false")
 
 
-def chat_review_argv(conn, brief: str, prompt: str, run_id: str) -> ReportTurn:
+def chat_review_argv(conn, brief: str, prompt: str, run_id: str, desk: str = CHAT_REVIEW_DESK) -> ReportTurn:
+    """The chat review turn of desk, one of CHAT_REVIEW_DESKS: Hermione's (chat_review_claude_argv) or Moody's
+    (chat_review_codex_argv)."""
+    if desk not in CHAT_REVIEW_DESKS:
+        raise FleetError("that desk runs no chat review")
+    if not isinstance(run_id, str) or CHAT_RUN_ID.fullmatch(run_id) is None:
+        raise FleetError("a chat review run id is chat- and 16 hex digits")
+    if desk in config.HEADLESS_CODEX:
+        return chat_review_codex_argv(conn, brief, prompt, run_id, desk)
+    return chat_review_claude_argv(conn, brief, prompt, run_id, desk)
+
+
+def chat_review_claude_argv(conn, brief: str, prompt: str, run_id: str, desk: str = CHAT_REVIEW_DESK) -> ReportTurn:
     """Hermione's chat review turn (fleet/chat_review.py), run like her fleet reviews but with Read as its only tool:
     claude -p --restricted (file tools confined to its working folder, which holds only the review input) under her
     chat review settings, held to the report-only shape (check_report_settings: no allow rule, no write, no network,
@@ -1207,7 +1233,8 @@ def chat_review_argv(conn, brief: str, prompt: str, run_id: str) -> ReportTurn:
     brief in runs/hermione/<run_id>.brief, so the run's own id is in its command line, the fixed prompt on stdin, and
     JSON output. The turn runs at most RUN_TIMEOUT_SECONDS. Gates first: no stop, no CLI update, and her model not
     blocked (Stopped, Blocked)."""
-    desk = CHAT_REVIEW_DESK
+    if desk not in CHAT_REVIEW_DESKS or desk not in config.HEADLESS_CLAUDE:
+        raise FleetError("that desk runs no Claude chat review")
     check_report_settings(_read_office(desk, CHAT_REVIEW_SETTINGS_FILE, config.SETTINGS_MAX_BYTES,
                                        "chat review settings"), desk)
     if not isinstance(run_id, str) or CHAT_RUN_ID.fullmatch(run_id) is None:
@@ -1225,7 +1252,63 @@ def chat_review_argv(conn, brief: str, prompt: str, run_id: str) -> ReportTurn:
             "--append-system-prompt-file", f"{config.runs_dir()}/{desk}/{name}", "--output-format", "json",
             "--max-budget-usd", config.MAX_BUDGET_USD[desk]]
     guard(argv)
-    return ReportTurn(argv, name, brief, prompt, desk, config.RUN_TIMEOUT_SECONDS, config.CHAT_REVIEW_OUTPUT_MAX_BYTES)
+    return ReportTurn(argv, name, brief, prompt, desk, config.RUN_TIMEOUT_SECONDS, config.CHAT_REVIEW_OUTPUT_MAX_BYTES,
+                      model=model)
+
+
+def last_message_name(run_id: str) -> str:
+    """The file a Codex run's --output-last-message names in its desk's runs folder."""
+    return safefs.check_component(f"{run_id}-last-message.md")
+
+
+def chat_review_permissions(desk: str) -> list:
+    """The -c overrides that define and select a Codex chat review turn's permission profile: Codex's ":minimal"
+    platform paths read, so its shell can start, and its working folder, which holds only the review input, read;
+    nothing written anywhere; the shared temp folder and the office denied; no network. None of the desk's own reads
+    (the castle, its tasks, the toolchain folders) is granted."""
+    name = f"fleet-chat-review-{desk}"
+    entries = ['":minimal"="read"', '":workspace_roots"={"."="read"}',
+               f'{_toml_path(config.SHARED_TEMP_ROOT)}="deny"', f'{_toml_path(config.OFFICE_ROOT)}="deny"']
+    table = "{filesystem={" + ", ".join(entries) + "}, network={enabled=false}}"
+    return ["-c", f"permissions.{name}={table}", "-c", f'default_permissions="{name}"']
+
+
+def chat_review_codex_argv(conn, brief: str, prompt: str, run_id: str, desk: str = "moody") -> ReportTurn:
+    """Moody's chat review turn (fleet/chat_review.py), run like his fleet reviews (codex exec, his codex.toml with
+    --ignore-user-config and --ignore-rules, his model and effort) but in a permission profile of its own
+    (chat_review_permissions: it may read only its working folder, which holds only the review input, and the
+    platform paths its shell needs; it writes nothing and has no network), with CHAT_REVIEW_CODEX_FORCED over his
+    codex.toml, no MCP, the brief and fixed prompt on stdin, JSON events on stdout, and --output-last-message in his
+    runs folder named by the run id, so the run's own id is in its command line. The turn runs at most
+    RUN_TIMEOUT_SECONDS. Gates first: no stop, no CLI update, and his model not blocked, the CLI default counting as
+    blocked while anything is (Stopped, Blocked)."""
+    if desk not in CHAT_REVIEW_DESKS or desk not in config.HEADLESS_CODEX:
+        raise FleetError("that desk runs no Codex chat review")
+    profile = _text(_read_office(desk, config.CODEX_PROFILE_FILE, config.SETTINGS_MAX_BYTES, "codex profile"),
+                    "codex profile")
+    overrides = parse_codex_profile(profile)
+    selected, top = profile_models(overrides)
+    choice = desk_choice(conn, desk)
+    chosen = model_overrides(choice, selected_profile(overrides))
+    model = choice["model"] or selected or top or CODEX_DEFAULT
+    _check_stop()
+    blocked = blocked_model({"model": model, "family": "codex"}, conn)
+    if blocked is not None:
+        raise Blocked(f"the chat review model {model} is blocked here ({blocked}), so no turn runs")
+    forced = {item.split("=", 1)[0] for item in chosen + list(CHAT_REVIEW_CODEX_FORCED)}
+    argv = [config.CODEX_BIN, "exec", "--ignore-user-config", "--ignore-rules"]
+    for override in overrides:
+        if override.split("=", 1)[0] not in forced:
+            argv += ["-c", override]
+    for override in chosen + list(CHAT_REVIEW_CODEX_FORCED):
+        argv += ["-c", override]
+    argv += chat_review_permissions(desk)
+    name = last_message_name(run_id)
+    argv += ["--skip-git-repo-check", "--ephemeral", "--json", "--output-last-message",
+             f"{config.runs_dir()}/{desk}/{name}", "-"]
+    guard(argv)
+    return ReportTurn(argv, name, brief, prompt, desk, config.RUN_TIMEOUT_SECONDS,
+                      config.CHAT_REVIEW_CODEX_OUTPUT_MAX_BYTES, "codex", model)
 
 
 # The exact shape the report-only settings must have. Anything broader is refused.
@@ -1388,10 +1471,20 @@ def kill_report_turn(pid: int) -> bool:
 
 def _chat_review_command(command: str, run_id: str) -> bool:
     """Whether a command line is the chat review turn of that run: claude under her chat review settings, with that
-    run's own brief file, which no other run shares."""
-    settings = f"{config.office_desk_dir(CHAT_REVIEW_DESK)}/{CHAT_REVIEW_SETTINGS_FILE}"
-    brief = f"--append-system-prompt-file {config.runs_dir()}/{CHAT_REVIEW_DESK}/{brief_name(run_id)} "
-    return command.startswith(config.CLAUDE_BIN + " ") and f"--settings {settings} " in command and brief in command
+    run's own brief file, or codex exec in his chat review profile, with that run's own last-message file. No other
+    run shares either file."""
+    for desk in CHAT_REVIEW_DESKS:
+        if desk in config.HEADLESS_CODEX:
+            profile = f'default_permissions="fleet-chat-review-{desk}" '
+            last = f"--output-last-message {config.runs_dir()}/{desk}/{last_message_name(run_id)} "
+            if command.startswith(config.CODEX_BIN + " exec ") and profile in command and last in command:
+                return True
+            continue
+        settings = f"{config.office_desk_dir(desk)}/{CHAT_REVIEW_SETTINGS_FILE}"
+        brief = f"--append-system-prompt-file {config.runs_dir()}/{desk}/{brief_name(run_id)} "
+        if command.startswith(config.CLAUDE_BIN + " ") and f"--settings {settings} " in command and brief in command:
+            return True
+    return False
 
 
 def chat_review_turns(run_id: str) -> list:
@@ -1441,9 +1534,17 @@ def run_report_turn(turn: ReportTurn, cwd: str, hand: tuple = (),
     the timeout, or when this process is stopped. stderr is never read. hand holds the reporter's lock and the launch
     gate, handed to the child, so no other reporter starts and no CLI update runs while it lives, even if this process
     dies first. on_start gets the child's pid as soon as it runs, and on_result the CLI's result event once its
-    whole output was read ({} when it had none), for its cost."""
+    whole output was read ({} when it had none), for its cost. A Codex turn (family codex) gets its brief and prompt
+    together on stdin, its answer is its last agent message, and on_result gets its usage (codex_report_usage); the
+    last-message file it leaves is removed once it has ended."""
     with safefs.opened_dir(config.OFFICE_ROOT, "runs", turn.desk, create=True) as run_fd:
         drop_brief(run_fd, turn.brief_name)
+        if turn.family == "codex":
+            try:
+                return _report_turn(turn._replace(prompt=turn.brief.rstrip("\n") + "\n\n" + turn.prompt), cwd, hand,
+                                    on_start, on_result)
+            finally:
+                drop_brief(run_fd, turn.brief_name)
         brief = write_brief(run_fd, turn.brief_name, turn.brief)
         try:
             return _report_turn(turn, cwd, hand, on_start, on_result)
@@ -1504,6 +1605,8 @@ def _report_turn(turn: ReportTurn, cwd: str, hand: tuple, on_start: Optional[Cal
             except subprocess.TimeoutExpired:
                 pass
         child.stdout.close()
+    if turn.family == "codex":
+        return _codex_report_outcome(b"".join(chunks), code, on_result)
     result = claude_result(b"".join(chunks))
     if on_result is not None:
         on_result(result)
@@ -1516,6 +1619,44 @@ def _report_turn(turn: ReportTurn, cwd: str, hand: tuple, on_start: Optional[Cal
             or any(text.strip().startswith(message) for message in AUTH_MESSAGES)
         return ("auth" if auth else "failed"), ""
     return "ok", text
+
+
+def codex_report_usage(raw: bytes) -> dict:
+    """What a Codex report turn's on_result gets: family codex and its token counts (parse_codex_usage). Codex reports
+    no cost, so its cost_usd is 0.0, as every run of a Codex desk records."""
+    return {"family": "codex", **parse_codex_usage(raw)}
+
+
+def codex_last_message(raw: bytes) -> str:
+    """The text of the last agent message a Codex run's JSON events completed, else ""."""
+    text = ""
+    for line in raw.split(b"\n"):
+        try:
+            event = json.loads(line)
+        except (ValueError, RecursionError):
+            continue
+        item = event.get("item") if isinstance(event, dict) and event.get("type") == "item.completed" else None
+        if isinstance(item, dict) and item.get("type") == "agent_message" and isinstance(item.get("text"), str):
+            text = item["text"]
+    return text
+
+
+def _codex_report_outcome(raw: bytes, code: int, on_result: Optional[Callable[[dict], None]]) -> tuple:
+    """(outcome, text) of a Codex report turn: "ok" with its last agent message when it exited 0, completed its turn
+    and failed none; "auth" when failover.classify calls its failure a sign-in one; else "failed"."""
+    if on_result is not None:
+        on_result(codex_report_usage(raw))
+    kinds = []
+    for line in raw.split(b"\n"):
+        try:
+            event = json.loads(line)
+        except (ValueError, RecursionError):
+            continue
+        if isinstance(event, dict) and isinstance(event.get("type"), str):
+            kinds.append(event["type"])
+    if code != 0 or "turn.failed" in kinds or "turn.completed" not in kinds:
+        return ("auth" if failover.classify("codex", raw, code if code != 0 else 1) == "auth" else "failed"), ""
+    return "ok", codex_last_message(raw)
 
 
 def _structured_text(raw: bytes, text: str) -> str:
