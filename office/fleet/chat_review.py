@@ -179,6 +179,8 @@ FINDING = re.compile(r"([BN])([1-9][0-9]?) (\S.*)")
 FIELDS = {"B": 3, "N": 2}
 # A finding's place: a file path, which may hold spaces, then its line or lines.
 PLACE = re.compile(r"\S(?:.{0,198}\S)?:[1-9][0-9]*(?:[-,][1-9][0-9]*)*")
+LINE_SUFFIX = re.compile(r":[1-9][0-9]*(?:[-,][1-9][0-9]*)*$")
+DIFF_PATH = re.compile(r"(?:--- a|\+\+\+ b)/(.+?)\t?")
 # Google credentials the shared scrub has no shape for: OAuth access and refresh tokens, API keys, client secrets.
 GOOGLE_SECRET = re.compile(r"(?<![A-Za-z0-9_-])(?:ya29\.[A-Za-z0-9._-]{10,}|AIza[0-9A-Za-z_-]{30,}"
                            r"|1//[0-9A-Za-z_-]{20,}|GOCSPX-[0-9A-Za-z_-]{10,})")
@@ -570,7 +572,8 @@ def _clear(root_fd: int, name: str) -> None:
         os.rmdir(name, dir_fd=root_fd)
 
 
-def parse_block(text: object, repo: str, number: int, sha: str, untrusted: str = "") -> tuple:
+def parse_block(text: object, repo: str, number: int, sha: str, untrusted: str = "",
+                paths: frozenset = frozenset()) -> tuple:
     """(verdict, blocking, non_blocking) from Hermione's last block, read strictly: its header names this PR and
     commit; then BLOCKING, its findings, NON-BLOCKING, its findings and the VERDICT line, in that order, with nothing
     after; findings numbered from 1, at most FINDINGS_MAX each; CHANGES exactly when a finding is blocking; and no
@@ -596,13 +599,37 @@ def parse_block(text: object, repo: str, number: int, sha: str, untrusted: str =
     non_blocking = _findings(body[split + 1:-1], "N")
     if (verdict.group(1) == "CHANGES") != bool(blocking):
         raise Unusable("the verdict does not match the blocking findings")
-    if _echoes(body[1:split] + body[split + 1:-1], untrusted):
+    if _echoes([_echo_text(line, paths) for line in body[1:split] + body[split + 1:-1]], untrusted):
         raise Unusable("a finding repeats the PR's own text")
     return verdict.group(1), blocking, non_blocking
 
 
 def _flat(text: str) -> str:
     return " ".join(common.normalized(text).split())
+
+
+def diff_paths(diff: str) -> frozenset:
+    """The paths of the files a diff touches, from the --- and +++ lines of each file's header only: those after its
+    diff --git line and before its first hunk, so no line of a hunk can pass for one."""
+    found, header = set(), False
+    for line in diff.split("\n"):  # newlines only: a vertical tab or other separator inside a hunk starts no line
+        if line.startswith("diff --git "):
+            header = True
+        elif line.startswith("@@"):
+            header = False
+        elif header:
+            match = DIFF_PATH.fullmatch(line)
+            if match is not None:
+                found.add(match.group(1))
+    return frozenset(found)
+
+
+def _echo_text(line: str, paths: set) -> str:
+    """The part of a finding the echo check reads: all of it, less its place when that names a file the diff touches,
+    since a long path is always the PR's own text. A place naming anything else is read with the rest."""
+    text = FINDING.fullmatch(line).group(3)
+    place, rest = text.split("|", 1)
+    return rest if LINE_SUFFIX.sub("", place.strip()) in paths else text
 
 
 def _echoes(findings: list, untrusted: str) -> bool:
@@ -784,7 +811,7 @@ def review(conn, key: str, record: dict, pr_fd: int) -> dict:
         return finish(COULD_NOT, "auth" if outcome == "auth" else "turn-failed", sha=sha, cost_usd=cost)
     try:
         verdict, blocking, non_blocking = parse_block(text, repo, number, sha,
-                                                      "\n".join((pr["title"], pr["body"], diff)))
+                                                      "\n".join((pr["title"], pr["body"], diff)), diff_paths(diff))
     except Unusable as exc:
         log("unusable", request=key[:12], why=str(exc))
         return finish(COULD_NOT, "unusable", sha=sha, cost_usd=cost)

@@ -1395,8 +1395,8 @@ class GuardTests(ChatCase):
 
 
 class StrictBlockTests(ChatCase):
-    def parse(self, text: str, untrusted: str = ""):
-        return chat_review.parse_block(text, "acme/web-app", 7, HEAD, untrusted)
+    def parse(self, text: str, untrusted: str = "", diff: str = ""):
+        return chat_review.parse_block(text, "acme/web-app", 7, HEAD, untrusted, chat_review.diff_paths(diff))
 
     def test_a_well_formed_block_parses(self):
         self.assertEqual(self.parse(block()), ("CHANGES", ["B1 x.py:2 | prints at import | remove it"],
@@ -1444,6 +1444,25 @@ class StrictBlockTests(ChatCase):
         spaced = block(non_blocking=("x.py:2 | " + "  ".join(PLANTED.split()[:12]),))
         with self.assertRaises(chat_review.Unusable):
             self.parse(spaced, INJECTED_DIFF)
+
+    def test_a_long_path_the_diff_touches_is_no_echo_but_any_other_place_is_read(self):
+        path = "public/some-long-package-name/.run/Full Test and Lint.run.xml"
+        diff = f"diff --git a/{path} b/{path}\n--- a/{path}\n+++ /dev/null\n@@ -1 +0,0 @@\n-<x/>\n" + INJECTED_DIFF
+        self.assertEqual(self.parse(block(non_blocking=(f"{path}:1 | still names live tasks",)), diff, diff)[0],
+                         "CHANGES")
+        planted = " ".join(PLANTED.split()[:9])
+        # Planted text dressed as a file header, in the description or inside a hunk, is no touched path.
+        hunk = diff + f"diff --git a/y.py b/y.py\n--- a/y.py\n+++ b/y.py\n@@ -1 +1 @@\n-- a/{planted}\n++ b/{planted}\n"
+        description = f"+++ b/{planted}\n" + diff
+        for untrusted, source in ((diff, diff), (hunk, hunk), (description, diff)):
+            with self.subTest(untrusted=untrusted[:20]):
+                with self.assertRaises(chat_review.Unusable):
+                    self.parse(block(non_blocking=(f"{planted}:1 | a note",)), untrusted, source)
+        self.assertNotIn(planted, chat_review.diff_paths(hunk))
+        spliced = f"diff --git a/z.py b/z.py\n--- a/z.py\n+++ b/z.py\n@@ -1 +1 @@\n+#\vdiff --git a/q b/q\v+++ b/{planted}\n"
+        self.assertEqual(chat_review.diff_paths(spliced), {"z.py"})
+        with self.assertRaises(chat_review.Unusable):
+            self.parse(block(non_blocking=(f"{path}:1 | the comment says {PLANTED}",)), diff, diff)
 
     def test_an_answer_shaped_by_the_diffs_injection_is_never_posted(self):
         self.switch(config.CHAT_REVIEW_GITHUB_FILE, True)
