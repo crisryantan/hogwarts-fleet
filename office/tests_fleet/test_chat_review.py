@@ -1684,6 +1684,34 @@ class GitHubTests(ChatCase):
         self.run_pass()
         self.assertEqual(len(self.writes), 4)
 
+    def test_a_switch_turned_off_before_the_fallback_posts_no_comment(self):
+        self.refused_events = ("REQUEST_CHANGES",)
+        real = self.gh_write
+        for name, message in ((config.CHAT_REVIEW_GITHUB_FILE, "m1"), (config.CHAT_REVIEW_FILE, "m2")):
+            with self.subTest(switch=name):
+                self.switch(config.CHAT_REVIEW_GITHUB_FILE, True)
+                self.switch(config.CHAT_REVIEW_FILE, True)
+
+                def refused_then_off(argv, body, name=name):
+                    answer = real(argv, body)
+                    self.switch(name, False)
+                    return answer
+
+                gitops.run_gh_write.side_effect = refused_then_off
+                self.deliver(msg(message=message))
+                self.run_pass()
+                self.assertEqual(self.events()[-1], "REQUEST_CHANGES")
+                self.assertEqual(os.listdir(self.office / chat_review.DIR / chat_review.GITHUB), [])
+        self.assertEqual(self.events(), ["REQUEST_CHANGES", "REQUEST_CHANGES"])
+        states = sorted((record["state"], record.get("github")) for record in self.records())
+        self.assertEqual(states, [("done", "off"), ("github", None)])  # the Chat request waits for its intake
+        gitops.run_gh_write.side_effect = real
+        self.switch(config.CHAT_REVIEW_FILE, True)
+        self.switch(config.CHAT_REVIEW_GITHUB_FILE, True)
+        self.refused_events = ()
+        self.run_pass()
+        self.assertEqual(self.events(), ["REQUEST_CHANGES", "REQUEST_CHANGES", "REQUEST_CHANGES"])
+
     def test_a_comment_refused_after_the_fallback_is_refused_and_not_tried_again(self):
         self.switch(config.CHAT_REVIEW_GITHUB_FILE, True)
         self.refused_events = ("REQUEST_CHANGES", "COMMENT")

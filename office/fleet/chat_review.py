@@ -880,6 +880,10 @@ def post_github(key: str, record: dict, poster: Callable = None) -> dict:
             if event == "COMMENT":
                 raise
             log("github-refused", request=key[:12], github_event=event, why=common.scrubbed_line(exc, 200))
+            if not intake_on(record) or not github_on():  # switched off since: release the marker, post nothing
+                with _folder(GITHUB) as fd, contextlib.suppress(OSError):
+                    os.unlink(name, dir_fd=fd)
+                return record if not intake_on(record) else _end(key, record, "reviewed", github="off")
             event = "COMMENT"  # surely not posted, so the one try as COMMENT cannot make a second review
             posted = poster(repo, number, sha, body, event)
     except gitops.Refused as exc:
