@@ -102,6 +102,13 @@ PR_WORD = re.compile(_PR_LINK + r"(?:/(?:files|commits|checks))?(?:[?#]\S*)?")
 ANY_ADDRESS = re.compile(r"https?://\S*")
 LINK_MARKUP = re.compile(r"<(https?://[^\s<>|]*)(?:\|([^<>\n]*))?>")
 REVIEW_WORD = re.compile(r"\breview(?:s|ing)?\b", re.IGNORECASE)
+# A request that also asks for work beyond the review: its acknowledgement then says a review is all she does. A work
+# word counts only as an instruction (at the start, or after "and", "then", "please", "you" or a sentence mark), so
+# "review the fix" or "review these changes" is a plain review.
+OTHER_WORK = re.compile(r"(?:^|[,.;:!&]|\b(?:and|then|also|please|pls|plz|you)\b)\s*(?:(?:also|please|pls|plz|then|just"
+                        r"|to)\s+)*(?:fix|change|update|edit|patch|rewrite|refactor|implement|address|resolve|commit"
+                        r"|push|merge|approve|deploy|run|build)\b", re.IGNORECASE | re.MULTILINE)
+NEGATION = re.compile(r"\b(?:don'?t|do not|doesn'?t|never|no need|without|not)\b", re.IGNORECASE)
 PR_TEXT_MAX = 20000
 FINDINGS_MAX = 15
 FINDING_MAX = 300
@@ -116,8 +123,8 @@ APP_NAME = "Hermione (Staff Engineer)"
 HELP = (f"I'm {APP_NAME}, and I do code reviews only. Mention me with a GitHub PR link and the word review, for a"
         " repo I take, and one PR link per message. I don't answer questions or fix, merge, build, run or deploy"
         " anything.")
-# The acknowledgement of an accepted request: one of these, picked by the message's own digest, and then the line saying
-# a review is all she does. Nothing a requester wrote is ever in one.
+# The acknowledgement of an accepted request: one of these, picked by the message's own digest, and then, when the
+# request asked for other work too, the line saying a review is all she does. Nothing a requester wrote is ever in one.
 ACKS = ("Right. Leave it with me.",
         "Honestly, give me a minute. I'll go through it properly.",
         "I'm on it. Back shortly.",
@@ -283,6 +290,15 @@ def parse_request(text: object) -> Optional[tuple]:
     if len(links) != 1 or REVIEW_WORD.search(ANY_ADDRESS.sub(" ", plain)) is None:
         return None
     return _allowed_pr(*links[0])
+
+
+def asks_other_work(text: object) -> bool:
+    """Whether text, outside every address and link, also asks for work a review does not do, such as a fix. A link
+    ends a phrase, so "review <link> fix it" asks; any negation ("don't merge it") reads as asking for none."""
+    if not isinstance(text, str):
+        return False
+    plain = ANY_ADDRESS.sub(",", LINK_MARKUP.sub(",", text))
+    return NEGATION.search(plain) is None and OTHER_WORK.search(plain) is not None
 
 
 def parse_pr_url(url: object) -> Optional[tuple]:
@@ -871,9 +887,11 @@ def _send_reply(key: str, record: dict) -> dict:
     return _github_or_done(key, {**record, "replied": True})
 
 
-def ack_text(key: str) -> str:
-    """The fixed acknowledgement for the request with this key: a line chosen by the key, then the review-only line."""
-    return f"{ACKS[int(key[:8], 16) % len(ACKS)]} {REVIEW_ONLY}"
+def ack_text(key: str, other_work: bool = False) -> str:
+    """The fixed acknowledgement for the request with this key: a line chosen by the key, then the review-only line
+    when the request asked for other work too."""
+    line = ACKS[int(key[:8], 16) % len(ACKS)]
+    return f"{line} {REVIEW_ONLY}" if other_work else line
 
 
 def _acknowledge(key: str, record: dict) -> dict:
@@ -887,7 +905,8 @@ def _acknowledge(key: str, record: dict) -> dict:
         token = google_chat.access_token(google_chat.CHAT_BOT_SCOPE)
         if not intake_on(record):  # switched off while the token was minted: this try is not counted, nothing sent
             return _save(key, {**record, "ack_tries": tries})
-        google_chat.create_message(record["space"], record["thread"], ack_text(key), f"chat-review-ack-{key}", token)
+        google_chat.create_message(record["space"], record["thread"], ack_text(key, record.get("other_work") is True),
+                                  f"chat-review-ack-{key}", token)
     except FleetError as exc:
         log("ack-failed", request=key[:12], why=common.scrubbed_line(exc, 200))
         return _save(key, {**record, "acked": False}) if tries + 1 >= config.CHAT_REVIEW_REPLY_TRIES else record
@@ -971,7 +990,8 @@ def take_message(message: dict, space: str, token: str, known: dict, now: int) -
         if asked is None:
             record = {**record, "state": "reply", "kind": "help", "reply": HELP, "outcome": "help"}
         else:
-            record = {**record, "state": "queued", "kind": "review", "repo": asked[0], "number": asked[1]}
+            record = {**record, "state": "queued", "kind": "review", "repo": asked[0], "number": asked[1],
+                      "other_work": asks_other_work(message["argument"])}
     if not _create(key, record):
         return "seen before"
     log("received", **_logged(key, record), kind=record["kind"])

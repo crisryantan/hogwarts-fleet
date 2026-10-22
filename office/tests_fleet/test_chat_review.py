@@ -1075,14 +1075,13 @@ class GrammarTests(ChatCase):
         self.assertEqual(self.run_pass()["taken"], ["review"])
         [record] = self.records()
         self.assertEqual((record["repo"], record["number"], record["outcome"]), ("acme/web-app", 7, "reviewed"))
-        self.assertEqual([ack["text"][-len(chat_review.REVIEW_ONLY):] for ack in self.google.acks],
-                         [chat_review.REVIEW_ONLY])
+        self.assertEqual([ack["text"] in chat_review.ACKS for ack in self.google.acks], [True])
         self.assertIn("the word review", chat_review.HELP)
         self.assertIn("code reviews only", chat_review.HELP)
 
     def test_every_acknowledgement_is_a_fixed_line_and_never_holds_the_message_text(self):
         for index in range(12):
-            self.deliver(msg(text=f"{SECRET_MARK}-{index} review {URL} fix it too", message=f"m{index}",
+            self.deliver(msg(text=f"{SECRET_MARK}-{index} review {URL} and fix it too", message=f"m{index}",
                              thread=f"{SPACE}/threads/t{index}"))
         for _ in range(8):
             self.run_pass()
@@ -1096,6 +1095,28 @@ class GrammarTests(ChatCase):
         self.assertIn("someone else's job", chat_review.REVIEW_ONLY)
         self.assertEqual(len(self.google.messages), 12)  # one review reply each, and no acknowledgement among them
         self.assertEqual(len(self.google.by_request), 24)  # sent once each, however many passes read them
+
+    def test_only_a_request_for_other_work_too_hears_that_she_only_reviews(self):
+        for index, text in enumerate((f"review {URL}", f"review {URL} and fix it", f"review {URL}, then merge it")):
+            self.deliver(msg(text=text, message=f"m{index}", thread=f"{SPACE}/threads/t{index}"))
+        for _ in range(4):
+            self.run_pass()
+        plain, *more = [ack["text"] for ack in sorted(self.google.acks, key=lambda ack: ack["thread"])]
+        self.assertIn(plain, chat_review.ACKS)
+        for text in more:
+            self.assertTrue(text.endswith(" " + chat_review.REVIEW_ONLY))
+        for text in (f"review {URL}", f"review <{URL}|the fix>", f"review https://github.com/acme/fix-it/pull/7",
+                     f"please review these changes {URL}", f"review the fix in {URL}", f"review the update to {URL}",
+                     f"review {URL}, don't merge it", f"review {URL}, don't fix, merge, or deploy anything",
+                     f"review {URL} but do not push", f"{URL} Review and add comments to this PR", None):
+            with self.subTest(text=text):
+                self.assertFalse(chat_review.asks_other_work(text))
+        for text in (f"review {URL} and FIX it", f"approve {URL} after review", f"review {URL}, then merge it",
+                     f"{URL}\nreview it\nthen merge it", f"can you review and fix {URL}", f"review {URL}; also update docs",
+                     f"review {URL} please fix the tests", f"review {URL}, I need you to push a fix",
+                     f"review {URL} fix it too"):
+            with self.subTest(text=text):
+                self.assertTrue(chat_review.asks_other_work(text))
 
     def test_a_request_that_gets_help_or_a_refusal_is_not_acknowledged(self):
         self.deliver(msg(text=f"please fix {URL}", message="m1"), msg(sender=STRANGER_USER, message="m2"))
