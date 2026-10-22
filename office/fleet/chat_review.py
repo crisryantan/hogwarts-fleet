@@ -1372,7 +1372,7 @@ def settle(conn, now: Optional[int] = None, only_hand: bool = False) -> list:
                 _reap_hung(key, record, now)
             elif state == "running":
                 _clear_workdir(key)
-                _clear_last_message(record)
+                _clear_turn_files(record)
                 record = _save(key, {**record, "state": "reply", "reply": COULD_NOT, "outcome": "interrupted"})
                 done.append(_send_reply(key, record)["state"])
             elif state == "queued" and now - int(record.get("at", 0)) > config.CHAT_REVIEW_QUEUE_MAX_SECONDS:
@@ -1412,12 +1412,15 @@ def _clear_workdir(key: str) -> None:
             os.close(root_fd)
 
 
-def _clear_last_message(record: dict) -> None:
-    """Remove the last-message file a killed Codex turn of the request left in its desk's runs folder. Called only once
-    the request's PR lock is free, so the turn, which inherited it, has ended."""
+def _clear_turn_files(record: dict) -> None:
+    """Remove what a Codex turn of the request whose launcher was killed outright left in its desk's runs folder: its
+    last-message file, and its run lock, which no reconcile settles for a desk that holds no spend. Called only once
+    the request's PR lock is free, so the turn, which inherited it and its run lock, has ended."""
     desk, run_id = app_of(record), record.get("run_id")
     if desk in config.HEADLESS_CODEX and isinstance(run_id, str) and run_desk.CHAT_RUN_ID.fullmatch(run_id):
         run_desk.drop_left_brief(desk, run_desk.last_message_name(run_id))
+        if not run_desk.holds_spend(desk):
+            run_desk.drop_left_brief(desk, run_desk.run_lock_name(run_id))
 
 
 def _run_queued(conn, key: str, record: dict) -> str:

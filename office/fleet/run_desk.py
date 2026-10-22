@@ -1203,9 +1203,14 @@ CHAT_REVIEW_TOOLS = "Read"
 # into the castle's tasks and worktrees: it allows nothing beyond the default reads of the working folder.
 CHAT_REVIEW_SETTINGS_FILE = "chat-review-settings.json"
 CHAT_RUN_ID = re.compile(r"chat-[0-9a-f]{16}")
+# What a Codex chat review turn keeps of the desk's codex.toml: only its model, effort and the profile that names them.
+# Everything else (MCP servers, notify commands, a profile's own web search or approval setting) is dropped.
+CHAT_REVIEW_CODEX_KEPT = ("model", "model_reasoning_effort", "model_reasoning_summary", "model_verbosity", "profile")
 # What a Codex chat review turn sets whatever the desk's codex.toml says: no approval prompt, no web search, nothing
-# kept, and every feature that could reach past its shell turned off.
+# kept, a core shell environment and no login shell, and every feature that could reach past its shell turned off.
 CHAT_REVIEW_CODEX_FORCED = ('approval_policy="never"', 'web_search="disabled"', 'history.persistence="none"',
+                            "allow_login_shell=false", 'shell_environment_policy.inherit="core"',
+                            "shell_environment_policy.ignore_default_excludes=false",
                             "check_for_update_on_startup=false", "analytics.enabled=false", "features.hooks=false",
                             "features.memories=false", "features.apps=false", "features.plugins=false",
                             "features.remote_plugin=false", "features.tool_suggest=false",
@@ -1277,8 +1282,8 @@ def chat_review_codex_argv(conn, brief: str, prompt: str, run_id: str, desk: str
     """Moody's chat review turn (fleet/chat_review.py), run like his fleet reviews (codex exec, his codex.toml with
     --ignore-user-config and --ignore-rules, his model and effort) but in a permission profile of its own
     (chat_review_permissions: it may read only its working folder, which holds only the review input, and the
-    platform paths its shell needs; it writes nothing and has no network), with CHAT_REVIEW_CODEX_FORCED over his
-    codex.toml, no MCP, the brief and fixed prompt on stdin, JSON events on stdout, and --output-last-message in his
+    platform paths its shell needs; it writes nothing and has no network), keeping only CHAT_REVIEW_CODEX_KEPT of his
+    codex.toml, top level or in a profile, with CHAT_REVIEW_CODEX_FORCED over it, no MCP, the brief and fixed prompt on stdin, JSON events on stdout, and --output-last-message in his
     runs folder named by the run id, so the run's own id is in its command line. The turn runs at most
     RUN_TIMEOUT_SECONDS. Gates first: no stop, no CLI update, and his model not blocked, the CLI default counting as
     blocked while anything is (Stopped, Blocked)."""
@@ -1298,7 +1303,10 @@ def chat_review_codex_argv(conn, brief: str, prompt: str, run_id: str, desk: str
     forced = {item.split("=", 1)[0] for item in chosen + list(CHAT_REVIEW_CODEX_FORCED)}
     argv = [config.CODEX_BIN, "exec", "--ignore-user-config", "--ignore-rules"]
     for override in overrides:
-        if override.split("=", 1)[0] not in forced:
+        key = override.split("=", 1)[0]
+        in_profile = re.fullmatch(r"profiles\.[A-Za-z0-9_-]{1,64}\.([A-Za-z0-9_]+)", key)
+        if key not in forced and (key in CHAT_REVIEW_CODEX_KEPT
+                                  or (in_profile is not None and in_profile.group(1) in CHAT_REVIEW_CODEX_KEPT)):
             argv += ["-c", override]
     for override in chosen + list(CHAT_REVIEW_CODEX_FORCED):
         argv += ["-c", override]

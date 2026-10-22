@@ -2006,13 +2006,20 @@ class SecondAppTests(ChatCase):
                 self.write_file(self.office / "desks" / "moody" / config.CODEX_PROFILE_FILE, line + "\n")
                 with self.assertRaises(FleetError):
                     run_desk.chat_review_argv(self.conn, chat_review.MOODY_BRIEF, "p", run_id, "moody")
-        # What the chat review forces wins over his codex.toml.
+        # Of his codex.toml only the model, effort and profile stay; what the chat review forces wins, top level or in
+        # the selected profile, and an MCP server or a notify command never comes along.
         self.write_file(self.office / "desks" / "moody" / config.CODEX_PROFILE_FILE,
-                        "approval_policy = \"on-request\"\nweb_search = \"live\"\n")
-        forced = run_desk.chat_review_argv(self.conn, chat_review.MOODY_BRIEF, "p", run_id, "moody").argv
-        self.assertNotIn('approval_policy="on-request"', forced)
-        self.assertNotIn('web_search="live"', forced)
-        self.assertEqual(forced.count('approval_policy="never"'), 1)
+                        'profile = "deep"\napproval_policy = "on-request"\nweb_search = "live"\nnotify = ["/bin/sh"]\n'
+                        'model = "gpt-test"\n[profiles.deep]\nmodel = "gpt-deep"\nweb_search = "live"\n'
+                        'approval_policy = "on-request"\n[mcp_servers.docs]\ncommand = "/usr/bin/true"\n')
+        kept = run_desk.chat_review_argv(self.conn, chat_review.MOODY_BRIEF, "p", run_id, "moody")
+        values = [kept.argv[index + 1] for index, arg in enumerate(kept.argv) if arg == "-c"]
+        self.assertEqual(kept.model, "gpt-deep")
+        self.assertIn('profile="deep"', values)
+        self.assertIn('profiles.deep.model="gpt-deep"', values)
+        for gone in ("on-request", "live", "notify", "mcp_servers", "/usr/bin/true", "/bin/sh"):
+            self.assertFalse([value for value in values if gone in value], gone)
+        self.assertEqual(values.count('approval_policy="never"'), 1)
         self.write_file(self.office / "desks" / "moody" / config.CODEX_PROFILE_FILE, "approval_policy = \"never\"\n")
         with mock.patch.object(config, "BLOCKED_MODEL_PREFIXES", ("synthetic-blocked-",)), \
                 self.assertRaises(run_desk.Blocked):
@@ -2030,8 +2037,10 @@ class SecondAppTests(ChatCase):
             self.run_pass()
         [record] = self.records()
         self.assertEqual((record["state"], record["app"]), ("running", "moody"))
-        # A launcher killed outright runs no cleanup: the file the CLI left stays until the request is answered.
+        # A launcher killed outright runs no cleanup: the file the CLI left and the turn's run lock stay until the
+        # request is answered.
         self.write_file(self.office / "runs" / "moody" / f"{record['run_id']}-last-message.md", "left behind")
+        self.write_file(self.office / "runs" / "moody" / f"{record['run_id']}.lock", "")
         self.answer = ("ok", block())
         self.run_pass()
         self.run_pass()
