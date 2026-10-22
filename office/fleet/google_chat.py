@@ -430,6 +430,19 @@ def _mentions(message: dict, app_user: str) -> bool:
     return False
 
 
+def _mentions_other(message: dict, app_user: str) -> bool:
+    """Whether the message mentions anyone besides the app itself, a person or another app."""
+    annotations = message.get("annotations")
+    for item in annotations if isinstance(annotations, list) else []:
+        if not isinstance(item, dict) or item.get("type") != "USER_MENTION":
+            continue
+        mention = item.get("userMention")
+        user = mention.get("user") if isinstance(mention, dict) else None
+        if not isinstance(user, dict) or user.get("name") != app_user:
+            return True
+    return False
+
+
 def _mentions_anyone(message: dict) -> bool:
     """Whether the message mentions anyone at all, a person or an app."""
     annotations = message.get("annotations")
@@ -448,7 +461,8 @@ def list_messages(space: str, after_us: int, app_user: str, token: str, page: Op
     nothing else of it ever leaves here; one that does is its name, time, thread, sender and the text Chat gives with
     the app mentions taken out (argumentText). The one exception, for a thread follow-up: a message that mentions no
     one at all, in one of threads (those where only the app took a mention), is given back the same way,
-    marked listening, with its whole text."""
+    marked listening, with its whole text. A message that mentions the app is marked shared when it mentions anyone
+    else too."""
     if not isinstance(app_user, str) or USER.fullmatch(app_user) is None:
         raise GoogleError("the app's user name is not a Chat user name")
     query = {"pageSize": PAGE_SIZE, "filter": f'createTime > "{rfc3339(after_us)}"', "orderBy": "createTime ASC"}
@@ -479,6 +493,7 @@ def list_messages(space: str, after_us: int, app_user: str, token: str, page: Op
         if not isinstance(argument, str) or len(argument) > TEXT_MAX:
             argument = ""  # text longer than Chat sends is read as none, never as a cut prefix
         messages.append({"created_us": at, "mentions": mentions, "listening": listening,
+                         "shared": mentions and _mentions_other(item, app_user),
                          "name": _text(item.get("name"), NAME_MAX * 2),
                          "thread": _text(thread.get("name"), NAME_MAX * 2),
                          "sender": _text(sender.get("name"), NAME_MAX), "sender_type": _text(sender.get("type"), 20),

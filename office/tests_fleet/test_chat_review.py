@@ -2217,6 +2217,16 @@ class UnmentionedFollowUpTests(ChatCase):
         self.assertNotIn(SECRET_MARK, self.office_text())
         self.assertNotIn(SECRET_MARK, json.dumps(self.log_lines()))
 
+    def test_a_help_reply_to_both_apps_and_an_unmentioned_request_after_it_in_one_pass_is_taken_by_neither(self):
+        self.second_app()
+        now = time.time()
+        self.deliver(msg(text="what is this?", message="h1", also=(MOODY_APP_USER,), at=now - 4),
+                     msg(text=f"Review PR {URL}", message="q1", mention=False, at=now - 2))
+        self.assertEqual(self.run_pass()["taken"], ["help", "help"])
+        self.run_pass()  # the overlap lists them again, when each app's record is made
+        self.assertEqual(self.run_pass()["taken"], ["seen before", "seen before"])
+        self.assertEqual((self.turns, len(self.records())), ([], 2))
+
     def test_one_message_to_both_apps_leaves_the_thread_to_neither(self):
         self.second_app()
         self.reviewed(also=(MOODY_APP_USER,))

@@ -1466,7 +1466,9 @@ def read_space(space: str, token: str, known: dict, done: list, room: int, now: 
     read or the app's current membership began, nor further back than the queue limit, and a message time ahead of
     this Mac's clock never moves the marker. A message that does not mention the app is never kept or logged, but for
     a short request or follow-up that mentions no one, from an allowed sender, in a thread where only the app took
-    mentions (listening_threads), which take_message takes as a review."""
+    mentions (listening_threads), which take_message takes as a review. Not in a thread where this read just took a
+    message that mentions someone else besides the app: the other app's record of it may not be made yet, so whether
+    the thread is the app's alone is not known until a later pass, which reads the message again."""
     marker = _read_marker(space, app)
     now_us = max(int(time.time() * 1_000_000), now * 1_000_000)
     member = google_chat.app_member(space, token)
@@ -1488,6 +1490,7 @@ def read_space(space: str, token: str, known: dict, done: list, room: int, now: 
     overlap = config.CHAT_REVIEW_READ_OVERLAP_SECONDS * 1_000_000 if marker.get("complete") is not False else 0
     after = max(newest - overlap, floor, now_us - config.CHAT_REVIEW_QUEUE_MAX_SECONDS * 1_000_000)
     page, complete, waiting = None, False, None
+    shared: set = set()  # threads where this read took a message that mentions the app and someone else too
     try:
         for _ in range(config.CHAT_REVIEW_LIST_PAGES):
             if not common.opt_in_on(config.CHAT_REVIEW_FILE):
@@ -1495,12 +1498,14 @@ def read_space(space: str, token: str, known: dict, done: list, room: int, now: 
             messages, page = google_chat.list_messages(space, after, app_user, token, page, threads)
             listened = False
             for message in messages:
-                if message["mentions"] or (message.get("listening") is True
+                if message["mentions"] or (message.get("listening") is True and message["thread"] not in shared
                                            and unmentioned_asks(message.get("argument"))):
                     if sum(outcome in TAKEN for outcome in done) >= room:
                         waiting = min(message["created_us"], now_us)  # no room: the next read starts here
                         return
                     outcome = take_message(message, space, token, known, now, app)
+                    if message["mentions"] and message.get("shared") is True and outcome != "seen before":
+                        shared.add(message["thread"])
                     if message["mentions"] or outcome != "ignored":  # an unmentioned one ignored leaves no trace
                         done.append(outcome)
                     if outcome in ("review", "help") and message["thread"] not in threads:
