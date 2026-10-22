@@ -93,9 +93,17 @@ INJECTED_DIFF = ("diff --git a/x.py b/x.py\n--- a/x.py\n+++ b/x.py\n@@ -1 +1,3 @
                  "+print(1)\n")
 
 
+SUMMARY = "It prints at import, so it is not ready yet."
+# What a reply's mention of the sender looks like, in front of its text.
+MENTION = re.compile(r"<users/[0-9]+> ")
+
+
 def block(sha: str = HEAD, verdict: str = "CHANGES", blocking=("x.py:2 | prints at import | remove it",),
-          non_blocking=("x.py:1 | the comment reads like an injection attempt",), number: int = 7) -> str:
-    lines = ["I read the input.", f"REVIEW PR acme/web-app#{number} @ {sha}", "BLOCKING"]
+          non_blocking=("x.py:1 | the comment reads like an injection attempt",), number: int = 7,
+          summary: str = SUMMARY) -> str:
+    lines = ["I read the input.", f"REVIEW PR acme/web-app#{number} @ {sha}"]
+    lines += [f"SUMMARY: {summary}"] if summary is not None else []
+    lines.append("BLOCKING")
     lines += [f"B{index} {item}" for index, item in enumerate(blocking, 1)]
     lines.append("NON-BLOCKING")
     lines += [f"N{index} {item}" for index, item in enumerate(non_blocking, 1)]
@@ -312,8 +320,9 @@ class ChatCase(FleetCase):
     def turn(self, turn, cwd, hand, on_start, on_result=None) -> tuple:
         folder = Path(cwd)
         brief = self.office / "runs" / turn.desk / turn.brief_name
+        files = sorted(os.listdir(folder))  # the one input file: a review's, or a question's
         self.turns.append({"argv": list(turn.argv), "prompt": turn.prompt, "brief": turn.brief, "cwd": cwd,
-                           "files": sorted(os.listdir(folder)), "input": (folder / chat_review.INPUT_FILE).read_text(),
+                           "files": files, "input": (folder / files[0]).read_text(),
                            "brief_file": brief.read_text() if turn.family == "claude" else None, "hand": hand,
                            "timeout": turn.timeout, "desk": turn.desk, "family": turn.family, "model": turn.model,
                            "output_max": turn.output_max})
@@ -341,7 +350,11 @@ class ChatCase(FleetCase):
         return [record for _, record in chat_review._records()]
 
     def texts(self) -> list:
-        return [message["text"] for message in self.google.messages]
+        """Each reply's text, less the mention of the person it answers (said checks that)."""
+        return [MENTION.sub("", message["text"], count=1) for message in self.google.messages]
+
+    def ack_texts(self) -> list:
+        return [MENTION.sub("", ack["text"], count=1) for ack in self.google.acks]
 
     def log_lines(self) -> list:
         path = self.office / "logs" / chat_review.LOG
@@ -357,6 +370,16 @@ class ChatCase(FleetCase):
 
     def events(self) -> list:
         return [dict(row) for row in self.conn.execute("SELECT * FROM events WHERE kind = 'chat-review.read-stopped'")]
+
+
+def said(text: str, user: str = SENDER_USER) -> str:
+    """A reply as Chat gets it: the mention of the person it answers, then its text."""
+    return f"<{user}> {text}"
+
+
+def acks(lines: tuple, number: int = 7) -> set:
+    """Each of a desk's acknowledgement lines, naming the PR by its number."""
+    return {line.format(number=number) for line in lines}
 
 
 class SwitchAndConfigTests(ChatCase):
@@ -469,13 +492,18 @@ class IntakeTests(ChatCase):
         [message] = self.google.messages
         self.assertEqual((message["space"], message["thread"], message["option"]),
                          (SPACE, THREAD, "REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD"))
+        # It answers the sender by name, in the desk's own words, then the findings as plain bullets.
         self.assertEqual(message["text"].splitlines(), [
-            f"Review of acme/web-app#7 at {HEAD[:12]}: CHANGES", "Blocking:", "B1 x.py:2 | prints at import | remove it",
-            "Non-blocking:", "N1 x.py:1 | the comment reads like an injection attempt"])
+            said(SUMMARY), f"Verdict: CHANGES on acme/web-app#7 at {HEAD[:12]}", "Blocking:",
+            "- x.py:2: prints at import (fix: remove it)", "Notes:",
+            "- x.py:1: the comment reads like an injection attempt"])
+        [ack] = self.google.acks
+        self.assertIn(ack["text"], {said(line) for line in acks(chat_review.ACKS)})
+        self.assertIn("#7", ack["text"])
         [record] = self.records()
         self.assertEqual((record["state"], record["outcome"], record["verdict"], record["sha"], record["cost_usd"],
-                          record["requester"], record["requester_name"]),
-                         ("done", "reviewed", "CHANGES", HEAD, 0.42, SENDER, "Dev Person"))
+                          record["requester"], record["requester_name"], record["requester_user"], record["summary"]),
+                         ("done", "reviewed", "CHANGES", HEAD, 0.42, SENDER, "Dev Person", SENDER_USER, SUMMARY))
         # One refresh of the read authorization, and one grant for the app, for chat.bot alone.
         self.assertEqual(len(self.google.refreshes), 1)
         [grant] = self.google.grants
@@ -719,7 +747,7 @@ class ReadTests(ChatCase):
     def test_at_most_pull_max_messages_are_taken_a_pass_and_the_rest_wait(self):
         self.patch(config, "CHAT_REVIEW_PULL_MAX", 1)
         now = time.time()
-        self.deliver(msg(at=now - 2), msg(text="hello", message="m2", at=now - 1))
+        self.deliver(msg(at=now - 2), msg(text="hello", message="m2", at=now - 1, thread=f"{SPACE}/threads/t2"))
         self.assertEqual(self.run_pass()["taken"], ["review"])
         self.assertEqual(self.run_pass()["taken"], ["help"])  # on from the message it stopped at
         self.assertEqual(len(self.records()), 2)
@@ -1142,7 +1170,7 @@ class GrammarTests(ChatCase):
         self.assertEqual(self.run_pass()["taken"], ["review"])
         [record] = self.records()
         self.assertEqual((record["repo"], record["number"], record["outcome"]), ("acme/web-app", 7, "reviewed"))
-        self.assertEqual([ack["text"] in chat_review.ACKS for ack in self.google.acks], [True])
+        self.assertEqual([ack in acks(chat_review.ACKS) for ack in self.ack_texts()], [True])
         self.assertNotIn("the word review", chat_review.help_text("hermione"))
         self.assertIn("code reviews only", chat_review.help_text("hermione"))
 
@@ -1152,10 +1180,10 @@ class GrammarTests(ChatCase):
                              thread=f"{SPACE}/threads/t{index}"))
         for _ in range(8):
             self.run_pass()
-        fixed = {f"{line} {chat_review.REVIEW_ONLY}" for line in chat_review.ACKS}
+        fixed = {f"{line} {chat_review.REVIEW_ONLY}" for line in acks(chat_review.ACKS)}
         self.assertEqual(len(self.google.acks), 12)
-        self.assertTrue({ack["text"] for ack in self.google.acks} <= fixed)
-        self.assertGreater(len({ack["text"] for ack in self.google.acks}), 1)  # chosen by the message, so they rotate
+        self.assertTrue(set(self.ack_texts()) <= fixed)
+        self.assertGreater(len(set(self.ack_texts())), 1)  # chosen by the message, so they rotate
         for ack in self.google.acks:
             self.assertNotIn(SECRET_MARK, ack["text"])
             self.assertNotIn("fix it", ack["text"])
@@ -1168,8 +1196,8 @@ class GrammarTests(ChatCase):
             self.deliver(msg(text=text, message=f"m{index}", thread=f"{SPACE}/threads/t{index}"))
         for _ in range(4):
             self.run_pass()
-        plain, *more = [ack["text"] for ack in sorted(self.google.acks, key=lambda ack: ack["thread"])]
-        self.assertIn(plain, chat_review.ACKS)
+        plain, *more = [MENTION.sub("", ack["text"]) for ack in sorted(self.google.acks, key=lambda ack: ack["thread"])]
+        self.assertIn(plain, acks(chat_review.ACKS))
         for text in more:
             self.assertTrue(text.endswith(" " + chat_review.REVIEW_ONLY))
         for text in (f"review {URL}", f"review <{URL}|the fix>", f"review https://github.com/acme/fix-it/pull/7",
@@ -1308,7 +1336,7 @@ class LimitTests(ChatCase):
         self.deliver(msg(message="m2"))
         self.run_pass()
         self.assertEqual(len(self.turns), 1)  # the failed review still counted
-        self.assertEqual([message["text"] for message in self.google.messages],
+        self.assertEqual(self.texts(),
                          [chat_review.COULD_NOT, chat_review.CAPPED_PERSON])
 
     def test_the_fleet_wide_cap_holds_across_people(self):
@@ -1316,7 +1344,7 @@ class LimitTests(ChatCase):
         self.deliver(msg(), msg(sender=LEAD_USER, message="m2"))
         self.run_pass()
         self.assertEqual(len(self.turns), 1)
-        self.assertEqual(self.google.messages[1]["text"], chat_review.CAPPED_FLEET)
+        self.assertEqual(self.texts()[1], chat_review.CAPPED_FLEET)
 
     def test_a_too_large_or_closed_pr_gets_its_fixed_reply_and_no_review(self):
         self.diff = "+" + "x" * config.CHAT_REVIEW_DIFF_MAX_BYTES
@@ -1325,7 +1353,7 @@ class LimitTests(ChatCase):
         self.pr["state"] = "closed"
         self.deliver(msg(message="m2"))
         self.run_pass()
-        self.assertEqual([message["text"] for message in self.google.messages],
+        self.assertEqual(self.texts(),
                          [chat_review.TOO_LARGE, chat_review.NOT_OPEN])
         self.assertEqual(self.turns, [])
 
@@ -1356,7 +1384,7 @@ class LimitTests(ChatCase):
         self.patch(gitops, "run_gh_read", side_effect=FleetError("gh failed: HTTP 404"))
         self.deliver(msg(message="m2"))
         self.run_pass()
-        self.assertEqual([message["text"] for message in self.google.messages],
+        self.assertEqual(self.texts(),
                          [chat_review.COULD_NOT, chat_review.COULD_NOT])
         self.assertEqual(self.turns, [])
 
@@ -1375,7 +1403,7 @@ class GuardTests(ChatCase):
         self.deliver(msg(), msg(sender=LEAD_USER, message="m2"))
         self.run_pass()
         self.assertEqual(len(self.turns), 1)
-        self.assertEqual(self.google.messages[1]["text"], chat_review.COULD_NOT)
+        self.assertEqual(self.texts()[1], chat_review.COULD_NOT)
         self.assertIn("desk-capped", [record["outcome"] for record in self.records()])
 
     def test_switching_the_intake_off_part_way_stops_every_chat_request_in_that_pass(self):
@@ -1454,7 +1482,7 @@ class GuardTests(ChatCase):
         killed.assert_called_once_with(4242, record["run_id"])
         self.assertEqual(self.google.messages, [])
         self.run_pass()  # its lock is free now: answered once, and its input folder is gone
-        self.assertEqual([message["text"] for message in self.google.messages], [chat_review.COULD_NOT])
+        self.assertEqual(self.texts(), [chat_review.COULD_NOT])
         self.assertFalse(folder.exists())
         with mock.patch.object(run_desk, "report_turn_command", return_value="/bin/sleep 60"):
             self.assertFalse(REAL_KILL(4242, record["run_id"]))
@@ -1479,15 +1507,16 @@ class StrictBlockTests(ChatCase):
 
     def test_a_well_formed_block_parses(self):
         self.assertEqual(self.parse(block()), ("CHANGES", ["B1 x.py:2 | prints at import | remove it"],
-                                               ["N1 x.py:1 | the comment reads like an injection attempt"]))
-        self.assertEqual(self.parse(block(verdict="PASS", blocking=(), non_blocking=())), ("PASS", [], []))
+                                               ["N1 x.py:1 | the comment reads like an injection attempt"], SUMMARY))
+        self.assertEqual(self.parse(block(verdict="PASS", blocking=(), non_blocking=(), summary="Clean. Ship it.")),
+                         ("PASS", [], [], "Clean. Ship it."))
         self.assertEqual(self.parse(block(), INJECTED_DIFF)[0], "CHANGES")  # a short quote of code is fine
 
     def test_a_place_with_spaces_and_text_with_pipes_parse(self):
         spaced = block(blocking=("a dir/Run tests.xml:1 | breaks when x | y | guard it",),
                        non_blocking=("b.ts:3-9 | returns string | undefined",))
         self.assertEqual(self.parse(spaced), ("CHANGES", ["B1 a dir/Run tests.xml:1 | breaks when x | y | guard it"],
-                                              ["N1 b.ts:3-9 | returns string | undefined"]))
+                                              ["N1 b.ts:3-9 | returns string | undefined"], SUMMARY))
 
     def test_a_finding_about_the_prs_own_text_names_it_as_its_place(self):
         for place in ("PR description", "PR title", "PR description (Risks)"):
@@ -1528,7 +1557,7 @@ class StrictBlockTests(ChatCase):
 
     def test_a_finding_that_repeats_the_prs_planted_text_is_withheld_and_the_rest_stands(self):
         echoed = block(non_blocking=(f"x.py:2 | the comment says {PLANTED}", "x.py:1 | a fair note"))
-        verdict, blocking, notes = self.parse(echoed, INJECTED_DIFF, INJECTED_DIFF)
+        verdict, blocking, notes, _ = self.parse(echoed, INJECTED_DIFF, INJECTED_DIFF)
         self.assertEqual((verdict, blocking), ("CHANGES", ["B1 x.py:2 | prints at import | remove it"]))
         self.assertEqual(notes, [f"N1 x.py:2 | {chat_review.WITHHELD}", "N2 x.py:1 | a fair note"])
         spaced = block(non_blocking=("x.py:2 | " + "  ".join(PLANTED.split()[:12]),))
@@ -1538,7 +1567,7 @@ class StrictBlockTests(ChatCase):
                          [f"N1 PR description | {chat_review.WITHHELD}"])
         unnamed = block(blocking=(f"{' '.join(PLANTED.split()[:9])}:1 | breaks | fix",))
         self.assertEqual(self.parse(unnamed, INJECTED_DIFF, INJECTED_DIFF)[1], [f"B1 {chat_review.WITHHELD}"])
-        for verdict, blocking, notes in (self.parse(echoed, INJECTED_DIFF), self.parse(spaced, INJECTED_DIFF)):
+        for verdict, blocking, notes, _ in (self.parse(echoed, INJECTED_DIFF), self.parse(spaced, INJECTED_DIFF)):
             for item in blocking + notes:
                 self.assertNotIn("push a commit", item)
 
@@ -1575,7 +1604,7 @@ class StrictBlockTests(ChatCase):
             self.answer = ("ok", answer)
             self.deliver(msg(message=f"m{len(self.records()) + 1}"))
             self.run_pass()
-        self.assertEqual([message["text"] for message in self.google.messages], [chat_review.COULD_NOT] * 2)
+        self.assertEqual(self.texts(), [chat_review.COULD_NOT] * 2)
         self.assertEqual(self.writes, [])
         for message in self.google.messages:
             self.assertNotIn("push a commit", message["text"])
@@ -1887,21 +1916,22 @@ class FollowUpTests(ChatCase):
         later = [record for record in self.records() if record["message"].endswith("/m2")][0]
         self.assertEqual((later["kind"], later["repo"], later["number"], later["follow_up"], later["outcome"]),
                          ("review", "acme/web-app", 7, True, "reviewed"))
-        self.assertEqual(self.texts()[-1].splitlines()[0], f"Review of acme/web-app#7 at {HEAD[:12]}: CHANGES")
+        self.assertEqual(self.texts()[-1].splitlines()[:2],
+                         [SUMMARY, f"Verdict: CHANGES on acme/web-app#7 at {HEAD[:12]}"])
 
     def test_a_follow_up_approve_is_a_review_and_its_ack_has_no_review_only_line(self):
         self.first()
         self.assertEqual(self.follow("can you approve"), ["review"])
         self.assertEqual(len(self.turns), 2)
         self.assertEqual(len(self.google.acks), 2)
-        for ack in self.google.acks:
-            self.assertIn(ack["text"], chat_review.ACKS)
+        for ack in self.ack_texts():
+            self.assertIn(ack, acks(chat_review.ACKS))
 
     def test_an_approve_with_a_link_is_a_request_with_a_plain_ack(self):
         self.deliver(msg(text=f"can you approve {URL}"))
         self.assertEqual(self.run_pass()["taken"], ["review"])
-        [ack] = self.google.acks
-        self.assertIn(ack["text"], chat_review.ACKS)
+        [ack] = self.ack_texts()
+        self.assertIn(ack, acks(chat_review.ACKS))
         self.assertFalse(chat_review.asks_other_work(f"can you approve {URL}"))
 
     def test_a_follow_up_in_a_thread_with_no_earlier_request_gets_help(self):
@@ -1958,7 +1988,7 @@ class FollowUpTests(ChatCase):
         self.assertEqual(self.follow("can you approve", app=MOODY_APP_USER), ["help"])
         self.assertEqual([turn["desk"] for turn in self.turns], ["hermione"])
         self.assertEqual(self.google.messages[-1]["app"], "moody")
-        self.assertEqual(self.google.messages[-1]["text"], chat_review.help_text("moody"))
+        self.assertEqual(self.texts()[-1], chat_review.help_text("moody"))
 
     def test_a_follow_up_uses_only_its_own_apps_earlier_request(self):
         self.second_app()
@@ -2002,8 +2032,8 @@ class FollowUpTests(ChatCase):
         self.assertEqual(self.follow("can you approve", message="m3", app=MOODY_APP_USER), ["review"])
         self.assertEqual([turn["desk"] for turn in self.turns], ["moody"] * 3)
         self.assertEqual({message["app"] for message in self.google.messages}, {"moody"})
-        for ack in self.google.acks:
-            self.assertIn(ack["text"], chat_review.MOODY_ACKS)
+        for ack in self.ack_texts():
+            self.assertIn(ack, acks(chat_review.MOODY_ACKS))
 
     def test_both_help_texts_say_a_follow_up_needs_no_link(self):
         self.second_app()
@@ -2261,6 +2291,358 @@ class UnmentionedFollowUpTests(ChatCase):
         self.assertEqual(found[1], {"created_us": found[1]["created_us"], "mentions": False})
 
 
+class ConversationTests(ChatCase):
+    """The apps talk like a person: each reply mentions whom it answers, the acknowledgement names the PR, and the
+    review leads with the desk's own summary."""
+
+    def test_a_mention_is_built_only_from_a_persons_user_id(self):
+        for user in (SENDER_USER, "users/123456789012345678901"):
+            with self.subTest(user=user):
+                self.assertEqual(chat_review.addressed({"requester_user": user}, "hi"), f"<{user}> hi")
+        for user in ("users/all", "users/app", "users/1 x", "users/1>", "<users/1>", "users/", SENDER, None, 7,
+                     "users/" + "1" * 41, "spaces/AAAA"):
+            with self.subTest(user=user):
+                self.assertEqual(chat_review.addressed({"requester_user": user}, "hi"), "hi")
+
+    def test_the_sender_is_mentioned_by_user_id_and_a_stranger_never_is(self):
+        self.deliver(msg(), msg(sender=STRANGER_USER, message="m2", thread=f"{SPACE}/threads/t2"))
+        self.run_pass()
+        by_thread = {message["thread"]: message["text"] for message in self.google.messages}
+        self.assertTrue(by_thread[THREAD].startswith(f"<{SENDER_USER}> {SUMMARY}\n"))
+        self.assertEqual(by_thread[f"{SPACE}/threads/t2"], chat_review.SENDER_REFUSED)
+        [ack] = self.google.acks
+        self.assertTrue(ack["text"].startswith(f"<{SENDER_USER}> "))
+        for text in [*by_thread.values(), ack["text"]]:
+            self.assertNotIn(SENDER, text)
+        self.assertNotIn(STRANGER_USER, self.office_text())
+
+    def test_a_sender_whose_name_is_no_user_id_is_answered_without_a_mention(self):
+        self.google.members[SPACE][SENDER] = "users/abc"
+        self.deliver(msg(sender="users/abc"))
+        self.run_pass()
+        [record] = self.records()
+        self.assertNotIn("requester_user", record)
+        self.assertTrue(self.google.messages[0]["text"].startswith(SUMMARY))
+
+    def test_the_acknowledgement_names_the_pr_by_its_number(self):
+        self.deliver(msg(text="review https://github.com/acme/web-app/pull/442"))
+        self.run_pass()
+        [ack] = self.ack_texts()
+        self.assertIn(ack, acks(chat_review.ACKS, 442))
+        self.assertIn("#442", ack)
+        for app, lines in (("hermione", chat_review.ACKS), ("moody", chat_review.MOODY_ACKS)):
+            for index in range(len(lines)):
+                key = f"{index:08x}" + "0" * 24
+                self.assertRegex(chat_review.ack_text(key, app, 9), r"#9\b")
+            with self.assertRaises(FleetError):
+                chat_review.ack_text("0" * 32, app, "9")
+
+    def test_the_summary_line_is_read_strictly(self):
+        def parse(text: str, untrusted: str = "") -> tuple:
+            return chat_review.parse_block(text, "acme/web-app", 7, HEAD, untrusted)
+
+        self.assertEqual(parse(block(summary="x" * chat_review.SUMMARY_MAX))[3], "x" * chat_review.SUMMARY_MAX)
+        for text in (block(summary=None), block(summary="x" * (chat_review.SUMMARY_MAX + 1)), block(summary=""),
+                     block().replace(f"SUMMARY: {SUMMARY}\nBLOCKING", f"BLOCKING\nSUMMARY: {SUMMARY}"),
+                     block().replace("SUMMARY: ", "SUMMARY ")):
+            with self.subTest(text=text[:80]):
+                with self.assertRaises(chat_review.Unusable):
+                    parse(text)
+        # One shaped to mention, link or format comes out defanged; one that repeats the PR's text is withheld.
+        shaped = parse(block(summary="<users/all> @acme/everyone see https://evil.test `x` ya29.a0AfB_" + "d" * 30))[3]
+        for bad in ("<users/all>", "@acme", "https://evil", "`", "ya29.a0"):
+            self.assertNotIn(bad, shaped)
+        echoed = parse(block(verdict="PASS", blocking=(), non_blocking=(), summary=f"Fine. {PLANTED}"),
+                       INJECTED_DIFF)
+        self.assertEqual(echoed[3], chat_review.SUMMARY_WITHHELD)
+        self.switch(config.CHAT_REVIEW_GITHUB_FILE, True)
+        self.switch(config.CHAT_REVIEW_APPROVE_FILE, True)
+        self.assertEqual(chat_review.github_event("PASS", [], [], chat_review.SUMMARY_WITHHELD), "COMMENT")
+        self.assertEqual(chat_review.github_event("PASS", [], [], SUMMARY), "APPROVE")
+
+    def test_a_pass_whose_summary_echoes_the_pr_is_posted_as_a_comment_never_an_approval(self):
+        self.switch(config.CHAT_REVIEW_GITHUB_FILE, True)
+        self.switch(config.CHAT_REVIEW_APPROVE_FILE, True)
+        self.answer = ("ok", block(verdict="PASS", blocking=(), non_blocking=(), summary=f"Fine. {PLANTED}"))
+        self.deliver(msg())
+        self.run_pass()
+        [(_, payload)] = self.writes
+        self.assertEqual(payload["event"], "COMMENT")
+        self.assertNotIn("push a commit", payload["body"] + self.google.messages[0]["text"])
+        self.assertTrue(self.texts()[0].startswith(chat_review.SUMMARY_WITHHELD + "\nVerdict: PASS"))
+
+    def test_the_reply_is_the_summary_the_verdict_and_bulleted_findings(self):
+        self.answer = ("ok", block(verdict="PASS", blocking=(), non_blocking=(), summary="Clean. Ship it."))
+        self.deliver(msg())
+        self.run_pass()
+        self.assertEqual(self.google.messages[0]["text"].splitlines(),
+                         [said("Clean. Ship it."), f"Verdict: PASS on acme/web-app#7 at {HEAD[:12]}", "No findings."])
+        self.assertEqual(chat_review._bullet(f"N2 {chat_review.WITHHELD}"), f"- {chat_review.WITHHELD}")
+        self.assertEqual(chat_review._bullet("N1 b.ts:3 | returns string | undefined"),
+                         "- b.ts:3: returns string | undefined")
+        self.assertEqual(chat_review._bullet(f"B1 x.py | {chat_review.WITHHELD}"), f"- x.py: {chat_review.WITHHELD}")
+        many = [f"N{index} x.py:{index} | " + "n" * 250 for index in range(1, 16)]
+        text = chat_review.reply_text("acme/web-app", 7, HEAD, "CHANGES", [f"B{index} x.py:{index} | {'b' * 250} | fix"
+                                                                        for index in range(1, 16)], many, SUMMARY)
+        self.assertLessEqual(len(said(text, "users/" + "9" * 40)), google_chat.MESSAGE_MAX_CHARS)
+        self.assertTrue(text.splitlines()[-1].endswith("more lines not shown)"))
+        self.assertNotRegex(text, r"(?m)^- [BN][0-9]")
+
+    def test_the_second_app_replies_the_same_way_in_its_own_voice(self):
+        self.second_app()
+        self.answer = ("ok", block(summary="Prints at import. Rip it out."))
+        self.deliver(msg(app=MOODY_APP_USER))
+        self.run_pass()
+        [message] = self.google.messages
+        self.assertEqual((message["app"], message["text"].splitlines()[:3]),
+                         ("moody", [said("Prints at import. Rip it out."),
+                                    f"Verdict: CHANGES on acme/web-app#7 at {HEAD[:12]}", "Blocking:"]))
+        [ack] = self.ack_texts()
+        self.assertIn(ack, acks(chat_review.MOODY_ACKS))
+        self.assertIn("gruff and terse", chat_review.MOODY_BRIEF)
+        self.assertIn("brisk, precise", chat_review.BRIEF)
+        for brief in (chat_review.BRIEF, chat_review.MOODY_BRIEF):
+            self.assertIn("SUMMARY: <your verdict in one or two plain sentences>", brief)
+            self.assertIn(f"at most {chat_review.SUMMARY_MAX} characters", brief)
+
+    def test_the_github_review_carries_the_summary_under_its_opening(self):
+        self.switch(config.CHAT_REVIEW_GITHUB_FILE, True)
+        self.deliver(msg())
+        self.run_pass()
+        [(_, payload)] = self.writes
+        self.assertEqual(payload["body"].splitlines()[:5], [
+            "This is an automated review by Hermione (Staff Engineer), requested by Dev Person in Chat.", "",
+            f"`{SUMMARY}`", "", f"Verdict: CHANGES at {HEAD[:12]}"])
+        self.assertNotIn(SENDER_USER, payload["body"])
+
+
+class QuestionTests(ChatCase):
+    """A mention in a thread the app reviewed that is no request or follow-up is a question about its review: a
+    read-only turn of the same desk answers it in the thread, and it never posts on GitHub or approves."""
+
+    QUESTION = "why is x.py line 2 a problem?"
+    ANSWER = "Because it prints when the module is imported. Move it under a main guard."
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.patch(config, "CHAT_REVIEW_PER_PERSON_DAILY", 20)
+
+    def reviewed(self, app: str = APP_USER) -> None:
+        self.answer = ("ok", block())
+        self.deliver(msg(at=time.time() - 5, app=app))
+        self.assertEqual([outcome for outcome in self.run_pass()["taken"] if outcome != "seen before"], ["review"])
+        self.answer = ("ok", f"Here it is.\nANSWER\n{self.ANSWER}\nEND\n")
+
+    def ask(self, text: str = QUESTION, message: str = "q1", **kwargs) -> list:
+        self.deliver(msg(text=text, message=message, at=time.time() + 1, **kwargs))
+        return [outcome for outcome in self.run_pass()["taken"] if outcome != "seen before"]
+
+    def question_records(self) -> list:
+        return [record for record in self.records() if record["kind"] == "question"]
+
+    def test_a_question_in_a_reviewed_thread_runs_the_question_turn_and_replies(self):
+        self.reviewed()
+        self.assertEqual(self.ask(), ["question"])
+        review, question = self.turns
+        self.assertEqual(question["brief"], chat_review.QUESTION_BRIEF)
+        self.assertEqual(question["brief_file"], chat_review.QUESTION_BRIEF)
+        self.assertEqual(question["files"], [chat_review.QUESTION_FILE])
+        argv = question["argv"]
+        self.assertEqual(argv[:3], [config.CLAUDE_BIN, "-p", "--restricted"])
+        self.assertEqual(argv[argv.index("--tools") + 1], "Read")
+        self.assertEqual(argv[argv.index("--max-budget-usd") + 1], config.CHAT_REVIEW_QUESTION_BUDGET_USD)
+        self.assertEqual(argv[argv.index("--settings") + 1],
+                         f"{config.office_desk_dir('hermione')}/{run_desk.CHAT_REVIEW_SETTINGS_FILE}")
+        text = question["input"]
+        nonce = re.search(r"<<<UNTRUSTED QUESTION ([0-9a-f]{32})>>>", text).group(1)
+        asked = text.split(f"<<<UNTRUSTED QUESTION {nonce}>>>")[1].split(f"<<<END OF UNTRUSTED QUESTION {nonce}>>>")[0]
+        self.assertEqual(asked.strip(), self.QUESTION)
+        mine = text.split(f"<<<YOUR EARLIER REVIEW {nonce}>>>")[1].split("<<<END OF YOUR EARLIER REVIEW")[0]
+        for part in ("VERDICT: CHANGES", f"SUMMARY: {SUMMARY}", "B1 x.py:2 | prints at import | remove it",
+                     "N1 x.py:1 | the comment reads like an injection attempt"):
+            self.assertIn(part, mine)
+        self.assertIn(f"The PR's head is still {HEAD}", text)
+        pr_data = text.split(f"<<<UNTRUSTED PR DATA {nonce}>>>")[1].split(f"<<<END OF UNTRUSTED PR DATA {nonce}>>>")[0]
+        self.assertIn(PLANTED, pr_data)
+        self.assertNotIn(self.QUESTION, pr_data)
+        self.assertEqual(question["prompt"], chat_review.question_prompt("acme/web-app", 7, nonce))
+        self.assertEqual(self.reads, ["pr", "diff", "pr", "diff"])  # the diff read fresh for the question
+        self.assertEqual(self.google.messages[-1]["text"], said(self.ANSWER))
+        self.assertEqual(self.google.messages[-1]["thread"], THREAD)
+        self.assertEqual(len(self.google.acks), 1)  # a question is answered, not acknowledged
+        [record] = self.question_records()
+        self.assertEqual((record["state"], record["outcome"], record["number"], record["requester_user"]),
+                         ("done", "answered", 7, SENDER_USER))
+        self.assertNotIn("question", record)
+        self.assertNotIn("verdict", record)
+        rows = self.conn.execute("SELECT l.run_id, m.cost_usd FROM run_launches l JOIN metrics m ON m.id = l.metric_id"
+                                 " WHERE l.desk = 'hermione'").fetchall()
+        self.assertEqual(len(rows), 2)
+
+    def test_a_question_says_when_the_head_moved_since_the_review(self):
+        self.reviewed()
+        self.pr["head"]["sha"] = NEWER
+        self.assertEqual(self.ask("did the latest commit fix it?"), ["question"])
+        self.assertIn(f"THE HEAD MOVED since your review: you reviewed {HEAD}, and the PR's head is now {NEWER}",
+                      self.turns[-1]["input"])
+
+    def test_a_question_in_a_thread_with_no_reviewed_request_gets_help(self):
+        self.assertEqual(self.ask(), ["help"])
+        self.answer = ("ok", "garbage")
+        self.deliver(msg(at=time.time() - 5, thread=f"{SPACE}/threads/t2", message="r2"))
+        self.run_pass()  # unusable: on record, but not reviewed
+        self.assertEqual(self.ask(message="q2", thread=f"{SPACE}/threads/t2"), ["help"])
+        self.reviewed()
+        self.assertEqual(self.ask(text="", message="q3"), ["help"])
+        self.assertEqual(self.ask(text="x" * (chat_review.QUESTION_MAX + 1), message="q4"), ["help"])
+        self.assertEqual(len(self.turns), 2)
+        self.assertEqual(self.texts().count(chat_review.help_text("hermione")), 4)
+        self.assertIn("with a question about my review", chat_review.help_text("hermione"))
+
+    def test_requests_and_follow_ups_win_and_a_broken_one_is_no_question(self):
+        self.reviewed()
+        self.answer = ("ok", block())
+        self.assertEqual(self.ask("review again", message="q1"), ["review"])
+        self.assertEqual(self.ask("approve https://github.com/acme/other/pull/3", message="q2"), ["help"])
+        self.assertEqual(self.ask("is the review of https://github.com/acme/other/pull/3 right?", message="q3"),
+                         ["help"])
+        self.assertEqual(self.question_records(), [])
+        for text in ("why?", "what about https://example.org/docs", "is x.py fine"):
+            self.assertTrue(chat_review.parse_question(text))
+        for text in ("review it", "why no approval", "", "   ", None, 7, "x" * (chat_review.QUESTION_MAX + 1)):
+            self.assertFalse(chat_review.parse_question(text))
+
+    def test_an_unmentioned_message_is_never_a_question(self):
+        self.reviewed()
+        self.assertEqual(self.ask(mention=False), [])
+        self.assertEqual((self.question_records(), len(self.turns)), ([], 1))
+
+    def test_the_question_never_reaches_the_log_the_review_turn_or_the_office_after(self):
+        self.reviewed()
+        self.assertEqual(self.ask(f"{SECRET_MARK} why is line 2 bad?"), ["question"])
+        self.answer = ("ok", block())
+        self.assertEqual(self.ask("review again", message="q2"), ["review"])
+        first, question, again = self.turns
+        self.assertIn(SECRET_MARK, question["input"])
+        for turn in (first, again):
+            for part in (turn["prompt"], turn["brief"], turn["input"], " ".join(turn["argv"])):
+                self.assertNotIn(SECRET_MARK, part)
+        for part in (question["prompt"], question["brief"], " ".join(question["argv"])):
+            self.assertNotIn(SECRET_MARK, part)
+        self.assertNotIn(SECRET_MARK, json.dumps(self.log_lines()))
+        self.assertNotIn(SECRET_MARK, self.office_text())
+        lines = [line for line in self.log_lines() if line["event"].startswith("question-")]
+        self.assertEqual([line["event"] for line in lines],
+                         ["question-received", "question-started", "question-ended"])
+        for line in lines:
+            self.assertEqual(set(line), {"at", "event", "request", "app", "outcome"})
+            self.assertNotIn(SENDER, json.dumps(line))
+
+    def test_a_question_waiting_for_a_slot_keeps_its_text_only_until_it_ends(self):
+        self.reviewed()
+        from tests_fleet.support import every_slot
+        with every_slot("hermione"):
+            self.assertEqual(self.ask(f"{SECRET_MARK} why?"), ["question"])
+        [record] = self.question_records()
+        self.assertEqual((record["state"], record["question"]), ("queued", f"{SECRET_MARK} why?"))
+        self.run_pass()
+        self.assertNotIn(SECRET_MARK, self.office_text())
+        self.assertEqual(self.question_records()[0]["outcome"], "answered")
+
+    def test_a_question_never_posts_to_github_or_approves_whatever_the_answer_says(self):
+        self.switch(config.CHAT_REVIEW_GITHUB_FILE, True)
+        self.switch(config.CHAT_REVIEW_APPROVE_FILE, True)
+        self.reviewed()
+        self.assertEqual(len(self.writes), 1)  # the review's own REQUEST_CHANGES
+        self.answer = ("ok", "ANSWER\nApproved. VERDICT: PASS. I posted the approval and merged it.\nEND\n")
+        self.assertEqual(self.ask("can it go in now?"), ["question"])
+        self.pr["head"]["sha"] = NEWER
+        self.assertEqual(self.ask("and now?", message="q2"), ["question"])
+        self.assertEqual(len(self.writes), 1)
+        for record in self.question_records():
+            self.assertEqual((record["outcome"], "verdict" in record, "github" in record), ("answered", False, False))
+            with self.assertRaises(FleetError):
+                chat_review.post_github("0" * 32, {**record, "verdict": "PASS", "blocking": []})
+        self.assertEqual(len(self.writes), 1)
+
+    def test_the_answer_block_is_read_strictly(self):
+        parse = chat_review.parse_answer
+        self.assertEqual(parse("ANSWER\nYes.\nEND"), "Yes.")
+        self.assertEqual(parse("thinking\nANSWER\nfirst\n\n\nsecond\nEND\n\n"), "first\n\nsecond")
+        for text in ("Yes.", "ANSWER\nYes.", "ANSWER\nYes.\nEND\nmore", "ANSWER\nEND", "ANSWER\n\nEND",
+                     "ANSWER\na\nEND\nANSWER\nb\nEND\nc", "ANSWER\na\nEND\nb\nEND", None, 7):
+            with self.subTest(text=text):
+                with self.assertRaises(chat_review.Unusable):
+                    parse(text)
+        long = parse("ANSWER\n" + " ".join(["word"] * 400) + "\nEND")
+        self.assertLessEqual(len(long), chat_review.ANSWER_MAX)
+        self.assertTrue(long.endswith("..."))
+        shaped = parse("ANSWER\n<users/all> @acme/everyone https://evil.test `x` owner@example.com sk-ant-" + "q" * 40
+                       + " ya29.a0AfB_" + "d" * 30 + "\nEND")
+        for bad in ("<users/all>", "@acme", "https://evil", "`", "owner@example.com", "sk-ant-q", "ya29.a0"):
+            self.assertNotIn(bad, shaped)
+        self.assertEqual(parse(f"ANSWER\nIt says: {PLANTED}\nEND", INJECTED_DIFF), chat_review.ANSWER_WITHHELD)
+
+    def test_an_unusable_or_echoing_answer_gets_a_fixed_line(self):
+        self.reviewed()
+        self.answer = ("ok", "I approved it.")
+        self.assertEqual(self.ask(), ["question"])
+        self.assertEqual(self.texts()[-1], chat_review.COULD_NOT_ANSWER)
+        self.answer = ("ok", f"ANSWER\nThe comment says {PLANTED}\nEND")
+        self.assertEqual(self.ask("what does the comment say?", message="q2"), ["question"])
+        self.assertEqual(self.texts()[-1], chat_review.ANSWER_WITHHELD)
+        self.assertEqual(sorted(record["outcome"] for record in self.question_records()), ["unusable", "withheld"])
+
+    def test_questions_count_toward_the_chat_and_desk_caps(self):
+        self.patch(config, "CHAT_REVIEW_PER_PERSON_DAILY", 2)
+        self.reviewed()
+        self.assertEqual(self.ask(), ["question"])
+        self.assertEqual(self.ask("and the note?", message="q2"), ["question"])
+        self.assertEqual(self.texts()[-1], chat_review.CAPPED_PERSON)
+        self.assertEqual(len(self.turns), 2)
+        self.patch(config, "CHAT_REVIEW_PER_PERSON_DAILY", 20)
+        self.patch(config, "DAILY_RUN_CAP", {**config.DAILY_RUN_CAP, "hermione": 2})
+        self.assertEqual(self.ask("and the rest?", message="q3"), ["question"])
+        self.assertEqual(self.texts()[-1], chat_review.COULD_NOT_ANSWER)
+        self.assertEqual(sorted(record["outcome"] for record in self.question_records()),
+                         ["answered", "capped", "desk-capped"])
+
+    def test_a_bad_question_budget_refuses_to_start(self):
+        for value in ("0.00", "1", "-1.00", 0.5, None, "1.5x"):
+            with self.subTest(value=value):
+                self.patch(config, "CHAT_REVIEW_QUESTION_BUDGET_USD", value)
+                self.assertIsNone(chat_review.question_budget())
+                with self.assertRaises(FleetError) as caught:
+                    self.run_pass()
+                self.assertIn("CHAT_REVIEW_QUESTION_BUDGET_USD", str(caught.exception))
+        with self.assertRaises(FleetError):
+            run_desk.chat_review_argv(self.conn, "brief", "prompt", "chat-" + "0" * 16, "hermione", "1; rm")
+
+    def test_a_question_through_the_second_app_is_a_read_only_codex_turn(self):
+        self.second_app()
+        self.reviewed(app=MOODY_APP_USER)
+        self.assertEqual(self.ask(app=MOODY_APP_USER), ["question"])
+        review, question = self.turns
+        self.assertEqual((question["desk"], question["family"], question["brief"]),
+                         ("moody", "codex", chat_review.MOODY_QUESTION_BRIEF))
+        argv = question["argv"]
+        run_desk.guard(argv)
+        self.assertEqual(argv[:4], [config.CODEX_BIN, "exec", "--ignore-user-config", "--ignore-rules"])
+        self.assertIn('default_permissions="fleet-chat-review-moody"', argv)
+        self.assertIn('approval_policy="never"', argv)
+        profile = next(arg for arg in argv if arg.startswith("permissions.fleet-chat-review-moody="))
+        self.assertIn("network={enabled=false}", profile)
+        self.assertNotIn('"write"', profile)
+        self.assertNotIn("--max-budget-usd", argv)
+        self.assertEqual(review["argv"][:-2], argv[:-2])  # the same read-only turn as his review, but its run id
+        self.assertEqual(question["files"], [chat_review.QUESTION_FILE])
+        self.assertEqual((self.google.messages[-1]["app"], self.google.messages[-1]["text"]),
+                         ("moody", said(self.ANSWER)))
+        self.assertIn("gruff and terse", chat_review.MOODY_QUESTION_BRIEF)
+        # A question to the other app in that thread is help: it reviewed nothing there.
+        self.assertEqual(self.ask(message="q2"), ["help"])
+
+
 class UpgradeTests(ChatCase):
     """One APPROVE may follow a COMMENT on the same head commit, once, and nothing else is ever posted twice."""
 
@@ -2504,10 +2886,11 @@ class SecondAppTests(ChatCase):
         self.assertEqual(len(turn["hand"]), 4)
         [message] = self.google.messages
         self.assertEqual((message["app"], message["thread"]), ("moody", THREAD))
-        self.assertTrue(message["text"].startswith(f"Review of acme/web-app#7 at {HEAD[:12]}: CHANGES"))
+        self.assertTrue(message["text"].startswith(
+            said(f"{SUMMARY}\nVerdict: CHANGES on acme/web-app#7 at {HEAD[:12]}")))
         [ack] = self.google.acks
         self.assertEqual(ack["app"], "moody")
-        self.assertIn(ack["text"], chat_review.MOODY_ACKS)
+        self.assertIn(MENTION.sub("", ack["text"]), acks(chat_review.MOODY_ACKS))
         [grant] = self.google.grants  # only the second app's worker was minted a token
         self.assertEqual(grant["iss"], MOODY_SERVICE_ACCOUNT)
         self.assertIn((MOODY_USER_KEYCHAIN_SERVICE, google_chat.USER_TOKEN_ACCOUNT), self.keychain_calls)
@@ -2532,7 +2915,7 @@ class SecondAppTests(ChatCase):
         self.assertEqual(sorted(turn["desk"] for turn in self.turns), ["hermione", "moody"])
         self.assertEqual(sorted(message["app"] for message in self.google.messages), ["hermione", "moody"])
         self.assertEqual({message["thread"] for message in self.google.messages}, {THREAD})
-        self.assertEqual(sorted((ack["app"], ack["text"] in chat_review.VOICES[ack["app"]].acks)
+        self.assertEqual(sorted((ack["app"], MENTION.sub("", ack["text"]) in acks(chat_review.VOICES[ack["app"]].acks))
                                 for ack in self.google.acks), [("hermione", True), ("moody", True)])
         self.assertEqual(sorted(record["app"] for record in self.records()), ["hermione", "moody"])
         self.assertEqual({record["message"] for record in self.records()}, {f"{SPACE}/messages/m1"})
@@ -2671,7 +3054,7 @@ class SecondAppTests(ChatCase):
         self.answer = ("ok", block())
         self.run_pass()
         self.run_pass()
-        self.assertEqual([(message["app"], message["text"]) for message in self.google.messages],
+        self.assertEqual([(message["app"], text) for message, text in zip(self.google.messages, self.texts())],
                          [("moody", chat_review.COULD_NOT)])
         self.assertEqual(os.listdir(self.office / "runs" / "moody"), [])
         self.assertEqual(len(self.turns), 1)
@@ -2701,7 +3084,7 @@ class SecondAppTests(ChatCase):
         self.answer = ("ok", block().replace("VERDICT: CHANGES", "VERDICT: APPROVE"))
         self.deliver(msg(app=MOODY_APP_USER, message="m2"))
         self.run_pass()
-        self.assertEqual(self.google.messages[-1]["text"], chat_review.COULD_NOT)
+        self.assertEqual(self.texts()[-1], chat_review.COULD_NOT)
 
     def test_a_codex_turn_answers_with_its_last_agent_message_and_its_tokens(self):
         events = [{"type": "thread.started"},
@@ -2721,9 +3104,10 @@ class SecondAppTests(ChatCase):
                 self.assertEqual(run_desk._codex_report_outcome(answer, code, None), ("failed", ""))
 
     def test_moodys_acknowledgements_are_his_own_fixed_lines_and_never_hold_the_message_text(self):
-        self.assertEqual(chat_review.MOODY_ACKS, ("Leave it with me.", "Reading it now. Every line of it.",
-                                                  "Give me a minute. I don't skim.",
-                                                  "Right. Let's see what's hiding in it."))
+        self.assertEqual(chat_review.MOODY_ACKS, ("Leave #{number} with me.",
+                                                  "Reading #{number} now. Every line of it.",
+                                                  "Give me a minute with #{number}. I don't skim.",
+                                                  "Right. Let's see what's hiding in #{number}."))
         self.assertEqual(chat_review.MOODY_REVIEW_ONLY, "I review. Someone else fixes.")
         self.second_app()
         for index in range(8):
@@ -2732,12 +3116,12 @@ class SecondAppTests(ChatCase):
         self.deliver(msg(text=f"review {URL}", message="m9", thread=f"{SPACE}/threads/t9", app=MOODY_APP_USER))
         for _ in range(6):
             self.run_pass()
-        fixed = {f"{line} {chat_review.MOODY_REVIEW_ONLY}" for line in chat_review.MOODY_ACKS}
-        acks = {ack["thread"]: ack["text"] for ack in self.google.acks}
-        self.assertEqual(len(acks), 9)
-        self.assertIn(acks.pop(f"{SPACE}/threads/t9"), chat_review.MOODY_ACKS)
-        self.assertTrue(set(acks.values()) <= fixed)
-        self.assertGreater(len(set(acks.values())), 1)
+        fixed = {f"{line} {chat_review.MOODY_REVIEW_ONLY}" for line in acks(chat_review.MOODY_ACKS)}
+        found = {ack["thread"]: MENTION.sub("", ack["text"]) for ack in self.google.acks}
+        self.assertEqual(len(found), 9)
+        self.assertIn(found.pop(f"{SPACE}/threads/t9"), acks(chat_review.MOODY_ACKS))
+        self.assertTrue(set(found.values()) <= fixed)
+        self.assertGreater(len(set(found.values())), 1)
         for ack in self.google.acks:
             self.assertEqual(ack["app"], "moody")
             self.assertNotIn(SECRET_MARK, ack["text"])
@@ -2748,8 +3132,8 @@ class SecondAppTests(ChatCase):
         self.deliver(msg(text="what does this repo do?", app=MOODY_APP_USER))
         self.assertEqual(self.run_pass()["taken"], ["help"])
         [message] = self.google.messages
-        self.assertEqual((message["app"], message["text"]), ("moody", chat_review.help_text("moody")))
-        self.assertTrue(message["text"].startswith(f"I'm {MOODY_NAME}, and I do code reviews only, security first."))
+        self.assertEqual((message["app"], message["text"]), ("moody", said(chat_review.help_text("moody"))))
+        self.assertTrue(self.texts()[0].startswith(f"I'm {MOODY_NAME}, and I do code reviews only, security first."))
         self.assertNotIn("the word review", message["text"])
 
     def test_each_desk_has_its_own_daily_caps_and_people_share_theirs(self):
@@ -2771,7 +3155,8 @@ class SecondAppTests(ChatCase):
         for _ in range(3):
             self.run_pass()
         self.assertEqual(len(self.turns), 3)
-        replies = [message["text"] for message in self.google.messages if message["thread"].endswith("/t4")]
+        replies = [text for message, text in zip(self.google.messages, self.texts())
+                   if message["thread"].endswith("/t4")]
         self.assertEqual(sorted(text == chat_review.CAPPED_PERSON for text in replies), [False, True])
 
     def test_the_second_apps_read_authorization_stops_only_its_own_reading(self):

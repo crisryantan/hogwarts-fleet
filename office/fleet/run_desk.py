@@ -1203,6 +1203,8 @@ CHAT_REVIEW_TOOLS = "Read"
 # into the castle's tasks and worktrees: it allows nothing beyond the default reads of the working folder.
 CHAT_REVIEW_SETTINGS_FILE = "chat-review-settings.json"
 CHAT_RUN_ID = re.compile(r"chat-[0-9a-f]{16}")
+# A chat turn's own --max-budget-usd, when it is not the desk's per-run one (a question's): dollars and cents.
+BUDGET = re.compile(r"[0-9]{1,3}\.[0-9]{2}")
 # What a Codex chat review turn keeps of the desk's codex.toml: only its model, effort and the profile that names them.
 # Everything else (MCP servers, notify commands, a profile's own web search or approval setting) is dropped.
 CHAT_REVIEW_CODEX_KEPT = ("model", "model_reasoning_effort", "model_reasoning_summary", "model_verbosity", "profile")
@@ -1218,25 +1220,28 @@ CHAT_REVIEW_CODEX_FORCED = ('approval_policy="never"', 'web_search="disabled"', 
                             "features.browser_use_external=false", "features.skill_mcp_dependency_install=false")
 
 
-def chat_review_argv(conn, brief: str, prompt: str, run_id: str, desk: str = CHAT_REVIEW_DESK) -> ReportTurn:
-    """The chat review turn of desk, one of CHAT_REVIEW_DESKS: Hermione's (chat_review_claude_argv) or Moody's
-    (chat_review_codex_argv)."""
+def chat_review_argv(conn, brief: str, prompt: str, run_id: str, desk: str = CHAT_REVIEW_DESK,
+                     budget: Optional[str] = None) -> ReportTurn:
+    """The chat review turn of desk, one of CHAT_REVIEW_DESKS: Hermione's (chat_review_claude_argv, at budget when it
+    is given, a question's) or Moody's (chat_review_codex_argv, which takes no budget). A question's turn is the same
+    turn, read-only alike, with its own brief and prompt."""
     if desk not in CHAT_REVIEW_DESKS:
         raise FleetError("that desk runs no chat review")
     if not isinstance(run_id, str) or CHAT_RUN_ID.fullmatch(run_id) is None:
         raise FleetError("a chat review run id is chat- and 16 hex digits")
     if desk in config.HEADLESS_CODEX:
         return chat_review_codex_argv(conn, brief, prompt, run_id, desk)
-    return chat_review_claude_argv(conn, brief, prompt, run_id, desk)
+    return chat_review_claude_argv(conn, brief, prompt, run_id, desk, budget)
 
 
-def chat_review_claude_argv(conn, brief: str, prompt: str, run_id: str, desk: str = CHAT_REVIEW_DESK) -> ReportTurn:
+def chat_review_claude_argv(conn, brief: str, prompt: str, run_id: str, desk: str = CHAT_REVIEW_DESK,
+                            budget: Optional[str] = None) -> ReportTurn:
     """Hermione's chat review turn (fleet/chat_review.py), run like her fleet reviews but with Read as its only tool:
     claude -p --restricted (file tools confined to its working folder, which holds only the review input) under her
     chat review settings, held to the report-only shape (check_report_settings: no allow rule, no write, no network,
-    no hooks), no MCP, her model (Ollivander's pick or her registry model) and effort, her per-run budget, the fixed
-    brief in runs/hermione/<run_id>.brief, so the run's own id is in its command line, the fixed prompt on stdin, and
-    JSON output. The turn runs at most RUN_TIMEOUT_SECONDS. Gates first: no stop, no CLI update, and her model not
+    no hooks), no MCP, her model (Ollivander's pick or her registry model) and effort, her per-run budget or budget
+    (dollars and cents, BUDGET), the fixed brief in runs/hermione/<run_id>.brief, so the run's own id is in its
+    command line, the fixed prompt on stdin, and JSON output. The turn runs at most RUN_TIMEOUT_SECONDS. Gates first: no stop, no CLI update, and her model not
     blocked (Stopped, Blocked)."""
     if desk not in CHAT_REVIEW_DESKS or desk not in config.HEADLESS_CLAUDE:
         raise FleetError("that desk runs no Claude chat review")
@@ -1244,6 +1249,8 @@ def chat_review_claude_argv(conn, brief: str, prompt: str, run_id: str, desk: st
                                        "chat review settings"), desk)
     if not isinstance(run_id, str) or CHAT_RUN_ID.fullmatch(run_id) is None:
         raise FleetError("a chat review run id is chat- and 16 hex digits")
+    if budget is not None and (not isinstance(budget, str) or BUDGET.fullmatch(budget) is None):
+        raise FleetError("a chat turn's budget is dollars and cents")
     choice = desk_choice(conn, desk)
     model = choice["model"] or pensieve.get_desk(conn, desk).get("model")
     if not model:
@@ -1255,7 +1262,7 @@ def chat_review_claude_argv(conn, brief: str, prompt: str, run_id: str, desk: st
             "--tools", CHAT_REVIEW_TOOLS, "--permission-mode", "dontAsk", "--model", model,
             *(("--effort", choice["effort"]) if choice["effort"] else ()),
             "--append-system-prompt-file", f"{config.runs_dir()}/{desk}/{name}", "--output-format", "json",
-            "--max-budget-usd", config.MAX_BUDGET_USD[desk]]
+            "--max-budget-usd", budget or config.MAX_BUDGET_USD[desk]]
     guard(argv)
     return ReportTurn(argv, name, brief, prompt, desk, config.RUN_TIMEOUT_SECONDS, config.CHAT_REVIEW_OUTPUT_MAX_BYTES,
                       model=model)

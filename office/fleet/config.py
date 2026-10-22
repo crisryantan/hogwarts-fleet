@@ -459,7 +459,8 @@ CHAT_REVIEW_SPACES: tuple = ("<allowed-chat-space>",)
 CHAT_REVIEW_REPOS: tuple = ("<allowed-repo>",)
 # Reviews per person and for the whole fleet in one cap day (CAP_RESET_UTC_SECONDS), whichever app was asked, counted
 # before the desk starts, so a killed review counts. Each is also one run of the reviewing desk under its own daily
-# caps: a Hermione turn at her MAX_BUDGET_USD at most, or a Moody turn, charged as his runs are.
+# caps: a Hermione turn at her MAX_BUDGET_USD at most, or a Moody turn, charged as his runs are. A question about a
+# review counts toward them all just as a review does.
 CHAT_REVIEW_PER_PERSON_DAILY = 3
 CHAT_REVIEW_DAILY = 10
 # Messages that mention an app one pass takes, across every app, reviews one job pass runs, and how long a request may
@@ -474,6 +475,9 @@ CHAT_REVIEW_LIST_PAGES = 5
 CHAT_REVIEW_READ_OVERLAP_SECONDS = 120
 # A PR whose diff is larger than this is refused with a fixed reply, never reviewed in part.
 CHAT_REVIEW_DIFF_MAX_BYTES = 300_000
+# A question about an app's review, asked in its thread, is a turn of the same desk with a smaller budget (a Claude
+# desk's --max-budget-usd, dollars and cents): it counts toward the same caps as a review.
+CHAT_REVIEW_QUESTION_BUDGET_USD = "0.50"
 # A Chat reply is sent at most this many times (each with the same request id, so Chat keeps one message).
 CHAT_REVIEW_REPLY_TRIES = 3
 # Hermione's chat review turn: Read only, her settings, her model and budget, and this much of its JSON output read.
