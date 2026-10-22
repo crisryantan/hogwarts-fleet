@@ -550,13 +550,14 @@ def _records() -> list:
     return sorted(found, key=lambda item: (item[1].get("at", 0), item[0]))
 
 
-def earlier_request(space: str, thread: str, app: str) -> Optional[tuple]:
-    """(repo, number) of the newest review request app took from Chat in that space and thread that is still on record
-    (CHAT_REVIEW_KEEP_SECONDS), whatever its outcome, when its repo is still allowed, else None. Only app's own
-    records count, so a thread another app reviewed is no thread this one reviewed."""
+def earlier_request(space: str, thread: str, app: str, before_us: int) -> Optional[tuple]:
+    """(repo, number) of the newest review request app took from Chat in that space and thread from a message created
+    before before_us (the follow-up's own), still on record (CHAT_REVIEW_KEEP_SECONDS), whatever its outcome, when its
+    repo is still allowed, else None. Only app's own records count, so a thread another app reviewed is no thread this
+    one reviewed, and a request listed after the follow-up never lends it its PR."""
     found = [record for _, record in _records() if record.get("app", DEFAULT_APP) == app
              and record.get("source") == "chat" and record.get("kind") == "review" and record.get("space") == space
-             and record.get("thread") == thread]
+             and record.get("thread") == thread and _taken_us(record) < before_us]
     for record in sorted(found, key=_taken_us, reverse=True)[:1]:
         repo, number = record.get("repo"), record.get("number")
         if not isinstance(repo, str) or type(number) is not int or not 1 <= number <= 9999999999 \
@@ -575,21 +576,27 @@ def _taken_us(record: dict) -> int:
     return at * 1_000_000 if type(at) is int else 0
 
 
-def listening_threads(space: str, app: str) -> frozenset:
-    """The threads of space where the newest review request any app took from Chat, still on record, is app's: there
-    app also takes a short follow-up that mentions no one. Two requests taken in the same second (one message to both
-    apps) go to the app first in CHAT_REVIEW_APPS."""
+def _owners(space: str, before_us: Optional[int] = None) -> dict:
+    """Each thread of space to the app of the newest review request any app took from Chat there, still on record, of
+    those from messages created before before_us when it is given. Two from one message (to both apps) go to the app
+    first in CHAT_REVIEW_APPS."""
     order = list(config.CHAT_REVIEW_APPS) if isinstance(config.CHAT_REVIEW_APPS, dict) else []
     newest: dict = {}
     for _, record in _records():
         thread, owner = record.get("thread"), record.get("app", DEFAULT_APP)
         if record.get("source") != "chat" or record.get("kind") != "review" or record.get("space") != space \
-                or not isinstance(thread, str):
+                or not isinstance(thread, str) or (before_us is not None and _taken_us(record) >= before_us):
             continue
         rank = (_taken_us(record), -order.index(owner) if owner in order else -len(order))
         if thread not in newest or rank >= newest[thread][0]:
             newest[thread] = (rank, owner)
-    return frozenset(thread for thread, (_, owner) in newest.items() if owner == app)
+    return {thread: owner for thread, (_, owner) in newest.items()}
+
+
+def listening_threads(space: str, app: str) -> frozenset:
+    """The threads of space where the newest review request is app's (_owners): there app also takes a short follow-up
+    that mentions no one."""
+    return frozenset(thread for thread, owner in _owners(space).items() if owner == app)
 
 
 def log(event: str, **fields) -> None:
@@ -1378,13 +1385,15 @@ def take_message(message: dict, space: str, token: str, known: dict, now: int, a
               "at_us": message["created_us"]}
     email = _senders_in(space, token, known).get(message["sender"])
     if not mentioned:
-        asked = earlier_request(space, thread, app) if email is not None and parse_unmentioned(message["argument"]) \
-            else None
+        # Only the app with the newest request in the thread before this message takes it.
+        asked = earlier_request(space, thread, app, message["created_us"]) if email is not None \
+            and parse_unmentioned(message["argument"]) \
+            and _owners(space, message["created_us"]).get(thread) == app else None
         if asked is None:
             return "ignored"
         record = {**record, "requester": email, "requester_name": display_name(message["sender_name"]),
                   "state": "queued", "kind": "review", "repo": asked[0], "number": asked[1], "follow_up": True,
-                  "mentioned": False, "other_work": False}
+                  "mentioned": False, "other_work": asks_other_work(message["argument"])}
     elif email is None:
         # Who they are is not kept: the record holds only the message's names and the fixed reply.
         record = {**record, "state": "reply", "kind": "refusal", "reply": SENDER_REFUSED, "outcome": "not-allowed"}
@@ -1393,7 +1402,7 @@ def take_message(message: dict, space: str, token: str, known: dict, now: int, a
         asked = parse_request(message["argument"])
         if asked is None and parse_follow_up(message["argument"]):
             # A follow-up in a thread where this app already took a review request: the same PR again, never another.
-            asked = earlier_request(space, thread, app)
+            asked = earlier_request(space, thread, app, message["created_us"])
             if asked is not None:
                 record = {**record, "follow_up": True}
         if asked is None:
@@ -1445,6 +1454,7 @@ def read_space(space: str, token: str, known: dict, done: list, room: int, now: 
             if not common.opt_in_on(config.CHAT_REVIEW_FILE):
                 break
             messages, page = google_chat.list_messages(space, after, app_user, token, page, threads)
+            listened = False
             for message in messages:
                 if message["mentions"] or (message.get("listening") is True
                                            and parse_unmentioned(message.get("argument"))):
@@ -1454,8 +1464,18 @@ def read_space(space: str, token: str, known: dict, done: list, room: int, now: 
                     outcome = take_message(message, space, token, known, now, app)
                     if message["mentions"] or outcome != "ignored":  # an unmentioned one ignored leaves no trace
                         done.append(outcome)
+                    if outcome == "review" and message["thread"] not in threads:
+                        threads = listening_threads(space, app)
+                        listened = message["thread"] in threads
                 if message["created_us"] <= now_us:  # a time ahead of this Mac's clock never moves the marker
                     newest = max(newest, message["created_us"])
+                if listened:
+                    # Its thread is listened to from now on: list again from just after it, so a follow-up there
+                    # that mentions no one is handed over too.
+                    after, page = message["created_us"], None
+                    break
+            if listened:
+                continue
             if page is None:
                 complete = True
                 break

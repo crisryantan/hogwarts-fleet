@@ -1959,7 +1959,19 @@ class FollowUpTests(ChatCase):
         self.deliver(msg(text="review https://github.com/acme/web-app/pull/8", message="m1", at=int(now) - 5 + 0.9),
                      msg(message="m0", at=int(now) - 5 + 0.1))  # PR 7 first, then PR 8, in the same second
         self.run_pass()
-        self.assertEqual(chat_review.earlier_request(SPACE, THREAD, "hermione"), ("acme/web-app", 8))
+        self.assertEqual(chat_review.earlier_request(SPACE, THREAD, "hermione", int(time.time() * 1e6)),
+                         ("acme/web-app", 8))
+
+    def test_a_follow_up_listed_late_never_takes_a_newer_requests_pr(self):
+        now = time.time()
+        self.deliver(msg(message="m1", at=now - 10))
+        self.run_pass()
+        self.deliver(msg(text="review https://github.com/acme/web-app/pull/8", message="m2", at=now - 2))
+        self.run_pass()
+        self.deliver(msg(text="review again", message="m3", at=now - 3))  # created before m2, listed after it
+        self.run_pass()
+        later = [record for record in self.records() if record["message"].endswith("/m3")][0]
+        self.assertEqual((later["number"], later["follow_up"]), (7, True))
 
     def test_a_follow_up_through_the_second_app(self):
         self.second_app()
@@ -1995,6 +2007,20 @@ class UnmentionedFollowUpTests(ChatCase):
     def quiet(self, text: str, message: str = "q1", **kwargs) -> list:
         self.deliver(msg(text=text, message=message, mention=False, at=time.time() + 1, **kwargs))
         return [outcome for outcome in self.run_pass()["taken"] if outcome != "seen before"]
+
+    def test_a_request_and_its_unmentioned_follow_up_in_one_read_are_both_taken(self):
+        now = time.time()
+        self.deliver(msg(message="m1", at=now - 4),
+                     msg(text="review again", message="q1", mention=False, at=now - 2))
+        self.assertEqual(self.run_pass()["taken"], ["review", "review"])
+        [record] = [record for record in self.records() if record["message"].endswith("/q1")]
+        self.assertEqual((record["number"], record["mentioned"]), (7, False))
+
+    def test_an_unmentioned_follow_up_asking_for_more_hears_she_only_reviews(self):
+        self.reviewed()
+        self.assertEqual(self.quiet("review again and merge it"), ["review"])
+        self.assertEqual(len(self.google.acks), 2)
+        self.assertTrue(self.google.acks[-1]["text"].endswith(" " + chat_review.REVIEW_ONLY))
 
     def test_the_unmentioned_grammar(self):
         for text in ("review again", "can you approve", "could you do another review please"):
