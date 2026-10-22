@@ -172,7 +172,9 @@ BRIEF = (
     "NON-BLOCKING\n"
     "N1 <file:line> | <note>\n"
     "VERDICT: PASS | CHANGES\n\n"
-    "The first line is exactly the one your prompt gives. Findings are numbered from 1 in each section, one line"
+    "The first line is exactly the one your prompt gives. A finding's place is a file and line from the diff, or for"
+    " a finding about the PR's own text, exactly PR title or PR description. Findings are numbered from 1 in each"
+    " section, one line"
     f" each, at most {FINDINGS_MAX} per section. A section with nothing has no line under its heading. The verdict is"
     " CHANGES when BLOCKING has a finding, and PASS when it has none. No other verdict exists here."
 )
@@ -183,6 +185,8 @@ FINDING = re.compile(r"([BN])([1-9][0-9]?) (\S.*)")
 FIELDS = {"B": 3, "N": 2}
 # A finding's place: a file path, which may hold spaces, then its line or lines.
 PLACE = re.compile(r"\S(?:.{0,198}\S)?:[1-9][0-9]*(?:[-,][1-9][0-9]*)*")
+# Or, for a finding about the PR's own text, its title or description, with at most a short section name after it.
+PR_TEXT_PLACE = re.compile(r"PR (?:title|description)(?: \([^()|]{1,40}\))?")
 LINE_SUFFIX = re.compile(r":[1-9][0-9]*(?:[-,][1-9][0-9]*)*$")
 DIFF_PATH = re.compile(r"(?:--- a|\+\+\+ b)/(.+?)\t?")
 # Google credentials the shared scrub has no shape for: OAuth access and refresh tokens, API keys, client secrets.
@@ -658,7 +662,8 @@ def _findings(lines: list, letter: str) -> list:
         if match is None or match.group(1) != letter or int(match.group(2)) != expected:
             raise Unusable("a line in the block is not a finding in order")
         fields = [field.strip() for field in match.group(3).split("|")]
-        if len(fields) < FIELDS[letter] or not all(fields) or PLACE.fullmatch(fields[0]) is None:
+        if len(fields) < FIELDS[letter] or not all(fields) or (PLACE.fullmatch(fields[0]) is None
+                                                               and PR_TEXT_PLACE.fullmatch(fields[0]) is None):
             raise Unusable("a finding does not have its fields")
         cleaned = defanged(scrubbed(match.group(3)))
         if not cleaned:

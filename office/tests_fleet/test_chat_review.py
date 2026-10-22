@@ -1414,6 +1414,16 @@ class StrictBlockTests(ChatCase):
         self.assertEqual(self.parse(spaced), ("CHANGES", ["B1 a dir/Run tests.xml:1 | breaks when x | y | guard it"],
                                               ["N1 b.ts:3-9 | returns string | undefined"]))
 
+    def test_a_finding_about_the_prs_own_text_names_it_as_its_place(self):
+        for place in ("PR description", "PR title", "PR description (Risks)"):
+            with self.subTest(place=place):
+                parsed = self.parse(block(non_blocking=(f"{place} | the risk class contradicts the rollout",)))
+                self.assertEqual(parsed[2], [f"N1 {place} | the risk class contradicts the rollout"])
+        for place in ("PR body", "PR description (" + "x" * 41 + ")", "PR description Risks"):
+            with self.subTest(place=place):
+                with self.assertRaises(chat_review.Unusable):
+                    self.parse(block(non_blocking=(f"{place} | a note",)))
+
     def test_anything_else_is_unusable(self):
         good = block()
         for text in (
