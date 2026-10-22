@@ -2024,10 +2024,12 @@ class UnmentionedFollowUpTests(ChatCase):
         self.assertTrue(self.google.acks[-1]["text"].endswith(" " + chat_review.REVIEW_ONLY))
 
     def test_the_unmentioned_grammar(self):
-        for text in ("review again", "can you approve", "could you do another review please"):
+        for text in ("review again", "can you approve", "could you do another review please", "Approve",
+                     "please re-review", "ok, review again"):
             with self.subTest(text=text):
                 self.assertTrue(chat_review.parse_unmentioned(text))
         for text in ("could you please do one more full review of this PR now", "thanks all", f"approve {URL}",
+                     "thanks for the review", "already approved", "I'll review it later", "nice review",
                      "approve https://example.org", "", None):
             with self.subTest(text=text):
                 self.assertFalse(chat_review.parse_unmentioned(text))

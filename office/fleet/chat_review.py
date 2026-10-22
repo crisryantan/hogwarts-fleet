@@ -141,6 +141,10 @@ OTHER_WORK = re.compile(r"(?:^|[,.;:!&]|\b(?:and|then|also|please|pls|plz|you)\b
 NEGATION = re.compile(r"\b(?:don'?t|do not|doesn'?t|never|no need|without|not)\b", re.IGNORECASE)
 # The most words a message that does not mention the app may have and still be a thread follow-up.
 UNMENTIONED_WORDS_MAX = 8
+# An unmentioned follow-up also starts as an instruction, so "thanks for the review" or "already approved" is chatter.
+UNMENTIONED_START = re.compile(r"(?:(?:please|pls|plz|ok|okay|hey|can you|could you|would you)[,!]?\s+)*"
+                               r"(?:(?:do|run)\s+)?(?:(?:another|one more|a new)\s+review|re-?review|review|approve)\b",
+                               re.IGNORECASE)
 PR_TEXT_MAX = 20000
 FINDINGS_MAX = 15
 FINDING_MAX = 300
@@ -488,8 +492,9 @@ def _allowed_pr(owner: str, name: str, number: str) -> Optional[tuple]:
 
 def parse_unmentioned(text: object) -> bool:
     """Whether a message that mentions no one is a follow-up in a thread the app reviewed: a follow-up (parse_follow_up)
-    of at most UNMENTIONED_WORDS_MAX words."""
-    return isinstance(text, str) and len(text.split()) <= UNMENTIONED_WORDS_MAX and parse_follow_up(text)
+    of at most UNMENTIONED_WORDS_MAX words that starts as an instruction (UNMENTIONED_START)."""
+    return isinstance(text, str) and len(text.split()) <= UNMENTIONED_WORDS_MAX \
+        and UNMENTIONED_START.match(text.strip()) is not None and parse_follow_up(text)
 
 
 # Office records
