@@ -1076,9 +1076,10 @@ def _withheld(found: list, lines: list, paths: frozenset, untrusted: str) -> lis
 
 
 def _flat(text: str) -> str:
-    """text as the echo check compares it: normalized, every character but printable ASCII made a space, as the scrub
-    of what is posted makes it, and its whitespace collapsed, so a character between words hides no echo."""
-    return " ".join(NOT_PRINTABLE.sub(" ", common.normalized(text)).split())
+    """text as the echo check compares it, on both sides: normalized, defanged and every character but printable ASCII
+    made a space, as what is posted is, and its whitespace collapsed, so neither a character between words nor one the
+    defang turns into another hides an echo."""
+    return " ".join(NOT_PRINTABLE.sub(" ", defanged(common.normalized(text))).split())
 
 
 def diff_paths(diff: str) -> frozenset:

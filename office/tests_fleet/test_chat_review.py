@@ -2358,6 +2358,12 @@ class ConversationTests(ChatCase):
         # A character between the words that the posted text's scrub makes a space hides no echo.
         hidden = parse(block(summary="Fine. " + "\U0001F600".join(PLANTED.split()[:10])), INJECTED_DIFF)
         self.assertEqual(hidden[3], chat_review.SUMMARY_WITHHELD)
+        # Nor does a character the defang turns into the PR's own: a backtick for each apostrophe.
+        quoted = "it's here, it's there, that's all of it, and it's over now"
+        swapped = parse(block(summary=quoted.replace("'", "`")), f"x\n{quoted}\n")
+        self.assertEqual(swapped[3], chat_review.SUMMARY_WITHHELD)
+        self.assertEqual(chat_review.parse_answer("ANSWER\n" + quoted.replace("'", "`") + "\nEND", quoted),
+                         chat_review.ANSWER_WITHHELD)
         self.switch(config.CHAT_REVIEW_GITHUB_FILE, True)
         self.switch(config.CHAT_REVIEW_APPROVE_FILE, True)
         self.assertEqual(chat_review.github_event("PASS", [], [], chat_review.SUMMARY_WITHHELD), "COMMENT")
