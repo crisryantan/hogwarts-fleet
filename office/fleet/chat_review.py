@@ -1046,7 +1046,7 @@ def parse_block(text: object, repo: str, number: int, sha: str, untrusted: str =
         raise Unusable("the verdict does not match the blocking findings")
     blocking = _withheld(blocking, body[1:split], paths, untrusted)
     non_blocking = _withheld(non_blocking, body[split + 1:-1], paths, untrusted)
-    said = defanged(scrubbed(summary.group(1)))
+    said = defanged(scrubbed(summary.group(1)))[:SUMMARY_MAX]  # the defang may lengthen it
     if not said:
         raise Unusable("an empty summary")
     if _echoes([summary.group(1)], untrusted):
@@ -1076,10 +1076,12 @@ def _withheld(found: list, lines: list, paths: frozenset, untrusted: str) -> lis
 
 
 def _flat(text: str) -> str:
-    """text as the echo check compares it, on both sides: normalized, defanged and every character but printable ASCII
-    made a space, as what is posted is, and its whitespace collapsed, so neither a character between words nor one the
-    defang turns into another hides an echo."""
-    return " ".join(NOT_PRINTABLE.sub(" ", defanged(common.normalized(text))).split())
+    """text as the echo check compares it, on both sides: sanitized as what is posted is (normalized, scrubbed of
+    every credential shape, defanged, every character but printable ASCII made a space) and its whitespace collapsed,
+    so no character between words, none the defang turns into another and no shape the scrub replaces hides an
+    echo."""
+    cleaned = GOOGLE_SECRET.sub("[token]", common.untrusted_text(text))
+    return " ".join(NOT_PRINTABLE.sub(" ", defanged(cleaned)).split())
 
 
 def diff_paths(diff: str) -> frozenset:

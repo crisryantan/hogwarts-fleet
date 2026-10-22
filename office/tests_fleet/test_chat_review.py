@@ -2364,6 +2364,12 @@ class ConversationTests(ChatCase):
         self.assertEqual(swapped[3], chat_review.SUMMARY_WITHHELD)
         self.assertEqual(chat_review.parse_answer("ANSWER\n" + quoted.replace("'", "`") + "\nEND", quoted),
                          chat_review.ANSWER_WITHHELD)
+        # Nor does a shape the scrub replaces with the placeholder the PR planted.
+        planted = "see [email] then [email] then [email] and then [email] once more"
+        mailed = planted.replace("[email]", "a@b.co")
+        self.assertEqual(parse(block(summary=mailed), planted)[3], chat_review.SUMMARY_WITHHELD)
+        self.assertEqual(chat_review.parse_answer(f"ANSWER\n{mailed}\nEND", planted), chat_review.ANSWER_WITHHELD)
+        self.assertLessEqual(len(parse(block(summary="@" * chat_review.SUMMARY_MAX))[3]), chat_review.SUMMARY_MAX)
         self.switch(config.CHAT_REVIEW_GITHUB_FILE, True)
         self.switch(config.CHAT_REVIEW_APPROVE_FILE, True)
         self.assertEqual(chat_review.github_event("PASS", [], [], chat_review.SUMMARY_WITHHELD), "COMMENT")
