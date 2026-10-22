@@ -1891,7 +1891,7 @@ class FollowUpTests(ChatCase):
         self.run_pass()
         self.assertEqual(self.follow("approve", message="m5"), ["help"])
         self.assertEqual(len(self.turns), 1)
-        self.assertEqual(self.texts().count(chat_review.help_text("hermione")), 3)
+        self.assertEqual(self.texts().count(chat_review.help_text("hermione")), 4)
 
     def test_a_follow_up_from_a_sender_not_on_the_list_is_refused(self):
         self.first()
@@ -1913,7 +1913,8 @@ class FollowUpTests(ChatCase):
         self.assertEqual(self.follow("review again"), ["help"])
         self.patch(config, "CHAT_REVIEW_REPOS", ("acme/web-app",))
         chat_review.prune(now=int(time.time()) + config.CHAT_REVIEW_KEEP_SECONDS + 86400)
-        read = int(time.time() * 1e6)  # read past the pruned messages, so the overlap does not take them again
+        # Read past the pruned messages, so the overlap does not take them again.
+        read = google_chat.time_us(self.google.posted[SPACE][-1]["createTime"])
         chat_review._save_marker(SPACE, "hermione", read, read, True, complete=False)
         self.assertEqual(self.follow("review again", message="m3"), ["help"])
         self.assertEqual(len(self.turns), 1)
