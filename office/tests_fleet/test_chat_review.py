@@ -2355,6 +2355,9 @@ class ConversationTests(ChatCase):
         echoed = parse(block(verdict="PASS", blocking=(), non_blocking=(), summary=f"Fine. {PLANTED}"),
                        INJECTED_DIFF)
         self.assertEqual(echoed[3], chat_review.SUMMARY_WITHHELD)
+        # A character between the words that the posted text's scrub makes a space hides no echo.
+        hidden = parse(block(summary="Fine. " + "\U0001F600".join(PLANTED.split()[:10])), INJECTED_DIFF)
+        self.assertEqual(hidden[3], chat_review.SUMMARY_WITHHELD)
         self.switch(config.CHAT_REVIEW_GITHUB_FILE, True)
         self.switch(config.CHAT_REVIEW_APPROVE_FILE, True)
         self.assertEqual(chat_review.github_event("PASS", [], [], chat_review.SUMMARY_WITHHELD), "COMMENT")
@@ -2451,6 +2454,8 @@ class QuestionTests(ChatCase):
         self.assertEqual(argv[:3], [config.CLAUDE_BIN, "-p", "--restricted"])
         self.assertEqual(argv[argv.index("--tools") + 1], "Read")
         self.assertEqual(argv[argv.index("--max-budget-usd") + 1], config.CHAT_REVIEW_QUESTION_BUDGET_USD)
+        for turn in (review, question):  # no transcript keeps the PR's text or the question after the turn
+            self.assertIn("--no-session-persistence", turn["argv"])
         self.assertEqual(argv[argv.index("--settings") + 1],
                          f"{config.office_desk_dir('hermione')}/{run_desk.CHAT_REVIEW_SETTINGS_FILE}")
         text = question["input"]
@@ -2582,6 +2587,8 @@ class QuestionTests(ChatCase):
         for bad in ("<users/all>", "@acme", "https://evil", "`", "owner@example.com", "sk-ant-q", "ya29.a0"):
             self.assertNotIn(bad, shaped)
         self.assertEqual(parse(f"ANSWER\nIt says: {PLANTED}\nEND", INJECTED_DIFF), chat_review.ANSWER_WITHHELD)
+        hidden = "\u2603".join(PLANTED.split()[:10])
+        self.assertEqual(parse(f"ANSWER\nIt says: {hidden}\nEND", INJECTED_DIFF), chat_review.ANSWER_WITHHELD)
 
     def test_an_unusable_or_echoing_answer_gets_a_fixed_line(self):
         self.reviewed()

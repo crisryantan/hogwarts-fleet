@@ -186,6 +186,8 @@ GITHUB_BODY_MAX = 20000
 # A finding that repeats this many characters of the PR's own text in a row is refused, so text planted in a PR is
 # never carried, word for word, into Chat or onto GitHub in the desk's voice.
 ECHO_MAX = 40
+# What the posted text's scrub turns into a space: anything but printable ASCII.
+NOT_PRINTABLE = re.compile(r"[^\x20-\x7e]")
 
 # The fixed replies. Nothing a requester wrote is ever in one. The help reply names the app as its settings spell it
 # (help_text), and each desk says what it does in its own words (Voice.does). Each is sent with a mention of the person
@@ -1074,7 +1076,9 @@ def _withheld(found: list, lines: list, paths: frozenset, untrusted: str) -> lis
 
 
 def _flat(text: str) -> str:
-    return " ".join(common.normalized(text).split())
+    """text as the echo check compares it: normalized, every character but printable ASCII made a space, as the scrub
+    of what is posted makes it, and its whitespace collapsed, so a character between words hides no echo."""
+    return " ".join(NOT_PRINTABLE.sub(" ", common.normalized(text)).split())
 
 
 def diff_paths(diff: str) -> frozenset:

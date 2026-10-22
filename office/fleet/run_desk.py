@@ -1241,7 +1241,8 @@ def chat_review_claude_argv(conn, brief: str, prompt: str, run_id: str, desk: st
     chat review settings, held to the report-only shape (check_report_settings: no allow rule, no write, no network,
     no hooks), no MCP, her model (Ollivander's pick or her registry model) and effort, her per-run budget or budget
     (dollars and cents, BUDGET), the fixed brief in runs/hermione/<run_id>.brief, so the run's own id is in its
-    command line, the fixed prompt on stdin, and JSON output. The turn runs at most RUN_TIMEOUT_SECONDS. Gates first: no stop, no CLI update, and her model not
+    command line, the fixed prompt on stdin, JSON output, and no session saved, so neither the PR's text nor a
+    teammate's question outlives the turn in a transcript. The turn runs at most RUN_TIMEOUT_SECONDS. Gates first: no stop, no CLI update, and her model not
     blocked (Stopped, Blocked)."""
     if desk not in CHAT_REVIEW_DESKS or desk not in config.HEADLESS_CLAUDE:
         raise FleetError("that desk runs no Claude chat review")
@@ -1262,7 +1263,7 @@ def chat_review_claude_argv(conn, brief: str, prompt: str, run_id: str, desk: st
             "--tools", CHAT_REVIEW_TOOLS, "--permission-mode", "dontAsk", "--model", model,
             *(("--effort", choice["effort"]) if choice["effort"] else ()),
             "--append-system-prompt-file", f"{config.runs_dir()}/{desk}/{name}", "--output-format", "json",
-            "--max-budget-usd", budget or config.MAX_BUDGET_USD[desk]]
+            "--no-session-persistence", "--max-budget-usd", budget or config.MAX_BUDGET_USD[desk]]
     guard(argv)
     return ReportTurn(argv, name, brief, prompt, desk, config.RUN_TIMEOUT_SECONDS, config.CHAT_REVIEW_OUTPUT_MAX_BYTES,
                       model=model)

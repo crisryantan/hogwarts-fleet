@@ -608,7 +608,8 @@ PR that is not open, or whose diff is over `CHAT_REVIEW_DIFF_MAX_BYTES`, gets a 
 headless as in its fleet reviews, with its model, in a fresh private folder that holds only the review input:
 
 - Hermione runs with her budget and Read as her only tool, no shell, under `desks/hermione/chat-review-settings.json`,
-  which allows no read beyond the working folder, no write and no network.
+  which allows no read beyond the working folder, no write and no network, and with no session saved, so no
+  transcript keeps what she read.
 - Moody runs `codex exec` with his `codex.toml`, user config and rules ignored, in a permission profile of the chat
   review's own: Codex's minimal platform paths and the working folder read, nothing written anywhere, the office and
   the shared temp folder denied, and no network. Web search, hooks, memories, apps, plugins and browser and computer
