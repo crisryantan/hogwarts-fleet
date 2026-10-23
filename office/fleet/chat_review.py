@@ -1899,6 +1899,10 @@ class _SwitchedOff(Exception):
     """A switch went off after a refused try: the marker is released and nothing more is posted."""
 
 
+class _ApproveOff(Exception):
+    """The approve switch went off after an APPROVE was refused for an inline comment: no APPROVE is tried again."""
+
+
 def _github_review(record: dict) -> dict:
     """What a review posts on GitHub: its inline comments and the body with the findings they leave out, the hunks
     they are checked against, and the body with every finding, for a try without inline comments."""
@@ -1916,7 +1920,8 @@ def _send(poster: Callable, key: str, record: dict, event: str, review: dict) ->
     """(what GitHub made, how many inline comments it carries) of one review post with this event: with the inline
     comments while it has any, and when GitHub refuses it for one of them (CommentRefused, so it surely was not
     posted), once more with none and every finding in the body, never with them again. _SwitchedOff when a switch
-    went off after that refusal."""
+    went off after that refusal, and _ApproveOff when it was an APPROVE and the approve switch is off now (read
+    again, as before any post)."""
     repo, number, sha = record["repo"], record["number"], record["sha"]
     if review["comments"]:
         try:
@@ -1927,6 +1932,8 @@ def _send(poster: Callable, key: str, record: dict, event: str, review: dict) ->
             review["comments"] = []
             if not intake_on(record) or not github_on():
                 raise _SwitchedOff from None
+            if event == "APPROVE" and not approve_on():
+                raise _ApproveOff from None
     return poster(repo, number, sha, review["flat"], event, [], review["hunks"]), 0
 
 
@@ -1962,7 +1969,11 @@ def post_github(key: str, record: dict, poster: Callable = None) -> dict:
     refused = None
     try:
         try:
-            posted, inline = _send(poster, key, record, event, review)
+            try:
+                posted, inline = _send(poster, key, record, event, review)
+            except _ApproveOff:  # what github_event says now: a COMMENT, tried once without inline comments
+                event = "COMMENT"
+                posted, inline = _send(poster, key, record, event, review)
         except gitops.Refused as exc:
             if event == "COMMENT":
                 raise
@@ -2006,6 +2017,10 @@ def _upgrade(key: str, record: dict, poster: Callable) -> dict:
             return _end(key, record, "reviewed", github="already")
     try:
         posted, inline = _send(poster, key, record, "APPROVE", _github_review(record))
+    except _ApproveOff:  # no longer an approval: the COMMENT stands
+        with _folder(GITHUB) as fd, contextlib.suppress(OSError):
+            os.unlink(upgrade, dir_fd=fd)
+        return _end(key, record, "reviewed", github="already")
     except _SwitchedOff:
         with _folder(GITHUB) as fd, contextlib.suppress(OSError):
             os.unlink(upgrade, dir_fd=fd)

@@ -2197,6 +2197,42 @@ class InlineCommentTests(ChatCase):
         self.assertEqual(self.records()[0]["github"], "off")
         self.assertEqual(os.listdir(self.office / chat_review.DIR / chat_review.GITHUB), [])
 
+    def test_an_approval_refused_for_a_comment_is_tried_again_only_while_the_approve_switch_is_on(self):
+        self.patch(config, "CHAT_REVIEW_PER_PERSON_DAILY", 20)
+        self.switch(config.CHAT_REVIEW_APPROVE_FILE, True)
+        self.answer = ("ok", block(verdict="PASS", blocking=()))
+        self.refuse_comments = True
+        real = self.gh_write
+
+        def refused_then_approve_off(argv, body):
+            answer = real(argv, body)
+            self.switch(config.CHAT_REVIEW_APPROVE_FILE, False)
+            return answer
+
+        gitops.run_gh_write.side_effect = refused_then_approve_off
+        self.deliver(msg())
+        self.run_pass()
+        self.assertEqual(self.events(), [("APPROVE", 1), ("COMMENT", 0)])
+        [record] = self.records()
+        self.assertEqual((record["github"], record["github_event"], record["github_inline"]), ("posted", "COMMENT", 0))
+        self.refuse_comments = False  # the upgrade: its APPROVE refused for a comment, then the switch goes off
+        self.switch(config.CHAT_REVIEW_APPROVE_FILE, True)
+        self.pr["head"]["sha"] = NEWER
+        self.answer = ("ok", block(sha=NEWER, verdict="PASS", blocking=()))
+        self.switch(config.CHAT_REVIEW_APPROVE_FILE, False)
+        gitops.run_gh_write.side_effect = real
+        self.deliver(msg(message="m2"))
+        self.run_pass()
+        self.switch(config.CHAT_REVIEW_APPROVE_FILE, True)
+        self.refuse_comments = True
+        gitops.run_gh_write.side_effect = refused_then_approve_off
+        self.deliver(msg(sender=LEAD_USER, message="m3"))
+        self.run_pass()
+        self.assertEqual(self.events()[2:], [("COMMENT", 1), ("APPROVE", 1)])
+        last = [record for record in self.records() if record["message"].endswith("/m3")][0]
+        self.assertEqual(last["github"], "already")
+        self.assertEqual(len(os.listdir(self.office / chat_review.DIR / chat_review.GITHUB)), 2)  # no upgrade marker
+
     def test_the_upgrade_to_an_approval_carries_its_own_comments(self):
         self.patch(config, "CHAT_REVIEW_PER_PERSON_DAILY", 20)
         self.answer = ("ok", block(verdict="PASS", blocking=()))
