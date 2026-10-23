@@ -579,8 +579,9 @@ never kept, never logged, but for the short thread follow-up below. Of those tha
   works; with no link at all it is the same follow-up as above, so "review again" works without tagging the app, and
   with no earlier request in the thread it is dropped. It is checked again before it runs, and dropped unanswered
   when a mention of the other app from before it turns up only later (Chat listed it late, or that app's read was
-  stopped). Any other message there that does not mention the app is dropped like any other: no reply, no record, no
-  log line;
+  stopped). A follow-up that does mention the app, in a thread where it took a mention before, is read in turn with
+  these, so it follows the PR such a request before it named. Any other message there that does not mention the app
+  is dropped like any other: no reply, no record, no log line;
 - one from them that is none of those, holds no review or approve word anywhere and has at most 2000 characters, in
   a thread where the same app has a review request on record whose outcome is reviewed, is a question about that
   review (Questions, below). A message that does not mention the app is never a question, and neither is one in a

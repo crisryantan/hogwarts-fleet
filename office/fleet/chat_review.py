@@ -784,6 +784,17 @@ def listening_threads(space: str, app: str) -> frozenset:
                      if app in apps and all(at > apps[app] for other, at in apps.items() if other != app))
 
 
+def _follows_quiet(message: dict, space: str, app: str) -> bool:
+    """Whether a message that mentions app is a follow-up in a thread where app took a mention before it, so the PR
+    it follows can be one asked for by a message there that mentions no one: it is taken in read_quiet, in turn with
+    those, not in read_space."""
+    argument = message.get("argument")
+    if not message["mentions"] or parse_request(argument) is not None or not parse_follow_up(argument):
+        return False
+    first = _first_mentions(space).get(message["thread"], {}).get(app)
+    return first is not None and first < message["created_us"]
+
+
 def log(event: str, **fields) -> None:
     """One JSON line in logs/chat-review.log. Never raises."""
     line = {"at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "event": event, **fields}
@@ -1925,7 +1936,8 @@ def read_space(space: str, token: str, known: dict, done: list, room: int, now: 
     before where it stopped, so a message sharing that microsecond is not lost. It never reads from before its first
     read or the app's current membership began, nor further back than the queue limit, and a message time ahead of
     this Mac's clock never moves the marker. A message that does not mention the app comes back as its time alone
-    here: the ones that mention no one are read_quiet's, once every app's mentions are read."""
+    here: the ones that mention no one are read_quiet's, once every app's mentions are read, and so is a follow-up
+    that may follow one of them (_follows_quiet)."""
     marker = _read_marker(space, app)
     now_us = max(int(time.time() * 1_000_000), now * 1_000_000)
     valid = marker is not None and type(marker.get("after_us")) is int and type(marker.get("floor_us")) is int
@@ -1961,7 +1973,7 @@ def read_space(space: str, token: str, known: dict, done: list, room: int, now: 
                 break
             messages, page = google_chat.list_messages(space, after, app_user, token, page)
             for message in messages:
-                if message["mentions"]:
+                if message["mentions"] and not _follows_quiet(message, space, app):
                     if sum(outcome in TAKEN for outcome in done) >= room:
                         waiting = min(message["created_us"], now_us)  # no room: the next read starts here
                         return
@@ -1988,7 +2000,8 @@ def read_quiet(space: str, token: str, known: dict, done: list, room: int, now: 
     its quiet read marker, until done holds room records. Only one in a thread that was app's alone for a while
     (listening_threads) is read with its text, and take_message takes it only from an allowed sender as a short
     review request or follow-up, in a thread only app took a mention in before it; anything else of it is dropped
-    with no trace. The marker keeps the mention marker's rules: the overlap after a read that went as far as it could,
+    with no trace. A follow-up that mentions app, left here by read_space (_follows_quiet), is taken in its turn
+    among them, so it follows a request one of them made before it. The marker keeps the mention marker's rules: the overlap after a read that went as far as it could,
     from just before where one cut short stopped, never before the mention marker's floor or the queue limit, and
     never ahead of this Mac's clock. Nothing moves while upto is None."""
     if upto is None:
@@ -2000,7 +2013,7 @@ def read_quiet(space: str, token: str, known: dict, done: list, room: int, now: 
     now_us = max(int(time.time() * 1_000_000), now * 1_000_000)
     newest, upto = mark["after_us"], min(upto, now_us + CLOCK_SKEW_SECONDS * 1_000_000)
     threads = listening_threads(space, app)
-    if not threads:  # no thread there was ever app's alone: nothing up to upto is for it
+    if not any(app in apps for apps in _first_mentions(space).values()):  # app took no mention here: nothing is its
         _save_quiet(space, app, max(newest, min(upto, now_us)), True)
         return
     overlap = config.CHAT_REVIEW_READ_OVERLAP_SECONDS * 1_000_000 if mark.get("complete") is not False else 0
@@ -2016,12 +2029,15 @@ def read_quiet(space: str, token: str, known: dict, done: list, room: int, now: 
                 if message["created_us"] > upto:  # not every app's mentions are read this far yet
                     complete, page = True, None
                     break
-                if message.get("listening") is True and unmentioned_asks(message.get("argument")):
+                key = _message_key(message["name"], app) if message["mentions"] else None
+                left = message["mentions"] and _follows_quiet(message, space, app) \
+                    and (key is None or read_record(key) is None)  # one read_space took is not offered again
+                if left or (message.get("listening") is True and unmentioned_asks(message.get("argument"))):
                     if sum(outcome in TAKEN for outcome in done) >= room:
                         waiting = min(message["created_us"], now_us)
                         return
                     outcome = take_message(message, space, token, known, now, app)
-                    if outcome != "ignored":  # one ignored leaves no trace
+                    if left or outcome != "ignored":  # an unmentioned one ignored leaves no trace
                         done.append(outcome)
                 if message["created_us"] <= now_us:
                     newest = max(newest, message["created_us"])

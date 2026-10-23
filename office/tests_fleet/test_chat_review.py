@@ -2327,6 +2327,33 @@ class UnmentionedFollowUpTests(ChatCase):
         self.assertEqual(turn["desk"], "hermione")
         self.assertEqual([ack["thread"] for ack in self.google.acks], [t1])
 
+    def test_a_mentioned_follow_up_follows_an_unmentioned_request_before_it_in_the_same_pass(self):
+        self.reviewed(at=time.time() - 30)  # PR 7, mentioned
+        now = time.time()
+        self.deliver(msg(text="review https://github.com/acme/web-app/pull/8", message="q1", mention=False, at=now - 4),
+                     msg(text="approve", message="m2", at=now - 2))
+        self.assertEqual([outcome for outcome in self.run_pass()["taken"] if outcome != "seen before"],
+                         ["review", "review"])
+        later = {record["message"][-2:]: record for record in self.records() if record["message"][-2:] in ("q1", "m2")}
+        self.assertEqual([(name, later[name]["number"], later[name].get("follow_up")) for name in ("q1", "m2")],
+                         [("q1", 8, None), ("m2", 8, True)])
+
+    def test_a_mentioned_follow_up_after_help_and_an_unmentioned_request_is_a_review_not_help(self):
+        for helped_first in (True, False):  # the help in an earlier pass, or all three in one read
+            with self.subTest(helped_first=helped_first):
+                thread, now = f"{SPACE}/threads/f{int(helped_first)}", time.time()
+                first = msg(text="what is this?", message=f"h{int(helped_first)}", at=now - 6, thread=thread)
+                if helped_first:
+                    self.deliver(first)
+                    self.run_pass()
+                self.deliver(*(() if helped_first else (first,)),
+                             msg(text=f"Review PR {URL}", message=f"q{int(helped_first)}", mention=False, at=now - 4,
+                                 thread=thread),
+                             msg(text="review again", message=f"m{int(helped_first)}", at=now - 2, thread=thread))
+                self.run_pass()
+                [follow] = [record for record in self.records() if record["message"].endswith(f"/m{int(helped_first)}")]
+                self.assertEqual((follow["kind"], follow["number"], follow["follow_up"]), ("review", 7, True))
+
     def test_a_mention_the_other_app_has_not_read_yet_holds_an_unmentioned_request_back(self):
         self.second_app()
         self.patch(config, "CHAT_REVIEW_LIST_PAGES", 1)
