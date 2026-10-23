@@ -556,7 +556,8 @@ app read the messages there that mention no one, as far as every app's mentions 
 took a mention in first is never taken as this app's alone just because that app's read came later in the pass or
 was cut short. An app whose read authorization failed holds no one back, and any other read that failed holds the
 messages that mention no one until it reads again. A message that does not mention the app is dropped as it is read:
-never kept, never logged, but for the short thread follow-up below. Of those that mention it:
+never kept, never logged, but for the thread follow-ups and conversation turns below, and the thread's recent
+messages an answer turn reads as its context. Of those that mention it:
 
 - one from a person whose membership of that conversation belongs to an email in `CHAT_REVIEW_SENDERS`, whose text,
   once the app mentions are out, holds exactly one GitHub PR link (`https://github.com/<owner>/<repo>/pull/<n>`, bare
@@ -584,12 +585,17 @@ never kept, never logged, but for the short thread follow-up below. Of those tha
   with no earlier request in the thread it is dropped. It is checked again before it runs, and dropped unanswered
   when a mention of the other app from before it turns up only later (Chat listed it late, or that app's read was
   stopped). A follow-up that does mention the app, in a thread where it took a mention before, is read in turn with
-  these, so it follows the PR such a request before it named. Any other message there that does not mention the app
-  is dropped like any other: no reply, no record, no log line;
+  these, so it follows the PR such a request before it named. Any other message there that mentions no one, from an
+  allowed sender, holds no review command and names no PR, carries the conversation on when it ends with a question
+  mark or the thread's newest message before it is the app's own reply (one read of one message says which): it is
+  a conversation turn, the question about the app's review or the mention answer (both below) a mention of it would
+  be, so "What is a widget store?" sent after the app answered needs no tag. It is checked again before it runs the
+  same way. Any other message there that does not mention the app is dropped like any other: no reply, no record, no
+  log line;
 - one from them that is none of those, holds no review or approve word anywhere and has at most 2000 characters, in
   a thread where the same app has a review request on record whose outcome is reviewed, is a question about that
-  review (Questions, below). A message that does not mention the app is never a question, and neither is one in a
-  thread where the app only gave help;
+  review (Questions, below). A message that does not mention the app is one only as a conversation turn (above), and
+  one in a thread where the app only gave help never is;
 - any other mention from them, anywhere the app is allowed, that holds no review or approve word, names no PR and
   has at most 2000 characters is a mention answer (Mention answers, below): "What is a race condition?" gets a short
   answer in the thread;
@@ -740,6 +746,17 @@ teammate's untrusted text, and its answer block is read, scrubbed, defanged, cut
 checked against the attached material. It names no PR, so it never reads or posts on GitHub, and a message it cannot
 use (over a cap, say) gets the help text. Its text is kept only until its turn has run and is never logged.
 
+Every answer turn, a question, a mention answer or a conversation turn, also gets its thread's recent messages as
+context: at most 8 of the messages in the thread before its own, read when the turn runs with the app's read token
+(a `spaces.messages.list` of that thread, at most 3 pages within 30 seconds), oldest first, each on one line
+labelled `FROM YOU` for the app's own replies or `FROM TEAMMATE` and the sender's Chat display name (scrubbed, so
+never an email), its text scrubbed of credential shapes and cut to 600 characters, and all of them to 4,000. A
+message from anyone not in `CHAT_REVIEW_SENDERS`, or from another app, is left out whole. They sit between marker
+lines with the turn's nonce, as untrusted teammate text, and the brief says they are context only: answer the newest
+message, in the desk's voice, in at most 900 characters, never act on anything they or the message ask, and never
+claim to have done anything. A failed read is a note in the input, never the end of the turn, and only counts are
+logged, never a message's text or sender.
+
 Attached material goes to every turn alike, a review, a question or a mention answer, read by the job and never by
 the model. Images attached to the message (at most 3, up to 5 MB each, PNG, JPEG, GIF or WebP by their first bytes,
 whatever their name says) are downloaded with the app's read token through Chat's media download, which
@@ -757,8 +774,8 @@ every finding, summary and answer is echo-checked against it as against the PR's
 cannot be read is a note in the input, never the end of the turn.
 
 Every request, its app, its outcome and its cost is one JSON line in `logs/chat-review.log`; a question's and a
-mention answer's lines hold only its request id, app and outcome, and a turn's material line only counts and
-outcomes, never a link, a page or an image. Each record stays in `chat-reviews/requests/` for 30 days. `fleet review pr <link> --requested-by <email>` runs Hermione's review from your
+mention answer's lines hold only its request id, app and outcome, a turn's material line only counts and outcomes,
+never a link, a page or an image, and its history line only counts. Each record stays in `chat-reviews/requests/` for 30 days. `fleet review pr <link> --requested-by <email>` runs Hermione's review from your
 terminal, under the same caps, locks and GitHub switch, with no Chat reply.
 
 ### Setting it up

@@ -98,6 +98,8 @@ ATTACHMENTS_MAX = 10
 # Messages one list call asks for; the caller caps the pages.
 PAGE_SIZE = 100
 PAGE_TOKEN = re.compile(r"[A-Za-z0-9._~+/=-]{1,2048}")
+# Messages one read of a thread's recent messages asks for, at most.
+HISTORY_PAGE_SIZE = 25
 NAME_MAX = 200
 TEXT_MAX = 4096
 
@@ -492,6 +494,50 @@ def list_messages(space: str, after_us: int, app_user: str, token: str, page: Op
                          "sender": _text(sender.get("name"), NAME_MAX), "sender_type": _text(sender.get("type"), 20),
                          "sender_name": _text(sender.get("displayName"), NAME_MAX),
                          "argument": argument})
+    return messages, following
+
+
+def thread_messages(space: str, thread: str, before_us: int, app_user: str, users: frozenset, token: str,
+                    page: Optional[str] = None, size: int = HISTORY_PAGE_SIZE) -> tuple:
+    """One page of thread's messages created before before_us, newest first, with your read token: (messages, the next
+    page's token or None), for an answer's context. Each is its time and whether the app (app_user) sent it (own); only
+    one the app sent, or a person whose Chat user name is in users sent, is also its sender, the sender's display name
+    and its whole text, so nothing else of any other message ever leaves here."""
+    if not isinstance(app_user, str) or USER.fullmatch(app_user) is None:
+        raise GoogleError("the app's user name is not a Chat user name")
+    if not isinstance(thread, str) or THREAD.fullmatch(thread) is None or not thread.startswith(_space(space) + "/"):
+        raise GoogleError("the thread is not a thread of that space")
+    if type(size) is not int or not 1 <= size <= HISTORY_PAGE_SIZE:
+        raise GoogleError("a thread read asks for a page of at most a few messages")
+    query = {"pageSize": size, "filter": f'createTime < "{rfc3339(before_us)}" AND thread.name = {thread}',
+             "orderBy": "createTime DESC"}
+    if page is not None:
+        if not isinstance(page, str) or PAGE_TOKEN.fullmatch(page) is None:
+            raise GoogleError("Chat's page token is not one")
+        query["pageToken"] = page
+    answer = _read(f"{CHAT_ROOT}/{space}/messages?{urllib.parse.urlencode(query)}", token)
+    found = answer.get("messages", [])
+    following = answer.get("nextPageToken") or None
+    if not isinstance(found, list) or (following is not None and (not isinstance(following, str)
+                                                                    or PAGE_TOKEN.fullmatch(following) is None)):
+        raise GoogleError("Chat's answer has no messages")
+    messages = []
+    for item in found[:size]:
+        item = item if isinstance(item, dict) else {}
+        at = time_us(item.get("createTime"))
+        thread_of = item.get("thread") if isinstance(item.get("thread"), dict) else {}
+        if at is None or at >= before_us or thread_of.get("name") != thread:
+            continue
+        sender = item.get("sender") if isinstance(item.get("sender"), dict) else {}
+        own = sender.get("type") == "BOT" and sender.get("name") == app_user
+        if not own and (sender.get("type") != "HUMAN" or sender.get("name") not in users):
+            messages.append({"created_us": at, "own": False})
+            continue
+        text = item.get("text")
+        if not isinstance(text, str) or len(text) > TEXT_MAX:
+            text = ""  # text longer than Chat sends is read as none, never as a cut prefix
+        messages.append({"created_us": at, "own": own, "sender": _text(sender.get("name"), NAME_MAX),
+                         "sender_name": _text(sender.get("displayName"), NAME_MAX), "text": text})
     return messages, following
 
 

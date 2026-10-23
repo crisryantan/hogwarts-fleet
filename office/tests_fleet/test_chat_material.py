@@ -150,10 +150,10 @@ class MentionAnswerTests(MaterialCase):
         self.assertEqual([turn["brief"] for turn in self.turns],
                          [chat_review.BRIEF, chat_review.QUESTION_BRIEF, chat_review.BRIEF])
 
-    def test_an_unmentioned_message_is_never_answered(self):
-        self.assertEqual(self.mention(mention=False), [])
+    def test_an_unmentioned_statement_is_never_answered(self):
+        self.assertEqual(self.mention(mention=False), [])  # the thread is no app's yet
         self.assertEqual(self.mention("help", message="h1"), ["help"])  # the thread is the app's now
-        self.assertEqual(self.mention(message="q2", mention=False), [])
+        self.assertEqual(self.mention("Race conditions are hard.", message="q2", mention=False), [])
         self.assertEqual((self.mention_records(), self.turns), ([], []))
 
     def test_the_message_never_reaches_the_log_the_office_after_or_github(self):
@@ -163,9 +163,11 @@ class MentionAnswerTests(MaterialCase):
         self.assertNotIn(SECRET_MARK, json.dumps(self.log_lines()))
         self.assertNotIn(SECRET_MARK, self.office_text())
         lines = [line for line in self.log_lines() if line["event"].startswith("mention-")]
-        self.assertEqual([line["event"] for line in lines], ["mention-received", "mention-started", "mention-ended"])
-        for line in lines:
-            self.assertEqual(set(line), {"at", "event", "request", "app", "outcome"})
+        self.assertEqual([line["event"] for line in lines],
+                         ["mention-received", "mention-history", "mention-started", "mention-ended"])
+        for line in lines:  # the history's line holds only its counts
+            self.assertEqual(set(line), {"at", "event", "request", "app", "messages", "failed"}
+                             if line["event"] == "mention-history" else {"at", "event", "request", "app", "outcome"})
             self.assertNotIn(SENDER, json.dumps(line))
         self.assertEqual(self.writes, [])
 
