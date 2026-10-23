@@ -761,7 +761,7 @@ class ReadTests(ChatCase):
 
     def test_the_membership_check_gates_reading(self):
         self.google.app_in = set()
-        self.deliver(msg())
+        self.deliver(msg(at=time.time() - 600))
         self.run_pass()
         self.run_pass()
         self.assertEqual(self.google.reads("/messages"), [])
@@ -770,8 +770,8 @@ class ReadTests(ChatCase):
         self.assertEqual((self.records(), self.turns), ([], []))
         self.assertFalse(self.marker()["member"])
         self.assertEqual([line["event"] for line in self.log_lines()], ["not-a-member"])  # said once
-        # The app joins: only what is asked after that is read.
-        self.google.app_in = {SPACE}
+        # The app joins: only what is asked from just before that is read.
+        self.google.app_in, self.google.joined = {SPACE}, time.time()
         self.deliver(msg(message="m2", at=time.time() + 1))
         self.assertEqual(self.run_pass()["taken"], ["review"])
         [record] = self.records()
@@ -785,15 +785,97 @@ class ReadTests(ChatCase):
         self.assertFalse([call for call in self.google.calls if "spaces/CCCC" in call[0]])
         self.assertEqual(self.records(), [])
 
-    def test_a_first_read_answers_nothing_from_before_it(self):
+    def forget_markers(self) -> None:
         with safefs.opened_dir(config.OFFICE_ROOT, chat_review.DIR, chat_review.READS) as fd:
-            os.unlink(chat_review._marker_name(SPACE, "hermione"), dir_fd=fd)
+            for quiet in (False, True):
+                with contextlib.suppress(FileNotFoundError):
+                    os.unlink(chat_review._marker_name(SPACE, "hermione", quiet), dir_fd=fd)
+
+    def test_a_first_read_with_no_join_time_answers_nothing_from_before_it(self):
+        self.google.joined = None
+        self.forget_markers()
         self.deliver(msg(at=time.time() - 30))
         self.run_pass()
         self.run_pass()  # its overlap reaches back, but never past the first read
         self.assertEqual((self.records(), self.google.messages), ([], []))
         self.deliver(msg(message="m2", at=time.time() + 1))
         self.assertEqual(self.run_pass()["taken"], ["review"])
+
+    def test_a_first_read_starts_from_the_join_less_the_grace_so_the_adding_mention_is_answered(self):
+        now = time.time()
+        grace = config.CHAT_REVIEW_JOIN_GRACE_SECONDS
+        self.google.joined = now - 10
+        self.forget_markers()
+        self.deliver(msg(message="old", at=now - 10 - grace - 60), msg(message="adding", at=now - 40))
+        self.assertEqual(self.run_pass()["taken"], ["review"])
+        [record] = self.records()
+        self.assertEqual(record["message"], f"{SPACE}/messages/adding")
+        self.assertEqual(self.marker()["floor_us"], int((now - 10 - grace) * 1e6))
+        self.assertEqual(self.run_pass()["taken"], ["seen before"])  # the overlap lists it again, and nothing else
+        self.assertEqual((len(self.records()), len(self.turns)), (1, 1))
+
+    def test_the_join_grace_is_a_setting(self):
+        now = time.time()
+        self.patch(config, "CHAT_REVIEW_JOIN_GRACE_SECONDS", 0)
+        self.google.joined = now - 10
+        self.forget_markers()
+        self.deliver(msg(message="before", at=now - 40), msg(message="after", at=now - 5))
+        self.assertEqual(self.run_pass()["taken"], ["review"])
+        [record] = self.records()
+        self.assertEqual(record["message"], f"{SPACE}/messages/after")
+        self.patch(config, "CHAT_REVIEW_JOIN_GRACE_SECONDS", -1)
+        self.assertEqual(len(chat_review.config_problems(True)), 1)
+
+    def test_a_first_read_never_reaches_back_past_the_queue_limit(self):
+        now = time.time()
+        self.google.joined = now - 86400
+        self.forget_markers()
+        self.deliver(msg(message="stale", at=now - config.CHAT_REVIEW_QUEUE_MAX_SECONDS - 600),
+                     msg(message="recent", at=now - 600))
+        self.assertEqual(self.run_pass()["taken"], ["review"])
+        self.assertEqual([record["message"] for record in self.records()], [f"{SPACE}/messages/recent"])
+
+    def test_a_first_read_never_starts_ahead_of_now(self):
+        now = time.time()
+        self.google.joined = now + 3600  # a join time ahead of this Mac's clock reads from now
+        self.forget_markers()
+        self.deliver(msg(message="past", at=now - 30))
+        self.run_pass()
+        self.assertEqual(self.records(), [])
+        self.assertLessEqual(self.marker()["floor_us"], int(time.time() * 1e6))
+        self.deliver(msg(message="next", at=time.time() + 1))
+        self.assertEqual(self.run_pass()["taken"], ["review"])
+
+    def test_a_rejoin_starts_from_the_new_join_time(self):
+        now = time.time()
+        grace = config.CHAT_REVIEW_JOIN_GRACE_SECONDS
+        self.google.app_in = set()
+        self.deliver(msg(message="while-out", at=now - 600))
+        self.run_pass()
+        self.assertFalse(self.marker()["member"])
+        self.google.app_in, self.google.joined = {SPACE}, now - 5
+        self.deliver(msg(message="adding", at=now - 30), msg(message="after", at=now - 1))
+        self.assertEqual(self.run_pass()["taken"], ["review", "review"])
+        self.assertEqual(sorted(record["message"] for record in self.records()),
+                         [f"{SPACE}/messages/adding", f"{SPACE}/messages/after"])
+        self.assertTrue(self.marker()["member"])
+        self.assertEqual(self.marker()["floor_us"], int((now - 5 - grace) * 1e6))
+
+    def test_the_quiet_read_starts_from_the_same_join_time(self):
+        now = time.time()
+        self.google.joined = now - 10
+        self.forget_markers()
+        other = f"{SPACE}/threads/t2"
+        self.deliver(msg(message="m0", at=now - 400, thread=other),
+                     msg(text="review again", message="q0", mention=False, at=now - 390, thread=other),
+                     msg(message="m1", at=now - 40),
+                     msg(text="review again", message="q1", mention=False, at=now - 30))
+        self.assertEqual(self.run_pass()["taken"], ["review", "review"])
+        self.assertEqual(sorted(record["message"] for record in self.records()),
+                         [f"{SPACE}/messages/m1", f"{SPACE}/messages/q1"])
+        self.assertEqual(len(self.turns), 2)
+        self.run_pass()
+        self.assertEqual((len(self.records()), len(self.turns)), (2, 2))  # nothing is taken twice
 
     def test_the_read_marker_moves_on_and_each_message_is_taken_once_across_a_kill(self):
         self.deliver(msg())
@@ -849,6 +931,7 @@ class ReadTests(ChatCase):
 
     def test_nothing_from_before_the_app_joined_is_read(self):
         now = time.time()
+        self.patch(config, "CHAT_REVIEW_JOIN_GRACE_SECONDS", 10)
         self.google.joined = now - 5  # it left and was added back since the last read
         self.deliver(msg(message="m1", at=now - 20), msg(message="m2", at=now - 1))
         self.assertEqual(self.run_pass()["taken"], ["review"])

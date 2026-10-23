@@ -475,6 +475,9 @@ CHAT_REVIEW_QUEUE_MAX_SECONDS = 2 * 3600
 # so a message Chat lists a little late is still seen (each message's record keeps it from being taken twice).
 CHAT_REVIEW_LIST_PAGES = 5
 CHAT_REVIEW_READ_OVERLAP_SECONDS = 120
+# How long before the moment an app joined a conversation its first read there starts, so the message that added it
+# (created just before its membership) is answered; nothing older is ever read.
+CHAT_REVIEW_JOIN_GRACE_SECONDS = 120
 # What a review may hold of a PR's diff once each file it deletes whole is cut to one line: a larger one is reviewed in
 # part, whole files smallest first, and the rest named as not shown. A diff read larger than the second is refused
 # with a fixed reply, and so is one whose changed files are each larger than the first on their own.

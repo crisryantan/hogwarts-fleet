@@ -554,6 +554,9 @@ def config_problems(intake: bool) -> list:
         value = getattr(config, name)
         if type(value) is not int or value < 1:
             bad(name, value, "must be a whole number of at least 1")
+    grace = config.CHAT_REVIEW_JOIN_GRACE_SECONDS
+    if type(grace) is not int or grace < 0:
+        bad("CHAT_REVIEW_JOIN_GRACE_SECONDS", grace, "must be a whole number of at least 0")
     if question_budget() is None:
         bad("CHAT_REVIEW_QUESTION_BUDGET_USD", config.CHAT_REVIEW_QUESTION_BUDGET_USD,
             "must be dollars and cents above zero, such as \"0.50\"")
@@ -2671,7 +2674,7 @@ def _read_marker(space: str, app: str, quiet: bool = False) -> Optional[dict]:
 def _save_marker(space: str, app: str, after_us: int, floor_us: int, member: bool, complete: bool = True,
                  through_us: Optional[int] = None) -> None:
     """app's read marker of the conversation's mentions. after_us: how far it was read; floor_us: nothing created
-    before it is ever read (its first read, or the last pass the app was not a member); complete: whether that read
+    before it is ever read (a read's start, from the app's join time: _join_start); complete: whether that read
     reached the newest message, so the next one may reach back by the overlap without stalling on a backlog;
     through_us (after_us when not given): every message created at or before it was read for mentions of app, a
     message timed a little ahead of this Mac's clock included."""
@@ -2679,6 +2682,16 @@ def _save_marker(space: str, app: str, after_us: int, floor_us: int, member: boo
         markers.replace(fd, _marker_name(space, app), {
             "state": "read", "space": space, "app": app, "after_us": int(after_us), "floor_us": int(floor_us),
             "member": member, "complete": complete, "through_us": int(after_us if through_us is None else through_us)})
+
+
+def _join_start(joined: Optional[int], now_us: int) -> Optional[int]:
+    """Where an app's first read of a conversation starts, so the message that added it is read: CHAT_REVIEW_JOIN_GRACE_
+    SECONDS before the microsecond its membership began (joined), never ahead of now_us and never further back than
+    the queue limit. None when Chat gave no usable time, and then only what comes from now on is read."""
+    if type(joined) is not int:
+        return None
+    oldest = now_us - config.CHAT_REVIEW_QUEUE_MAX_SECONDS * 1_000_000
+    return max(min(joined - config.CHAT_REVIEW_JOIN_GRACE_SECONDS * 1_000_000, now_us), oldest)
 
 
 def _save_quiet(space: str, app: str, after_us: int, complete: bool) -> None:
@@ -2854,11 +2867,12 @@ def read_space(space: str, token: str, known: dict, done: list, room: int, now: 
     """Read one conversation's new messages for app, with its read token, only while the app is a member of it (its
     Chat user name then goes in members, for read_quiet), and take those that mention the app until done (this pass's
     outcomes, shared by every conversation and app) holds room records. The app's read marker says how far it was
-    read: a first read only sets it to now, and each read after one that reached the newest message starts
-    CHAT_REVIEW_READ_OVERLAP_SECONDS before it, so a message Chat lists late is still seen, and the records make the
-    overlap harmless; one cut short (by the page cap, or by room at a message it could not take) goes on from just
-    before where it stopped, so a message sharing that microsecond is not lost. It never reads from before its first
-    read or the app's current membership began, nor further back than the queue limit, and a message time ahead of
+    read: a first read, or the first after the app joined again, starts CHAT_REVIEW_JOIN_GRACE_SECONDS before its
+    membership began (_join_start), so the mention that added the app is answered, and each read after one that reached
+    the newest message starts CHAT_REVIEW_READ_OVERLAP_SECONDS before it, so a message Chat lists late is still seen,
+    and the records make the overlap harmless; one cut short (by the page cap, or by room at a message it could not
+    take) goes on from just before where it stopped, so a message sharing that microsecond is not lost. It never reads
+    from before that start, nor further back than the queue limit, and a message time ahead of
     this Mac's clock never moves the marker. A message that does not mention the app comes back as its time alone
     here: the ones that mention no one are read_quiet's, once every app's mentions are read, and so is a follow-up
     that may follow one of them (_follows_quiet)."""
@@ -2877,17 +2891,26 @@ def read_space(space: str, token: str, known: dict, done: list, room: int, now: 
         _save_marker(space, app, now_us, now_us, False)  # nothing from while it was out is ever read
         return
     app_user, joined = member
+    start = _join_start(joined, now_us)
     if not valid:
-        _save_marker(space, app, now_us, now_us, True)  # the first read: nothing from before it is answered
-        return
-    newest, floor = marker["after_us"], max(marker["floor_us"], joined or 0)
-    if marker.get("member") is False:
-        log("member", space=space, app=app)
-        if joined is None:  # just joined, and Chat gave no time it did: only what comes from now on is read
-            floor = now_us
+        if start is None:  # Chat gave no time the app joined: only what comes from now on is read
+            _save_marker(space, app, now_us, now_us, True)
+            return
+        newest = floor = start  # the first read: the message that added the app is answered, nothing before it
+        _save_quiet(space, app, start, True)
+    else:
+        newest, floor = marker["after_us"], max(marker["floor_us"], start or 0)
+        if marker.get("member") is False:
+            log("member", space=space, app=app)
+            if start is None:  # just joined, and Chat gave no time it did: only what comes from now on is read
+                floor = now_us
+            else:  # joined again: the same start as a first read, from the new join time
+                newest = floor = start
+                _save_quiet(space, app, start, True)
     if members is not None:
         members[space] = app_user
-    overlap = config.CHAT_REVIEW_READ_OVERLAP_SECONDS * 1_000_000 if marker.get("complete") is not False else 0
+    overlap = config.CHAT_REVIEW_READ_OVERLAP_SECONDS * 1_000_000 if not valid or marker.get("complete") is not False \
+        else 0
     after = max(newest - overlap, floor, now_us - config.CHAT_REVIEW_QUEUE_MAX_SECONDS * 1_000_000)
     ahead = newest  # the newest message read, one ahead of this Mac's clock but within its skew included
     page, complete, waiting = None, False, None

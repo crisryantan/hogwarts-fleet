@@ -548,8 +548,11 @@ and can change nothing.
 For each app, your token reads only a conversation that is in `CHAT_REVIEW_SPACES` and that you are in, and only
 while that app is a member of it: each pass first asks Chat for the app's own membership there
 (`spaces/<id>/members/app`), and a conversation it has left is not read for it at all. Each app has two read markers
-per conversation in the office: one for its mentions, one for the messages that mention no one. A first read only
-sets them, so nothing from before is answered, and each read lists the messages created since its marker (back by
+per conversation in the office: one for its mentions, one for the messages that mention no one. A first read starts
+`CHAT_REVIEW_JOIN_GRACE_SECONDS` before the moment the app joined the conversation (its membership's create time, never
+ahead of now and never further back than the queue limit), so the mention that added the app is answered and nothing
+older is; an app that joins again starts the same way from its new join time, and one whose join time Chat does not
+give starts from now. After that each read lists the messages created since its marker (back by
 `CHAT_REVIEW_READ_OVERLAP_SECONDS`, for a message Chat lists a little late), at most `CHAT_REVIEW_LIST_PAGES` pages.
 Each pass reads in two rounds: first every app reads every conversation for its mentions, and only then does each
 app read the messages there that mention no one, as far as every app's mentions are read. So a thread the other app
