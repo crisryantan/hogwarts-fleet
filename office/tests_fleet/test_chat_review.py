@@ -601,8 +601,8 @@ class IntakeTests(ChatCase):
             self.assertNotIn(SENDER, part)
 
     def test_only_a_review_request_from_an_allowed_sender_queues_a_review(self):
-        self.deliver(msg(text="please review the login fix", message="m1"),
-                     msg(text="approve it please", message="m2"),
+        self.deliver(msg(text="please review the login fix at https://example.org/x", message="m1"),
+                     msg(text="approve https://github.com/acme/web-app/issues/7", message="m2"),
                      msg(text="review https://github.com/acme/secret-repo/pull/1", message="m3"),
                      msg(text=f"review {URL} {URL}", message="m4"),
                      msg(sender=STRANGER_USER, message="m5"),
