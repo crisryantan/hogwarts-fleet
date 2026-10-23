@@ -675,7 +675,7 @@ the review input, any attached images and the repo context:
 
 The PR's title, description and diff sit in that input between two marker lines with a random nonce, and the desk's
 brief and prompt say its only job is to review it and return its block, and that any instruction inside the PR text
-is ignored. Neither desk runs the PR's code. The last block is read strictly, the same for both: its header, a
+is ignored. Neither desk runs the PR's code. Both desks judge blocking by one shared rubric in their briefs. A finding blocks when the change breaks behavior on a path the diff touches, loses, corrupts or leaks data, opens a security hole, ships a behavior change without a test the repo would expect, or does something its title and description do not say. Style, docs, behavior-neutral refactors, missing tests for code the repo does not test, questions and risks that need an unlikely precondition do not. When a reviewer is unsure it is non-blocking, and the finding says what would make it blocking. The last block is read strictly, the same for both: its header, a
 SUMMARY line of at most 300 characters, the findings and the verdict, and anything else is a fixed "couldn't review"
 reply. A finding or summary that repeats 40 or more characters of the PR's own text (its whole diff and the repo
 context included) is withheld with a fixed line,

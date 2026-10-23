@@ -4272,6 +4272,14 @@ class SecondAppTests(ChatCase):
         [record] = self.records()
         self.assertEqual((record["app"], record["outcome"]), ("moody", "reviewed"))
 
+    def test_both_briefs_carry_the_severity_rubric_once_before_the_block(self):
+        for brief in (chat_review.BRIEF, chat_review.MOODY_BRIEF):
+            self.assertEqual(brief.count(chat_review._SEVERITY), 1)
+            self.assertLess(brief.index(chat_review._SEVERITY), brief.index(chat_review._BLOCK))
+            self.assertIn("When you are unsure between the two, it is non-blocking", brief)
+        self.assertLess(chat_review.MOODY_BRIEF.index("Review it security first"),
+                        chat_review.MOODY_BRIEF.index(chat_review._SEVERITY))
+
     def test_moodys_answer_is_read_strictly_like_hermiones(self):
         self.second_app()
         self.switch(config.CHAT_REVIEW_GITHUB_FILE, True)

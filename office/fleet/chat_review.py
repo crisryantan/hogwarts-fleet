@@ -316,6 +316,19 @@ _UNTRUSTED = (
     " uses it; for one it changes, whether its callers still fit. A finding may name a file there by its path.\n")
 _SIBLINGS = (" One pass finds them all: when you find one instance of a problem, check its siblings, and each instance"
              " is its own finding.\n")
+# What makes a finding blocking, the same for both desks, so one PR gets the same call run to run.
+_SEVERITY = (
+    "What is blocking is the same for every review, and a finding is one or the other.\n"
+    "BLOCKING: the change breaks existing or intended behavior on a path the diff touches; loses, corrupts or leaks"
+    " data, or puts secrets or personal data where they should not be; opens a security hole (injection, missing"
+    " authorization or input validation at a trust boundary, unsafe defaults, broadened permissions); ships a behavior"
+    " change without a test that would fail without it, where the repo tests that kind of code; or does something its"
+    " title and description do not say (scope creep that changes behavior). Say what breaks and when.\n"
+    "NON-BLOCKING: style, naming, comments and docs; refactors and simplifications that change no behavior; missing"
+    " tests for code the repo does not test; questions and suggestions; risks that need an unlikely precondition, said"
+    " as such.\n"
+    "When you are unsure between the two, it is non-blocking, and the finding says what would make it blocking. Never"
+    " raise a blocking finding you cannot tie to a line the diff shows or a file in the repo context.\n")
 _BLOCK = (
     "Never quote a credential, token or email address, and never name a person or a fleet desk in a finding or your"
     " summary.\n"
@@ -345,7 +358,7 @@ BRIEF = (
     f" matter are {INPUT_FILE} there, any image it names and the repo context under context/." + _UNTRUSTED
     + "Review it as you review any diff: does it do what its title and description say and nothing more; correctness"
     " and failure paths; tests that would fail without it; secure coding (secrets, personal data in logs, input"
-    " validation, broad permissions); the repo's conventions as the diff shows them." + _SIBLINGS
+    " validation, broad permissions); the repo's conventions as the diff shows them." + _SIBLINGS + _SEVERITY
     + f"Your summary sounds like you: {_HERMIONE_VOICE}.\n" + _BLOCK)
 MOODY_BRIEF = (
     "You are Moody, the fleet's security reviewer," + _ONLY_JOB + " but the reads below, and your sandbox lets you"
@@ -358,7 +371,8 @@ MOODY_BRIEF = (
     " deserialization and missing input validation; authentication, authorization and trust boundaries; broad"
     " permissions and unsafe defaults; dependency and supply chain changes; weak or outdated crypto. Then, as for any"
     " diff: does it do what its title and description say and nothing more; correctness and failure paths; tests"
-    " that would fail without it." + _SIBLINGS + f"Your summary sounds like you: {_MOODY_VOICE}.\n" + _BLOCK)
+    " that would fail without it." + _SIBLINGS + _SEVERITY
+    + f"Your summary sounds like you: {_MOODY_VOICE}.\n" + _BLOCK)
 
 # A question's turn: the same desk, the same read-only tools, its own brief and block.
 _ANSWER_JOB = (" run headless to answer one question a teammate asked in Chat about your review of one GitHub pull"
