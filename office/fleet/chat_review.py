@@ -95,7 +95,10 @@ Anyone in the company's Chat can send an app text, so everything here treats a m
   office file chat-review-github holds "on" too, the same review goes on the PR with your gh login
   (gitops.post_pr_review), opening with a fixed line naming the app and the requester by Chat display name, never
   email, then the summary in a code span, at most once per desk, PR and head commit (a marker made create-exclusive
-  before it is posted, never posted again after a kill). Its event is
+  before it is posted, never posted again after a kill). Each finding on a line the diff shows on its new side
+  (diff_hunks, _anchor) is one of its inline comments, at most INLINE_MAX, checked again line by line by gitops
+  before gh runs; the rest stay in its body. GitHub refusing it for a comment posts it once more without them, under
+  the same marker, and the count that posted is the record's github_inline. Its event is
   REQUEST_CHANGES for a CHANGES verdict; APPROVE for a PASS with no blocking finding while the office file
   chat-review-approve holds "on" as well, read just before the post; else COMMENT. An APPROVE or REQUEST_CHANGES review
   is your gh account's own review, so it counts for branch protection. GitHub refuses both on a PR your gh login
@@ -418,6 +421,13 @@ DIFF_PATH = re.compile(r"(?:--- a|\+\+\+ b)/(.+?)\t?")
 # control character or (core.quotePath) a byte above ASCII: its escapes, and each part of what is between them.
 QUOTED_DIFF_PATH = re.compile(r'(---|\+\+\+) "((?:[^"\\]|\\(?:[0-7]{3}|[abtnvfr"\\]))*)"\t?')
 QUOTED_PART = re.compile(r'([^\\]+)|\\([0-7]{3}|[abtnvfr"\\])')
+# A hunk's header: where its old and new sides start, and how many lines each has (1 when the count is left out).
+HUNK = re.compile(r"@@ -([0-9]{1,9})(?:,([0-9]{1,9}))? \+([0-9]{1,9})(?:,([0-9]{1,9}))? @@.*")
+# A finding's place as an inline comment reads it: a path, then one line, a range N-M, or a list N,M,...
+ANCHOR = re.compile(r"(.+):([1-9][0-9]{0,8})(?:-([1-9][0-9]{0,8})|((?:,[1-9][0-9]{0,8})+))?")
+# A review's inline comments: at most this many (the rest go in its body), each field cut so a comment fits.
+INLINE_MAX = gitops.REVIEW_COMMENTS_MAX
+INLINE_FIELD_MAX = 450
 C_ESCAPES = {"a": b"\a", "b": b"\b", "t": b"\t", "n": b"\n", "v": b"\v", "f": b"\f", "r": b"\r", '"': b'"',
              "\\": b"\\"}
 # Google credentials the shared scrub has no shape for: OAuth access and refresh tokens, API keys, client secrets.
@@ -889,7 +899,8 @@ def _logged(key: str, record: dict) -> dict:
             "source": record.get("source"),
             "repo": record.get("repo"), "number": record.get("number"), "sha": record.get("sha"),
             "outcome": record.get("outcome"), "verdict": record.get("verdict"), "cost_usd": record.get("cost_usd"),
-            "github": record.get("github"), "github_event": record.get("github_event")}
+            "github": record.get("github"), "github_event": record.get("github_event"),
+            "github_inline": record.get("github_inline")}
 
 
 def _event(record: dict, event: str) -> str:
@@ -1298,6 +1309,95 @@ def _git_path(line: str) -> Optional[str]:
     return path[2:] if path.startswith(side) and len(path) > 2 else None
 
 
+def diff_hunks(diff: str) -> dict:
+    """Each file the diff shows on its new side, by the path of its +++ header line (read by diff_paths' rules: a
+    header line only, a quoted path as git wrote it), mapped to its hunks' new-side line ranges, [first, last] per
+    hunk: the lines a review comment can sit on, added and context alike, never a removed one. Each hunk is read for
+    as many lines as its header counts, so no line inside it passes for a header or another hunk; a deleted file
+    (+++ /dev/null) has none, and so does a hunk whose header does not parse."""
+    found, header, path = {}, False, None
+    hunk, old, new, first, seen = None, 0, 0, 0, 0
+    for line in diff.split("\n"):
+        if old or new:
+            if line.startswith("\\"):  # "\ No newline at end of file" counts for neither side
+                continue
+            if line.startswith(" ") and old and new:
+                old, new, seen = old - 1, new - 1, seen + 1
+            elif line.startswith("+") and new:
+                new, seen = new - 1, seen + 1
+            elif line.startswith("-") and old:
+                old -= 1
+            else:
+                old = new = 0  # a line its counts do not allow ends the hunk, and is read as one outside it
+            if old or new:
+                continue
+            if hunk is not None and seen:
+                found.setdefault(hunk, []).append([first, first + seen - 1])
+            if line[:1] in (" ", "+", "-"):
+                continue
+        if line.startswith("diff --git "):
+            header, path = True, None
+        elif line.startswith("@@"):
+            header = False
+            match = HUNK.fullmatch(line)
+            if match is not None:
+                old, new = int(match.group(2) or 1), int(match.group(4) or 1)
+                first, seen = int(match.group(3)), 0
+                hunk = path if first >= 1 else None
+        elif header and line.startswith("+++ "):
+            match = DIFF_PATH.fullmatch(line)
+            path = match.group(1) if match is not None else _git_path(line)
+    if (old or new) and hunk is not None and seen:  # the diff ended inside a hunk
+        found.setdefault(hunk, []).append([first, first + seen - 1])
+    return found
+
+
+def _hunk_of(ranges: list, line: int) -> Optional[int]:
+    return next((index for index, hunk in enumerate(ranges) if gitops.in_hunk(hunk, line)), None)
+
+
+def _anchor(item: str, hunks: dict) -> Optional[dict]:
+    """Where a parsed finding sits as an inline comment, {"path", "line"} and a range's "start_line", or None: a
+    withheld finding, one about the PR's text, or one whose place names no commentable line of the diff. path:N sits
+    on N; path:N-M on N to M when both are in one hunk, else on M or N alone, whichever is commentable; path:N,M,...
+    on the first commentable one. The place is read as the finding was posted (scrubbed and defanged), so it names a
+    path of hunks only when exactly one path reads the same once sanitized."""
+    if item.endswith(WITHHELD) or " " not in item:
+        return None
+    match = ANCHOR.fullmatch(item.split(" ", 1)[1].split("|", 1)[0].strip())
+    if match is None:
+        return None
+    paths = [path for path in hunks if defanged(scrubbed(path)) == match.group(1)]
+    ranges = hunks.get(paths[0]) if len(paths) == 1 else None
+    if not isinstance(ranges, list):
+        return None
+    first = int(match.group(2))
+    if match.group(3) is not None:
+        last = int(match.group(3))
+        if first < last and _hunk_of(ranges, first) is not None and _hunk_of(ranges, first) == _hunk_of(ranges, last):
+            return {"path": paths[0], "start_line": first, "line": last}
+        lines = [last, first]
+    else:
+        lines = [first, *(int(number) for number in (match.group(4) or "").split(",") if number)]
+    line = next((number for number in lines if _hunk_of(ranges, number) is not None), None)
+    return None if line is None else {"path": paths[0], "line": line}
+
+
+def named_hunks(findings: list, hunks: dict) -> dict:
+    """The part of a diff's hunks (diff_hunks) the review's record keeps for its inline comments: for each finding
+    that anchors, its path's hunk holding the line it sits on. Anchored again from this, each finding sits where it
+    did on the whole diff."""
+    kept = {}
+    for item in findings:
+        anchor = _anchor(item, hunks)
+        if anchor is not None:
+            ranges = hunks[anchor["path"]]
+            hunk = ranges[_hunk_of(ranges, anchor["line"])]
+            if hunk not in kept.setdefault(anchor["path"], []):
+                kept[anchor["path"]].append(hunk)
+    return kept
+
+
 def _echo_text(line: str, paths: set) -> str:
     """The part of a finding the echo check reads: all of it, less its place when that names a file the diff touches,
     since a long path is always the PR's own text. A place naming anything else is read with the rest."""
@@ -1368,6 +1468,36 @@ def _bullet(item: str) -> str:
     return f"- {text}"
 
 
+def _inline_text(item: str) -> str:
+    """A parsed finding as an inline comment on its line, said the way a reviewer would: "Blocking:" with what breaks
+    and "Fix:" with its direction, or "Note:" with the note, each in a code span (the finding is defanged, so it holds
+    no backtick to end one) and cut so the comment fits. Never a GitHub suggestion block: a suggestion the model wrote
+    could be committed with one click, and the PR's own text can steer the model."""
+    text = item.split(" ", 1)[1]
+    fields = [field.strip()[:INLINE_FIELD_MAX] for field in text.split("|", 2 if item.startswith("B") else 1)]
+    if item.startswith("B") and len(fields) == 3:
+        return f"Blocking: `{fields[1]}`\n\nFix: `{fields[2]}`"
+    return f"{'Blocking' if item.startswith('B') else 'Note'}: `{fields[-1]}`"
+
+
+def inline_comments(record: dict) -> tuple:
+    """(comments, blocking, non_blocking) of a review for GitHub: an inline comment on the new side of the diff for
+    each finding that anchors on the record's hunks (_anchor), blocking first, at most INLINE_MAX, and the findings
+    left for the review's body: those about the PR's text, on a line the diff does not show, withheld, or over the
+    cap."""
+    hunks = record.get("hunks") if isinstance(record.get("hunks"), dict) else {}
+    comments, left = [], {"B": [], "N": []}
+    for item in [*record.get("blocking", []), *record.get("non_blocking", [])]:
+        anchor = _anchor(item, hunks) if len(comments) < INLINE_MAX else None
+        if anchor is None:
+            left[item[:1]].append(item)
+            continue
+        ranged = {"start_line": anchor["start_line"], "start_side": "RIGHT"} if "start_line" in anchor else {}
+        comments.append({"path": anchor["path"], "line": anchor["line"], "side": "RIGHT", **ranged,
+                         "body": _inline_text(item)})
+    return comments, left["B"], left["N"]
+
+
 def reply_text(repo: str, number: int, sha: str, verdict: str, blocking: list, non_blocking: list,
                summary: str = "") -> str:
     """The reply for the Chat thread: the summary, the verdict line, then the findings as bullets, cut whole lines at
@@ -1395,16 +1525,17 @@ def display_name(value: object) -> str:
 def github_body(requester: str, sha: str, verdict: str, blocking: list, non_blocking: list,
                 app: str = DEFAULT_APP, summary: str = "") -> str:
     """The PR review's text: the fixed opening line naming the app and the requester by display name, the summary in
-    a code span (it is defanged, so it holds no backtick to end one), then the verdict and findings, cut whole lines
-    at a time to GITHUB_BODY_MAX."""
+    a code span (it is defanged, so it holds no backtick to end one), then the verdict and the findings given, those
+    not posted as inline comments, each in a code span without its tag, cut whole lines at a time to
+    GITHUB_BODY_MAX."""
     lines = [OPENING.format(name=app_name(app), requester=requester)]
     if summary:
         lines += ["", f"`{summary}`"]
     lines += ["", f"Verdict: {verdict} at {sha[:12]}"]
     if blocking:
-        lines += ["", "Blocking", *(f"- `{item}`" for item in blocking)]
+        lines += ["", "Blocking", *(f"- `{_bullet(item)[2:]}`" for item in blocking)]
     if non_blocking:
-        lines += ["", "Non-blocking", *(f"- `{item}`" for item in non_blocking)]
+        lines += ["", "Non-blocking", *(f"- `{_bullet(item)[2:]}`" for item in non_blocking)]
     return _whole_lines(lines, GITHUB_BODY_MAX)
 
 
@@ -1557,7 +1688,8 @@ def review(conn, key: str, record: dict, pr_fd: int) -> dict:
         log("unusable", request=key[:12], why=str(exc))
         return finish(COULD_NOT, "unusable")
     return finish(reply_text(repo, number, sha, verdict, blocking, non_blocking, summary), "reviewed",
-                  verdict=verdict, summary=summary, blocking=blocking, non_blocking=non_blocking)
+                  verdict=verdict, summary=summary, blocking=blocking, non_blocking=non_blocking,
+                  hunks=named_hunks(blocking + non_blocking, diff_hunks(diff)))
 
 
 # Questions
@@ -1763,12 +1895,49 @@ def github_event(verdict: str, blocking: list, non_blocking: list = (), summary:
     return "COMMENT"
 
 
+class _SwitchedOff(Exception):
+    """A switch went off after a refused try: the marker is released and nothing more is posted."""
+
+
+def _github_review(record: dict) -> dict:
+    """What a review posts on GitHub: its inline comments and the body with the findings they leave out, the hunks
+    they are checked against, and the body with every finding, for a try without inline comments."""
+    comments, blocking, non_blocking = inline_comments(record)
+    requester, sha, verdict, app = (display_name(record.get("requester_name")), record["sha"], record["verdict"],
+                                    app_of(record))
+    hunks = record.get("hunks") if isinstance(record.get("hunks"), dict) else {}
+    return {"comments": comments, "hunks": hunks,
+            "body": github_body(requester, sha, verdict, blocking, non_blocking, app, _summary(record)),
+            "flat": github_body(requester, sha, verdict, record.get("blocking", []), record.get("non_blocking", []),
+                                app, _summary(record))}
+
+
+def _send(poster: Callable, key: str, record: dict, event: str, review: dict) -> tuple:
+    """(what GitHub made, how many inline comments it carries) of one review post with this event: with the inline
+    comments while it has any, and when GitHub refuses it for one of them (CommentRefused, so it surely was not
+    posted), once more with none and every finding in the body, never with them again. _SwitchedOff when a switch
+    went off after that refusal."""
+    repo, number, sha = record["repo"], record["number"], record["sha"]
+    if review["comments"]:
+        try:
+            return (poster(repo, number, sha, review["body"], event, review["comments"], review["hunks"]),
+                    len(review["comments"]))
+        except gitops.CommentRefused as exc:
+            log("github-inline-refused", request=key[:12], github_event=event, why=common.scrubbed_line(exc, 200))
+            review["comments"] = []
+            if not intake_on(record) or not github_on():
+                raise _SwitchedOff from None
+    return poster(repo, number, sha, review["flat"], event, [], review["hunks"]), 0
+
+
 def post_github(key: str, record: dict, poster: Callable = None) -> dict:
     """Post the review on the PR once per (app, PR, head commit), only while chat-review-github is on: a marker made
-    create-exclusive first, so a second request to that app, or this one after a kill, never posts it again. A
-    REQUEST_CHANGES or APPROVE review GitHub refuses (it refuses both on a PR the gh login opened) is posted once more
-    as COMMENT, under the same marker. The one exception to once: a COMMENT posted may be followed by one APPROVE
-    (_upgrade). The record as it ends, with the event that posted in github_event."""
+    create-exclusive first, so a second request to that app, or this one after a kill, never posts it again. It
+    carries an inline comment for each finding on a line the diff shows (inline_comments), and the rest in its body;
+    one GitHub refuses for an inline comment is posted once more without them (_send). A REQUEST_CHANGES or APPROVE
+    review GitHub refuses (it refuses both on a PR the gh login opened) is posted once more as COMMENT, under the same
+    marker. The one exception to once: a COMMENT posted may be followed by one APPROVE (_upgrade). The record as it
+    ends, with the event that posted in github_event and its count of inline comments in github_inline."""
     poster = poster or gitops.post_pr_review
     if record.get("kind") != "review":
         raise FleetError("only a review is posted on GitHub")
@@ -1787,24 +1956,25 @@ def post_github(key: str, record: dict, poster: Callable = None) -> dict:
                     or marker.get("event") != "COMMENT" or "refused" not in marker or marker["refused"] is not None:
                 return _end(key, record, "reviewed", github="already")
             return _upgrade(key, record, poster)
-    body = github_body(display_name(record.get("requester_name")), sha, record["verdict"], record.get("blocking", []),
-                       record.get("non_blocking", []), app, _summary(record))
+    review = _github_review(record)
     event = github_event(record["verdict"], record.get("blocking", []), record.get("non_blocking", []),
                          _summary(record))
     refused = None
     try:
         try:
-            posted = poster(repo, number, sha, body, event)
+            posted, inline = _send(poster, key, record, event, review)
         except gitops.Refused as exc:
             if event == "COMMENT":
                 raise
             log("github-refused", request=key[:12], github_event=event, why=common.scrubbed_line(exc, 200))
-            if not intake_on(record) or not github_on():  # switched off since: release the marker, post nothing
-                with _folder(GITHUB) as fd, contextlib.suppress(OSError):
-                    os.unlink(name, dir_fd=fd)
-                return record if not intake_on(record) else _end(key, record, "reviewed", github="off")
+            if not intake_on(record) or not github_on():
+                raise _SwitchedOff from None
             refused, event = event, "COMMENT"  # surely not posted, so the one try as COMMENT makes no second review
-            posted = poster(repo, number, sha, body, event)
+            posted, inline = _send(poster, key, record, event, review)
+    except _SwitchedOff:  # switched off since: release the marker, post nothing
+        with _folder(GITHUB) as fd, contextlib.suppress(OSError):
+            os.unlink(name, dir_fd=fd)
+        return record if not intake_on(record) else _end(key, record, "reviewed", github="off")
     except gitops.Refused as exc:
         with _folder(GITHUB) as fd, contextlib.suppress(OSError):
             os.unlink(name, dir_fd=fd)  # surely not posted, so a later request may post it
@@ -1815,15 +1985,17 @@ def post_github(key: str, record: dict, poster: Callable = None) -> dict:
         return _end(key, record, "reviewed", github="uncertain", github_why=common.scrubbed_line(exc, 200))
     with _folder(GITHUB) as fd:
         markers.replace(fd, name, {"state": "posted", "request": key, "url": posted["url"], "event": event,
-                                   "refused": refused, "at": int(time.time())})
-    return _end(key, record, "reviewed", github="posted", github_url=posted["url"], github_event=event)
+                                   "refused": refused, "inline": inline, "at": int(time.time())})
+    return _end(key, record, "reviewed", github="posted", github_url=posted["url"], github_event=event,
+                github_inline=inline)
 
 
 def _upgrade(key: str, record: dict, poster: Callable) -> dict:
     """The app posted a COMMENT on this PR at this head commit for another request: post this review as APPROVE when
     it is one (a PASS with no blocking finding, both switches on, read now), at most once per (app, PR, head commit),
-    under its own marker made create-exclusive before the post, so a kill at any point never posts it twice. A
-    refused APPROVE leaves the COMMENT as it is and posts nothing else. Anything but APPROVE is "already"."""
+    under its own marker made create-exclusive before the post, so a kill at any point never posts it twice. It
+    carries its own inline comments, posted once more without them when GitHub refuses one (_send). A refused
+    APPROVE leaves the COMMENT as it is and posts nothing else. Anything but APPROVE is "already"."""
     repo, number, sha, app = record["repo"], record["number"], record["sha"], app_of(record)
     if github_event(record["verdict"], record.get("blocking", []), record.get("non_blocking", []),
                     _summary(record)) != "APPROVE":
@@ -1832,10 +2004,12 @@ def _upgrade(key: str, record: dict, poster: Callable) -> dict:
     with _folder(GITHUB) as fd:
         if not markers.publish(fd, upgrade, {"state": "posting", "request": key, "at": int(time.time())}):
             return _end(key, record, "reviewed", github="already")
-    body = github_body(display_name(record.get("requester_name")), sha, record["verdict"], record.get("blocking", []),
-                       record.get("non_blocking", []), app, _summary(record))
     try:
-        posted = poster(repo, number, sha, body, "APPROVE")
+        posted, inline = _send(poster, key, record, "APPROVE", _github_review(record))
+    except _SwitchedOff:
+        with _folder(GITHUB) as fd, contextlib.suppress(OSError):
+            os.unlink(upgrade, dir_fd=fd)
+        return record if not intake_on(record) else _end(key, record, "reviewed", github="off")
     except gitops.Refused as exc:
         log("github-refused", request=key[:12], github_event="APPROVE", why=common.scrubbed_line(exc, 200))
         with _folder(GITHUB) as fd, contextlib.suppress(OSError):
@@ -1847,9 +2021,10 @@ def _upgrade(key: str, record: dict, poster: Callable) -> dict:
         return _end(key, record, "reviewed", github="uncertain", github_why=common.scrubbed_line(exc, 200))
     with _folder(GITHUB) as fd:
         markers.replace(fd, upgrade, {"state": "posted", "request": key, "url": posted["url"], "event": "APPROVE",
-                                      "at": int(time.time())})
+                                      "inline": inline, "at": int(time.time())})
     _mark_upgraded(name, key, posted["url"])
-    return _end(key, record, "reviewed", github="posted", github_url=posted["url"], github_event="APPROVE")
+    return _end(key, record, "reviewed", github="posted", github_url=posted["url"], github_event="APPROVE",
+                github_inline=inline)
 
 
 def _mark_upgraded(name: str, key: str, url: object) -> None:
@@ -1885,7 +2060,8 @@ def _resume_github(key: str, record: dict) -> dict:
     if marker is not None and marker.get("request") == key and marker["state"] == "posted":
         upgraded = marker.get("upgraded")
         return _end(key, record, "reviewed", github="posted", github_url=marker.get("url"),
-                    github_event=upgraded.get("from") if isinstance(upgraded, dict) else marker.get("event"))
+                    github_event=upgraded.get("from") if isinstance(upgraded, dict) else marker.get("event"),
+                    github_inline=marker.get("inline"))
     if marker is not None and marker.get("request") != key:
         return _resume_upgrade(key, record)
     return _end(key, record, "reviewed", github="uncertain")
@@ -1905,7 +2081,8 @@ def _resume_upgrade(key: str, record: dict) -> dict:
     if marker["state"] == "posted":  # posted, perhaps killed before the first marker said so
         _mark_upgraded(_github_marker(record["repo"], record["number"], record["sha"], app_of(record)), key,
                        marker.get("url"))
-        return _end(key, record, "reviewed", github="posted", github_url=marker.get("url"), github_event="APPROVE")
+        return _end(key, record, "reviewed", github="posted", github_url=marker.get("url"), github_event="APPROVE",
+                    github_inline=marker.get("inline"))
     return _end(key, record, "reviewed", github="uncertain")
 
 

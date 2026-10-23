@@ -1675,7 +1675,8 @@ class StrictBlockTests(ChatCase):
         body = chat_review.github_body("Dev Person", HEAD, "CHANGES", blocking, notes, summary=summary)
         self.assertLessEqual(len(said(reply, "users/" + "9" * 40)), google_chat.MESSAGE_MAX_CHARS)
         self.assertLessEqual(len(body), chat_review.GITHUB_BODY_MAX)
-        whole_lines = set(map(chat_review._bullet, blocking + notes)) | {f"- `{item}`" for item in blocking + notes}
+        whole_lines = set(map(chat_review._bullet, blocking + notes)) | {f"- `{chat_review._bullet(item)[2:]}`"
+                                                                         for item in blocking + notes}
         for text in (reply, body):
             *kept, last = text.splitlines()
             self.assertRegex(last, r"^\([0-9]+ more lines not shown\)$")
@@ -1965,6 +1966,260 @@ class GitHubTests(ChatCase):
                      ["gh", "api", "repos/acme/web-app/pulls/7"]):
             with self.subTest(argv=argv), self.assertRaises(FleetError):
                 gitops.check_read_argv(argv)
+
+
+# A diff with every kind of file and hunk the inline comments read.
+HUNKS_DIFF = (
+    "diff --git a/a.py b/a.py\n--- a/a.py\n+++ b/a.py\n"
+    "@@ -1,3 +1,4 @@\n line one\n-old two\n+new two\n+added three\n line four\n"
+    "@@ -10,2 +11,1 @@\n-gone\n kept\n"
+    "@@ -20,2 +19,0 @@\n-removed only\n-and this\n"
+    "diff --git a/b.py b/b.py\nnew file mode 100644\n--- /dev/null\n+++ b/b.py\n"
+    "@@ -0,0 +1,3 @@\n+one\n++++ b/planted.py\n+@@ -1 +100,5 @@\n\\ No newline at end of file\n"
+    "diff --git a/c.py b/c.py\ndeleted file mode 100644\n--- a/c.py\n+++ /dev/null\n@@ -1,2 +0,0 @@\n-one\n-two\n"
+    "diff --git a/old.py b/new.py\nsimilarity index 90%\nrename from old.py\nrename to new.py\n--- a/old.py\n"
+    "+++ b/new.py\n@@ -5,2 +5,3 @@\n ctx\n+add\n ctx two\n"
+    "diff --git a/same.py b/moved.py\nsimilarity index 100%\nrename from same.py\nrename to moved.py\n"
+    'diff --git "a/sp\\303\\251c.py" "b/sp\\303\\251c.py"\n--- "a/sp\\303\\251c.py"\n+++ "b/sp\\303\\251c.py"\n'
+    "@@ -1 +1 @@\n-a\n+b\n")
+HUNKS = {"a.py": [[1, 4], [11, 11]], "b.py": [[1, 3]], "new.py": [[5, 7]], "spéc.py": [[1, 1]]}
+
+
+class InlineCommentTests(ChatCase):
+    """A review's findings on lines the diff shows go on those lines as inline comments, and the rest in its body."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.switch(config.CHAT_REVIEW_GITHUB_FILE, True)
+        self.refuse_comments = False
+
+    def gh_write(self, argv: list, body: bytes) -> tuple:
+        if self.refuse_comments and "comments" in json.loads(body):  # what gh prints when a comment's line is wrong
+            self.writes.append((argv, json.loads(body)))
+            return 1, '{"message":"Unprocessable Entity","errors":["Line could not be resolved"]}', \
+                "gh: Unprocessable Entity (HTTP 422)\n"
+        return super().gh_write(argv, body)
+
+    def events(self) -> list:
+        return [(payload["event"], len(payload.get("comments", []))) for _, payload in self.writes]
+
+    def test_hunks_map_each_new_side_line_a_comment_can_sit_on(self):
+        self.assertEqual(chat_review.diff_hunks(HUNKS_DIFF), HUNKS)
+        self.assertEqual(set(chat_review.diff_hunks(HUNKS_DIFF)) - chat_review.diff_paths(HUNKS_DIFF), set())
+        self.assertEqual(chat_review.diff_hunks(INJECTED_DIFF), {"x.py": [[1, 3]]})
+        # A hunk's lines are read for as many as its header counts: none passes for a header or a hunk.
+        spliced = "diff --git a/z.py b/z.py\n--- a/z.py\n+++ b/z.py\n@@ -1 +1,2 @@\n+a\n+++ b/q.py\n+b\n"
+        self.assertEqual(chat_review.diff_hunks(spliced), {"z.py": [[1, 2]]})
+        for broken in ("@@ -1 +0,1 @@\n+x\n", "diff --git a/z.py b/z.py\n--- a/z.py\n+++ b/z.py\n@@ nope @@\n+x\n",
+                       "diff --git a/z.py b/z.py\n--- a/z.py\n+++ b/z.py\n@@ -1 +0,1 @@\n+x\n"):
+            with self.subTest(broken=broken):
+                self.assertEqual(chat_review.diff_hunks(broken), {})
+        cut = "diff --git a/z.py b/z.py\n--- a/z.py\n+++ b/z.py\n@@ -1,1 +1,9 @@\n+a\n+b\ndiff --git a/y b/y\n"
+        self.assertEqual(chat_review.diff_hunks(cut), {"z.py": [[1, 2]]})
+
+    def test_a_finding_anchors_on_one_line_a_range_or_the_first_listed_line_shown(self):
+        anchor = chat_review._anchor
+        cases = {"B1 a.py:2 | breaks | fix": {"path": "a.py", "line": 2},
+                 "N1 a.py:2-4 | spans": {"path": "a.py", "start_line": 2, "line": 4},
+                 "N1 a.py:3-11 | across two hunks": {"path": "a.py", "line": 11},
+                 "N1 a.py:3-6 | ends outside": {"path": "a.py", "line": 3},
+                 "N1 a.py:4-4 | one line": {"path": "a.py", "line": 4},
+                 "N1 a.py:6,9,11,2 | listed": {"path": "a.py", "line": 11},
+                 "N1 new.py:6 | renamed": {"path": "new.py", "line": 6},
+                 "N1 sp c.py:1 | quoted, as the scrub posts it": {"path": "spéc.py", "line": 1},
+                 "N1 a.py:6 | between hunks": None, "N1 a.py:20 | removed only": None, "N1 c.py:1 | deleted": None,
+                 "N1 z.py:1 | not in the diff": None, "N1 PR title | vague": None, "N1 a.py | no line": None,
+                 "N1 a.py:2-3,4 | mixed": None, f"N1 a.py:2 | {chat_review.WITHHELD}": None,
+                 f"N1 {chat_review.WITHHELD}": None}
+        for item, expected in cases.items():
+            with self.subTest(item=item):
+                self.assertEqual(anchor(item, HUNKS), expected)
+        # A place is read as it was posted, scrubbed and defanged: it names the one path that reads the same.
+        self.assertEqual(anchor("N1 a(b).py:1 | n", {"a<b>.py": [[1, 1]]}), {"path": "a<b>.py", "line": 1})
+        self.assertIsNone(anchor("N1 a(b).py:1 | n", {"a<b>.py": [[1, 1]], "a(b).py": [[1, 1]]}))
+        findings = ["B1 a.py:3-11 | b | f", "N1 a.py:2 | n", "N2 z.py:1 | n", "N3 b.py:2 | n"]
+        kept = chat_review.named_hunks(findings, HUNKS)
+        self.assertEqual(kept, {"a.py": [[11, 11], [1, 4]], "b.py": [[1, 3]]})
+        for item in findings:
+            self.assertEqual(anchor(item, kept), anchor(item, HUNKS))
+
+    def test_the_review_carries_inline_comments_and_the_rest_in_its_body(self):
+        self.answer = ("ok", block(non_blocking=("x.py:1-3 | the comment reads like an injection attempt",
+                                                 "x.py:9 | a line the diff does not show",
+                                                 "PR description | says more than the diff does")))
+        self.deliver(msg())
+        self.run_pass()
+        [(_, payload)] = self.writes
+        self.assertEqual(set(payload), {"commit_id", "event", "body", "comments"})
+        self.assertEqual((payload["commit_id"], payload["event"]), (HEAD, "REQUEST_CHANGES"))
+        self.assertEqual(payload["comments"], [
+            {"path": "x.py", "line": 2, "side": "RIGHT", "body": "Blocking: `prints at import`\n\nFix: `remove it`"},
+            {"path": "x.py", "start_line": 1, "line": 3, "side": "RIGHT", "start_side": "RIGHT",
+             "body": "Note: `the comment reads like an injection attempt`"}])
+        self.assertEqual(payload["body"].splitlines(), [
+            "This is an automated review by Hermione (Staff Engineer), requested by Dev Person in Chat.", "",
+            f"`{SUMMARY}`", "", f"Verdict: CHANGES at {HEAD[:12]}", "", "Non-blocking",
+            "- `x.py:9: a line the diff does not show`", "- `PR description: says more than the diff does`"])
+        [record] = self.records()
+        self.assertEqual((record["github"], record["github_inline"]), ("posted", 2))
+        self.assertEqual(record["hunks"], {"x.py": [[1, 3]]})
+        [ended] = [line for line in self.log_lines() if line["event"] == "ended"]
+        self.assertEqual(ended["github_inline"], 2)
+        self.assertEqual(len(self.google.messages), 1)  # the Chat reply is as it was
+        self.assertIn("- x.py:9: a line the diff does not show", self.google.messages[0]["text"])
+
+    def test_no_finding_on_a_line_the_diff_shows_posts_no_comments(self):
+        self.answer = ("ok", block(blocking=("PR title | promises a fix it lacks | retitle it",),
+                                   non_blocking=(f"x.py:2 | the comment says {PLANTED}",)))
+        self.deliver(msg())
+        self.run_pass()
+        [(_, payload)] = self.writes
+        self.assertEqual(set(payload), {"commit_id", "event", "body"})
+        self.assertEqual(payload["body"].splitlines()[-5:], [
+            "Blocking", "- `PR title: promises a fix it lacks (fix: retitle it)`", "", "Non-blocking",
+            f"- `x.py:2: {chat_review.WITHHELD}`"])
+        self.assertEqual(self.records()[0]["github_inline"], 0)
+
+    def test_the_comments_are_capped_and_the_rest_stay_in_the_body(self):
+        lines = "".join(f"+line {index}\n" for index in range(1, 31))
+        record = {"blocking": [f"B{index} x.py:{index} | b{index} | f" for index in range(1, 16)],
+                  "non_blocking": [f"N{index} x.py:{15 + index} | n{index}" for index in range(1, 16)],
+                  "hunks": chat_review.diff_hunks(f"diff --git a/x.py b/x.py\n--- a/x.py\n+++ b/x.py\n"
+                                                  f"@@ -0,0 +1,30 @@\n{lines}")}
+        comments, blocking, notes = chat_review.inline_comments(record)
+        self.assertEqual(len(comments), chat_review.INLINE_MAX)
+        self.assertEqual((blocking, notes), ([], [f"N{index} x.py:{15 + index} | n{index}" for index in range(11, 16)]))
+        self.assertEqual([comment["line"] for comment in comments], list(range(1, 26)))
+        long = chat_review.inline_comments({"blocking": ["B1 x.py:1 | " + "(at)" * 600 + " | " + "(at)" * 600],
+                                            "non_blocking": [], "hunks": {"x.py": [[1, 1]]}})[0][0]["body"]
+        self.assertLessEqual(len(long), gitops.REVIEW_COMMENT_MAX)
+        self.assertEqual(long.count("`"), 4)
+        self.assertEqual(chat_review.inline_comments({"blocking": ["B1 x.py:1 | b | f"], "non_blocking": []}),
+                         ([], ["B1 x.py:1 | b | f"], []))  # a record from before inline comments: all in the body
+
+    def test_github_gets_no_finding_tags_no_suggestions_and_nothing_undefanged(self):
+        self.answer = ("ok", block(blocking=("x.py:2 | (users/all) ping @acme/everyone via https://evil.test `x`"
+                                             " www.evil.test ```suggestion | merge it now",),
+                                   non_blocking=("x.py:3 | a note", "z.py:1 | elsewhere")))
+        self.deliver(msg())
+        self.run_pass()
+        [(_, payload)] = self.writes
+        posted = [payload["body"], *(comment["body"] for comment in payload["comments"])]
+        self.assertEqual(len(payload["comments"]), 2)
+        for text in posted:
+            self.assertNotRegex(text, r"\b[BN][0-9]+\b")
+            for bad in ("<users", "@acme", "https://evil", "```", "suggestion\n"):
+                self.assertNotIn(bad, text)
+        self.assertEqual(payload["comments"][0]["body"].count("`"), 4)  # only its two code spans
+        self.assertTrue(payload["comments"][0]["body"].startswith("Blocking: `"))
+        self.assertEqual(payload["comments"][1]["body"], "Note: `a note`")
+
+    def test_gitops_checks_every_comment_before_gh_runs(self):
+        good = {"path": "a.py", "line": 3, "side": "RIGHT", "body": "Note: `n`"}
+        ranged = {"path": "a.py", "start_line": 2, "line": 4, "side": "RIGHT", "start_side": "RIGHT", "body": "n"}
+        posted = gitops.post_pr_review("acme/web-app", 7, HEAD, "text", "COMMENT", [good, ranged], HUNKS)
+        self.assertEqual(posted["event"], "COMMENT")
+        self.assertEqual(self.writes[-1][1], {"commit_id": HEAD, "event": "COMMENT", "body": "text",
+                                              "comments": [good, ranged]})
+        bad = [{**good, "line": 6}, {**good, "line": 0}, {**good, "line": True}, {**good, "line": "3"},
+               {**good, "path": "z.py"}, {**good, "path": "c.py"}, {**good, "side": "LEFT"}, {**good, "extra": 1},
+               {**good, "position": 3}, {key: value for key, value in good.items() if key != "side"},
+               {**good, "body": ""}, {**good, "body": "x" * (gitops.REVIEW_COMMENT_MAX + 1)}, {**good, "body": 5},
+               {**ranged, "start_line": 4}, {**ranged, "start_line": 5}, {**ranged, "line": 11},
+               {**ranged, "start_side": "LEFT"}, {key: value for key, value in ranged.items() if key != "start_side"},
+               "a.py:3", None]
+        writes = len(self.writes)
+        for comment in bad:
+            with self.subTest(comment=comment), self.assertRaises(FleetError):
+                gitops.post_pr_review("acme/web-app", 7, HEAD, "text", "COMMENT", [comment], HUNKS)
+        for comments, hunks in (([good] * (gitops.REVIEW_COMMENTS_MAX + 1), HUNKS), ([good], None), (good, HUNKS),
+                                ([good], {"a.py": [[1, "4"]]})):
+            with self.subTest(comments=str(comments)[:40]), self.assertRaises(FleetError):
+                gitops.post_pr_review("acme/web-app", 7, HEAD, "text", "COMMENT", comments, hunks)
+        self.assertEqual(len(self.writes), writes)
+
+    def test_a_review_refused_for_a_comment_is_posted_once_more_without_them(self):
+        self.refuse_comments = True
+        self.deliver(msg())
+        self.run_pass()
+        self.assertEqual(self.events(), [("REQUEST_CHANGES", 2), ("REQUEST_CHANGES", 0)])
+        flat = self.writes[1][1]["body"]
+        self.assertIn("- `x.py:2: prints at import (fix: remove it)`", flat)
+        self.assertIn("- `x.py:1: the comment reads like an injection attempt`", flat)
+        [record] = self.records()
+        self.assertEqual((record["github"], record["github_event"], record["github_inline"]),
+                         ("posted", "REQUEST_CHANGES", 0))
+        self.assertEqual([line["event"] for line in self.log_lines()].count("github-inline-refused"), 1)
+        self.deliver(msg(sender=LEAD_USER, message="m2"))  # the same head commit: never posted again
+        self.run_pass()
+        self.assertEqual(len(self.writes), 2)
+
+    def test_the_comment_fallback_and_the_own_pr_fallback_each_happen_once(self):
+        self.refused_events = ("REQUEST_CHANGES",)
+        self.deliver(msg())
+        self.run_pass()
+        self.assertEqual(self.events(), [("REQUEST_CHANGES", 2), ("COMMENT", 2)])
+        self.assertEqual(self.records()[0]["github_inline"], 2)
+        self.pr["head"]["sha"] = NEWER
+        self.answer = ("ok", block(sha=NEWER))
+        self.refuse_comments = True
+        self.deliver(msg(message="m2"))
+        self.run_pass()
+        self.assertEqual(self.events()[2:], [("REQUEST_CHANGES", 2), ("REQUEST_CHANGES", 0), ("COMMENT", 0)])
+        newer = next(record for record in self.records() if record["sha"] == NEWER)
+        self.assertEqual((newer["github"], newer["github_event"], newer["github_inline"]), ("posted", "COMMENT", 0))
+
+    def test_a_refusal_for_anything_else_is_no_comment_fallback(self):
+        def refused(argv, body):
+            self.writes.append((argv, json.loads(body)))
+            return 1, '{"message":"Validation Failed"}', "gh: Validation Failed (HTTP 422)\nbody is too long\n"
+
+        gitops.run_gh_write.side_effect = refused
+        self.answer = ("ok", block(verdict="PASS", blocking=()))
+        self.deliver(msg())
+        self.run_pass()
+        self.assertEqual(self.events(), [("COMMENT", 1)])
+        self.assertEqual(self.records()[0]["github"], "refused")
+
+    def test_a_switch_turned_off_after_a_comment_refusal_posts_nothing_more(self):
+        self.refuse_comments = True
+        real = self.gh_write
+
+        def refused_then_off(argv, body):
+            answer = real(argv, body)
+            self.switch(config.CHAT_REVIEW_GITHUB_FILE, False)
+            return answer
+
+        gitops.run_gh_write.side_effect = refused_then_off
+        self.deliver(msg())
+        self.run_pass()
+        self.assertEqual(self.events(), [("REQUEST_CHANGES", 2)])
+        self.assertEqual(self.records()[0]["github"], "off")
+        self.assertEqual(os.listdir(self.office / chat_review.DIR / chat_review.GITHUB), [])
+
+    def test_the_upgrade_to_an_approval_carries_its_own_comments(self):
+        self.patch(config, "CHAT_REVIEW_PER_PERSON_DAILY", 20)
+        self.answer = ("ok", block(verdict="PASS", blocking=()))
+        self.deliver(msg())
+        self.run_pass()
+        self.switch(config.CHAT_REVIEW_APPROVE_FILE, True)
+        self.deliver(msg(sender=LEAD_USER, message="m2"))
+        self.run_pass()
+        self.assertEqual(self.events(), [("COMMENT", 1), ("APPROVE", 1)])
+        found = sorted((record["github_event"], record["github_inline"]) for record in self.records())
+        self.assertEqual(found, [("APPROVE", 1), ("COMMENT", 1)])
+        self.pr["head"]["sha"] = NEWER  # an upgrade refused for its comment goes once more without them
+        self.answer = ("ok", block(sha=NEWER, verdict="PASS", blocking=()))
+        self.switch(config.CHAT_REVIEW_APPROVE_FILE, False)
+        self.deliver(msg(message="m3"))
+        self.run_pass()
+        self.switch(config.CHAT_REVIEW_APPROVE_FILE, True)
+        self.refuse_comments = True
+        self.deliver(msg(sender=LEAD_USER, message="m4"))
+        self.run_pass()
+        self.assertEqual(self.events()[2:], [("COMMENT", 1), ("APPROVE", 1), ("APPROVE", 0)])
+        last = [record for record in self.records() if record["message"].endswith("/m4")][0]
+        self.assertEqual((last["github"], last["github_event"], last["github_inline"]), ("posted", "APPROVE", 0))
 
 
 class FollowUpTests(ChatCase):

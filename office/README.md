@@ -656,15 +656,27 @@ request on a PR your `gh` login opened; when it refuses one, the review is poste
 lands, and the event that posted is in the request's record and its log line. The review opens with a fixed line
 saying it is an automated review by the app (its name as its settings spell it) requested by the requester in Chat,
 naming them by their Chat display name (scrubbed, at most 60 characters, else "a teammate"), never their email, which
-stays in the office's own log, with the summary under it in a code span, then the verdict and the findings, cut whole
-lines at a time to what GitHub takes. It is posted at most once per app, PR and head commit, with one exception: when the
+stays in the office's own log, with the summary under it in a code span, then the verdict, cut whole lines at a time
+to what GitHub takes. Each finding whose place is a file and line the diff shows on its new side goes on that line as
+an inline comment, the way a reviewer leaves one: a blocking finding as "Blocking:" with what breaks and "Fix:" with
+its direction, a note as "Note:", each in a code span, at most 25 of them and at most 1000 characters each. A place
+`path:N` sits on line N, `path:N-M` on lines N to M when both are in one hunk, and `path:N,M` on the first of them the
+diff shows. The script reads the diff's hunks for the lines a comment can sit on (header lines only for the paths, as
+the echo check reads them), and `gitops.post_pr_review` checks every comment against those lines before `gh` runs:
+its path, its line and start line inside one hunk, the new side only, its length, and no other field. A finding about
+the PR's title or description, on a line the diff does not show, withheld, or over the cap stays in the review's body
+under a Blocking or Non-blocking heading, without its B1 or N1 tag. There is never a GitHub suggestion block: a
+suggestion the model wrote could be committed with one click, and the PR's own text can steer the model. When GitHub
+refuses the review for one of its comments (HTTP 422 naming a line or path), it is posted once more without them and
+every finding in its body, under the same marker, and the count of inline comments that posted is the record's and
+log line's `github_inline`. It is posted at most once per app, PR and head commit, with one exception: when the
 app posted a COMMENT there (a pass while the approve switch was off), a later review of that same head commit that
 is an APPROVE is posted once more, so asking it to approve after turning the switch on works. That second post has
 its own create-exclusive marker, made before it is posted, so a kill never posts it twice, and nothing else is ever
 posted a second time: no second COMMENT, REQUEST_CHANGES or APPROVE, nothing after a change request, nothing while
 the first post is still in flight or uncertain, and nothing over a COMMENT GitHub took only after refusing an approval
 or change request. When GitHub refuses that APPROVE, the COMMENT stands and nothing else is posted. Findings and
-summaries are defanged before they are posted, so no mention or link markup in them survives in either place.
+summaries are defanged before they are posted, so no mention or link markup in them survives in any place.
 
 A question about a review is the one place a teammate's own words reach a model. Its text is kept in its record only
 until its turn has run, and is never logged. It runs a separate turn of the same app's desk, read-only exactly as a

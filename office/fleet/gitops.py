@@ -17,7 +17,8 @@ commands that write to GitHub, four shapes held exactly by one guard (check_writ
 review loop's automatic draft PR (open_draft_pr), for a PR follow-up's replies, gh api --method POST to reply in a
 review thread (post_reply) or to comment on the PR (post_pr_comment), and for a chat review, gh api --method POST of
 one PR review (post_pr_review) whose event is one of three fixed names, COMMENT, REQUEST_CHANGES or APPROVE, checked
-here against REVIEW_EVENTS and never taken as free text. An APPROVE or REQUEST_CHANGES review is the gh account
+here against REVIEW_EVENTS and never taken as free text, and whose inline comments are each checked against the
+diff's commentable lines the caller passes (check_review_comments). An APPROVE or REQUEST_CHANGES review is the gh account
 owner's own review, so it counts for branch protection like any review they post by hand. The chat review's
 reads are three fixed gh api GET shapes (check_read_argv): a PR's metadata, its diff, and a gist a teammate linked.
 Each runs in the office with a fixed environment and its text on stdin, never in a worktree, so no file a desk wrote
@@ -68,6 +69,14 @@ COMMENT_ID = re.compile(r"[1-9][0-9]{0,19}")
 # GitHub's answer must carry.
 PR_REVIEW_PATH = re.compile(_REPO_PART + r"/pulls/([1-9][0-9]{0,9})/reviews")
 REVIEW_EVENTS = {"COMMENT": "COMMENTED", "REQUEST_CHANGES": "CHANGES_REQUESTED", "APPROVE": "APPROVED"}
+# A PR review's inline comments: at most this many, each at most this long, each with exactly these keys, on the
+# new side of the diff (RIGHT) only, and a range's start_line before its line.
+REVIEW_COMMENTS_MAX = 25
+REVIEW_COMMENT_MAX = 1000
+REVIEW_COMMENT_KEYS = (frozenset({"path", "line", "side", "body"}),
+                       frozenset({"path", "line", "side", "start_line", "start_side", "body"}))
+# GitHub's refusal of a review for one of its comments (a line or path it cannot resolve, a range across hunks).
+COMMENT_REFUSED = re.compile(r"(?i)\b(?:line|start_line|path|hunk|position)\b")
 # A chat review's two reads: a PR's metadata, and the diff of its base and head commits.
 PR_READ_PATH = re.compile(_REPO_PART + r"/pulls/([1-9][0-9]{0,9})")
 COMPARE_PATH = re.compile(_REPO_PART + r"/compare/([0-9a-f]{40})\.\.\.([0-9a-f]{40})")
@@ -399,6 +408,11 @@ class Refused(FleetError):
     """GitHub, or gh before it reached GitHub, refused the write, so it surely did not happen."""
 
 
+class CommentRefused(Refused):
+    """GitHub refused a PR review because of one of its inline comments (HTTP 422 naming a line or path), so the
+    review surely was not posted, and may be posted once more without them."""
+
+
 def check_draft_pr_argv(argv: object) -> None:
     """Refuse every gh command but the exact draft PR shape draft_pr_argv builds, checked again field by field."""
     if not isinstance(argv, list) or len(argv) != 14 or argv[:4] != [config.GH_BIN, "pr", "create", "--draft"] \
@@ -516,7 +530,9 @@ def _made(answer: dict) -> tuple:
 
 
 def _write(argv: list, payload: dict, repo: str) -> dict:
-    """Run one checked write with payload as JSON on stdin, and read GitHub's answer strictly as a JSON object."""
+    """Run one checked write with payload as JSON on stdin, and read GitHub's answer strictly as a JSON object. A
+    refused PR review that carried inline comments, refused with HTTP 422 naming a line or path in what gh printed on
+    either stream, is CommentRefused."""
     body = json.dumps(payload, ensure_ascii=True).encode("ascii")
     check_write_argv(argv, repo)
     code, out, err = run_gh_write(argv, body)
@@ -534,6 +550,8 @@ def _write(argv: list, payload: dict, repo: str) -> dict:
         last = [line for line in pensieve.scrub(err).splitlines() if line.strip()]
         line = common.scrubbed_line(last[-1] if last else f"exit {code}", 200)
         if GH_HTTP_REFUSED.search(err):
+            if payload.get("comments") and "(HTTP 422)" in err and COMMENT_REFUSED.search(err + "\n" + out):
+                raise CommentRefused(f"GitHub refused an inline comment of the review: {line}")
             raise Refused(f"GitHub refused the comment: {line}")
         raise Uncertain(f"gh exited {code} without GitHub's answer, so the comment may or may not be posted: {line}")
     try:
@@ -555,14 +573,20 @@ def post_pr_comment(repo: str, number: int, text: str) -> dict:
     return _post(pr_comment_argv(repo, number), text, repo, number, "issuecomment-")
 
 
-def post_pr_review(repo: str, number: int, sha: str, text: str, event: str) -> dict:
+def post_pr_review(repo: str, number: int, sha: str, text: str, event: str, comments: object = (),
+                   commentable: object = None) -> dict:
     """Post one review on a PR at commit sha, its event one of REVIEW_EVENTS (anything else is a FleetError before
-    gh runs). {"id", "url", "login", "event"} of the review GitHub made, which must carry the state that event maps
-    to, at that commit; Refused when it surely was not posted, Uncertain for anything that does not say."""
+    gh runs), with its inline comments (check_review_comments: each on a line of commentable, the caller's map of
+    the diff's paths to the new-side line ranges of their hunks). {"id", "url", "login", "event"} of the review GitHub
+    made, which must carry the state that event maps to, at that commit; Refused when it surely was not posted
+    (CommentRefused when GitHub refused it for a comment), Uncertain for anything that does not say."""
     if not isinstance(event, str) or event not in REVIEW_EVENTS:
         raise FleetError("a PR review's event is COMMENT, REQUEST_CHANGES or APPROVE")
     sha = ids.check("sha", sha)
     payload = {"commit_id": sha, "event": event, "body": _comment_text(text)}
+    checked = check_review_comments(comments, commentable)
+    if checked:
+        payload["comments"] = checked
     answer = _write(pr_review_argv(repo, number), payload, repo)
     review_id, login = _made(answer)
     if answer.get("state") != REVIEW_EVENTS[event] or answer.get("commit_id") != sha:
@@ -572,6 +596,45 @@ def post_pr_review(repo: str, number: int, sha: str, text: str, event: str) -> d
     if not isinstance(html_url, str) or html_url.lower() != url.lower():
         raise Uncertain("gh's answer links somewhere else, so the review may or may not be posted where it should")
     return {"id": str(review_id), "url": html_url, "login": login, "event": event}
+
+
+def check_review_comments(comments: object, commentable: object) -> list:
+    """A PR review's inline comments, each checked and copied key by key, or a FleetError before gh runs: at most
+    REVIEW_COMMENTS_MAX of them, each a dict with exactly the keys of REVIEW_COMMENT_KEYS, its path one of
+    commentable's, its line an int inside one of that path's hunk ranges and its start_line, when it has one, an int
+    before line in the same range, both sides RIGHT, and its body non-empty text of at most REVIEW_COMMENT_MAX
+    characters. commentable maps each path to a list of [first, last] new-side line ranges, one per hunk."""
+    if not isinstance(comments, (list, tuple)) or len(comments) > REVIEW_COMMENTS_MAX:
+        raise FleetError(f"a PR review has at most {REVIEW_COMMENTS_MAX} inline comments")
+    if comments and not isinstance(commentable, dict):
+        raise FleetError("a PR review's inline comments need the diff's commentable lines")
+    checked = []
+    for comment in comments:
+        if not isinstance(comment, dict) or frozenset(comment) not in REVIEW_COMMENT_KEYS:
+            raise FleetError("an inline comment has path, line, side and body, and a range start_line and start_side")
+        path, line, body = comment["path"], comment["line"], comment["body"]
+        ranges = commentable.get(path) if isinstance(path, str) else None
+        if not isinstance(ranges, list) or not path or "\x00" in path:
+            raise FleetError("an inline comment's path is not one of the diff's")
+        if comment["side"] != "RIGHT" or comment.get("start_side", "RIGHT") != "RIGHT":
+            raise FleetError("an inline comment is on the new side of the diff only")
+        if not isinstance(body, str) or not body.strip() or len(body) > REVIEW_COMMENT_MAX or "\x00" in body:
+            raise FleetError(f"an inline comment is text of at most {REVIEW_COMMENT_MAX} characters")
+        start = comment.get("start_line", line)
+        if type(line) is not int or type(start) is not int or ("start_line" in comment and not start < line) \
+                or not any(in_hunk(hunk, start) and in_hunk(hunk, line) for hunk in ranges):
+            raise FleetError("an inline comment's lines are not commentable lines of one hunk of the diff")
+        made = {"path": path, "line": line, "side": "RIGHT"}
+        if "start_line" in comment:
+            made.update(start_line=start, start_side="RIGHT")
+        checked.append({**made, "body": body})
+    return checked
+
+
+def in_hunk(hunk: object, line: int) -> bool:
+    """Whether hunk is a [first, last] range of ints holding line."""
+    return isinstance(hunk, (list, tuple)) and len(hunk) == 2 and all(type(end) is int for end in hunk) \
+        and hunk[0] <= line <= hunk[1]
 
 
 # A chat review's reads of a PR
