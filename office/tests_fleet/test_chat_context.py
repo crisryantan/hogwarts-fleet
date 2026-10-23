@@ -151,19 +151,23 @@ class ContextTests(ContextCase):
         self.assertIn("it reached the time limit.", turn["input"])
         self.assertEqual(self.records()[0]["outcome"], "reviewed")
 
-    def test_two_paths_one_disk_name_never_replace_each_other(self):
+    def test_paths_that_differ_only_in_case_never_share_a_name(self):
         self.repo_file("app/core/Notes.md", b"first\n")
         self.repo_file("app/core/NOTES.md", b"second\n")
-        probe = Path(config.CHAT_REVIEW_ROOT).parent / "Case-Probe"
-        probe.write_text("x")
-        folds = (probe.parent / "case-probe").exists()  # a case-insensitive disk
-        probe.unlink()
+        self.repo_file("app/core/Sub/a.py", b"third\n")
+        self.repo_file("app/core/sub/b.py", b"fourth\n")  # a folder another path spells in another case
+        self.repo_file("app/core/plain.py", b"fifth\n")
         turn = self.review()
-        if folds:
-            self.assertEqual(list(turn["context"].values()), [b"first\n"])
-            self.assertIn("NOTE 1 files of the repo context could not be written", turn["input"])
-        else:
-            self.assertEqual(sorted(turn["context"].values()), [b"first\n", b"second\n"])
+        self.assertEqual(turn["context"], {"app/core/Notes.md": b"first\n", "app/core/Sub/a.py": b"third\n",
+                                           "app/core/plain.py": b"fifth\n"})
+        self.assertIn("NOTE 2 files of the repo context could not be written", turn["input"])
+
+    def test_each_read_is_bounded_by_the_time_left(self):
+        self.patch(config, "CHAT_REVIEW_CONTEXT_SECONDS", 30)
+        self.repo_file("app/core/util.py", b"ok\n")
+        self.review()
+        self.assertEqual(len(self.read_timeouts), 2)  # the tree and the one blob
+        self.assertTrue(all(0 < timeout <= 30 for timeout in self.read_timeouts))
 
     def test_a_blob_that_is_not_the_one_its_sha_names_is_left_out(self):
         sha = self.repo_file("app/core/swapped.py", b"the real text\n")

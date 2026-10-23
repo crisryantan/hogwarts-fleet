@@ -8,7 +8,7 @@ a long run of it is withheld.
   a/x.py, the repo's root for x.py), with any folder inside another dropped.
 - The reads: the head commit's whole tree with gh api repos/<repo>/git/trees/<sha>?recursive=1, then each file's blob
   with gh api repos/<repo>/git/blobs/<sha> (gitops.check_read_argv's tree and blob shapes), a few at a time, all
-  within CHAT_REVIEW_CONTEXT_SECONDS.
+  within CHAT_REVIEW_CONTEXT_SECONDS: each read's own timeout is the time left.
 - What is kept: a plain file (mode 100644 or 100755, never a link or a submodule) whose every path part is a plain
   name (no .., no empty part, nothing but letters, digits, dot, dash and underscore), at most
   CHAT_REVIEW_CONTEXT_FILE_MAX_BYTES, whose blob GitHub gave back is the one its sha names, and that is text (UTF-8
@@ -90,7 +90,10 @@ def fetch(repo: str, head_sha: str, paths: object) -> Context:
         return _context({}, ["NOTE no repo context: the diff names no file it could be read for."], {"files": 0})
     deadline = time.monotonic() + config.CHAT_REVIEW_CONTEXT_SECONDS
     try:
-        entries, truncated = _tree(repo, head_sha)
+        entries, truncated = _tree(repo, head_sha, deadline)
+    except _Late:
+        return _context({}, ["NOTE no repo context: it reached the time limit. Review from the diff alone."],
+                        {"capped": 1})
     except (FleetError, StoreError, OSError, ValueError, RecursionError):
         return _context({}, ["NOTE the repo context could not be read: review from the diff alone."], {"failed": 1})
     counts = {"files": 0, "bytes": 0, "skipped": 0, "failed": 0}
@@ -136,10 +139,18 @@ def _context(files: dict, lines: list, counts: dict) -> Context:
     return Context(files, lines, "\n".join(raw.decode("utf-8") for raw in files.values()), counts)
 
 
-def _tree(repo: str, sha: str) -> tuple:
-    """The tree of the commit sha as GitHub lists it: (its entries, each with a path, mode, type, sha and size, in
-    order, and whether GitHub cut the list short)."""
-    data = common.strict_json(gitops.run_gh_read(gitops.tree_read_argv(repo, sha)))
+def _left(deadline: float) -> float:
+    """The seconds left before deadline, for one gh read's own timeout; _Late when none are."""
+    left = deadline - time.monotonic()
+    if left <= 0:
+        raise _Late()
+    return left
+
+
+def _tree(repo: str, sha: str, deadline: float) -> tuple:
+    """The tree of the commit sha as GitHub lists it, read within deadline: (its entries, each with a path, mode,
+    type, sha and size, in order, and whether GitHub cut the list short)."""
+    data = common.strict_json(gitops.run_gh_read(gitops.tree_read_argv(repo, sha), timeout=_left(deadline)))
     if not isinstance(data, dict) or not isinstance(data.get("tree"), list):
         raise FleetError("GitHub's answer is not a tree")
     entries = []
@@ -179,9 +190,8 @@ def _blobs(repo: str, chosen: list, deadline: float, counts: dict, capped: set) 
         except concurrent.futures.TimeoutError:
             late = True
     finally:
-        # Past the deadline nothing waits: reads not begun never start, and one still running ends on its own (gh's
-        # own timeout), its answer dropped.
-        pool.shutdown(wait=False, cancel_futures=True)
+        # Reads not begun never start, and each one running ends by the deadline (its own timeout is what is left).
+        pool.shutdown(wait=True, cancel_futures=True)
     if late:
         capped.add("it reached the time limit")
     return found
@@ -196,11 +206,9 @@ class _Late(Exception):
 
 
 def _blob(repo: str, entry: dict, deadline: float) -> bytes:
-    """One file's bytes: its blob read with gh, unless the deadline has passed (_Late), checked to be the blob its sha
+    """One file's bytes: its blob read with gh within deadline (_Late once it has passed), checked to be the blob its sha
     names (git's own hash of it) and of the size the tree gave, and text (UTF-8 with no NUL byte)."""
-    if time.monotonic() >= deadline:
-        raise _Late()
-    data = common.strict_json(gitops.run_gh_read(gitops.blob_read_argv(repo, entry["sha"])))
+    data = common.strict_json(gitops.run_gh_read(gitops.blob_read_argv(repo, entry["sha"]), timeout=_left(deadline)))
     if not isinstance(data, dict) or data.get("sha") != entry["sha"] or data.get("encoding") != "base64" \
             or not isinstance(data.get("content"), str):
         raise FleetError("GitHub's answer is not that blob")

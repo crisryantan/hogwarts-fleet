@@ -1369,16 +1369,23 @@ def _write_context(folder: int, files: dict) -> int:
     """Each repo context file under context/ in the work folder, at its path in the repo: only a plain relative path
     (chat_context.plain_path, so no .., no absolute path), each folder on the way made here or opened without
     following a link, and each file written new, never over one there, so nothing lands outside the folder and no
-    file takes another's place. How many were left out: one whose name the disk already holds (two paths that differ
-    only in case, on a case-insensitive disk), whose path meets a file where a folder must be, or that could not be
-    written."""
-    omitted = 0
+    file takes another's place. How many were left out: one whose path, or a folder on it, a file written before
+    spells in another case (on a case-insensitive disk they would share a name), whose name the disk already holds,
+    whose path meets a file where a folder must be, or that could not be written."""
+    omitted, spelled = 0, {}
     top = safefs.open_subdir(folder, chat_context.FOLDER, create=True)
     try:
         for path, raw in files.items():
             if not chat_context.plain_path(path):
                 raise FleetError("a repo context path is not a plain relative path")
             *parts, leaf = path.split("/")
+            prefixes = ["/".join(path.split("/")[:end]) for end in range(1, len(parts) + 2)]
+            # A folder or file another path already spells in another case would share its name on a
+            # case-insensitive disk, so this one is left out whatever the disk.
+            if any(spelled.get(prefix.casefold(), prefix) != prefix for prefix in prefixes) \
+                    or prefixes[-1].casefold() in spelled:
+                omitted += 1
+                continue
             opened = [top]
             try:
                 for part in parts:
@@ -1386,6 +1393,7 @@ def _write_context(folder: int, files: dict) -> int:
                 if safefs.lstat(opened[-1], leaf) is not None:
                     raise safefs.Unsafe("a repo context file is already there by that name")
                 safefs.write_new(opened[-1], leaf, raw)
+                spelled.update((prefix.casefold(), prefix) for prefix in prefixes)
             except (safefs.Unsafe, OSError):
                 omitted += 1
             finally:

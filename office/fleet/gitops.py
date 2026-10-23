@@ -700,13 +700,15 @@ def check_read_argv(argv: object) -> str:
     raise FleetError("a chat review reads GitHub only with its five fixed gh api reads")
 
 
-def run_gh_read(argv: list) -> bytes:
-    """stdout of one checked read, run once in the office with nothing on stdin. A failure names no line gh printed
-    about a login, and keeps only the scrubbed last line of anything else. Tests replace this."""
+def run_gh_read(argv: list, timeout: Optional[float] = None) -> bytes:
+    """stdout of one checked read, run once in the office with nothing on stdin, for at most GH_TIMEOUT_SECONDS or
+    timeout, whichever is shorter. A failure names no line gh printed about a login, and keeps only the scrubbed last
+    line of anything else. Tests replace this."""
     check_read_argv(argv)
+    limit = config.GH_TIMEOUT_SECONDS if timeout is None else min(config.GH_TIMEOUT_SECONDS, max(1.0, timeout))
     try:
         done = subprocess.run(argv, cwd=config.OFFICE_ROOT, env=gh_env(), stdin=subprocess.DEVNULL,
-                              capture_output=True, timeout=config.GH_TIMEOUT_SECONDS, check=False)
+                              capture_output=True, timeout=limit, check=False)
     except subprocess.TimeoutExpired:
         raise FleetError("gh did not answer in time") from None
     except OSError:

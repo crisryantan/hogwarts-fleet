@@ -254,6 +254,7 @@ class ChatCase(FleetCase):
         self.reads = []
         self.tree = {"sha": HEAD, "tree": [], "truncated": False}  # the head's tree for the repo context, and its blobs
         self.blobs = {}
+        self.read_timeouts = []  # the timeouts the repo context's reads were given
         self.patch(gitops, "run_gh_read", side_effect=self.gh_read)
         self.writes = []
         self.refused_events = ()
@@ -307,8 +308,10 @@ class ChatCase(FleetCase):
         self.sign_calls.append((key_pem, data))
         return 0, SIGNATURE
 
-    def gh_read(self, argv: list) -> bytes:
+    def gh_read(self, argv: list, timeout: float = None) -> bytes:
         kind = gitops.check_read_argv(argv)
+        if timeout is not None:
+            self.read_timeouts.append(timeout)
         self.reads.append(kind)
         if kind == "pr":
             return json.dumps(self.pr).encode("utf-8")
