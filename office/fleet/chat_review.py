@@ -1055,8 +1055,12 @@ def _owners(space: str, before_us: Optional[int] = None) -> dict:
 def _still_listening(record: dict) -> bool:
     """Whether the thread of a queued request that mentioned no one is still the app's alone, as of that message: an
     earlier mention of it by the other app is on record before the request is taken, but for one Chat listed late
-    (inside the read overlap) or one read after that app's read was stopped, so this is asked again before it runs."""
-    return _owners(record["space"], _taken_us(record)).get(record["thread"]) == app_of(record)
+    (inside the read overlap) or one read after that app's read was stopped, so this is asked again before it runs. A
+    conversation turn's is asked as of its newest message (last_us), so none of it comes after the thread stopped
+    being the app's alone."""
+    last = record.get("last_us")
+    at = max(_taken_us(record), last if type(last) is int else 0)
+    return _owners(record["space"], at).get(record["thread"]) == app_of(record)
 
 
 def listening_threads(space: str, app: str) -> frozenset:
@@ -3151,25 +3155,20 @@ def _join(message: dict, lead: str, app: str) -> None:
 
 
 def undecided(turn: list, app: str) -> list:
-    """The messages of a turn no record decides yet, oldest first: those with no record of their own that the record
-    leading a turn (its "burst") does not name. One it names that has no record is recorded now as joined to it
-    (_join), which finishes what a kill cut short."""
-    records = {message["name"]: read_record(_message_key(message["name"], app)) for message in turn}
-    named = {}
-    for message in turn:
-        record = records[message["name"]]
-        if record is not None and isinstance(record.get("burst"), list):
-            for name in record["burst"]:
-                named.setdefault(name, _message_key(message["name"], app))
-    left = []
-    for message in turn:
-        if records[message["name"]] is not None:
-            continue
-        if message["name"] in named:
-            _join(message, named[message["name"]], app)
-        else:
-            left.append(message)
-    return left
+    """The messages of a turn still to decide, oldest first: all of them while none has a record. Once one has (the
+    request a turn made, or a message joined to it), the turn was taken, so each of the others with no record is
+    recorded now as joined to that request (_join), never answered again: that finishes what a kill cut short, and
+    holds a message Chat listed late, or one past a read cut short by its page cap, to the one answer."""
+    records = [(_message_key(message["name"], app), message) for message in turn]
+    records = [(key, message, read_record(key)) for key, message in records]
+    leads = [record["joined"] if record.get("kind") == "joined" else key for key, _, record in records
+             if record is not None]
+    if not leads:
+        return list(turn)
+    for _, message, record in records:
+        if record is None:
+            _join(message, leads[0], app)
+    return []
 
 
 def _turn_text(messages: list) -> list:
@@ -3177,7 +3176,7 @@ def _turn_text(messages: list) -> list:
     kept, used = [], 0
     for message in reversed(messages):
         text = message["argument"].strip()
-        if kept and used + len(text) + 1 > QUESTION_MAX:
+        if kept and used + len(text) > QUESTION_MAX:
             break
         kept.insert(0, message)
         used += len(text) + 1
@@ -3191,8 +3190,9 @@ def take_turn(messages: list, space: str, token: str, known: dict, now: int, app
     mention would be. It is taken only when a message of it asks a question (asks_question), or the turn answers the
     app (the thread's newest message before its first is app's own, app_user's: _answers_app) and a message of it
     says something (substantive); anything else is dropped, with no reply, no record and no log line. The first
-    message's record is the request and names the others ("burst"), made create-exclusive before each of them is
-    recorded as joined to it, so a turn read again, or after a kill, is never answered twice."""
+    message's record is the request and names the others ("burst", and when the newest was created: "last_us"), made
+    create-exclusive before each of them is recorded as joined to it, so a turn read again, or after a kill, is never
+    answered twice."""
     lead, texts = messages[0], [message["argument"] for message in messages]
     if not any(asks_question(text) for text in texts) and not (
             any(substantive(text) for text in texts)
@@ -3209,7 +3209,8 @@ def take_turn(messages: list, space: str, token: str, known: dict, now: int, app
               "requester_name": display_name(lead["sender_name"]), **user, "state": "queued", "mentioned": False,
               "question": question, **_material({"argument": question, "attachments": attached})}
     if len(messages) > 1:
-        record["burst"] = [message["name"] for message in messages[1:]]
+        record = {**record, "burst": [message["name"] for message in messages[1:]],
+                  "last_us": messages[-1]["created_us"]}
     # The conversation goes on as a mention of the app would: about its review where it reviewed a PR.
     reviewed = reviewed_request(space, lead["thread"], app, lead["created_us"])
     record = {**record, "kind": "question", "repo": allowed_repo(reviewed[1]["repo"]), "number": reviewed[1]["number"],

@@ -601,9 +601,10 @@ messages an answer turn reads as its context. Of those that mention it:
   case, punctuation ignored, or emoji alone). It is a conversation turn, the question about the app's review or the
   mention answer (both below) a mention of it would be, so "What is a widget store?" sent after the app answered needs
   no tag, and "haha" gets nothing. Its first message's record is the request and names the others, each then recorded
-  as joined to it with none of its text, so no turn is answered twice, after a kill too. It is checked again before it
-  runs the same way. Any other message there that does not mention the app, a turn not taken included, is dropped like
-  any other: no reply, no record, no log line;
+  as joined to it with none of its text, and a message of the turn that Chat lists late joins it the same way, so no
+  turn is answered twice, after a kill too. It is checked again before it runs the same way, as of its newest message.
+  Any other message there that does not mention the app, a turn not taken included, is dropped like any other: no
+  reply, no record, no log line;
 - one from them that only asks what the app is doing ("status", "what are you working on", "queue", "what's
   pending", "anything running" and a few of their kin, any letter case, at most 8 words, no link or address) gets the
   app's status reply (Status, below) and no turn, even in a thread the app reviewed; a link or a review command in it

@@ -3603,6 +3603,26 @@ class BurstTests(ChatCase):
             self.assertEqual(self.taken(), [])
         self.assertEqual((len(self.turns), len(self.google.messages)), (2, 2))
 
+    def test_a_message_listed_late_inside_an_answered_burst_joins_it_unanswered(self):
+        self.assertEqual(self.burst(*self.LIVE), ["mention"])
+        self.assertEqual(self.burst("and what about the docs?", at=-88, first=4), [])
+        self.assertEqual((len(self.turns), len(self.google.messages)), (2, 2))
+        self.assertEqual(self.record_of("q4")["joined"], chat_review._message_key(f"{SPACE}/messages/q1", "hermione"))
+
+    def test_a_queued_burst_the_other_apps_mention_listed_late_falls_inside_is_dropped_unanswered(self):
+        self.second_app()
+        start = int((self.now - 400) * 1e6)
+        chat_review._save_marker(SPACE, "moody", start, start, True)
+        self.patch(config, "CHAT_REVIEW_PER_PASS", 0)
+        self.assertEqual(self.burst(*self.LIVE), ["mention"])  # taken, and left queued
+        self.patch(config, "CHAT_REVIEW_PER_PASS", 2)
+        # Moody's mention from between its messages is listed only now: the thread stopped being Hermione's alone.
+        self.deliver(msg(text="help", message="m9", app=MOODY_APP_USER, at=self.now - 93))
+        self.run_pass()
+        lead = self.record_of("q1")
+        self.assertEqual((lead["state"], lead["outcome"], lead["kind"]), ("done", "not-owned", "dropped"))
+        self.assertEqual(len(self.turns), 1)
+
     def test_the_turn_grammar(self):
         for text in ("haha", "Haha!", "hahaha", "nope", "Nope.", "LOL", "ok", "okay", "thank you", "ok thanks!",
                      "\U0001f44d", "\U0001f389 \U0001f389", "...", "yes yes yes yes"):
