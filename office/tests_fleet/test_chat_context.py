@@ -143,6 +143,28 @@ class ContextTests(ContextCase):
         self.assertFalse((Path(config.CHAT_REVIEW_ROOT).parent / "escape.py").exists())
         self.assertEqual(os.listdir(config.CHAT_REVIEW_ROOT), [])
 
+    def test_past_the_time_limit_no_blob_is_read_and_it_is_noted(self):
+        self.patch(config, "CHAT_REVIEW_CONTEXT_SECONDS", 0)
+        self.repo_file("app/core/util.py", b"ok\n")
+        turn = self.review()
+        self.assertEqual((turn["context"], self.reads.count("blob")), ({}, 0))
+        self.assertIn("it reached the time limit.", turn["input"])
+        self.assertEqual(self.records()[0]["outcome"], "reviewed")
+
+    def test_two_paths_one_disk_name_never_replace_each_other(self):
+        self.repo_file("app/core/Notes.md", b"first\n")
+        self.repo_file("app/core/NOTES.md", b"second\n")
+        probe = Path(config.CHAT_REVIEW_ROOT).parent / "Case-Probe"
+        probe.write_text("x")
+        folds = (probe.parent / "case-probe").exists()  # a case-insensitive disk
+        probe.unlink()
+        turn = self.review()
+        if folds:
+            self.assertEqual(list(turn["context"].values()), [b"first\n"])
+            self.assertIn("NOTE 1 files of the repo context could not be written", turn["input"])
+        else:
+            self.assertEqual(sorted(turn["context"].values()), [b"first\n", b"second\n"])
+
     def test_a_blob_that_is_not_the_one_its_sha_names_is_left_out(self):
         sha = self.repo_file("app/core/swapped.py", b"the real text\n")
         self.blobs[sha] = b"other text of another length\n"
