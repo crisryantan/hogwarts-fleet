@@ -94,7 +94,7 @@ Anyone in the company's Chat can send an app text, so everything here treats a m
   line and the findings as bullets, scrubbed and cut, sent as the app to the message's thread. Then, while the
   office file chat-review-github holds "on" too, the same review goes on the PR with your gh login
   (gitops.post_pr_review), opening with a fixed line naming the app and the requester by Chat display name, never
-  email, then the summary in a code span, at most once per desk, PR and head commit (a marker made create-exclusive
+  email, then the summary as plain prose (github_prose), at most once per desk, PR and head commit (a marker made create-exclusive
   before it is posted, never posted again after a kill). Each finding on a line the diff shows on its new side
   (diff_hunks, _anchor) is one of its inline comments, at most INLINE_MAX, checked again line by line by gitops
   before gh runs; the rest stay in its body. GitHub refusing it for a comment posts it once more without them, under
@@ -428,6 +428,10 @@ ANCHOR = re.compile(r"(.+):([1-9][0-9]{0,8})(?:-([1-9][0-9]{0,8})|((?:,[1-9][0-9
 # A review's inline comments: at most this many (the rest go in its body), each field cut so a comment fits.
 INLINE_MAX = gitops.REVIEW_COMMENTS_MAX
 INLINE_FIELD_MAX = 450
+# GitHub text from the reviewer is plain prose: every markdown character escaped, so nothing links, formats or embeds,
+# and a word joiner after "#" or "GH-" before a digit, so no issue or PR reference autolinks or cross-references.
+MARKDOWN_SPECIAL = re.compile(r"([\\`*_{}\[\]()#+\-.!|<>~=:])")
+REFERENCE = re.compile(r"(#|\bGH\\-)(?=[0-9])", re.IGNORECASE)
 C_ESCAPES = {"a": b"\a", "b": b"\b", "t": b"\t", "n": b"\n", "v": b"\v", "f": b"\f", "r": b"\r", '"': b'"',
              "\\": b"\\"}
 # Google credentials the shared scrub has no shape for: OAuth access and refresh tokens, API keys, client secrets.
@@ -1468,16 +1472,23 @@ def _bullet(item: str) -> str:
     return f"- {text}"
 
 
+def github_prose(text: str, limit: int = GITHUB_BODY_MAX) -> str:
+    """text as plain prose on GitHub (MARKDOWN_SPECIAL, REFERENCE), cut to limit with no escape left dangling."""
+    escaped = REFERENCE.sub(lambda match: match.group(1) + "\u2060", MARKDOWN_SPECIAL.sub(r"\\\1", text))[:limit]
+    return escaped[:-1] if (len(escaped) - len(escaped.rstrip("\\"))) % 2 == 1 else escaped
+
+
 def _inline_text(item: str) -> str:
     """A parsed finding as an inline comment on its line, said the way a reviewer would: "Blocking:" with what breaks
-    and "Fix:" with its direction, or "Note:" with the note, each in a code span (the finding is defanged, so it holds
-    no backtick to end one) and cut so the comment fits. Never a GitHub suggestion block: a suggestion the model wrote
-    could be committed with one click, and the PR's own text can steer the model."""
+    and "Fix:" with its direction, or "Note:" with the note, as plain prose (github_prose) cut so the comment fits.
+    Never a GitHub suggestion block: a suggestion the model wrote could be committed with one click, and the PR's own
+    text can steer the model."""
     text = item.split(" ", 1)[1]
-    fields = [field.strip()[:INLINE_FIELD_MAX] for field in text.split("|", 2 if item.startswith("B") else 1)]
+    fields = [github_prose(field.strip()[:INLINE_FIELD_MAX], INLINE_FIELD_MAX + 30)
+              for field in text.split("|", 2 if item.startswith("B") else 1)]
     if item.startswith("B") and len(fields) == 3:
-        return f"Blocking: `{fields[1]}`\n\nFix: `{fields[2]}`"
-    return f"{'Blocking' if item.startswith('B') else 'Note'}: `{fields[-1]}`"
+        return f"Blocking: {fields[1]}\n\nFix: {fields[2]}"
+    return f"{'Blocking' if item.startswith('B') else 'Note'}: {fields[-1]}"
 
 
 def inline_comments(record: dict) -> tuple:
@@ -1524,18 +1535,17 @@ def display_name(value: object) -> str:
 
 def github_body(requester: str, sha: str, verdict: str, blocking: list, non_blocking: list,
                 app: str = DEFAULT_APP, summary: str = "") -> str:
-    """The PR review's text: the fixed opening line naming the app and the requester by display name, the summary in
-    a code span (it is defanged, so it holds no backtick to end one), then the verdict and the findings given, those
-    not posted as inline comments, each in a code span without its tag, cut whole lines at a time to
-    GITHUB_BODY_MAX."""
+    """The PR review's text: the fixed opening line naming the app and the requester by display name, the summary,
+    then the verdict and the findings given, those not posted as inline comments, without their tags, all as plain
+    prose (github_prose), cut whole lines at a time to GITHUB_BODY_MAX."""
     lines = [OPENING.format(name=app_name(app), requester=requester)]
     if summary:
-        lines += ["", f"`{summary}`"]
+        lines += ["", github_prose(summary)]
     lines += ["", f"Verdict: {verdict} at {sha[:12]}"]
     if blocking:
-        lines += ["", "Blocking", *(f"- `{_bullet(item)[2:]}`" for item in blocking)]
+        lines += ["", "Blocking", *(f"- {github_prose(_bullet(item)[2:])}" for item in blocking)]
     if non_blocking:
-        lines += ["", "Non-blocking", *(f"- `{_bullet(item)[2:]}`" for item in non_blocking)]
+        lines += ["", "Non-blocking", *(f"- {github_prose(_bullet(item)[2:])}" for item in non_blocking)]
     return _whole_lines(lines, GITHUB_BODY_MAX)
 
 
