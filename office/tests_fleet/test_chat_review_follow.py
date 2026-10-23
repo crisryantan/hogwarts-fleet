@@ -185,9 +185,10 @@ class FollowTests(FollowCase):
         self.assertEqual(self.notes(), ["That's today's limit of reviews for #7 (1). I'll look at its new commits"
                                         " again tomorrow."])
         self.assertEqual(len(self.turns), 2)
-        tomorrow = chat_review._day(int(time.time())) + 86400
-        with mock.patch.object(chat_review, "_day", return_value=tomorrow):
-            self.assertEqual(self.run_pass()["followed"], ["queued"])
+        for key, record in chat_review._records():  # a day on, the day's review is yesterday's
+            if record.get("source") == "follow":
+                chat_review._save(key, {**record, "at": record["at"] - 86400})
+        self.assertEqual(self.run_pass()["followed"], ["queued"])
         self.assertEqual(len(self.turns), 3)
         self.assertEqual(len(self.google.notes), 1)
 
@@ -362,3 +363,83 @@ class FollowLimitTests(FollowCase):
         self.assertEqual((len(self.turns), len(self.writes)), (3, 2))
         self.assertEqual(caps_used(), (2, 1))  # the review of new commits counted once, toward the fleet's cap only
         self.assertEqual(caps_used(LEAD), (2, 0))
+
+
+class FollowKillTests(FollowCase):
+    """A kill at any step of a follow command, a stop or a queued review never undoes a later command, never lets a
+    stopped follow's review run and never loses a review from the day's count."""
+
+    def dying_at(self, event: str):
+        """chat_review.log, killed at the log line of one event: just after that step, before what comes next."""
+        real = chat_review.log
+
+        def log(name: str, **fields) -> None:
+            if name == event:
+                raise SystemExit(143)
+            real(name, **fields)
+        return mock.patch.object(chat_review, "log", side_effect=log)
+
+    def killed_queueing(self) -> None:
+        with mock.patch.object(chat_review, "_save_follow", side_effect=SystemExit(143)), \
+                self.assertRaises(SystemExit):
+            self.run_pass()
+
+    def test_a_stop_after_a_kill_left_a_review_queued_still_ends_that_review(self):
+        self.reviewed()
+        self.push(NEWER)
+        self.killed_queueing()
+        self.assertIsNone(self.follow()["pending"])
+        self.deliver(msg(text="stop following", message="m2", at=time.time() + 1))
+        self.run_pass()
+        [record] = self.follow_records()
+        self.assertEqual((record["state"], record["outcome"]), ("done", "unfollowed"))
+        self.assertEqual((len(self.turns), self.texts()[-1]), (1, "Stopped following #7."))
+
+    def test_a_follow_command_carried_out_after_a_later_stop_starts_nothing(self):
+        self.deliver(msg(text=f"follow {URL}", at=time.time() - 5))
+        with self.dying_at("follow-started"), self.assertRaises(SystemExit):
+            self.run_pass()
+        self.assertIsNotNone(self.follow())  # started, but the command not marked done
+        self.deliver(msg(text="stop following", message="m2"))
+        self.run_pass()
+        self.assertIsNone(self.follow())
+        self.assertEqual(self.texts()[-1], "Stopped following #7.")
+
+    def test_a_stop_carried_out_after_a_later_follow_command_ends_nothing(self):
+        self.reviewed()
+        self.deliver(msg(text="stop following", message="m2", at=time.time() - 3))
+        with self.dying_at("follow-ended"), self.assertRaises(SystemExit):
+            self.run_pass()
+        self.assertIsNone(self.follow())
+        self.deliver(msg(text=f"follow {URL}", message="m3"))
+        self.run_pass()
+        self.assertIsNotNone(self.follow())
+
+    def test_a_kill_after_queueing_still_counts_toward_the_days_limit(self):
+        self.patch(config, "CHAT_REVIEW_FOLLOW_REVIEWS_PER_DAY", 1)
+        self.reviewed()
+        self.push(NEWER)
+        self.killed_queueing()
+        self.run_pass()
+        self.push(THIRD)
+        self.assertEqual(self.run_pass()["followed"], ["limited"])
+        self.assertEqual(len(self.turns), 2)
+
+    def test_stopping_and_following_again_keeps_the_days_count(self):
+        self.patch(config, "CHAT_REVIEW_FOLLOW_REVIEWS_PER_DAY", 1)
+        self.reviewed()
+        self.push(NEWER)
+        self.run_pass()
+        self.deliver(msg(text="stop following", message="m2", at=time.time() - 3))
+        self.run_pass()
+        self.push(THIRD)
+        self.deliver(msg(text=f"follow {URL}", message="m3"))
+        self.assertEqual(self.run_pass()["followed"], ["limited"])
+        self.assertEqual(len(self.turns), 2)
+
+    def test_a_thread_started_with_follow_takes_an_unmentioned_stop(self):
+        self.deliver(msg(text=f"follow {URL}", at=time.time() - 5))
+        self.run_pass()
+        self.deliver(msg(text="stop following", message="q1", mention=False, at=time.time() + 1))
+        self.assertEqual([outcome for outcome in self.run_pass()["taken"] if outcome != "seen before"], ["unfollow"])
+        self.assertIsNone(self.follow())

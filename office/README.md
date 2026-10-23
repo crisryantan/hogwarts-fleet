@@ -579,9 +579,9 @@ messages an answer turn reads as its context. Of those that mention it:
   PR, the newest one's when there are several, under the same sender, space and repo lists and caps. So "review
   again" or "approve" works in a thread the app already reviewed. A follow-up never names another PR, and only the
   app's own requests count, so a thread only the other app reviewed is no thread this one reviewed. In a thread
-  where only this app had taken a mention when the message was sent, a review, a mention answer or a help reply to an
-  allowed sender (once the other app takes one there too, a message after it needs a mention), a message needs no
-  mention either:
+  where only this app had taken a mention when the message was sent, a review, a mention answer, a follow command or a
+  help reply to an allowed sender (once the other app takes one there too, a message after it needs a mention), a
+  message needs no mention either:
   one that mentions no one at all, from an allowed sender,
   with at most 8 words outside its addresses and starting as an instruction (review, re-review, another review or
   approve, after an optional please or can you) is taken. With exactly one PR link for a repo in `CHAT_REVIEW_REPOS`
@@ -826,9 +826,11 @@ after an earlier change request approves only while `chat-review-approve` is on.
 request's key is made from the app, PR and head, create-exclusive), so a kill never queues it twice and a review that
 failed is not retried for that head. A follow ends with one line after `CHAT_REVIEW_FOLLOW_DAYS` (7) with no new
 commits, and reviews a PR at most `CHAT_REVIEW_FOLLOW_REVIEWS_PER_DAY` (6) times a cap day; past that it waits for the
-next day and says so once. These reviews count toward the desk's own caps and the fleet's chat cap, never toward the
-requester's. "stop following" ends a follow and a review of it still queued, and "follow <link>" starts one with no
-head reviewed yet, so its first check reviews the PR.
+next day and says so once; that count is the follow's review requests on record, so a kill, or stopping and
+following again, never resets it. These reviews count toward the desk's own caps and the fleet's chat cap, never
+toward the requester's. "stop following" ends a follow and any review of it still queued, and "follow <link>" starts
+one with no head reviewed yet, so its first check reviews the PR. Either, carried out again after a kill, never undoes
+a later one: a stop ends only a follow asked for before it, and a follow command after a later stop starts nothing.
 
 A request that waits keeps what it waits on in its record. A review acknowledged in its thread that then waited
 longer than `CHAT_REVIEW_WAIT_NOTICE_SECONDS` (300) before its turn started gets one fixed line there as it starts,

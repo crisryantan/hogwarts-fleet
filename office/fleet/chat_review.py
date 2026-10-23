@@ -31,7 +31,7 @@ Anyone in the company's Chat can send an app text, so everything here treats a m
   breaks its rules (a review or approve word with no link, two links, a repo not listed, a follow-up in a thread the
   app never reviewed), an empty or overlong message or a plea for help, which get the app's fixed help reply; a person
   not on the list gets the fixed refusal. In a thread only this app took mentions in before it (a review, a mention
-  answer, or a help reply to an allowed sender), a message that mentions no one at all and has at most
+  answer, a follow command or a help reply to an allowed sender), a message that mentions no one at all and has at most
   UNMENTIONED_WORDS_MAX words outside its addresses, and that starts as an instruction, is taken too, from an allowed
   sender only: with exactly one PR link for an allowlisted repo it is a review of that PR, with no link at all a
   follow-up of the thread's earlier review request (none: dropped), and it is checked again before it runs, so one an
@@ -207,6 +207,8 @@ SPACE_MARK = "space"
 QUIET = "quiet"
 # What taking a message that mentions the app can make: a record, each counted toward CHAT_REVIEW_PULL_MAX.
 TAKEN = ("review", "question", "mention", "help", "refusal", "status", "follow", "unfollow")
+# What a mention from an allowed sender can make that takes its thread for the app (_first_mentions).
+TAKES_THREAD = ("review", "help", "mention", "follow", "unfollow")
 LOG = "chat-review.log"
 JOB_LOCK = "chat-review-job.lock"
 CAPS_LOCK = "chat-review-caps.lock"
@@ -1097,13 +1099,13 @@ def _taken_us(record: dict) -> int:
 
 
 def _first_mentions(space: str) -> dict:
-    """Each thread of space where an app took a mention from Chat that became a review, a mention answer or a help
-    reply (a refusal is a sender who is not allowed), still on record, to {app: the microsecond its first such message
-    was created}."""
+    """Each thread of space where an app took a mention from Chat that became a review, a mention answer, a help reply
+    or a follow command (a refusal is a sender who is not allowed), still on record, to {app: the microsecond its first
+    such message was created}."""
     firsts: dict = {}
     for _, record in _records():
         thread, app = record.get("thread"), record.get("app", DEFAULT_APP)
-        if record.get("source") != "chat" or record.get("kind") not in ("review", "help", "mention") \
+        if record.get("source") != "chat" or record.get("kind") not in TAKES_THREAD \
                 or record.get("mentioned") is False or record.get("space") != space or not isinstance(thread, str):
             continue
         apps = firsts.setdefault(thread, {})
@@ -3100,8 +3102,8 @@ def _followed(key: str, record: dict) -> None:
         if record.get("source") == "follow":
             fkey = record.get("follow")
             follow = read_follow(fkey)
-            if follow is None:
-                return  # it ended since: a review never starts one again
+            if follow is None or follow.get("since") != record.get("follow_since"):
+                return  # it ended since, or was started again: a review never starts or moves one
             follow = {**follow, "sha": sha, "pending": None if follow.get("pending") == key else follow.get("pending")}
             if sha != follow.get("seen"):
                 follow = {**follow, "seen": sha, "moved": now}
@@ -3136,32 +3138,52 @@ def _follow_reply(text: str, space: str, thread: str, app: str) -> Optional[dict
 def _follow_command(key: str, record: dict) -> dict:
     """Carry out a follow command's record once: "follow <link>" follows the PR in its thread with no head reviewed yet,
     so its first check reviews it; "stop following" ends each follow it names. Done as it is taken and again before its
-    reply, so a kill between never loses it, and marked done in the record. The record as it is after."""
+    reply, so a kill between never loses it, and marked done in the record; done late, it never undoes a later
+    command (_stopped_after, and a stop ends only a follow asked for before it). The record as it is after."""
     kind = record.get("kind")
     if kind == "follow" and record.get("followed") is not True:
-        fkey = _start_follow(app_of(record), record["repo"], record["number"], _where(record), None, int(time.time()))
-        log("follow-started", request=key[:12], app=app_of(record), follow=fkey[:12])
+        if not _stopped_after(record):
+            fkey = _start_follow(app_of(record), record["repo"], record["number"], _where(record), None,
+                                 int(time.time()))
+            log("follow-started", request=key[:12], app=app_of(record), follow=fkey[:12])
         return _save(key, {**record, "followed": True})
     if kind == "unfollow" and record.get("unfollowed") is not True:
         for fkey in record.get("follows") or ():
-            _end_follow(fkey, "unfollowed")
+            _end_follow(fkey, "unfollowed", _taken_us(record))
         return _save(key, {**record, "unfollowed": True})
     return record
 
 
-def _end_follow(fkey: str, why: str) -> None:
-    """End the follow, with one log line. Stopped by a teammate, its review of new commits still queued ends too,
-    unanswered."""
+def _stopped_after(record: dict) -> bool:
+    """Whether a stop of app's follows in the follow command's thread was taken from a message after its own: then
+    the command, carried out late after a kill, starts nothing."""
+    at = _taken_us(record)
+    return any(other.get("kind") == "unfollow" and other.get("app", DEFAULT_APP) == record.get("app", DEFAULT_APP)
+               and other.get("space") == record.get("space") and other.get("thread") == record.get("thread")
+               and _taken_us(other) > at for _, other in _records())
+
+
+def _end_follow(fkey: str, why: str, before_us: Optional[int] = None) -> None:
+    """End the follow, with one log line; with before_us (a stop's message), only a follow last asked for before it,
+    so a stop carried out late after a kill never ends one a later message started or moved. Stopped by a teammate,
+    every review of new commits it queued that is still queued ends too, unanswered."""
     follow = read_follow(fkey)
-    if follow is None:
+    asked = follow.get("asked_us") if follow is not None else None
+    if follow is None or (before_us is not None and type(asked) is int and asked > before_us):
         return
-    pending = follow.get("pending")
-    queued = read_record(pending) if why == "unfollowed" and isinstance(pending, str) and KEY.fullmatch(pending) \
-        else None
-    if queued is not None and queued.get("state") == "queued" and queued.get("source") == "follow":
-        _end(pending, queued, "unfollowed")
+    if why == "unfollowed":
+        for key, record in _records():
+            if record.get("source") == "follow" and record.get("follow") == fkey and record["state"] == "queued":
+                _end(key, record, "unfollowed")
     _drop_follow(fkey)
     log("follow-ended", follow=fkey[:12], app=follow.get("app"), why=why)
+
+
+def _follow_gone(record: dict) -> bool:
+    """Whether a queued review of new commits outlived its follow: the follow it names is gone, or was started again
+    since it was queued. Such a review ends unanswered."""
+    follow = read_follow(record.get("follow"))
+    return follow is None or follow.get("since") != record.get("follow_since")
 
 
 def _follow_note(fkey: str, follow: dict, name: str, text: str) -> None:
@@ -3200,8 +3222,8 @@ def follow_check(fkey: str, follow: dict, now: int, served: list) -> Optional[st
     line. Otherwise it reads the PR as a review does (read_pr): merged or closed, the follow ends with its line; quiet
     for CHAT_REVIEW_FOLLOW_DAYS since its head last moved, it ends with its line; with a head that is not its last
     reviewed one, it queues a review of it, a request of source follow in the same thread for the same requester, at
-    most once per head (its key is made from it) and at most CHAT_REVIEW_FOLLOW_REVIEWS_PER_DAY a cap day, past which
-    it waits for the next day and says so once."""
+    most once per head (its key is made from it) and at most CHAT_REVIEW_FOLLOW_REVIEWS_PER_DAY a cap day, counted from
+    the follow's requests on record, past which it waits for the next day and says so once."""
     if now - _follow_due(follow) < config.CHAT_REVIEW_FOLLOW_CHECK_SECONDS:
         return None
     app, pending = follow.get("app"), follow.get("pending")
@@ -3243,7 +3265,8 @@ def follow_check(fkey: str, follow: dict, now: int, served: list) -> Optional[st
         _save_follow(fkey, {**follow, "pending": key if earlier["state"] != "done" else None})
         return "unchanged"
     day = _day(now)
-    count = follow.get("reviews") if follow.get("day") == day and type(follow.get("reviews")) is int else 0
+    count = sum(1 for _, record in _records() if record.get("source") == "follow" and record.get("follow") == fkey
+                and type(record.get("at")) is int and _day(record["at"]) == day)
     if count >= config.CHAT_REVIEW_FOLLOW_REVIEWS_PER_DAY:
         if follow.get("limit_day") != day:
             try:
@@ -3258,10 +3281,11 @@ def follow_check(fkey: str, follow: dict, now: int, served: list) -> Optional[st
               "thread": follow["thread"], "requester_name": display_name(follow.get("requester_name")),
               **({"requester_user": follow["requester_user"]} if isinstance(follow.get("requester_user"), str)
                  and CHAT_USER.fullmatch(follow["requester_user"]) is not None else {}),
-              "repo": repo, "number": number, "at": now, "follow": fkey, "follow_sha": head}
+              "repo": repo, "number": number, "at": now, "follow": fkey, "follow_since": follow.get("since"),
+              "follow_sha": head}
     if _create(key, record):
         log("received", **_logged(key, record), kind="review")
-    _save_follow(fkey, {**follow, "pending": key, "day": day, "reviews": count + 1})
+    _save_follow(fkey, {**follow, "pending": key})
     return "queued"
 
 
@@ -3949,6 +3973,8 @@ def settle(conn, now: Optional[int] = None, only_hand: bool = False) -> list:
                 # An earlier mention of the thread by the other app was recorded only after this was taken: Chat
                 # listed it late, or that app's read was stopped then.
                 done.append(_end(key, {**record, "kind": "dropped"}, "not-owned")["state"])
+            elif state == "queued" and record.get("source") == "follow" and _follow_gone(record):
+                done.append(_end(key, record, "unfollowed")["state"])  # stopped, or a kill left it behind the stop
             elif state == "queued":
                 record = _acknowledge(key, record)
                 if reviews < config.CHAT_REVIEW_PER_PASS:
