@@ -661,7 +661,8 @@ to what GitHub takes. Each finding whose place is a file and line the diff shows
 an inline comment, the way a reviewer leaves one: a blocking finding as "Blocking:" with what breaks and "Fix:" with
 its direction, a note as "Note:", at most 25 of them and at most 1000 characters each. All of the reviewer's text on
 GitHub is plain prose: every markdown character is escaped and a word joiner follows "#" or "GH-" before a digit, so
-nothing in it formats, links, embeds or references another issue or PR. A place
+nothing in it formats, links, embeds or references another issue or PR. A commit hash may still link to the repo's
+own commit, as in any review a person writes. A place
 `path:N` sits on line N, `path:N-M` on lines N to M when both are in one hunk, and `path:N,M` on the first of them the
 diff shows. The script reads the diff's hunks for the lines a comment can sit on (header lines only for the paths, as
 the echo check reads them), and `gitops.post_pr_review` checks every comment against those lines before `gh` runs:

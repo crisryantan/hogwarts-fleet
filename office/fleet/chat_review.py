@@ -429,7 +429,8 @@ ANCHOR = re.compile(r"(.+):([1-9][0-9]{0,8})(?:-([1-9][0-9]{0,8})|((?:,[1-9][0-9
 INLINE_MAX = gitops.REVIEW_COMMENTS_MAX
 INLINE_FIELD_MAX = 450
 # GitHub text from the reviewer is plain prose: every markdown character escaped, so nothing links, formats or embeds,
-# and a word joiner after "#" or "GH-" before a digit, so no issue or PR reference autolinks or cross-references.
+# and a word joiner after "#" or "GH-" before a digit, so no issue or PR reference autolinks or cross-references. A
+# commit hash may still link to that repo's own commit, as it does in any review a person writes.
 MARKDOWN_SPECIAL = re.compile(r"([\\`*_{}\[\]()#+\-.!|<>~=:])")
 REFERENCE = re.compile(r"(#|\bGH\\-)(?=[0-9])", re.IGNORECASE)
 C_ESCAPES = {"a": b"\a", "b": b"\b", "t": b"\t", "n": b"\n", "v": b"\v", "f": b"\f", "r": b"\r", '"': b'"',
