@@ -4,8 +4,10 @@ are read by the job (never the model) and handed to its turn as untrusted, fence
 turn are fakes here (tests_fleet.test_chat_review.ChatCase): no call leaves the machine and no model runs."""
 from __future__ import annotations
 
+import contextlib
 import http.client
 import json
+import socket
 import threading
 import time
 import urllib.parse
@@ -485,6 +487,46 @@ class WebTests(MaterialCase):
         with self.assertRaises(chat_material.Refused):  # nothing starts once the deadline passed
             REAL_GET("docs.example.org", "93.184.216.34", "/guide", time.monotonic() - 1)
         self.assertLessEqual(chat_material.LINK_DEADLINE_SECONDS, 30)
+
+    def test_a_real_connection_that_closes_and_drips_its_body_or_trailers_is_cut_too(self):
+        # http.client lets go of its sock once an answer says Connection: close; the cut must still reach the read.
+        heads = {"body": b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nConnection: close\r\n"
+                         b"Content-Length: 100000\r\n\r\n",
+                 "trailer": b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nConnection: close\r\n"
+                            b"Transfer-Encoding: chunked\r\n\r\n1\r\nx\r\n0\r\n"}
+        for kind, head in heads.items():
+            with self.subTest(kind=kind):
+                server = socket.socket()
+                server.bind(("127.0.0.1", 0))
+                server.listen(1)
+                stop = threading.Event()
+
+                def serve(head=head, server=server, stop=stop):
+                    peer, _ = server.accept()
+                    with peer:
+                        peer.recv(65536)
+                        peer.sendall(head)
+                        while not stop.wait(0.1):  # a byte at a time, never done
+                            with contextlib.suppress(OSError):
+                                peer.sendall(b"x" if kind == "body" else b"X-Trailer: y\r\n")
+
+                worker = threading.Thread(target=serve, daemon=True)
+                worker.start()
+                port = server.getsockname()[1]
+
+                def plain(connection):
+                    connection.raw = socket.create_connection(("127.0.0.1", port), connection.timeout)
+                    return connection.raw
+
+                begun = time.monotonic()
+                try:
+                    with mock.patch.object(chat_material._Pinned, "_open", plain), \
+                            self.assertRaises((chat_material.Refused, OSError, http.client.HTTPException)):
+                        REAL_GET("docs.example.org", "93.184.216.34", "/guide", time.monotonic() + 0.5)
+                finally:
+                    stop.set()
+                    server.close()
+                self.assertLess(time.monotonic() - begun, 3)
 
     def test_a_slow_name_lookup_is_given_up_at_the_deadline(self):
         def slow(*args, **kwargs):

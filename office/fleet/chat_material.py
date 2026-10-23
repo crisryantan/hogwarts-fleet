@@ -366,20 +366,26 @@ def _resolve(host: str, deadline: float) -> list:
 
 class _Pinned(http.client.HTTPSConnection):
     """An HTTPS connection to one checked address, its certificate checked for the host name. http.client reads no
-    proxy setting and sends no cookie."""
+    proxy setting and sends no cookie. It keeps its own socket (raw) for _cut, since http.client lets go of sock once an
+    answer says Connection: close, while that answer still reads from it."""
 
     def __init__(self, host: str, address: str, timeout: float = FETCH_TIMEOUT_SECONDS) -> None:
         super().__init__(host, 443, timeout=timeout, context=ssl.create_default_context())
         self._address = address
+        self.raw: Optional[socket.socket] = None
 
     def connect(self) -> None:
-        sock = socket.create_connection((self._address, 443), self.timeout)
-        self.sock = self._context.wrap_socket(sock, server_hostname=self.host)
+        self.sock = self.raw = self._open()
+
+    def _open(self) -> socket.socket:
+        self.raw = socket.create_connection((self._address, 443), self.timeout)
+        return self._context.wrap_socket(self.raw, server_hostname=self.host)
 
 
 def _cut(connection: _Pinned) -> None:
-    """End a connection that ran past its deadline: a blocked read on it returns at once."""
-    sock = connection.sock
+    """End a connection that ran past its deadline, through the socket it keeps, so a blocked connect, handshake,
+    header, body or trailer read on it returns at once."""
+    sock = getattr(connection, "raw", None) or connection.sock
     if sock is not None:
         with contextlib.suppress(OSError):
             sock.shutdown(socket.SHUT_RDWR)
