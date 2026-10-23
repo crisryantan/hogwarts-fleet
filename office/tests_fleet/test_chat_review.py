@@ -3312,6 +3312,25 @@ class ThreadConversationTests(ChatCase):
                                     thread=f"{SPACE}/threads/t2"), ["mention"])
         self.assertEqual([turn["desk"] for turn in self.turns], ["moody", "moody", "moody"])
 
+    def test_a_conversation_turn_waits_out_a_stop_of_its_own_apps_family_only(self):
+        self.second_app()
+        self.mentioned(app=MOODY_APP_USER, thread=f"{SPACE}/threads/t2")
+        self.mentioned(message="m3", thread=f"{SPACE}/threads/t3")
+        stop = self.office / "state" / config.STOP_FAMILY_FILES["codex"]
+        self.write_file(stop, "1 a new codex version\n")
+        self.assertEqual(self.quiet("noted, and the other one", thread=f"{SPACE}/threads/t2"), ["mention"])
+        self.assertEqual(self.quiet("What is a widget store?", message="q2", ahead=2, thread=f"{SPACE}/threads/t3"),
+                         ["mention"])
+        self.assertEqual([turn["desk"] for turn in self.turns], ["moody", "hermione", "hermione"])
+        [held] = [record for record in self.records() if record["message"].endswith("/q1")]
+        self.assertEqual((held["state"], held["app"], held["mentioned"]), ("queued", "moody", False))
+        waiting = [line for line in self.log_lines() if line["event"] == "waiting"]
+        self.assertIn("so codex turns wait", waiting[-1]["why"])
+        stop.unlink()
+        self.run_pass()
+        self.assertEqual([turn["desk"] for turn in self.turns], ["moody", "hermione", "hermione", "moody"])
+        self.assertEqual(self.google.messages[-1]["app"], "moody")
+
     def test_thread_messages_gives_back_only_the_apps_and_allowed_senders_text(self):
         google_chat._READ["hermione"] = {"token": USER_TOKEN, "until": int(time.time()) + 3600}
         at = time.time()
