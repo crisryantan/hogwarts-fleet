@@ -12,14 +12,19 @@
   <circle cx="256" cy="256" r="240" fill="url(#field)"/>
 
   <g clip-path="url(#inner)">
-    <path d="M 256 112 C 174 108 124 160 122 232 C 110 290 120 340 140 372 L 186 360 L 326 360 L 372 372 C 392 340 402 290 390 232 C 388 160 338 108 256 112 Z" fill="#A9A49A" stroke="#231F20" stroke-width="10" stroke-linejoin="round" stroke-linecap="round"/>
-    <path d="M 160 500 L 176 384 Q 256 358 336 384 L 352 500 Z" fill="#3A3026" stroke="#231F20" stroke-width="10" stroke-linejoin="round" stroke-linecap="round"/>
-    <path d="M 176 384 Q 256 410 336 384" fill="none" stroke="#5A4632" stroke-width="12" stroke-linecap="round"/>
-    <ellipse cx="148" cy="250" rx="20" ry="26" fill="#E8CBA4" stroke="#231F20" stroke-width="10" stroke-linejoin="round" stroke-linecap="round"/>
-    <ellipse cx="364" cy="250" rx="20" ry="26" fill="#E8CBA4" stroke="#231F20" stroke-width="10" stroke-linejoin="round" stroke-linecap="round"/>
-    <ellipse cx="256" cy="236" rx="108" ry="100" fill="#F6E2C4" stroke="#231F20" stroke-width="10" stroke-linejoin="round" stroke-linecap="round"/>
-    <path d="M 150 226 C 148 156 200 124 258 126 C 318 128 366 160 362 226 C 344 196 316 182 290 186 L 282 168 L 264 188 L 246 166 L 230 190 L 210 172 L 196 196 C 176 200 160 212 150 226 Z" fill="#A9A49A" stroke="#231F20" stroke-width="10" stroke-linejoin="round" stroke-linecap="round"/>
-    <path d="M 150 248 L 196 238 M 316 238 L 362 232" fill="none" stroke="#6B4A2E" stroke-width="10" stroke-linecap="round"/>
+    <path d="M 256 104 C 164 100 106 156 104 232 C 92 290 104 342 124 374 L 186 362 L 326 362 L 388 374 C 408 342 420 290 408 232 C 406 156 348 100 256 104 Z" fill="#A9A49A" stroke="#231F20" stroke-width="10" stroke-linejoin="round" stroke-linecap="round"/>
+    <path d="M 224 300 L 288 300 L 290 392 L 222 392 Z" fill="#E8CBA4" stroke="#231F20" stroke-width="10" stroke-linejoin="round" stroke-linecap="round"/>
+    <path d="M 114 500 L 130 384 Q 256 358 382 384 L 398 500 Z" fill="#3A3026" stroke="#231F20" stroke-width="10" stroke-linejoin="round" stroke-linecap="round"/>
+    <path d="M 150 386 Q 256 414 362 386" fill="none" stroke="#5A4632" stroke-width="12" stroke-linecap="round"/>
+    <ellipse cx="124" cy="260" rx="20" ry="26" fill="#E8CBA4" stroke="#231F20" stroke-width="10" stroke-linejoin="round" stroke-linecap="round"/>
+    <ellipse cx="388" cy="260" rx="20" ry="26" fill="#E8CBA4" stroke="#231F20" stroke-width="10" stroke-linejoin="round" stroke-linecap="round"/>
+    <ellipse cx="256" cy="246" rx="132" ry="116" fill="#F6E2C4" stroke="#231F20" stroke-width="10" stroke-linejoin="round" stroke-linecap="round"/>
+    <ellipse cx="166" cy="300" rx="30" ry="24" fill="#F6E2C4"/>
+    <ellipse cx="346" cy="300" rx="30" ry="24" fill="#F6E2C4"/>
+    <path d="M 126 236 C 122 150 190 114 258 116 C 330 118 392 150 386 236 C 362 200 328 184 296 186 L 286 166 L 266 188 L 246 164 L 228 190 L 206 170 L 190 196 C 162 200 140 216 126 236 Z" fill="#A9A49A" stroke="#231F20" stroke-width="10" stroke-linejoin="round" stroke-linecap="round"/>
+    <path d="M 214 346 Q 256 366 298 346" fill="none" stroke="#231F20" stroke-width="8" stroke-linecap="round"/>
+    <ellipse cx="180" cy="300" rx="18" ry="10" fill="#E3A99A"/>
+    <path d="M 124 256 L 196 242 M 318 242 L 388 236" fill="none" stroke="#6B4A2E" stroke-width="10" stroke-linecap="round"/>
     <circle cx="300" cy="258" r="34" fill="#C49A4A" stroke="#231F20" stroke-width="10" stroke-linejoin="round" stroke-linecap="round"/>
     <circle cx="300" cy="258" r="22" fill="#F4F1E8"/>
     <circle cx="306" cy="254" r="13" fill="#3F8FE0"/>

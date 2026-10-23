@@ -9,37 +9,22 @@
     </clipPath>
   </defs>
 
-  <!-- field -->
   <circle cx="256" cy="256" r="240" fill="url(#field)"/>
 
   <g clip-path="url(#inner)">
-    <!-- faint compass rose -->
-    <circle cx="156" cy="164" r="38" fill="none" stroke="#C9B48A" stroke-width="8"/>
-    <polygon fill="#C9B48A" points="156,106 160.6,152.9 182.9,137.1 167.1,159.4 214,164 167.1,168.6 182.9,190.9 160.6,175.1 156,222 151.4,175.1 129.1,190.9 144.9,168.6 98,164 144.9,159.4 129.1,137.1 151.4,152.9"/>
-
-    <!-- dashed trail curving across the field -->
-    <path d="M13,432 Q98.9,420.1 148.9,370.1 L361.1,157.9 Q411.1,107.9 497,96" fill="none" stroke="#4A3521" stroke-width="8" stroke-linecap="round" stroke-dasharray="14 20" stroke-opacity="0.45"/>
-
-    <!-- two pairs of footprints walking up the trail (left feet mirrored) -->
-    <g transform="translate(136.2,331.8) rotate(41) scale(-1.12,1.12)">
-      <path d="M-2,-56 C13,-57 24,-46 24,-30 C24,-15 18,-3 13,6 C9,12 -7,13 -11,6 C-15,-2 -20,-14 -20,-30 C-20,-45 -14,-55 -2,-56 Z" fill="#4A3521"/>
-      <ellipse cx="1" cy="35" rx="17" ry="16" fill="#4A3521"/>
-    </g>
-    <g transform="translate(249.4,320.6) rotate(49) scale(1.12)">
-      <path d="M-2,-56 C13,-57 24,-46 24,-30 C24,-15 18,-3 13,6 C9,12 -7,13 -11,6 C-15,-2 -20,-14 -20,-30 C-20,-45 -14,-55 -2,-56 Z" fill="#4A3521"/>
-      <ellipse cx="1" cy="35" rx="17" ry="16" fill="#4A3521"/>
-    </g>
-    <g transform="translate(260.6,207.4) rotate(41) scale(-1.12,1.12)">
-      <path d="M-2,-56 C13,-57 24,-46 24,-30 C24,-15 18,-3 13,6 C9,12 -7,13 -11,6 C-15,-2 -20,-14 -20,-30 C-20,-45 -14,-55 -2,-56 Z" fill="#4A3521"/>
-      <ellipse cx="1" cy="35" rx="17" ry="16" fill="#4A3521"/>
-    </g>
-    <g transform="translate(373.8,196.2) rotate(49) scale(1.12)">
-      <path d="M-2,-56 C13,-57 24,-46 24,-30 C24,-15 18,-3 13,6 C9,12 -7,13 -11,6 C-15,-2 -20,-14 -20,-30 C-20,-45 -14,-55 -2,-56 Z" fill="#4A3521"/>
-      <ellipse cx="1" cy="35" rx="17" ry="16" fill="#4A3521"/>
+    <path d="M 120 160 L 200 136 L 312 160 L 392 136 L 392 360 L 312 384 L 200 360 L 120 384 Z" fill="#F3E6C4" stroke="#231F20" stroke-width="10" stroke-linejoin="round" stroke-linecap="round"/>
+    <path d="M 200 136 L 200 360 M 312 160 L 312 384" fill="none" stroke="#C9B48A" stroke-width="9"/>
+    <path d="M 152 330 Q 210 300 238 250 Q 270 196 350 190" fill="none" stroke="#B9A47A" stroke-width="9" stroke-dasharray="4 18" stroke-linecap="round"/>
+    <g fill="#231F20">
+      <ellipse cx="160" cy="318" rx="9" ry="14" transform="rotate(-40 160 318)"/>
+      <ellipse cx="190" cy="300" rx="9" ry="14" transform="rotate(-40 190 300)"/>
+      <ellipse cx="238" cy="238" rx="9" ry="14" transform="rotate(-25 238 238)"/>
+      <ellipse cx="262" cy="214" rx="9" ry="14" transform="rotate(-25 262 214)"/>
+      <ellipse cx="318" cy="196" rx="9" ry="14" transform="rotate(70 318 196)"/>
+      <ellipse cx="346" cy="178" rx="9" ry="14" transform="rotate(70 346 178)"/>
     </g>
   </g>
 
-  <!-- ring -->
   <circle cx="256" cy="256" r="240" fill="none" stroke="#9AA0A6" stroke-width="16"/>
   <circle cx="256" cy="256" r="222" fill="none" stroke="#9AA0A6" stroke-width="3" stroke-opacity="0.45"/>
 </svg>

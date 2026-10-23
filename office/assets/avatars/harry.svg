@@ -12,6 +12,7 @@
   <circle cx="256" cy="256" r="240" fill="url(#field)"/>
 
   <g clip-path="url(#inner)">
+    <path d="M 224 300 L 288 300 L 290 392 L 222 392 Z" fill="#E8CBA4" stroke="#231F20" stroke-width="10" stroke-linejoin="round" stroke-linecap="round"/>
     <path d="M 160 500 L 176 384 Q 256 358 336 384 L 352 500 Z" fill="#231F20" stroke="#231F20" stroke-width="10" stroke-linejoin="round" stroke-linecap="round"/>
     <path d="M 186 360 Q 256 392 326 360 L 330 390 Q 256 420 182 390 Z" fill="#8A2232" stroke="#231F20" stroke-width="10" stroke-linejoin="round" stroke-linecap="round"/>
     <path d="M 270 396 L 300 398 L 296 486 L 264 484 Z" fill="#8A2232" stroke="#231F20" stroke-width="10" stroke-linejoin="round" stroke-linecap="round"/>

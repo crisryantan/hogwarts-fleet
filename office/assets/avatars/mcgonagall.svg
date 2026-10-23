@@ -12,6 +12,7 @@
   <circle cx="256" cy="256" r="240" fill="url(#field)"/>
 
   <g clip-path="url(#inner)">
+    <path d="M 224 300 L 288 300 L 290 392 L 222 392 Z" fill="#E8CBA4" stroke="#231F20" stroke-width="10" stroke-linejoin="round" stroke-linecap="round"/>
     <path d="M 160 500 L 176 384 Q 256 358 336 384 L 352 500 Z" fill="#2E8048" stroke="#231F20" stroke-width="10" stroke-linejoin="round" stroke-linecap="round"/>
     <path d="M 218 372 L 256 420 L 294 372" fill="none" stroke="#1C5A33" stroke-width="12" stroke-linejoin="round"/>
     <ellipse cx="148" cy="262" rx="20" ry="26" fill="#E8CBA4" stroke="#231F20" stroke-width="10" stroke-linejoin="round" stroke-linecap="round"/>
