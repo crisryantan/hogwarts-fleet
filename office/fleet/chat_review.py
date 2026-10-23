@@ -241,6 +241,14 @@ UNMENTIONED_WORDS_MAX = 8
 UNMENTIONED_START = re.compile(r"(?:(?:please|pls|plz|ok|okay|hey|can you|could you|would you)[,!]?\s+)*"
                                r"(?:(?:do|run)\s+)?(?:(?:another|one more|a new)\s+review|re-?review|review|approve)\b",
                                re.IGNORECASE)
+# A conversation turn that comes straight after the app's reply is taken only when one of its messages says something:
+# at least TURN_WORDS_MIN words outside its addresses and emoji, and no bare reaction (REACTION, matched whole on its
+# words, lower case with their punctuation out; text with no word at all, emoji alone, is one too).
+TURN_WORDS_MIN = 4
+_REACTION = (r"(?:(?:ha){2,}h?|(?:he){2,}h?|lo+l|lmao+|nice|cool|ok|okay|thanks|thank you|thx|ty|nope|yep|yes|no"
+             r"|great|awesome)")
+REACTION = re.compile(rf"{_REACTION}(?: {_REACTION})*")
+WORD_CHARACTER = re.compile(r"\w")
 PR_TEXT_MAX = 20000
 FINDINGS_MAX = 15
 FINDING_MAX = 600
@@ -617,7 +625,8 @@ def config_problems(intake: bool) -> list:
         value = getattr(config, name)
         if type(value) is not int or value < 1:
             bad(name, value, "must be a whole number of at least 1")
-    for name in ("CHAT_REVIEW_JOIN_GRACE_SECONDS", "CHAT_REVIEW_WAIT_NOTICE_SECONDS", "CHAT_REVIEW_RESUME_MAX"):
+    for name in ("CHAT_REVIEW_JOIN_GRACE_SECONDS", "CHAT_REVIEW_WAIT_NOTICE_SECONDS", "CHAT_REVIEW_RESUME_MAX",
+                 "CHAT_REVIEW_BURST_SECONDS"):
         value = getattr(config, name)
         if type(value) is not int or value < 0:
             bad(name, value, "must be a whole number of at least 0")
@@ -850,13 +859,38 @@ def unmentioned_asks(text: object) -> bool:
 def parse_conversation(text: object) -> bool:
     """Whether a message that mentions no one, in a thread the app took a mention in, may carry on the conversation
     there: no review command (unmentioned_asks, which wins) and a message a mention answer takes (parse_mention), so
-    it names no PR in any way. It is a turn only when it also asks a question (asks_question) or answers the app."""
+    it names no PR in any way. Its turn (take_turn) is taken only when a message of it asks a question
+    (asks_question), or the turn answers the app and a message of it says something (substantive)."""
     return not unmentioned_asks(text) and parse_mention(text)
 
 
 def asks_question(text: object) -> bool:
     """Whether text ends with a question mark."""
     return isinstance(text, str) and text.rstrip().endswith("?")
+
+
+def _words(text: str) -> list:
+    """text's words outside its addresses, each in lower case with its punctuation out, so emoji alone are none."""
+    plain = ANY_ADDRESS.sub(" ", LINK_MARKUP.sub(" ", text))
+    found = ("".join(WORD_CHARACTER.findall(token.lower())) for token in plain.split())
+    return [word for word in found if word]
+
+
+def is_reaction(text: object) -> bool:
+    """Whether text only reacts: no word at all (emoji or punctuation alone), or reaction words alone (REACTION), with
+    letter case and punctuation ignored, so "haha", "Nope." or "ok thanks!" is one."""
+    if not isinstance(text, str):
+        return False
+    words = _words(text)
+    return not words or REACTION.fullmatch(" ".join(words)) is not None
+
+
+def substantive(text: object) -> bool:
+    """Whether a message that mentions no one says something, so it may answer the app's reply: it asks a question
+    (asks_question) or has at least TURN_WORDS_MIN words outside its addresses and emoji, and it is no bare reaction
+    (is_reaction)."""
+    return isinstance(text, str) and not is_reaction(text) \
+        and (asks_question(text) or len(_words(text)) >= TURN_WORDS_MIN)
 
 
 def parse_question(text: object) -> bool:
@@ -2938,8 +2972,7 @@ def _ignored(name: str, why: str) -> str:
     return "ignored"
 
 
-def take_message(message: dict, space: str, token: str, known: dict, now: int, app: str,
-                 app_user: Optional[str] = None) -> str:
+def take_message(message: dict, space: str, token: str, known: dict, now: int, app: str) -> str:
     """Take one message that mentions app, once for that app: a review request from an allowed sender becomes a queued
     review by its desk, a status ask (parse_status) the app's status reply (status_text), a question about the app's review there or any other message a queued answer (parse_question,
     parse_mention), with what it attaches (_material), anything else from them the app's fixed help reply, and
@@ -2947,11 +2980,8 @@ def take_message(message: dict, space: str, token: str, known: dict, now: int, a
     the fixed refusal, each as a record made create-exclusive, so a message read again (the overlap of each read, or
     after a kill) is "seen before". A bot, a message too old or with no thread in its space gets nothing. What
     happened, for the log. A message that mentions no one, in a thread where only app took mentions (listening), is
-    taken only from an allowed sender: as a short review request or follow-up, or, when it is none of those
-    (parse_conversation) and either asks a question (asks_question) or answers the app (the thread's newest message
-    before it is app's own, app_user's: _answers_app), as a conversation turn, the question about the app's review or
-    the mention answer a mention of it would be. Anything else of it is ignored, with no reply, no record and no log
-    line."""
+    taken here only from an allowed sender, as a short review request or follow-up; one that carries the conversation
+    on is take_turn's. Anything else of it is ignored, with no reply, no record and no log line."""
     name, mentioned = message["name"], message["mentions"] is True
 
     def ignored(why: str) -> str:
@@ -2981,30 +3011,19 @@ def take_message(message: dict, space: str, token: str, known: dict, now: int, a
         and CHAT_USER.fullmatch(message["sender"]) is not None else {}
     if not mentioned:
         # Only the one app that took a mention in the thread before this message takes it.
-        asked, follow_up, talk, argument = None, False, False, message["argument"]
-        if email is not None and _owners(space, message["created_us"]).get(thread) == app:
-            if unmentioned_asks(argument):  # a review command keeps its path, and wins
-                asked = parse_unmentioned_request(argument)
-                if asked is None and parse_unmentioned(argument):
-                    asked = earlier_request(space, thread, app, message["created_us"])
-                    follow_up = asked is not None
-            elif parse_conversation(argument):
-                talk = asks_question(argument) or _answers_app(space, thread, message["created_us"], token, app_user)
-        person = {**record, "requester": email, "requester_name": display_name(message["sender_name"]), **user,
-                  "state": "queued", "mentioned": False}
-        if talk:
-            # The conversation goes on as a mention of the app would: about its review where it reviewed a PR.
-            reviewed = reviewed_request(space, thread, app, message["created_us"])
-            record = {**person, "question": argument.strip(), **_material(message)}
-            record = {**record, "kind": "question", "repo": allowed_repo(reviewed[1]["repo"]),
-                      "number": reviewed[1]["number"], "about": reviewed[0]} if reviewed is not None \
-                else {**record, "kind": "mention"}
-        elif asked is None:
+        asked, follow_up, argument = None, False, message["argument"]
+        if email is not None and _owners(space, message["created_us"]).get(thread) == app \
+                and unmentioned_asks(argument):  # a review command keeps its path, and wins
+            asked = parse_unmentioned_request(argument)
+            if asked is None and parse_unmentioned(argument):
+                asked = earlier_request(space, thread, app, message["created_us"])
+                follow_up = asked is not None
+        if asked is None:
             return "ignored"
-        else:
-            record = {**person, "kind": "review", "repo": asked[0], "number": asked[1],
-                      "other_work": asks_other_work(argument), **({"follow_up": True} if follow_up else {}),
-                      **_material(message)}
+        record = {**record, "requester": email, "requester_name": display_name(message["sender_name"]), **user,
+                  "state": "queued", "mentioned": False, "kind": "review", "repo": asked[0], "number": asked[1],
+                  "other_work": asks_other_work(argument), **({"follow_up": True} if follow_up else {}),
+                  **_material(message)}
     elif email is None:
         # Who they are is not kept: the record holds only the message's names and the fixed reply.
         record = {**record, "state": "reply", "kind": "refusal", "reply": SENDER_REFUSED, "outcome": "not-allowed"}
@@ -3065,6 +3084,143 @@ def _material(message: dict) -> dict:
     only until its turn has run, never logged."""
     found = chat_material.plan(message.get("argument"), message.get("attachments", ()))
     return {"material": found} if found else {}
+
+
+# Conversation turns
+
+
+class Burst(NamedTuple):
+    """One conversation turn among the messages a quiet read listed: its messages, oldest first, and whether it may
+    still grow (a message of it was created less than CHAT_REVIEW_BURST_SECONDS before what was read)."""
+    messages: list
+    growing: bool
+
+
+def _turn_message(message: dict, space: str, token: str, known: dict, now: int, app: str) -> bool:
+    """Whether a listed message may be part of a conversation turn of app: it mentions no one, in a thread that was
+    app's alone for a while (listening), from a person on CHAT_REVIEW_SENDERS, in a thread only app took a mention in
+    before it (_owners), recent enough to take, no review command and naming no PR (parse_conversation)."""
+    if message.get("mentions") is not False or message.get("listening") is not True \
+            or message.get("sender_type") != "HUMAN":
+        return False
+    named, thread, at = MESSAGE_NAME.fullmatch(message["name"]), message["thread"], message["created_us"] // 1_000_000
+    if named is None or named.group(1) != space or google_chat.THREAD.fullmatch(thread) is None \
+            or not thread.startswith(space + "/") or at > now + CLOCK_SKEW_SECONDS \
+            or now - at > config.CHAT_REVIEW_QUEUE_MAX_SECONDS or not parse_conversation(message["argument"]):
+        return False
+    return _senders_in(space, token, known).get(message["sender"]) is not None \
+        and _owners(space, message["created_us"]).get(thread) == app
+
+
+def bursts(listed: list, space: str, token: str, known: dict, now: int, app: str, horizon_us: int,
+           cut: bool) -> dict:
+    """The conversation turns among listed (a quiet read's messages, oldest first), each by the index of its first
+    message: one person's turn messages (_turn_message) in one thread, each created at most CHAT_REVIEW_BURST_SECONDS
+    after the one before. Any other message of theirs there that was listed with its sender, a mention or a review
+    command, ends their turn before it. A turn still grows while its newest message is less than that before
+    horizon_us (how far the read saw), unless that read was cut short (cut) and the turn starts it, so a turn longer
+    than a read's pages never holds the read back for good."""
+    window = config.CHAT_REVIEW_BURST_SECONDS * 1_000_000
+    found, current = {}, {}
+    for index, message in enumerate(listed):
+        if message.get("mentions") is not True and message.get("listening") is not True:
+            continue  # listed as its time alone: no one's message, so no one's turn ends
+        who = (message.get("thread"), message.get("sender"))
+        if not _turn_message(message, space, token, known, now, app):
+            current.pop(who, None)
+            continue
+        turn = current.get(who)
+        if turn is None or window <= 0 or message["created_us"] - turn[-1]["created_us"] > window:
+            turn = current[who] = found[index] = []
+        turn.append(message)
+    ended = {id(turn) for turn in found.values()} - {id(turn) for turn in current.values()}
+    start = listed[0]["created_us"] if listed else 0
+    return {index: Burst(turn, window > 0 and id(turn) not in ended and turn[-1]["created_us"] + window > horizon_us
+                         and not (cut and turn[0]["created_us"] <= start))
+            for index, turn in found.items()}
+
+
+def _join(message: dict, lead: str, app: str) -> None:
+    """Record message as one of the turn whose request is the record lead: done, with none of its text, so it is
+    never taken again."""
+    _create(_message_key(message["name"], app), {
+        "message": message["name"], "space": message["name"].split("/messages/")[0], "thread": message["thread"],
+        "source": "chat", "app": app, "at": message["created_us"] // 1_000_000, "at_us": message["created_us"],
+        "mentioned": False, "kind": "joined", "joined": lead, "state": "done", "outcome": "joined",
+        "ended": int(time.time())})
+
+
+def undecided(turn: list, app: str) -> list:
+    """The messages of a turn no record decides yet, oldest first: those with no record of their own that the record
+    leading a turn (its "burst") does not name. One it names that has no record is recorded now as joined to it
+    (_join), which finishes what a kill cut short."""
+    records = {message["name"]: read_record(_message_key(message["name"], app)) for message in turn}
+    named = {}
+    for message in turn:
+        record = records[message["name"]]
+        if record is not None and isinstance(record.get("burst"), list):
+            for name in record["burst"]:
+                named.setdefault(name, _message_key(message["name"], app))
+    left = []
+    for message in turn:
+        if records[message["name"]] is not None:
+            continue
+        if message["name"] in named:
+            _join(message, named[message["name"]], app)
+        else:
+            left.append(message)
+    return left
+
+
+def _turn_text(messages: list) -> list:
+    """The newest of messages whose texts, each stripped and one to a line, fit in QUESTION_MAX, oldest first."""
+    kept, used = [], 0
+    for message in reversed(messages):
+        text = message["argument"].strip()
+        if kept and used + len(text) + 1 > QUESTION_MAX:
+            break
+        kept.insert(0, message)
+        used += len(text) + 1
+    return kept
+
+
+def take_turn(messages: list, space: str, token: str, known: dict, now: int, app: str, app_user: str) -> str:
+    """Take one conversation turn of app (bursts: its messages no record decides yet, undecided), once: a queued
+    answer to its messages' texts in order, one to a line (the newest that fit QUESTION_MAX: _turn_text), with what
+    they attach, the question about the app's review where it reviewed a PR in the thread, else the mention answer a
+    mention would be. It is taken only when a message of it asks a question (asks_question), or the turn answers the
+    app (the thread's newest message before its first is app's own, app_user's: _answers_app) and a message of it
+    says something (substantive); anything else is dropped, with no reply, no record and no log line. The first
+    message's record is the request and names the others ("burst"), made create-exclusive before each of them is
+    recorded as joined to it, so a turn read again, or after a kill, is never answered twice."""
+    lead, texts = messages[0], [message["argument"] for message in messages]
+    if not any(asks_question(text) for text in texts) and not (
+            any(substantive(text) for text in texts)
+            and _answers_app(space, lead["thread"], lead["created_us"], token, app_user)):
+        return "ignored"
+    kept = _turn_text(messages)
+    question = "\n".join(message["argument"].strip() for message in kept)
+    attached = [name for message in kept for name in message.get("attachments", ())]
+    sender = lead["sender"]
+    user = {"requester_user": sender} if isinstance(sender, str) and CHAT_USER.fullmatch(sender) is not None else {}
+    record = {"message": lead["name"], "space": space, "thread": lead["thread"], "source": "chat", "app": app,
+              "at": lead["created_us"] // 1_000_000, "at_us": lead["created_us"],
+              "requester": _senders_in(space, token, known)[sender],
+              "requester_name": display_name(lead["sender_name"]), **user, "state": "queued", "mentioned": False,
+              "question": question, **_material({"argument": question, "attachments": attached})}
+    if len(messages) > 1:
+        record["burst"] = [message["name"] for message in messages[1:]]
+    # The conversation goes on as a mention of the app would: about its review where it reviewed a PR.
+    reviewed = reviewed_request(space, lead["thread"], app, lead["created_us"])
+    record = {**record, "kind": "question", "repo": allowed_repo(reviewed[1]["repo"]), "number": reviewed[1]["number"],
+              "about": reviewed[0]} if reviewed is not None else {**record, "kind": "mention"}
+    key = _message_key(lead["name"], app)
+    if not _create(key, record):
+        return "seen before"
+    for message in messages[1:]:
+        _join(message, key, app)
+    log(_event(record, "received"), **_logged(key, record))
+    return record["kind"]
 
 
 def read_space(space: str, token: str, known: dict, done: list, room: int, now: int, app: str,
@@ -3150,12 +3306,15 @@ def read_quiet(space: str, token: str, known: dict, done: list, room: int, now: 
     """Decide, for app, the conversation's messages that mention no one, created at or before upto (frontier: every
     app's mentions are read that far, so each such message is decided against every mention created before it), from
     its quiet read marker, until done holds room records. Only one in a thread that was app's alone for a while
-    (listening_threads) is read with its text, and take_message takes it only from an allowed sender as a short
-    review request or follow-up, or as a conversation turn, in a thread only app took a mention in before it; anything
-    else of it is dropped with no trace. A follow-up that mentions app, left here by read_space (_follows_quiet), is
-    taken in its turn among them, so it follows a request one of them made before it. The marker keeps the mention marker's rules: the overlap after a read that went as far as it could,
-    from just before where one cut short stopped, never before the mention marker's floor or the queue limit, and
-    never ahead of this Mac's clock. Nothing moves while upto is None."""
+    (listening_threads) is read with its text, and only from an allowed sender, in a thread only app took a mention in
+    before it, is it taken: a short review request or follow-up by take_message, and one that carries the
+    conversation on as part of its sender's turn there (bursts), by take_turn once the turn has stopped growing;
+    anything else of it is dropped with no trace. A follow-up that mentions app, left here by read_space
+    (_follows_quiet), is taken in its turn among them, so it follows a request one of them made before it. The marker
+    keeps the mention marker's rules: the overlap after a read that went as far as it could, from just before where
+    one cut short stopped, never before the mention marker's floor or the queue limit, and never ahead of this Mac's
+    clock; it also stays before the first undecided message of a turn still growing, so the next read sees it whole.
+    Nothing moves while upto is None."""
     if upto is None:
         return  # some app has no read of its mentions here yet: nothing that mentions no one is decided
     mark, floor_mark = _read_marker(space, app, quiet=True), _read_marker(space, app)
@@ -3170,7 +3329,7 @@ def read_quiet(space: str, token: str, known: dict, done: list, room: int, now: 
         return
     overlap = config.CHAT_REVIEW_READ_OVERLAP_SECONDS * 1_000_000 if mark.get("complete") is not False else 0
     after = max(newest - overlap, floor_mark["floor_us"], now_us - config.CHAT_REVIEW_QUEUE_MAX_SECONDS * 1_000_000)
-    page, complete, waiting = None, False, None
+    page, complete, beyond, decided, waiting, growing, listed = None, False, False, False, None, None, []
     try:
         for _ in range(config.CHAT_REVIEW_LIST_PAGES):
             if after >= upto or not common.opt_in_on(config.CHAT_REVIEW_FILE):
@@ -3179,29 +3338,43 @@ def read_quiet(space: str, token: str, known: dict, done: list, room: int, now: 
             messages, page = google_chat.list_messages(space, after, app_user, token, page, threads)
             for message in messages:
                 if message["created_us"] > upto:  # not every app's mentions are read this far yet
-                    complete, page = True, None
+                    complete, beyond, page = True, True, None
                     break
-                key = _message_key(message["name"], app) if message["mentions"] else None
-                left = message["mentions"] and _follows_quiet(message, space, app) \
-                    and (key is None or read_record(key) is None)  # one read_space took is not offered again
-                if left or (message.get("listening") is True and (unmentioned_asks(message.get("argument"))
-                                                                   or parse_conversation(message.get("argument")))):
-                    if sum(outcome in TAKEN for outcome in done) >= room:
-                        waiting = min(message["created_us"], now_us)
-                        return
-                    outcome = take_message(message, space, token, known, now, app, app_user)
-                    if left or outcome != "ignored":  # an unmentioned one ignored leaves no trace
-                        done.append(outcome)
-                if message["created_us"] <= now_us:
-                    newest = max(newest, message["created_us"])
+                listed.append(message)
             if page is None:
                 complete = True
                 break
+        # A turn is decided only once it is whole: how far the read saw every message, to now when it listed all of
+        # them, which upto (the newest message read for mentions) may lag well behind.
+        horizon = (min(upto, now_us) if beyond else now_us) if complete or not listed else listed[-1]["created_us"]
+        turns = bursts(listed, space, token, known, now, app, horizon, not complete)
+        for index, message in enumerate(listed):
+            key = _message_key(message["name"], app) if message["mentions"] else None
+            left = message["mentions"] and _follows_quiet(message, space, app) \
+                and (key is None or read_record(key) is None)  # one read_space took is not offered again
+            turn = turns.get(index)
+            pending = undecided(turn.messages, app) if turn is not None else []
+            if pending and turn.growing:  # its sender may still be typing: the next read sees it again
+                growing = min(pending[0]["created_us"], growing or pending[0]["created_us"])
+            elif left or pending or (message.get("listening") is True
+                                     and unmentioned_asks(message.get("argument"))):
+                if sum(outcome in TAKEN for outcome in done) >= room:
+                    waiting = min(message["created_us"], now_us)
+                    return
+                outcome = take_turn(pending, space, token, known, now, app, app_user) if pending \
+                    else take_message(message, space, token, known, now, app)
+                if left or outcome != "ignored":  # an unmentioned one ignored leaves no trace
+                    done.append(outcome)
+            if message["created_us"] <= now_us:
+                newest = max(newest, message["created_us"])
+        decided = True
     finally:
-        if complete:
+        if complete and decided:
             newest = max(newest, min(upto, now_us))
         else:
-            newest = (waiting if waiting is not None else newest) - 1
+            complete, newest = False, (waiting if waiting is not None else newest) - 1
+        if growing is not None:
+            newest = min(newest, growing - 1)
         _save_quiet(space, app, newest, complete)
 
 

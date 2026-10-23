@@ -279,6 +279,7 @@ class ChatCase(FleetCase):
                     "CHAT_REVIEW_REPOS": ("acme/web-app",), "CHAT_REVIEW_ROOT": str(self.tmp / "chat-root")}
         for name, value in {**settings, **MOODY_PLACEHOLDERS}.items():  # the second app is not served unless filled
             self.patch(config, name, value)
+        self.patch(config, "CHAT_REVIEW_BURST_SECONDS", 0)  # each message its own turn, but in BurstTests
         google_chat.forget_tokens()
         self.addCleanup(google_chat.forget_tokens)
         self.switch(config.CHAT_REVIEW_FILE, True)
@@ -3458,6 +3459,164 @@ class ThreadConversationTests(ChatCase):
         with mock.patch.object(google_chat, "_opener", return_value=broken), \
                 self.assertRaises(google_chat.GoogleError):
             REAL_SEND(f"{google_chat.CHAT_ROOT}/{SPACE}/messages", USER_TOKEN, None)
+
+
+class Killed(BaseException):
+    """A kill part way through a pass: nothing in the job catches it."""
+
+
+class BurstTests(ChatCase):
+    """In a thread the app owns, one person's messages that mention no one and come within CHAT_REVIEW_BURST_SECONDS of
+    each other are one conversation turn: answered once, with all of them, once it has been quiet that long. A turn
+    straight after the app's reply is taken only when it says something; reactions get nothing."""
+
+    ANSWER = "I'm here. Ask away."
+    LIVE = ("haha", "That's for triggering for me", "I guess you still get PR notifications?")
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.patch(config, "CHAT_REVIEW_PER_PERSON_DAILY", 20)
+        self.patch(config, "CHAT_REVIEW_BURST_SECONDS", 60)
+        self.answer = ("ok", f"ANSWER\n{self.ANSWER}\nEND\n")
+        self.now = time.time()
+        start = int((self.now - 400) * 1e6)
+        chat_review._save_marker(SPACE, "hermione", start, start, True)
+        # The thread is Hermione's: a mention, and her reply to it, a while ago.
+        self.deliver(msg(text="test test you there", message="m1", at=self.now - 300),
+                     app_reply(said(self.ANSWER), THREAD, f"{SPACE}/messages/r1", at=self.now - 250))
+        self.run_pass()
+        self.assertEqual((len(self.turns), self.texts()), (1, [self.ANSWER]))
+
+    def burst(self, *texts, at: float = -100, gap: float = 5, sender: str = SENDER_USER, first: int = 1) -> list:
+        """Deliver texts as one person's messages that mention no one, gap seconds apart from at (before now), then run
+        a pass: what it took."""
+        self.deliver(*[msg(text=text, message=f"q{first + index}", mention=False, sender=sender,
+                           at=self.now + at + index * gap) for index, text in enumerate(texts)])
+        return self.taken()
+
+    def taken(self) -> list:
+        return [outcome for outcome in self.run_pass()["taken"] if outcome != "seen before"]
+
+    def asked(self, turn: dict) -> str:
+        nonce = turn["prompt"].split("<<<UNTRUSTED QUESTION ")[1][:32]
+        return turn["input"].split(f"<<<UNTRUSTED QUESTION {nonce}>>>")[1].split("<<<END OF UNTRUSTED")[0].strip()
+
+    def record_of(self, message: str) -> dict:
+        return next(record for record in self.records() if record["message"] == f"{SPACE}/messages/{message}")
+
+    def test_a_reaction_straight_after_the_apps_reply_gets_nothing(self):
+        before = (len(self.records()), len(self.log_lines()))
+        self.assertEqual(self.burst("haha"), [])
+        self.assertEqual(self.taken(), [])
+        self.assertEqual((len(self.turns), len(self.google.messages)), (1, 1))
+        self.assertEqual((len(self.records()), len(self.log_lines())), before)  # dropped with no trace
+
+    def test_nope_straight_after_the_apps_reply_gets_nothing(self):
+        self.assertEqual(self.burst("nope"), [])
+        self.assertEqual((len(self.turns), len(self.records())), (1, 1))
+
+    def test_emoji_alone_straight_after_the_apps_reply_gets_nothing(self):
+        self.assertEqual(self.burst("\U0001f44d\U0001f389"), [])
+        self.assertEqual((len(self.turns), len(self.records())), (1, 1))
+
+    def test_a_reply_of_four_words_or_more_straight_after_the_apps_reply_is_answered(self):
+        self.assertEqual(self.burst("A store for widgets, the one we launch next week"), ["mention"])
+        self.assertEqual(self.asked(self.turns[-1]), "A store for widgets, the one we launch next week")
+        self.assertEqual(self.texts(), [self.ANSWER, self.ANSWER])
+
+    def test_a_question_is_answered_on_its_own_even_after_someone_else(self):
+        # Another person's short note first: their own turn, and nothing worth an answer.
+        self.assertEqual(self.burst("lunch soon", at=-105, sender=LEAD_USER, first=9), [])
+        self.assertEqual(self.burst("why?"), ["mention"])  # no longer straight after the app's reply, still a question
+        self.assertEqual(self.asked(self.turns[-1]), "why?")
+
+    def test_the_live_burst_gets_exactly_one_answer_that_holds_all_three(self):
+        self.assertEqual(self.burst(*self.LIVE), ["mention"])
+        self.assertEqual(len(self.turns), 2)
+        self.assertEqual(self.asked(self.turns[-1]), "\n".join(self.LIVE))
+        self.assertEqual(self.texts(), [self.ANSWER, self.ANSWER])
+        lead = self.record_of("q1")
+        self.assertEqual((lead["kind"], lead["mentioned"], lead["outcome"], lead["burst"]),
+                         ("mention", False, "answered", [f"{SPACE}/messages/q2", f"{SPACE}/messages/q3"]))
+        key = chat_review._message_key(f"{SPACE}/messages/q1", "hermione")
+        for name in ("q2", "q3"):
+            joined = self.record_of(name)
+            self.assertEqual((joined["kind"], joined["state"], joined["outcome"], joined["joined"]),
+                             ("joined", "done", "joined", key))
+        # Read again (the overlap), nothing is answered twice, and no text of it stays in the office or the log.
+        for _ in range(3):
+            self.assertEqual(self.taken(), [])
+        self.assertEqual((len(self.turns), len(self.google.messages)), (2, 2))
+        self.assertNotIn("triggering", self.office_text() + json.dumps(self.log_lines()))
+
+    def test_a_burst_still_within_its_quiet_window_waits_and_a_message_being_typed_joins_it(self):
+        self.assertEqual(self.burst(*self.LIVE[:2], at=-30), [])
+        self.assertEqual(self.burst(self.LIVE[2], at=-20, first=3), [])  # the burst still grows: it joins
+        self.assertEqual((len(self.turns), len(self.records())), (1, 1))
+        first = int(google_chat.time_us(self.google.posted[SPACE][-3]["createTime"]))
+        self.assertEqual(chat_review._read_marker(SPACE, "hermione", quiet=True)["after_us"], first - 1)
+        self.patch(config, "CHAT_REVIEW_BURST_SECONDS", 5)  # as if a minute went by with no new message
+        self.assertEqual(self.taken(), ["mention"])
+        self.assertEqual(self.asked(self.turns[-1]), "\n".join(self.LIVE))
+        self.assertEqual(self.taken(), [])
+        self.assertEqual(len(self.turns), 2)
+
+    def test_a_burst_of_reactions_alone_is_dropped(self):
+        before = len(self.records())
+        self.assertEqual(self.burst("haha", "lol", "\U0001f44d", "ok thanks!"), [])
+        self.assertEqual(self.taken(), [])
+        self.assertEqual((len(self.turns), len(self.records())), (1, before))
+
+    def test_a_mention_in_the_middle_ends_the_burst_before_it(self):
+        self.deliver(msg(text="haha", message="q1", mention=False, at=self.now - 30),
+                     msg(text="and what is a mutex", message="m2", at=self.now - 28),
+                     msg(text="what about the tests?", message="q2", mention=False, at=self.now - 25))
+        self.assertEqual(self.taken(), ["mention"])  # the mention gets its own answer, as always
+        self.assertEqual(self.asked(self.turns[-1]), "and what is a mutex")
+        # The burst before it ended there and was dropped; the one after it still grows, and holds the read.
+        question = int(google_chat.time_us(self.google.posted[SPACE][-1]["createTime"]))
+        self.assertEqual(chat_review._read_marker(SPACE, "hermione", quiet=True)["after_us"], question - 1)
+        self.patch(config, "CHAT_REVIEW_BURST_SECONDS", 5)
+        self.assertEqual(self.taken(), ["mention"])
+        self.assertEqual(self.asked(self.turns[-1]), "what about the tests?")
+        self.assertEqual(len(self.turns), 3)
+
+    def test_a_kill_part_way_answers_the_burst_once_and_records_each_message_once(self):
+        real, calls = chat_review._create, []
+
+        def create(key, record):
+            calls.append(record["message"])
+            if len(calls) > 1:  # the request is made, the first message joined to it is not
+                raise Killed()
+            return real(key, record)
+
+        with mock.patch.object(chat_review, "_create", side_effect=create), self.assertRaises(Killed):
+            self.burst(*self.LIVE)
+        self.assertEqual(len(self.turns), 1)
+        self.assertEqual(self.taken(), [])  # the next pass finishes the records and answers the request once
+        self.assertEqual(len(self.turns), 2)
+        self.assertEqual(self.asked(self.turns[-1]), "\n".join(self.LIVE))
+        names = sorted(record["message"][-2:] for record in self.records() if record["message"][-2] == "q")
+        self.assertEqual(names, ["q1", "q2", "q3"])
+        self.assertEqual([self.record_of(name)["kind"] for name in ("q2", "q3")], ["joined", "joined"])
+        for _ in range(2):
+            self.assertEqual(self.taken(), [])
+        self.assertEqual((len(self.turns), len(self.google.messages)), (2, 2))
+
+    def test_the_turn_grammar(self):
+        for text in ("haha", "Haha!", "hahaha", "nope", "Nope.", "LOL", "ok", "okay", "thank you", "ok thanks!",
+                     "\U0001f44d", "\U0001f389 \U0001f389", "...", "yes yes yes yes"):
+            with self.subTest(text=text):
+                self.assertTrue(chat_review.is_reaction(text))
+                self.assertFalse(chat_review.substantive(text))
+        for text in ("That's for triggering for me", "I guess you still get PR notifications?", "why?",
+                     "no idea why it fails"):
+            with self.subTest(text=text):
+                self.assertFalse(chat_review.is_reaction(text))
+                self.assertTrue(chat_review.substantive(text))
+        for text in ("sounds good to me", "see https://example.com/a/b/c", "haha?", None, 7):
+            with self.subTest(text=text):
+                self.assertEqual(chat_review.substantive(text), text == "sounds good to me")
 
 
 class ConversationTests(ChatCase):

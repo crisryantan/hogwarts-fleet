@@ -478,6 +478,10 @@ CHAT_REVIEW_READ_OVERLAP_SECONDS = 120
 # How long before the moment an app joined a conversation its first read there starts, so the message that added it
 # (created just before its membership) is answered; nothing older is ever read.
 CHAT_REVIEW_JOIN_GRACE_SECONDS = 120
+# Messages that mention no one, from one person in one thread, each created at most this long after the one before,
+# are one conversation turn: it is taken once it has been quiet this long, and answered once. 0 makes each message its
+# own turn, taken at once.
+CHAT_REVIEW_BURST_SECONDS = 60
 # What a review may hold of a PR's diff once each file it deletes whole is cut to one line: a larger one is reviewed in
 # part, whole files smallest first, and the rest named as not shown. A diff read larger than the second is refused
 # with a fixed reply, and so is one whose changed files are each larger than the first on their own.

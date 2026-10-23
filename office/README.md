@@ -558,7 +558,8 @@ Each pass reads in two rounds: first every app reads every conversation for its 
 app read the messages there that mention no one, as far as every app's mentions are read. So a thread the other app
 took a mention in first is never taken as this app's alone just because that app's read came later in the pass or
 was cut short. An app whose read authorization failed holds no one back, and any other read that failed holds the
-messages that mention no one until it reads again. A message that does not mention the app is dropped as it is read:
+messages that mention no one until it reads again. The marker of those also stays just before a conversation turn
+(below) that is still growing, so the next read sees it whole. A message that does not mention the app is dropped as it is read:
 never kept, never logged, but for the thread follow-ups and conversation turns below, and the thread's recent
 messages an answer turn reads as its context. Of those that mention it:
 
@@ -589,12 +590,20 @@ messages an answer turn reads as its context. Of those that mention it:
   when a mention of the other app from before it turns up only later (Chat listed it late, or that app's read was
   stopped). A follow-up that does mention the app, in a thread where it took a mention before, is read in turn with
   these, so it follows the PR such a request before it named. Any other message there that mentions no one, from an
-  allowed sender, holds no review command and names no PR, carries the conversation on when it ends with a question
-  mark or the thread's newest message before it is the app's own reply (one read of one message says which): it is
-  a conversation turn, the question about the app's review or the mention answer (both below) a mention of it would
-  be, so "What is a widget store?" sent after the app answered needs no tag. It is checked again before it runs the
-  same way. Any other message there that does not mention the app is dropped like any other: no reply, no record, no
-  log line;
+  allowed sender, holds no review command and names no PR, carries the conversation on as part of a turn: one person's
+  such messages in one thread, each sent at most `CHAT_REVIEW_BURST_SECONDS` (60) after the one before, are one
+  conversation turn. It is taken once it has been quiet that long, so a message still being typed joins it, and
+  answered once, with its messages in order as its question (the newest that fit in 2000 characters). A mention or a
+  review command of theirs in the thread ends their turn before it and keeps its own path. The turn is taken when one
+  of its messages ends with a question mark, or when the thread's newest message before it is the app's own reply (one
+  read of one message says which) and one of its messages says something: at least 4 words outside its addresses and
+  emoji, and no bare reaction (haha, lol, nice, cool, ok, thanks, nope, yes, great and a few of their kin, any letter
+  case, punctuation ignored, or emoji alone). It is a conversation turn, the question about the app's review or the
+  mention answer (both below) a mention of it would be, so "What is a widget store?" sent after the app answered needs
+  no tag, and "haha" gets nothing. Its first message's record is the request and names the others, each then recorded
+  as joined to it with none of its text, so no turn is answered twice, after a kill too. It is checked again before it
+  runs the same way. Any other message there that does not mention the app, a turn not taken included, is dropped like
+  any other: no reply, no record, no log line;
 - one from them that only asks what the app is doing ("status", "what are you working on", "queue", "what's
   pending", "anything running" and a few of their kin, any letter case, at most 8 words, no link or address) gets the
   app's status reply (Status, below) and no turn, even in a thread the app reviewed; a link or a review command in it
