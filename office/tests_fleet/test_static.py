@@ -46,6 +46,8 @@ KNOWN_FLAGS = {
     "--task-lock-fd",
     # run_desk: a Codex chat review turn runs in its private review folder, which is no git repo
     "--skip-git-repo-check",
+    # run_desk: a Codex chat turn is given the images attached to its message, from its own folder
+    "--image",
     # run_desk: a Claude chat turn saves no session, so no transcript keeps the PR's text or a teammate's question
     "--no-session-persistence",
     # Claude's stream-json output, which print mode only writes with --verbose, and fleet feed --all

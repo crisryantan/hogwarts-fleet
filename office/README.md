@@ -509,9 +509,10 @@ Auto-portrait (`fleet/portrait_auto.py`) applies his additions for you while `~/
 
 Teammates ask a reviewer, a Google Chat app, for a code review of a GitHub PR, and get its verdict, in its own words,
 and its findings in their thread, addressed to them by name. They can then ask it about that review in the same
-thread. There can be two apps, each its own reviewer: Hermione (Staff Engineer), a Claude turn, and Moody, a Codex
-turn whose brief puts security first. A teammate mentions whichever they want, or both. The apps review code and
-answer questions about their own reviews: they fix, build, run or deploy nothing. Nothing listens on your Mac, and no
+thread, or mention it anywhere it is allowed with any other question, engineering or casual, for a short answer in
+its voice. There can be two apps, each its own reviewer: Hermione (Staff Engineer), a Claude turn, and Moody, a Codex
+turn whose brief puts security first. A teammate mentions whichever they want, or both. The apps review PRs and
+answer questions: they fix, build, run or deploy nothing. Nothing listens on your Mac, and no
 one who writes to an app is ever asked to authorize anything.
 
 Google allows one Chat app per Cloud project, so each app has its own project, its own read authorization, its own
@@ -570,8 +571,9 @@ never kept, never logged, but for the short thread follow-up below. Of those tha
   PR, the newest one's when there are several, under the same sender, space and repo lists and caps. So "review
   again" or "approve" works in a thread the app already reviewed. A follow-up never names another PR, and only the
   app's own requests count, so a thread only the other app reviewed is no thread this one reviewed. In a thread
-  where only this app had taken a mention when the message was sent, a review or a help reply to an allowed sender
-  (once the other app takes one there too, a message after it needs a mention), a message needs no mention either:
+  where only this app had taken a mention when the message was sent, a review, a mention answer or a help reply to an
+  allowed sender (once the other app takes one there too, a message after it needs a mention), a message needs no
+  mention either:
   one that mentions no one at all, from an allowed sender,
   with at most 8 words outside its addresses and starting as an instruction (review, re-review, another review or
   approve, after an optional please or can you) is taken. With exactly one PR link for a repo in `CHAT_REVIEW_REPOS`
@@ -586,8 +588,12 @@ never kept, never logged, but for the short thread follow-up below. Of those tha
   a thread where the same app has a review request on record whose outcome is reviewed, is a question about that
   review (Questions, below). A message that does not mention the app is never a question, and neither is one in a
   thread where the app only gave help;
-- anything else from them, a task with no PR link, two or more PR links, a repo that is not listed, or a follow-up or
-  question in a thread the app never reviewed, gets the app's one fixed help text saying it does code reviews only;
+- any other mention from them, anywhere the app is allowed, that holds no review or approve word, names no PR and
+  has at most 2000 characters is a mention answer (Mention answers, below): "What is a race condition?" gets a short
+  answer in the thread;
+- a request or follow-up that breaks its rules (a review or approve word with no usable link, two or more PR links,
+  a repo that is not listed, a follow-up in a thread the app never reviewed), an empty mention, one over 2000
+  characters, or just "help" gets the app's one fixed help text saying it reviews PRs and answers questions;
 - a person not on the list gets one fixed refusal, and who they are is not kept;
 - a bot, or a message older than `CHAT_REVIEW_QUEUE_MAX_SECONDS`, gets nothing.
 
@@ -596,8 +602,9 @@ own app. Each app takes a message once, even across kills and the overlap of eac
 digest of the app and the Chat message's name, is made create-exclusive, and a message with that app's record is
 never taken by it again. At most `CHAT_REVIEW_PULL_MAX` are taken a pass across both apps; the rest wait for the
 next. The record holds the app, the message's, thread's and space's names, the requester's email, display name and
-Chat user id, and the PR link rebuilt from what the grammar matched. No other text of a message is kept anywhere, and
-a request's words never reach a model; only a question's text does, as below. The sender, space and repo lists are
+Chat user id, and the PR link rebuilt from what the grammar matched, with the links and image names of the material
+it attached until its turn has run (Attached material, below). No other text of a message is kept anywhere, and a
+request's words never reach a model; only a question's or a mention answer's text does, as below. The sender, space and repo lists are
 shared by both apps.
 
 Every reply in a thread mentions the person it answers, with Chat's user mention markup built only from their Chat
@@ -673,8 +680,35 @@ repeats the PR's own text at length is withheld with a fixed line. The answer go
 the asker. A question counts toward the per-person, fleet and desk caps like a review, and it never posts on GitHub
 and can never approve: only a review reaches GitHub, through its strict verdict and the switches.
 
-Every request, its app, its outcome and its cost is one JSON line in `logs/chat-review.log`; a question's lines hold
-only its request id, app and outcome. Each record stays in `chat-reviews/requests/` for 30 days. `fleet review pr <link> --requested-by <email>` runs Hermione's review from your
+A mention answer is a question that is about no review. It runs the same kind of read-only turn as a question, of
+the same app's desk, at the same budget and under the same caps, with a brief of its own: answer software engineering
+questions, casual questions and light chit-chat alike, concisely, in the desk's voice, in at most 900 characters,
+from general knowledge and the attached material only. It has no access to your repos, files or systems, or to the
+network beyond that material, and says so rather than pretend; it never claims to have done anything, and points to
+a mention with a PR link for a review. Its input holds the message between marker lines with a random nonce, as a
+teammate's untrusted text, and its answer block is read, scrubbed, defanged, cut and withheld like a question's,
+checked against the attached material. It names no PR, so it never reads or posts on GitHub, and a message it cannot
+use (over a cap, say) gets the help text. Its text is kept only until its turn has run and is never logged.
+
+Attached material goes to every turn alike, a review, a question or a mention answer, read by the job and never by
+the model. Images attached to the message (at most 3, up to 5 MB each, PNG, JPEG, GIF or WebP by their first bytes,
+whatever their name says) are downloaded with the app's read token through Chat's media download, which
+`chat.messages.readonly` covers, and put in the turn's private folder: Hermione reads them with Read, and Moody's
+`codex exec` gets them with `--image`, in the same read-only profile. `CHAT_REVIEW_IMAGES = False` downloads none.
+Gist links (`https://gist.github.com/<user>/<id>` or a `gist.githubusercontent.com` raw link, at most 3) are read with
+`gh api gists/<id>`, a third fixed read shape, text files only, 100,000 characters in all. Any other https link (at
+most 3, never a GitHub PR link) is fetched GET only, with no cookies, credentials or proxy, a timeout, at most 300 KB
+read and text-like content only, its HTML reduced to text. The job refuses a link that is not https on port 443 or
+that names an address rather than a host, resolves the host itself and refuses it when any address it has is
+loopback, private, link-local, shared (CGNAT), multicast, reserved or otherwise not public, IPv4 or IPv6, connects to
+the address it checked, with the certificate checked for the host, and follows at most 3 redirects, each hop checked
+the same way. The material sits in the turn's input between marker lines with its nonce, as untrusted data, and
+every finding, summary and answer is echo-checked against it as against the PR's own text. A link or image that
+cannot be read is a note in the input, never the end of the turn.
+
+Every request, its app, its outcome and its cost is one JSON line in `logs/chat-review.log`; a question's and a
+mention answer's lines hold only its request id, app and outcome, and a turn's material line only counts and
+outcomes, never a link, a page or an image. Each record stays in `chat-reviews/requests/` for 30 days. `fleet review pr <link> --requested-by <email>` runs Hermione's review from your
 terminal, under the same caps, locks and GitHub switch, with no Chat reply.
 
 ### Setting it up

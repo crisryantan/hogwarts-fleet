@@ -19,9 +19,9 @@ review thread (post_reply) or to comment on the PR (post_pr_comment), and for a 
 one PR review (post_pr_review) whose event is one of three fixed names, COMMENT, REQUEST_CHANGES or APPROVE, checked
 here against REVIEW_EVENTS and never taken as free text. An APPROVE or REQUEST_CHANGES review is the gh account
 owner's own review, so it counts for branch protection like any review they post by hand. The chat review's
-reads of a PR are two fixed gh api GET shapes (check_read_argv). Each runs in the office with a fixed environment
-and its text on stdin, never in a worktree, so no file a desk wrote can steer it, and nothing gh prints about a login
-reaches an event. Nothing here resolves a thread, requests a review, marks a PR ready or merges: no such shape passes
+reads are three fixed gh api GET shapes (check_read_argv): a PR's metadata, its diff, and a gist a teammate linked.
+Each runs in the office with a fixed environment and its text on stdin, never in a worktree, so no file a desk wrote
+can steer it, and nothing gh prints about a login reaches an event. Nothing here resolves a thread, requests a review, marks a PR ready or merges: no such shape passes
 the guard. An answer that does not say for sure whether a comment was posted raises Uncertain, so the caller reads
 it back from GitHub and never posts it again.
 """
@@ -72,6 +72,8 @@ REVIEW_EVENTS = {"COMMENT": "COMMENTED", "REQUEST_CHANGES": "CHANGES_REQUESTED",
 PR_READ_PATH = re.compile(_REPO_PART + r"/pulls/([1-9][0-9]{0,9})")
 COMPARE_PATH = re.compile(_REPO_PART + r"/compare/([0-9a-f]{40})\.\.\.([0-9a-f]{40})")
 DIFF_ACCEPT = "Accept: application/vnd.github.v3.diff"
+# A chat turn's third read: one gist a teammate linked, by its id.
+GIST_ID = re.compile(r"[0-9a-f]{1,64}")
 # gh api says (HTTP 4xx) when GitHub answered with a refusal, so nothing was posted.
 GH_HTTP_REFUSED = re.compile(r"\(HTTP 4[0-9]{2}\)")
 GH_LOGIN = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})")
@@ -587,20 +589,31 @@ def compare_diff_argv(repo: str, base_sha: str, head_sha: str) -> list:
             f"repos/{ids.check('repo', repo)}/compare/{ids.check('sha', base_sha)}...{ids.check('sha', head_sha)}"]
 
 
+def gist_read_argv(gist_id: str) -> list:
+    """gh api GET of one gist, by its id: its files and their text."""
+    if not isinstance(gist_id, str) or GIST_ID.fullmatch(gist_id) is None:
+        raise FleetError("a gist is named by its hex id")
+    return [config.GH_BIN, "api", f"gists/{gist_id}"]
+
+
 def check_read_argv(argv: object) -> str:
-    """The guard on a chat review's gh reads: exactly one of the two shapes above, rebuilt and compared whole. Which
-    one ("pr" or "diff"), or a FleetError for anything else, a write or another flag or path included."""
+    """The guard on a chat review's gh reads: exactly one of the three shapes above, rebuilt and compared whole. Which
+    one ("pr", "diff" or "gist"), or a FleetError for anything else, a write or another flag or path included."""
     if isinstance(argv, list) and len(argv) == 3 and argv[:2] == [config.GH_BIN, "api"] and isinstance(argv[2], str) \
             and argv[2].startswith("repos/"):
         found = PR_READ_PATH.fullmatch(argv[2][len("repos/"):])
         if found is not None and pr_read_argv(found.group(1), int(found.group(2))) == argv:
             return "pr"
+    if isinstance(argv, list) and len(argv) == 3 and argv[:2] == [config.GH_BIN, "api"] and isinstance(argv[2], str) \
+            and argv[2].startswith("gists/") and GIST_ID.fullmatch(argv[2][len("gists/"):]) is not None \
+            and gist_read_argv(argv[2][len("gists/"):]) == argv:
+        return "gist"
     if isinstance(argv, list) and len(argv) == 5 and argv[:4] == [config.GH_BIN, "api", "-H", DIFF_ACCEPT] \
             and isinstance(argv[4], str) and argv[4].startswith("repos/"):
         found = COMPARE_PATH.fullmatch(argv[4][len("repos/"):])
         if found is not None and compare_diff_argv(found.group(1), found.group(2), found.group(3)) == argv:
             return "diff"
-    raise FleetError("a chat review reads GitHub only with its two fixed gh api reads")
+    raise FleetError("a chat review reads GitHub only with its three fixed gh api reads")
 
 
 def run_gh_read(argv: list) -> bytes:

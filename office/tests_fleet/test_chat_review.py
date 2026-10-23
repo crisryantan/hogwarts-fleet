@@ -23,7 +23,7 @@ import urllib.request
 from pathlib import Path
 from unittest import mock
 
-from fleet import chat_review, common, config, gitops, google_chat, run_desk, safefs, tools
+from fleet import chat_material, chat_review, common, config, gitops, google_chat, run_desk, safefs, tools
 from fleet.safefs import FleetError
 from tests_fleet.support import IN_KIT, OFFICE, ONLY_IN_KIT, FleetCase, kit_setting
 
@@ -259,6 +259,13 @@ class ChatCase(FleetCase):
         self.turns = []
         self.answer = ("ok", block())
         self.patch(run_desk, "_report_turn", side_effect=self.turn)
+        # The attached material's three sources, faked: Chat's media download, gists through gh, and the web.
+        self.media, self.media_calls = {}, []
+        self.patch(google_chat, "fetch_media", side_effect=self.fetch_media)
+        self.gists = {}
+        self.web, self.web_calls, self.resolved = {}, [], {}
+        self.patch(chat_material, "_resolve", side_effect=self.resolve)
+        self.patch(chat_material, "_get", side_effect=self.web_get)
         # The conversation was read once already, a minute ago: what is delivered now is new.
         started = int((time.time() - 60) * 1e6)
         chat_review._save_marker(SPACE, "hermione", started, started, True)
@@ -303,7 +310,32 @@ class ChatCase(FleetCase):
         self.reads.append(kind)
         if kind == "pr":
             return json.dumps(self.pr).encode("utf-8")
+        if kind == "gist":
+            gist = argv[2][len("gists/"):]
+            if gist not in self.gists:
+                raise FleetError("gh failed: HTTP 404")
+            return json.dumps(self.gists[gist]).encode("utf-8")
         return self.diff.encode("utf-8")
+
+    def fetch_media(self, url: str, token: str, limit: int) -> bytes:
+        self.media_calls.append((url, token))
+        assert token in APP_USERS, "a media download with the wrong token"
+        resource = urllib.parse.unquote(url[len(google_chat.CHAT_ROOT + "/media/"):].split("?", 1)[0])
+        if resource not in self.media:
+            raise google_chat.GoogleError("Google answered HTTP 404", status=404)
+        if len(self.media[resource]) > limit:
+            raise google_chat.GoogleError("the attachment is larger than the fleet reads")
+        return self.media[resource]
+
+    def resolve(self, host: str) -> list:
+        return self.resolved.get(host, ["93.184.216.34"])
+
+    def web_get(self, host: str, address: str, target: str) -> tuple:
+        self.web_calls.append((host, address, target))
+        found = self.web.get(f"https://{host}{target}")
+        if found is None:
+            return 404, {"content-type": "text/html"}, b"not found"
+        return found
 
     def gh_write(self, argv: list, body: bytes) -> tuple:
         self.assertEqual(gitops.check_write_argv(argv), "pr-review")
@@ -320,9 +352,11 @@ class ChatCase(FleetCase):
     def turn(self, turn, cwd, hand, on_start, on_result=None) -> tuple:
         folder = Path(cwd)
         brief = self.office / "runs" / turn.desk / turn.brief_name
-        files = sorted(os.listdir(folder))  # the one input file: a review's, or a question's
+        files = sorted(os.listdir(folder))  # the one input file (a review's, or a question's), and any images
+        text = next(name for name in files if name.endswith(".txt"))
         self.turns.append({"argv": list(turn.argv), "prompt": turn.prompt, "brief": turn.brief, "cwd": cwd,
-                           "files": files, "input": (folder / files[0]).read_text(),
+                           "files": files, "input": (folder / text).read_text(),
+                           "images": {name: (folder / name).read_bytes() for name in files if name.startswith("image-")},
                            "brief_file": brief.read_text() if turn.family == "claude" else None, "hand": hand,
                            "timeout": turn.timeout, "desk": turn.desk, "family": turn.family, "model": turn.model,
                            "output_max": turn.output_max})
@@ -567,8 +601,8 @@ class IntakeTests(ChatCase):
             self.assertNotIn(SENDER, part)
 
     def test_only_a_review_request_from_an_allowed_sender_queues_a_review(self):
-        self.deliver(msg(text="please fix the login bug", message="m1"),
-                     msg(text="please deploy the web app", message="m2"),
+        self.deliver(msg(text="please review the login fix", message="m1"),
+                     msg(text="approve it please", message="m2"),
                      msg(text="review https://github.com/acme/secret-repo/pull/1", message="m3"),
                      msg(text=f"review {URL} {URL}", message="m4"),
                      msg(sender=STRANGER_USER, message="m5"),
@@ -581,7 +615,7 @@ class IntakeTests(ChatCase):
         self.assertEqual((texts.count(chat_review.help_text("hermione")), texts.count(chat_review.SENDER_REFUSED),
                           len(texts)), (4, 2, 7))
         self.assertEqual([record["requester"] for record in self.records() if record["kind"] == "review"], [LEAD])
-        self.assertIn("code reviews only", chat_review.help_text("hermione"))
+        self.assertIn("I review PRs and answer questions", chat_review.help_text("hermione"))
         refused = [record for record in self.records() if record["kind"] == "refusal"]
         self.assertEqual([("requester" in record, "requester_name" in record) for record in refused],
                          [(False, False)] * 2)  # who a stranger is is never kept
@@ -735,7 +769,7 @@ class ReadTests(ChatCase):
                          (True, f"review {URL}", SENDER_USER))
 
     def test_a_mention_that_is_not_a_request_gets_the_help_reply_once(self):
-        self.deliver(msg(text="what does this repo do?"))
+        self.deliver(msg(text="help"))
         self.assertEqual(self.run_pass()["taken"], ["help"])
         self.run_pass()
         self.run_pass()
@@ -747,7 +781,7 @@ class ReadTests(ChatCase):
     def test_at_most_pull_max_messages_are_taken_a_pass_and_the_rest_wait(self):
         self.patch(config, "CHAT_REVIEW_PULL_MAX", 1)
         now = time.time()
-        self.deliver(msg(at=now - 2), msg(text="hello", message="m2", at=now - 1, thread=f"{SPACE}/threads/t2"))
+        self.deliver(msg(at=now - 2), msg(text="help", message="m2", at=now - 1, thread=f"{SPACE}/threads/t2"))
         self.assertEqual(self.run_pass()["taken"], ["review"])
         self.assertEqual(self.run_pass()["taken"], ["help"])  # on from the message it stopped at
         self.assertEqual(len(self.records()), 2)
@@ -773,7 +807,7 @@ class ReadTests(ChatCase):
     def test_a_future_message_waiting_for_room_never_moves_the_marker_ahead(self):
         self.patch(config, "CHAT_REVIEW_PULL_MAX", 1)
         now = time.time()
-        self.deliver(msg(message="m1", at=now - 2), msg(text="hello", message="m2", at=now + 3600))
+        self.deliver(msg(message="m1", at=now - 2), msg(text="help", message="m2", at=now + 3600))
         self.assertEqual(self.run_pass()["taken"], ["review"])
         self.deliver(msg(sender=LEAD_USER, message="m3", at=time.time() + 1))
         self.run_pass()
@@ -805,10 +839,10 @@ class ReadTests(ChatCase):
         self.google.list_fail[SPACE] = (1, 503)
         # The first one is a refusal: a help reply would make its thread listened to and list the space again from
         # after it, so the page that fails would never be asked for.
-        self.deliver(msg(text="hello", message="h1", sender=STRANGER_USER, at=now - 3),
-                     msg(text="hello", message="h2", at=now - 2))
-        self.deliver(msg(text="hello", message="d1", space=other, at=now - 3),
-                     msg(text="hello", message="d2", space=other, at=now - 2))
+        self.deliver(msg(text="help", message="h1", sender=STRANGER_USER, at=now - 3),
+                     msg(text="help", message="h2", at=now - 2))
+        self.deliver(msg(text="help", message="d1", space=other, at=now - 3),
+                     msg(text="help", message="d2", space=other, at=now - 2))
         result = self.run_pass()
         self.assertEqual(result["taken"], ["refusal", "help"])
         self.assertIn("HTTP 503", result["read_error"])
@@ -1172,7 +1206,7 @@ class GrammarTests(ChatCase):
         self.assertEqual((record["repo"], record["number"], record["outcome"]), ("acme/web-app", 7, "reviewed"))
         self.assertEqual([ack in acks(chat_review.ACKS) for ack in self.ack_texts()], [True])
         self.assertNotIn("the word review", chat_review.help_text("hermione"))
-        self.assertIn("code reviews only", chat_review.help_text("hermione"))
+        self.assertIn("I review PRs and answer questions", chat_review.help_text("hermione"))
 
     def test_every_acknowledgement_is_a_fixed_line_and_never_holds_the_message_text(self):
         for index in range(12):
@@ -1991,7 +2025,7 @@ class FollowUpTests(ChatCase):
         self.assertEqual(self.follow("can you approve"), ["help"])
         self.first(thread=f"{SPACE}/threads/t2")  # a review in another thread is no review in this one
         self.assertEqual(self.follow("review again", message="m3"), ["help"])
-        self.deliver(msg(text="what is this?", message="m4"))  # a help reply in the thread is no review request
+        self.deliver(msg(text="help", message="m4"))  # a help reply in the thread is no review request
         self.run_pass()
         self.assertEqual(self.follow("approve", message="m5"), ["help"])
         self.assertEqual(len(self.turns), 1)
@@ -2178,7 +2212,7 @@ class UnmentionedFollowUpTests(ChatCase):
             self.assertNotIn(SECRET_MARK, found)
 
     def helped(self, app: str = APP_USER, message: str = "h1", at: float = None, also: tuple = ()) -> None:
-        self.deliver(msg(text="what is this?", message=message, app=app, also=also, at=at or time.time() - 5))
+        self.deliver(msg(text="help", message=message, app=app, also=also, at=at or time.time() - 5))
         self.run_pass()
 
     def test_an_unmentioned_review_pr_link_after_a_help_reply_in_the_thread_is_a_request(self):
@@ -2196,7 +2230,7 @@ class UnmentionedFollowUpTests(ChatCase):
 
     def test_a_help_reply_and_the_unmentioned_request_after_it_in_one_read_are_both_taken(self):
         now = time.time()
-        self.deliver(msg(text="what is this?", message="h1", at=now - 4),
+        self.deliver(msg(text="help", message="h1", at=now - 4),
                      msg(text=f"Review PR {URL}", message="q1", mention=False, at=now - 2))
         self.assertEqual(self.run_pass()["taken"], ["help", "review"])
 
@@ -2308,14 +2342,14 @@ class UnmentionedFollowUpTests(ChatCase):
         t0, t1, t2 = (f"{SPACE}/threads/s{index}" for index in range(3))
         self.deliver(
             # One message to both apps, then a request: Hermione reads first, but every mention is read before it.
-            msg(text="what is this?", message="h0", also=(MOODY_APP_USER,), at=now + 1, thread=t0),
+            msg(text="help", message="h0", also=(MOODY_APP_USER,), at=now + 1, thread=t0),
             msg(text=f"Review PR {URL}", message="q0", mention=False, at=now + 2, thread=t0),
             # A help reply from Hermione alone, then a request: hers.
-            msg(text="what is this?", message="h1", at=now + 3, thread=t1),
+            msg(text="help", message="h1", at=now + 3, thread=t1),
             msg(text=f"Review PR {URL}", message="q1", mention=False, at=now + 4, thread=t1),
             # A help reply from each app in separate messages, then a request.
-            msg(text="what is this?", message="h2", at=now + 5, thread=t2),
-            msg(text="what is this?", message="h3", app=MOODY_APP_USER, at=now + 6, thread=t2),
+            msg(text="help", message="h2", at=now + 5, thread=t2),
+            msg(text="help", message="h3", app=MOODY_APP_USER, at=now + 6, thread=t2),
             msg(text=f"Review PR {URL}", message="q2", mention=False, at=now + 7, thread=t2))
         self.run_pass()
         self.run_pass()
@@ -2342,7 +2376,7 @@ class UnmentionedFollowUpTests(ChatCase):
         for helped_first in (True, False):  # the help in an earlier pass, or all three in one read
             with self.subTest(helped_first=helped_first):
                 thread, now = f"{SPACE}/threads/f{int(helped_first)}", time.time()
-                first = msg(text="what is this?", message=f"h{int(helped_first)}", at=now - 6, thread=thread)
+                first = msg(text="help", message=f"h{int(helped_first)}", at=now - 6, thread=thread)
                 if helped_first:
                     self.deliver(first)
                     self.run_pass()
@@ -2366,7 +2400,7 @@ class UnmentionedFollowUpTests(ChatCase):
             chat_review._save_marker(SPACE, app, int(read * 1e6), floor, True, complete=False)
         self.deliver(*[msg(text="chatter", mention=False, message=f"c{index}", at=now - 40 + index,
                            thread=f"{SPACE}/threads/t9") for index in range(3)],
-                     msg(text="what is this?", message="m2", app=MOODY_APP_USER, at=now - 6),
+                     msg(text="help", message="m2", app=MOODY_APP_USER, at=now - 6),
                      msg(text=f"Review PR {URL}", message="q1", mention=False, at=now - 4))
         self.assertEqual(self.run_pass()["taken"], [])  # Hermione's read reached q1, Moody's did not reach m2
         self.assertEqual(len(self.records()), 1)
@@ -2380,7 +2414,7 @@ class UnmentionedFollowUpTests(ChatCase):
         self.second_app()
         now = time.time()
         self.helped(at=now - 30)
-        self.deliver(msg(text="what is this?", message="m2", app=MOODY_APP_USER, at=now - 10))
+        self.deliver(msg(text="help", message="m2", app=MOODY_APP_USER, at=now - 10))
         self.assertEqual([outcome for outcome in self.run_pass()["taken"] if outcome != "seen before"],
                          ["help"])  # now the thread has two apps
         # Created before Moody's mention, while the thread was Hermione's alone, and listed only now.
@@ -2397,7 +2431,7 @@ class UnmentionedFollowUpTests(ChatCase):
         self.assertEqual(self.quiet(f"Review PR {URL}"), ["review"])  # taken, and left queued
         self.patch(config, "CHAT_REVIEW_PER_PASS", 2)
         # Moody's mention from before it is listed only now, inside the read overlap.
-        self.deliver(msg(text="what is this?", message="m2", app=MOODY_APP_USER, at=now - 10))
+        self.deliver(msg(text="help", message="m2", app=MOODY_APP_USER, at=now - 10))
         self.run_pass()
         [record] = [record for record in self.records() if record["message"].endswith("/q1")]
         self.assertEqual((record["state"], record["outcome"], record["kind"]), ("done", "not-owned", "dropped"))
@@ -2642,18 +2676,21 @@ class QuestionTests(ChatCase):
         self.assertIn(f"THE HEAD MOVED since your review: you reviewed {HEAD}, and the PR's head is now {NEWER}",
                       self.turns[-1]["input"])
 
-    def test_a_question_in_a_thread_with_no_reviewed_request_gets_help(self):
-        self.assertEqual(self.ask(), ["help"])
+    def test_a_question_in_a_thread_with_no_reviewed_request_is_a_mention_answer(self):
+        self.answer = ("ok", f"ANSWER\n{self.ANSWER}\nEND\n")
+        self.assertEqual(self.ask(), ["mention"])
         self.answer = ("ok", "garbage")
         self.deliver(msg(at=time.time() - 5, thread=f"{SPACE}/threads/t2", message="r2"))
         self.run_pass()  # unusable: on record, but not reviewed
-        self.assertEqual(self.ask(message="q2", thread=f"{SPACE}/threads/t2"), ["help"])
+        self.answer = ("ok", f"ANSWER\n{self.ANSWER}\nEND\n")
+        self.assertEqual(self.ask(message="q2", thread=f"{SPACE}/threads/t2"), ["mention"])
         self.reviewed()
         self.assertEqual(self.ask(text="", message="q3"), ["help"])
         self.assertEqual(self.ask(text="x" * (chat_review.QUESTION_MAX + 1), message="q4"), ["help"])
-        self.assertEqual(len(self.turns), 2)
-        self.assertEqual(self.texts().count(chat_review.help_text("hermione")), 4)
-        self.assertIn("with a question about my review", chat_review.help_text("hermione"))
+        self.assertEqual(len(self.turns), 4)  # two answers, two reviews; neither help reply runs a turn
+        self.assertEqual(self.texts().count(chat_review.help_text("hermione")), 2)
+        self.assertEqual(self.texts().count(self.ANSWER), 2)
+        self.assertIn("about my review or anything else", chat_review.help_text("hermione"))
 
     def test_requests_and_follow_ups_win_and_a_broken_one_is_no_question(self):
         self.reviewed()
@@ -2797,8 +2834,9 @@ class QuestionTests(ChatCase):
         self.assertEqual((self.google.messages[-1]["app"], self.google.messages[-1]["text"]),
                          ("moody", said(self.ANSWER)))
         self.assertIn("gruff and terse", chat_review.MOODY_QUESTION_BRIEF)
-        # A question to the other app in that thread is help: it reviewed nothing there.
-        self.assertEqual(self.ask(message="q2"), ["help"])
+        # A question to the other app in that thread is a mention answer: it reviewed nothing there.
+        self.assertEqual(self.ask(message="q2"), ["mention"])
+        self.assertEqual(self.turns[-1]["brief"], chat_review.MENTION_BRIEF)
 
 
 class UpgradeTests(ChatCase):
@@ -3287,11 +3325,11 @@ class SecondAppTests(ChatCase):
 
     def test_moodys_help_reply_names_his_app(self):
         self.second_app()
-        self.deliver(msg(text="what does this repo do?", app=MOODY_APP_USER))
+        self.deliver(msg(text="help", app=MOODY_APP_USER))
         self.assertEqual(self.run_pass()["taken"], ["help"])
         [message] = self.google.messages
         self.assertEqual((message["app"], message["text"]), ("moody", said(chat_review.help_text("moody"))))
-        self.assertTrue(self.texts()[0].startswith(f"I'm {MOODY_NAME}, and I do code reviews only, security first."))
+        self.assertTrue(self.texts()[0].startswith(f"I'm {MOODY_NAME}, and I review PRs, security first, and answer questions."))
         self.assertNotIn("the word review", message["text"])
 
     def test_each_desk_has_its_own_daily_caps_and_people_share_theirs(self):

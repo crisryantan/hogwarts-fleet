@@ -475,9 +475,13 @@ CHAT_REVIEW_LIST_PAGES = 5
 CHAT_REVIEW_READ_OVERLAP_SECONDS = 120
 # A PR whose diff is larger than this is refused with a fixed reply, never reviewed in part.
 CHAT_REVIEW_DIFF_MAX_BYTES = 300_000
-# A question about an app's review, asked in its thread, is a turn of the same desk with a smaller budget (a Claude
-# desk's --max-budget-usd, dollars and cents): it counts toward the same caps as a review.
+# A question about an app's review, asked in its thread, and any other question an app is mentioned with, is a turn of
+# the same desk with a smaller budget (a Claude desk's --max-budget-usd, dollars and cents): it counts toward the same
+# caps as a review.
 CHAT_REVIEW_QUESTION_BUDGET_USD = "0.50"
+# Images attached to a message an app takes are downloaded with that app's read authorization (Chat's media download,
+# which chat.messages.readonly covers) and handed to its turn; False downloads none, and the turn is told so.
+CHAT_REVIEW_IMAGES = True
 # A Chat reply is sent at most this many times (each with the same request id, so Chat keeps one message).
 CHAT_REVIEW_REPLY_TRIES = 3
 # Hermione's chat review turn: Read only, her settings, her model and budget, and this much of its JSON output read.

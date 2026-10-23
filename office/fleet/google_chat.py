@@ -11,8 +11,9 @@ per app that never stand in for each other or for another app's:
   service, account USER_TOKEN_ACCOUNT). read_token trades them at the OAuth token endpoint for a short-lived access
   token and refuses one whose granted scopes are anything but those two. It is per app because Chat answers
   spaces/<id>/members/app with the membership of the app of the project the OAuth client belongs to. With it this
-  module only reads Chat: spaces.members.get (that app's own membership, and an allowlisted sender's, by email) and
-  spaces.messages.list.
+  module only reads Chat: spaces.members.get (that app's own membership, and an allowlisted sender's, by email),
+  spaces.messages.list, and media.download of an image attached to a message the app takes (download_media), which
+  chat.messages.readonly covers.
 - Sending is the app's. Its worker service account's one JSON key is a generic password too (service the app's key
   Keychain service, account the service account's email), stored there by scripts/chat-review-store-key.py as the
   base64 of its PKCS#8 body. access_token signs a JWT bearer grant (RS256) for the chat.bot scope alone with it, and
@@ -89,6 +90,10 @@ EMAIL = re.compile(r"[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9.-]{1,190}\.[A-Za-z]{2,24}
 REQUEST_ID = re.compile(r"[a-z0-9][a-z0-9-]{0,99}")
 # A message's createTime, in UTC as Chat gives it, read to the microsecond.
 CREATE_TIME = re.compile(r"([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2})(?:\.([0-9]{1,9}))?Z")
+# An attached file's media, as media.download names it: its attachmentDataRef.resourceName.
+MEDIA_RESOURCE = re.compile(r"[A-Za-z0-9._~+/=-]{1,1000}")
+# The attachments of a message one list call gives back, at most.
+ATTACHMENTS_MAX = 10
 # Messages one list call asks for; the caller caps the pages.
 PAGE_SIZE = 100
 PAGE_TOKEN = re.compile(r"[A-Za-z0-9._~+/=-]{1,2048}")
@@ -446,8 +451,9 @@ def list_messages(space: str, after_us: int, app_user: str, token: str, page: Op
     """One page of space's messages created after after_us, oldest first, with your read token: (messages, the next
     page's token or None). A message that does not mention the app (app_user) is given back as its time alone, so
     nothing else of it ever leaves here; one that does is its name, time, thread, sender and the text Chat gives with
-    the app mentions taken out (argumentText). The one exception, for a thread follow-up: a message that mentions no
-    one at all, in one of threads (those that were the app's alone for a while), is given back the same way,
+    the app mentions taken out (argumentText) and the resource names of its uploaded images (_images). The one
+    exception, for a thread follow-up: a message that mentions no one at all, in one of threads (those that were the
+    app's alone for a while), is given back the same way,
     marked listening, with its whole text."""
     if not isinstance(app_user, str) or USER.fullmatch(app_user) is None:
         raise GoogleError("the app's user name is not a Chat user name")
@@ -479,12 +485,57 @@ def list_messages(space: str, after_us: int, app_user: str, token: str, page: Op
         if not isinstance(argument, str) or len(argument) > TEXT_MAX:
             argument = ""  # text longer than Chat sends is read as none, never as a cut prefix
         messages.append({"created_us": at, "mentions": mentions, "listening": listening,
+                         "attachments": _images(item.get("attachment")),
                          "name": _text(item.get("name"), NAME_MAX * 2),
                          "thread": _text(thread.get("name"), NAME_MAX * 2),
                          "sender": _text(sender.get("name"), NAME_MAX), "sender_type": _text(sender.get("type"), 20),
                          "sender_name": _text(sender.get("displayName"), NAME_MAX),
                          "argument": argument})
     return messages, following
+
+
+def _images(found: object) -> list:
+    """The media resource name of each attachment of a message that was uploaded to Chat and says it is an image.
+    What it says is not trusted: chat_material keeps only a file whose first bytes are an image."""
+    names = []
+    for item in (found if isinstance(found, list) else [])[:ATTACHMENTS_MAX]:
+        if not isinstance(item, dict):
+            continue
+        ref = item.get("attachmentDataRef")
+        name, kind = ref.get("resourceName") if isinstance(ref, dict) else None, item.get("contentType")
+        if item.get("source") == "UPLOADED_CONTENT" and isinstance(kind, str) and kind.lower().startswith("image/") \
+                and isinstance(name, str) and MEDIA_RESOURCE.fullmatch(name) and ".." not in name:
+            names.append(name)
+    return names
+
+
+def download_media(resource: str, token: str, limit: int) -> bytes:
+    """The bytes of one attached file, by its media resource name, with your read token (media.download, ?alt=media),
+    at most limit of them: more is a GoogleError, never a cut file."""
+    if not isinstance(resource, str) or MEDIA_RESOURCE.fullmatch(resource) is None or ".." in resource \
+            or resource.startswith("/"):
+        raise GoogleError("that is not a media resource name")
+    if not _is_read_token(token) or _is_app_token(token):
+        raise GoogleError("Chat is read only with the read-only authorization")
+    return fetch_media(f"{CHAT_ROOT}/media/{urllib.parse.quote(resource, safe='/')}?alt=media", token, limit)
+
+
+def fetch_media(url: str, token: str, limit: int) -> bytes:
+    """One media download from Chat with a read token, at most limit bytes, no redirect followed, so the token goes to
+    no other host. Tests replace this."""
+    if not url.startswith(CHAT_ROOT + "/media/") or not _is_read_token(token) or _is_app_token(token):
+        raise GoogleError("a media download goes only to Chat, with the read-only authorization")
+    request = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
+    try:
+        with _opener().open(request, timeout=HTTP_TIMEOUT_SECONDS) as answer:
+            raw = answer.read(limit + 1)
+    except urllib.error.HTTPError as exc:
+        raise GoogleError(f"Google answered HTTP {exc.code}", status=exc.code) from None
+    except (urllib.error.URLError, OSError, ValueError):
+        raise GoogleError("Google could not be reached") from None
+    if len(raw) > limit:
+        raise GoogleError("the attachment is larger than the fleet reads")
+    return raw
 
 
 # Sending in Chat, as the app

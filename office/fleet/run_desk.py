@@ -1220,17 +1220,25 @@ CHAT_REVIEW_CODEX_FORCED = ('approval_policy="never"', 'web_search="disabled"', 
                             "features.browser_use_external=false", "features.skill_mcp_dependency_install=false")
 
 
+# An image the job put in a chat turn's working folder, as chat_material names it.
+CHAT_IMAGE = re.compile(r"image-[1-9]\.(?:png|jpg|gif|webp)")
+
+
 def chat_review_argv(conn, brief: str, prompt: str, run_id: str, desk: str = CHAT_REVIEW_DESK,
-                     budget: Optional[str] = None) -> ReportTurn:
+                     budget: Optional[str] = None, images: tuple = ()) -> ReportTurn:
     """The chat review turn of desk, one of CHAT_REVIEW_DESKS: Hermione's (chat_review_claude_argv, at budget when it
     is given, a question's) or Moody's (chat_review_codex_argv, which takes no budget). A question's turn is the same
-    turn, read-only alike, with its own brief and prompt."""
+    turn, read-only alike, with its own brief and prompt. images names the images in its working folder (CHAT_IMAGE):
+    Hermione reads them with Read, and Moody's turn attaches them to its prompt with --image."""
     if desk not in CHAT_REVIEW_DESKS:
         raise FleetError("that desk runs no chat review")
     if not isinstance(run_id, str) or CHAT_RUN_ID.fullmatch(run_id) is None:
         raise FleetError("a chat review run id is chat- and 16 hex digits")
+    if not isinstance(images, tuple) or len(images) > 3 \
+            or not all(isinstance(name, str) and CHAT_IMAGE.fullmatch(name) for name in images):
+        raise FleetError("a chat turn's images are the job's own names in its working folder")
     if desk in config.HEADLESS_CODEX:
-        return chat_review_codex_argv(conn, brief, prompt, run_id, desk)
+        return chat_review_codex_argv(conn, brief, prompt, run_id, desk, images)
     return chat_review_claude_argv(conn, brief, prompt, run_id, desk, budget)
 
 
@@ -1288,15 +1296,17 @@ def chat_review_permissions(desk: str) -> list:
     return ["-c", f"permissions.{name}={table}", "-c", f'default_permissions="{name}"']
 
 
-def chat_review_codex_argv(conn, brief: str, prompt: str, run_id: str, desk: str = "moody") -> ReportTurn:
+def chat_review_codex_argv(conn, brief: str, prompt: str, run_id: str, desk: str = "moody",
+                           images: tuple = ()) -> ReportTurn:
     """Moody's chat review turn (fleet/chat_review.py), run like his fleet reviews (codex exec, his codex.toml with
     --ignore-user-config and --ignore-rules, his model and effort) but in a permission profile of its own
     (chat_review_permissions: it may read only its working folder, which holds only the review input, and the
     platform paths its shell needs; it writes nothing and has no network), keeping only CHAT_REVIEW_CODEX_KEPT of his
     codex.toml, top level or in a profile, with CHAT_REVIEW_CODEX_FORCED over it, no MCP, the brief and fixed prompt on stdin, JSON events on stdout, and --output-last-message in his
     runs folder named by the run id, so the run's own id is in its command line. The turn runs at most
-    RUN_TIMEOUT_SECONDS. Gates first: no stop, no CLI update, and his model not blocked, the CLI default counting as
-    blocked while anything is (Stopped, Blocked)."""
+    RUN_TIMEOUT_SECONDS. images, the images in his working folder, go with --image, by name, so the CLI reads them from
+    that folder for the prompt and the sandbox stays as it is. Gates first: no stop, no CLI update, and his model not
+    blocked, the CLI default counting as blocked while anything is (Stopped, Blocked)."""
     if desk not in CHAT_REVIEW_DESKS or desk not in config.HEADLESS_CODEX:
         raise FleetError("that desk runs no Codex chat review")
     profile = _text(_read_office(desk, config.CODEX_PROFILE_FILE, config.SETTINGS_MAX_BYTES, "codex profile"),
@@ -1321,6 +1331,10 @@ def chat_review_codex_argv(conn, brief: str, prompt: str, run_id: str, desk: str
     for override in chosen + list(CHAT_REVIEW_CODEX_FORCED):
         argv += ["-c", override]
     argv += chat_review_permissions(desk)
+    for image in images:  # each before a flag, so none can take what follows as another image
+        if CHAT_IMAGE.fullmatch(image) is None:
+            raise FleetError("a chat turn's images are the job's own names in its working folder")
+        argv += ["--image", image]
     name = last_message_name(run_id)
     argv += ["--skip-git-repo-check", "--ephemeral", "--json", "--output-last-message",
              f"{config.runs_dir()}/{desk}/{name}", "-"]
