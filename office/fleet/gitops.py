@@ -20,7 +20,8 @@ one PR review (post_pr_review) whose event is one of three fixed names, COMMENT,
 here against REVIEW_EVENTS and never taken as free text, and whose inline comments are each checked against the
 diff's commentable lines the caller passes (check_review_comments). An APPROVE or REQUEST_CHANGES review is the gh account
 owner's own review, so it counts for branch protection like any review they post by hand. The chat review's
-reads are three fixed gh api GET shapes (check_read_argv): a PR's metadata, its diff, and a gist a teammate linked.
+reads are six fixed gh api GET shapes (check_read_argv): a PR's metadata, its diff, a gist a teammate linked, the PR
+head's tree and one blob of it, and the check runs on its head.
 Each runs in the office with a fixed environment and its text on stdin, never in a worktree, so no file a desk wrote
 can steer it, and nothing gh prints about a login reaches an event. Nothing here resolves a thread, requests a review, marks a PR ready or merges: no such shape passes
 the guard. An answer that does not say for sure whether a comment was posted raises Uncertain, so the caller reads
@@ -86,6 +87,8 @@ GIST_ID = re.compile(r"[0-9a-f]{1,64}")
 # A chat review's repo context reads: the PR head's whole tree, then one blob of it at a time, each by its sha.
 TREE_PATH = re.compile(_REPO_PART + r"/git/trees/([0-9a-f]{40})\?recursive=1")
 BLOB_PATH = re.compile(_REPO_PART + r"/git/blobs/([0-9a-f]{40})")
+# A chat review's CI read: the check runs on the PR's head commit, one page of at most 100.
+CHECK_RUNS_PATH = re.compile(_REPO_PART + r"/commits/([0-9a-f]{40})/check-runs\?per_page=100")
 # gh api says (HTTP 4xx) when GitHub answered with a refusal, so nothing was posted.
 GH_HTTP_REFUSED = re.compile(r"\(HTTP 4[0-9]{2}\)")
 GH_LOGIN = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})")
@@ -673,10 +676,18 @@ def blob_read_argv(repo: str, sha: str) -> list:
     return [config.GH_BIN, "api", f"repos/{ids.check('repo', repo)}/git/blobs/{ids.check('sha', sha)}"]
 
 
+def check_runs_argv(repo: str, sha: str) -> list:
+    """gh api GET of the check runs on one commit (a PR's head): each run's name, status and conclusion, and how many
+    there are in all. Check runs are what GitHub Actions and GitHub Apps report; the older combined status endpoint
+    holds neither."""
+    return [config.GH_BIN, "api", f"repos/{ids.check('repo', repo)}/commits/{ids.check('sha', sha)}/check-runs"
+                                  "?per_page=100"]
+
+
 def check_read_argv(argv: object) -> str:
-    """The guard on a chat review's gh reads: exactly one of the five shapes above, rebuilt and compared whole. Which
-    one ("pr", "diff", "gist", "tree" or "blob"), or a FleetError for anything else, a write or another flag or path
-    included."""
+    """The guard on a chat review's gh reads: exactly one of the six shapes above, rebuilt and compared whole. Which
+    one ("pr", "diff", "gist", "tree", "blob" or "checks"), or a FleetError for anything else, a write or another flag
+    or path included."""
     if isinstance(argv, list) and len(argv) == 3 and argv[:2] == [config.GH_BIN, "api"] and isinstance(argv[2], str) \
             and argv[2].startswith("repos/"):
         found = PR_READ_PATH.fullmatch(argv[2][len("repos/"):])
@@ -688,6 +699,9 @@ def check_read_argv(argv: object) -> str:
         found = BLOB_PATH.fullmatch(argv[2][len("repos/"):])
         if found is not None and blob_read_argv(found.group(1), found.group(2)) == argv:
             return "blob"
+        found = CHECK_RUNS_PATH.fullmatch(argv[2][len("repos/"):])
+        if found is not None and check_runs_argv(found.group(1), found.group(2)) == argv:
+            return "checks"
     if isinstance(argv, list) and len(argv) == 3 and argv[:2] == [config.GH_BIN, "api"] and isinstance(argv[2], str) \
             and argv[2].startswith("gists/") and GIST_ID.fullmatch(argv[2][len("gists/"):]) is not None \
             and gist_read_argv(argv[2][len("gists/"):]) == argv:
@@ -697,7 +711,7 @@ def check_read_argv(argv: object) -> str:
         found = COMPARE_PATH.fullmatch(argv[4][len("repos/"):])
         if found is not None and compare_diff_argv(found.group(1), found.group(2), found.group(3)) == argv:
             return "diff"
-    raise FleetError("a chat review reads GitHub only with its five fixed gh api reads")
+    raise FleetError("a chat review reads GitHub only with its six fixed gh api reads")
 
 
 def run_gh_read(argv: list, timeout: Optional[float] = None) -> bytes:

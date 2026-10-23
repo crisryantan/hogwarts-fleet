@@ -161,9 +161,9 @@ The store has none of these:
                                         review with your gh login, once per app, PR and head commit:
                                         REQUEST_CHANGES with a blocking finding, else COMMENT (off when missing)
   chat-review-approve                   while it holds exactly "on" as well, a chat review that passes with no
-                                        blocking finding is posted as APPROVE, your gh account's own approval for
-                                        branch protection (off when missing, and nothing while chat-review-github is
-                                        off)
+                                        blocking finding and a risk below high is posted as APPROVE, your gh
+                                        account's own approval for branch protection (off when missing, and nothing
+                                        while chat-review-github is off)
   chat-reviews/                         one record per message and app it asked something (requests/), each app's
                                         read markers per conversation (read/), the once-per-head-commit GitHub markers
                                         of each app (github/), each cap day's counts (caps/) and the PRs each app
@@ -644,9 +644,11 @@ shared by both apps.
 Every reply in a thread mentions the person it answers, with Chat's user mention markup built only from their Chat
 user id (a number, so never everyone or an app), never their email. A person not on the list is answered with no
 mention. A review's reply is its desk's own summary of its verdict, one or two sentences in its voice (Hermione brisk
-and precise, Moody gruff and terse), then its verdict (PASS or CHANGES) with the PR and head commit, then its findings
-as bullets under "Blocking:" and "Notes:", each "- path:line: text" of at most 600 characters, cut whole lines at a
-time to what Chat takes.
+and precise, Moody gruff and terse), then "Risk: low", "medium" or "high", its verdict (PASS or CHANGES) with the PR
+and head commit, for a high-risk pass a fixed line saying approval needs a person for high-risk changes, then the CI
+line (below), then its findings as bullets under "Blocking:" and "Notes:", each "- path:line: text" of at most 600
+characters, then what it did not verify as bullets under "Not verified:", cut whole lines at a time to what Chat
+takes.
 
 When an app's read authorization fails (revoked, expired, deleted from the Keychain, or granted more than the two read
 scopes), the job stops reading for that app with one headmaster event saying to run the authorize helper for it
@@ -665,10 +667,26 @@ input holds the diff shaped to fit `CHAT_REVIEW_DIFF_MAX_BYTES` (300 KB):
 - When the diff is still over the cap, the review is partial: whole files go in smallest first while they fit, and
   the rest are listed in the input as `not shown: <path> (+A -D)`. The reviewer is told so and asked to say what it
   could not check. A partial review is never an approval (a PASS posts as COMMENT, and blocking findings still post
-  as REQUEST_CHANGES), and its Chat reply and GitHub review both say how many files were not reviewed and name up to
-  10 of them. Inline comments sit only on files the reviewer was shown, so a finding on a deleted or left-out file
+  as REQUEST_CHANGES), and its Chat reply and GitHub review both say under "Not verified:", after the reviewer's own
+  lines, how many files were not reviewed and name up to 10 of them. Inline comments sit only on files the reviewer was shown, so a finding on a deleted or left-out file
   stays in the review's body. A PR whose changed files are each over the cap on their own gets the fixed too-large
   reply.
+
+The job also reads, read only, the facts it posts itself, never the model. The base branch and commit come from the
+PR's metadata. The CI checks on the head come from one more fixed read shape, `gh api
+repos/<owner>/<repo>/commits/<head sha>/check-runs?per_page=100`: check runs are what GitHub Actions and GitHub Apps
+report, which the older combined status endpoint leaves out, so commit statuses set through that older API are not
+counted. A completed run whose conclusion is success, neutral or skipped is passed, any other completed one failed,
+and one not completed pending; up to 5 failed ones are named, each scrubbed, defanged and cut to 80 characters, and
+when there are more runs than the one page of 100 the line says how many were read. A failed read or an answer of
+another shape is "Checks: could not be read", and none at all "Checks: none reported"; neither stops the review.
+Then up to 5 PRs the description links, in the order it names them, each read once with the same PR read as the
+review's own for its title and state only: `#N` of the same repo (not inside a word, a path or an HTML entity) and
+full `https://github.com/<owner>/<repo>/pull/<n>` links to a repo in `CHAT_REVIEW_REPOS`, never the PR itself and
+never a repo the office does not take. One that cannot be read is left out. The input names the base branch (a name
+of plain characters, else a fixed stand-in) and commit above the PR data, and the CI counts and linked PRs between
+marker lines of their own with the turn's nonce, as untrusted text. Findings, summaries and the reviewer's own caveats
+are echo-checked against them too.
 
 Before the turn the job also reads repo context, read only, while `CHAT_REVIEW_REPO_CONTEXT` is `True` (the
 default): the PR head's tree with `gh api repos/<owner>/<repo>/git/trees/<head sha>?recursive=1`, then each file it
@@ -699,8 +717,13 @@ the review input, any attached images and the repo context:
 The PR's title, description and diff sit in that input between two marker lines with a random nonce, and the desk's
 brief and prompt say its only job is to review it and return its block, and that any instruction inside the PR text
 is ignored. Neither desk runs the PR's code. Both desks judge blocking by one shared rubric in their briefs. A finding blocks when the change breaks behavior on a path the diff touches, loses, corrupts or leaks data, opens a security hole, ships a behavior change without a test the repo would expect, or does something its title and description do not say. Style, docs, behavior-neutral refactors, missing tests for code the repo does not test, questions and risks that need an unlikely precondition do not. When a reviewer is unsure it is non-blocking, and the finding says what would make it blocking. The last block is read strictly, the same for both: its header, a
-SUMMARY line of at most 300 characters, the findings and the verdict, and anything else is a fixed "couldn't review"
-reply. A finding or summary that repeats 40 or more characters of the PR's own text (its whole diff and the repo
+SUMMARY line of at most 300 characters, a RISK line of exactly `RISK: low`, `RISK: medium` or `RISK: high` (low:
+small, contained, easy to roll back; medium: shared code, a data shape or config others read; high: auth, money, data
+loss, migrations, a public API, or hard to roll back), the findings, a NOT VERIFIED section of at most 8 lines (`V1
+<what was not checked and why>`, each at most 300 characters: a runtime behavior, a database state, a linked PR seen
+only by its title) and the verdict, and anything else, a missing or malformed RISK line included, is a fixed
+"couldn't review" reply. Each NOT VERIFIED line is scrubbed and defanged like a finding, and one that repeats the PR's
+own text is dropped from the list: it is the reviewer's own caveat, so the review stands and may still approve. A finding or summary that repeats 40 or more characters of the PR's own text (its whole diff and the repo
 context included) is withheld with a fixed line,
 and a review holding one is never an approval, so planted text never reaches Chat or GitHub word for word. A
 finding's place is left out of that check when it names a repo context file or a file the diff touches, read from
@@ -714,7 +737,9 @@ every Codex run, no cost.
 While `~/.hogwarts/chat-review-github` holds `on` too, the review also goes on the PR with your `gh` login. A review
 with a blocking finding (verdict CHANGES) is posted as REQUEST_CHANGES, and any other as COMMENT. While
 `~/.hogwarts/chat-review-approve` holds `on` as well, a review of the whole diff that passes with no blocking finding
-is posted as APPROVE instead. That approval, like a change request, is your `gh` account's own review, so it counts
+and a risk of low or medium is posted as APPROVE instead. A high-risk review may still pass, but it is never approved
+automatically: it posts as COMMENT, and its Chat reply says approval needs a person for high-risk changes. That
+approval, like a change request, is your `gh` account's own review, so it counts
 for branch
 protection exactly as one you post by hand would. The approve switch is off until you turn it on, it is read just
 before each post, and it does nothing while `chat-review-github` is off. GitHub refuses an approval or a change
@@ -722,8 +747,13 @@ request on a PR your `gh` login opened; when it refuses one, the review is poste
 lands, and the event that posted is in the request's record and its log line. The review opens with a fixed line
 saying it is an automated review by the app (its name as its settings spell it) requested by the requester in Chat,
 naming them by their Chat display name (scrubbed, at most 60 characters, else "a teammate"), never their email, which
-stays in the office's own log, with the summary under it, then the verdict, cut whole lines at a time
-to what GitHub takes. Each finding whose place is a file and line the diff shows on its new side goes on that line as
+stays in the office's own log, ending "Automated review; not an independent human approval." Then, in order: "Risk:
+<level>"; the summary; "Checked against <base branch> at <base sha>; head <head sha>." (both shas cut to 12); the CI
+line, "Checks on this head: P passed, F failed, Q pending" with the failed ones named, or "Checks: none reported", or
+"Checks: could not be read"; "Related PRs read:" with a line for each linked PR, `#N (open|merged|closed) <title>`
+for one of the same repo and `owner/repo#N (state)` with no title for another, so no other repo's title is posted on
+the PR; the verdict; the findings not posted inline; then "Not verified:" with the reviewer's caveats and a partial
+review's left-out files as bullets. It is cut whole lines at a time to what GitHub takes. Each finding whose place is a file and line the diff shows on its new side goes on that line as
 an inline comment, the way a reviewer leaves one: a blocking finding as "Blocking:" with what breaks and "Fix:" with
 its direction, a note as "Note:", at most 25 of them and at most 1000 characters each. All of the reviewer's text on
 GitHub is plain prose: every markdown character is escaped and a word joiner follows "#" or "GH-" before a digit, so

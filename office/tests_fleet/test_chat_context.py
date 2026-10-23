@@ -198,7 +198,7 @@ class ContextTests(ContextCase):
         self.patch(config, "CHAT_REVIEW_REPO_CONTEXT", False)
         self.repo_file("app/core/util.py", b"ok\n")
         turn = self.review()
-        self.assertEqual((self.reads, turn["context"]), (["pr", "diff"], {}))
+        self.assertEqual((self.reads, turn["context"]), (["pr", "diff", "checks"], {}))
         self.assertIn("NOTE no repo context this time", turn["input"])
 
     def test_nothing_fetched_reaches_the_log_or_the_office(self):
