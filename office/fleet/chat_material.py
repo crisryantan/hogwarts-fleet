@@ -73,10 +73,12 @@ WORD = re.compile(MARKUP.pattern + "|" + ADDRESS.pattern, re.IGNORECASE)
 # endings count, so a file name such as "build.py" or "node.js" is never taken for one.
 BARE_TLDS = ("com", "org", "net", "io", "dev", "app", "ai", "co", "edu", "gov", "info", "me", "page", "site", "tech",
              "us", "uk", "au", "ca", "de", "fr", "jp", "nz", "sg", "in")
-# The whole host must end there (never "example.com.internal" read as "example.com"), and a port, path, query or
-# fragment right after it is kept, so the guard checks the link as written.
+# The whole host must end there (never "example.com.internal" read as "example.com", never the name part of an email
+# address), a port must be all digits, and a port, path, query or fragment right after it is kept, so the guard
+# checks the link as written.
 BARE_HOST = re.compile(r"(?<![\w@./:-])((?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+(?:" + "|".join(BARE_TLDS)
-                       + r"))(?![\w-]|\.[a-z0-9])((?::[0-9]+)?(?:[/?#][^\s<>|]*)?)", re.IGNORECASE)
+                       + r"))(?![\w@-]|\.[a-z0-9]|:(?![0-9]+(?:[/?#\s]|$)))((?::[0-9]+)?(?:[/?#][^\s<>|]*)?)",
+                       re.IGNORECASE)
 RESOURCE = re.compile(r"[A-Za-z0-9._~+/=-]{1,1000}")
 # A gist file of one of these types is no text, whatever its content says.
 NOT_TEXT = ("image/", "audio/", "video/", "font/", "application/octet-stream", "application/pdf", "application/zip",

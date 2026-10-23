@@ -382,7 +382,8 @@ class WebTests(MaterialCase):
         with self.assertRaises(chat_material.Refused):
             chat_material.check_url(chat_material.plan("example.org:8080/x")["links"][0])
         for text in ("edit build.py and node.js", "mail me at dev@example.com", "version 1.2.3", "e.g. this",
-                     "see example.com.internal now"):
+                     "see example.com.internal now", "write to docs.example.com@company.org",
+                     "example.org:abc/guide", "example.org:443oops/guide"):
             with self.subTest(text=text):
                 self.assertEqual(chat_material.plan(text), {})
 
