@@ -3120,14 +3120,14 @@ def bursts(listed: list, space: str, token: str, known: dict, now: int, app: str
            cut: bool) -> dict:
     """The conversation turns among listed (a quiet read's messages, oldest first), each by the index of its first
     message: one person's turn messages (_turn_message) in one thread, each created at most CHAT_REVIEW_BURST_SECONDS
-    after the one before. Any other message of theirs there that was listed with its sender, a mention or a review
-    command, ends their turn before it. A turn still grows while its newest message is less than that before
+    after the one before. Any other message of theirs there that was listed with its sender, a mention of the app or
+    of anyone else, or a review command, ends their turn before it. A turn still grows while its newest message is less than that before
     horizon_us (how far the read saw), unless that read was cut short (cut) and the turn starts it, so a turn longer
     than a read's pages never holds the read back for good."""
     window = config.CHAT_REVIEW_BURST_SECONDS * 1_000_000
     found, current = {}, {}
     for index, message in enumerate(listed):
-        if message.get("mentions") is not True and message.get("listening") is not True:
+        if message.get("mentions") is not True and message.get("listening") is not True and "sender" not in message:
             continue  # listed as its time alone: no one's message, so no one's turn ends
         who = (message.get("thread"), message.get("sender"))
         if not _turn_message(message, space, token, known, now, app):

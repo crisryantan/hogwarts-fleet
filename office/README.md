@@ -594,17 +594,19 @@ messages an answer turn reads as its context. Of those that mention it:
   such messages in one thread, each sent at most `CHAT_REVIEW_BURST_SECONDS` (60) after the one before, are one
   conversation turn. It is taken once it has been quiet that long, so a message still being typed joins it, and
   answered once, with its messages in order as its question (the newest that fit in 2000 characters). A mention or a
-  review command of theirs in the thread ends their turn before it and keeps its own path. The turn is taken when one
-  of its messages ends with a question mark, or when the thread's newest message before it is the app's own reply (one
-  read of one message says which) and one of its messages says something: at least 4 words outside its addresses and
-  emoji, and no bare reaction (haha, lol, nice, cool, ok, thanks, nope, yes, great and a few of their kin, any letter
-  case, punctuation ignored, or emoji alone). It is a conversation turn, the question about the app's review or the
-  mention answer (both below) a mention of it would be, so "What is a widget store?" sent after the app answered needs
-  no tag, and "haha" gets nothing. Its first message's record is the request and names the others, each then recorded
-  as joined to it with none of its text, and a message of the turn that Chat lists late joins it the same way, so no
-  turn is answered twice, after a kill too. It is checked again before it runs the same way, as of its newest message.
-  Any other message there that does not mention the app, a turn not taken included, is dropped like any other: no
-  reply, no record, no log line;
+  review command of theirs in the thread ends their turn before it and keeps its own path, and so does a message of
+  theirs there that mentions someone else (only its time, thread and sender are read). A turn longer than one whole
+  read (`CHAT_REVIEW_LIST_PAGES` pages) is answered from the part that read holds. The turn is taken when one of its
+  messages ends with a question mark, or when the thread's newest message before it is the app's own reply (one read
+  of one message says which) and one of its messages says something: at least 4 words outside its addresses and emoji,
+  and no bare reaction (haha, lol, nice, cool, ok, thanks, nope, yes, great and a few of their kin, any letter case,
+  punctuation ignored, or emoji alone). It is a conversation turn, the question about the app's review or the mention
+  answer (both below) a mention of it would be, so "What is a widget store?" sent after the app answered needs no tag,
+  and "haha" gets nothing. Its first message's record is the request and names the others, each then recorded as
+  joined to it with none of its text, and a message of the turn that Chat lists late joins it the same way, so no turn
+  is answered twice, after a kill too. It is checked again before it runs the same way, as of its newest message. Any
+  other message there that does not mention the app, a turn not taken included, is dropped like any other: no reply,
+  no record, no log line;
 - one from them that only asks what the app is doing ("status", "what are you working on", "queue", "what's
   pending", "anything running" and a few of their kin, any letter case, at most 8 words, no link or address) gets the
   app's status reply (Status, below) and no turn, even in a thread the app reviewed; a link or a review command in it

@@ -3158,11 +3158,15 @@ class UnmentionedFollowUpTests(ChatCase):
     def test_list_messages_gives_back_an_unmentioned_message_only_in_a_listened_thread(self):
         google_chat._READ["hermione"] = {"token": USER_TOKEN, "until": int(time.time()) + 3600}
         self.deliver(msg(text="review again", mention=False, message="q1"),
-                     msg(text="review again", mention=False, message="q2", thread=f"{SPACE}/threads/t2"))
+                     msg(text="review again", mention=False, message="q2", thread=f"{SPACE}/threads/t2"),
+                     msg(text=f"{SECRET_MARK} can you look", message="o1", app="users/444"))
         found, _ = google_chat.list_messages(SPACE, 0, APP_USER, USER_TOKEN, None, frozenset({THREAD}))
         self.assertEqual((found[0]["listening"], found[0]["mentions"], found[0]["argument"]),
                          (True, False, "review again"))
         self.assertEqual(found[1], {"created_us": found[1]["created_us"], "mentions": False})
+        # One that mentions someone else in a listened thread is only its time, thread and sender, never its text.
+        self.assertEqual(found[2], {"created_us": found[2]["created_us"], "mentions": False, "thread": THREAD,
+                                    "sender": SENDER_USER})
 
 
 class ThreadConversationTests(ChatCase):
@@ -3622,6 +3626,27 @@ class BurstTests(ChatCase):
         lead = self.record_of("q1")
         self.assertEqual((lead["state"], lead["outcome"], lead["kind"]), ("done", "not-owned", "dropped"))
         self.assertEqual(len(self.turns), 1)
+
+    def test_a_mention_of_someone_else_in_the_middle_ends_the_burst_before_it(self):
+        self.deliver(msg(text="haha", message="q1", mention=False, at=self.now - 100),
+                     msg(text="can you check this one", message="o1", app="users/444", at=self.now - 97),
+                     msg(text=self.LIVE[1], message="q2", mention=False, at=self.now - 95))
+        # Two turns: a reaction straight after the app's reply, then a sentence that answers no one.
+        self.assertEqual(self.taken(), [])
+        self.assertEqual((len(self.turns), len(self.records())), (1, 1))
+
+    def test_a_burst_longer_than_a_capped_read_is_answered_once_and_never_holds_the_read(self):
+        self.patch(config, "CHAT_REVIEW_LIST_PAGES", 1)
+        self.patch(google_chat, "PAGE_SIZE", 2)
+        self.patch(config, "CHAT_REVIEW_READ_OVERLAP_SECONDS", 1)  # so a read's overlap is less than its one page
+        self.deliver(*[msg(text=text, message=f"q{index}", mention=False, at=self.now - 100 + index * 5)
+                       for index, text in enumerate(self.LIVE, 1)])
+        taken = [outcome for _ in range(10) for outcome in self.taken()]
+        self.assertEqual(taken, ["mention"])
+        self.assertEqual((len(self.turns), len(self.google.messages)), (2, 2))
+        self.assertEqual(sorted(record["message"][-2:] for record in self.records()), ["m1", "q1", "q2", "q3"])
+        last = int(google_chat.time_us(self.google.posted[SPACE][-1]["createTime"]))
+        self.assertGreaterEqual(chat_review._read_marker(SPACE, "hermione", quiet=True)["after_us"], last)
 
     def test_the_turn_grammar(self):
         for text in ("haha", "Haha!", "hahaha", "nope", "Nope.", "LOL", "ok", "okay", "thank you", "ok thanks!",

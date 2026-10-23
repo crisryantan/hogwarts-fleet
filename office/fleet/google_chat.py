@@ -462,7 +462,8 @@ def list_messages(space: str, after_us: int, app_user: str, token: str, page: Op
     the app mentions taken out (argumentText) and the resource names of its uploaded images (_images). The one
     exception, for a thread follow-up: a message that mentions no one at all, in one of threads (those that were the
     app's alone for a while), is given back the same way,
-    marked listening, with its whole text."""
+    marked listening, with its whole text. One there that mentions someone else is given back as its time, thread and
+    sender alone (never its text), so it ends its sender's conversation turn."""
     if not isinstance(app_user, str) or USER.fullmatch(app_user) is None:
         raise GoogleError("the app's user name is not a Chat user name")
     query = {"pageSize": PAGE_SIZE, "filter": f'createTime > "{rfc3339(after_us)}"', "orderBy": "createTime ASC"}
@@ -485,10 +486,14 @@ def list_messages(space: str, after_us: int, app_user: str, token: str, page: Op
         thread = item.get("thread") if isinstance(item.get("thread"), dict) else {}
         mentions = _mentions(item, app_user)
         listening = not mentions and thread.get("name") in threads and not _mentions_anyone(item)
+        sender = item.get("sender") if isinstance(item.get("sender"), dict) else {}
+        if not mentions and not listening and thread.get("name") in threads:
+            messages.append({"created_us": at, "mentions": False, "thread": _text(thread.get("name"), NAME_MAX * 2),
+                             "sender": _text(sender.get("name"), NAME_MAX)})
+            continue
         if not mentions and not listening:
             messages.append({"created_us": at, "mentions": False})
             continue
-        sender = item.get("sender") if isinstance(item.get("sender"), dict) else {}
         argument = item.get("argumentText") if mentions else item.get("text")
         if not isinstance(argument, str) or len(argument) > TEXT_MAX:
             argument = ""  # text longer than Chat sends is read as none, never as a cut prefix
