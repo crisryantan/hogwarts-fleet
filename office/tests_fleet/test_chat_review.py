@@ -8,6 +8,7 @@ from __future__ import annotations
 import base64
 import contextlib
 import hashlib
+import http.client
 import importlib.util
 import io
 import json
@@ -3329,6 +3330,17 @@ class ThreadConversationTests(ChatCase):
                 google_chat.thread_messages(SPACE, bad, int(at * 1e6), APP_USER, frozenset(), USER_TOKEN)
         with self.assertRaises(google_chat.GoogleError):
             google_chat.thread_messages(SPACE, THREAD, int(at * 1e6), APP_USER, frozenset(), USER_TOKEN, size=500)
+        # A display name too long to hand over whole is handed over as none, never cut.
+        self.google.posted[SPACE][0]["sender"]["displayName"] = " " * 190 + "ya29." + "a" * 40
+        found, _ = google_chat.thread_messages(SPACE, THREAD, int(at * 1e6), APP_USER, frozenset({SENDER_USER}),
+                                               USER_TOKEN)
+        self.assertEqual(found[-1]["sender_name"], "")
+        # A broken answer from Google is a GoogleError, as any failed call is, so a history read only notes it.
+        broken = mock.MagicMock()
+        broken.open.side_effect = http.client.IncompleteRead(b"")
+        with mock.patch.object(google_chat, "_opener", return_value=broken), \
+                self.assertRaises(google_chat.GoogleError):
+            REAL_SEND(f"{google_chat.CHAT_ROOT}/{SPACE}/messages", USER_TOKEN, None)
 
 
 class ConversationTests(ChatCase):

@@ -245,15 +245,16 @@ def read_token(app: str, timeout: Optional[float] = None) -> str:
     """Your short-lived read-only access token for app's project, minted from its stored refresh token, kept in this
     process's memory only. ReadAuthError when the authorization is missing, refused, or granted any scope but
     READ_SCOPES; GoogleError when Google could not be asked (within timeout, when given: send). It only reads."""
-    now = int(time.time())
+    now, began = int(time.time()), time.monotonic()
     held = _READ.get(app)
     if held is not None and held["until"] - TOKEN_MARGIN_SECONDS > now:
         return held["token"]
     stored = _read_authorization(app)
+    left = None if timeout is None else timeout - (time.monotonic() - began)  # what the Keychain read left of it
     try:
         answer = send(TOKEN_URL, None, {"grant_type": "refresh_token", "client_id": stored["client_id"],
                                         "client_secret": stored["client_secret"],
-                                        "refresh_token": stored["refresh_token"]}, timeout=timeout)
+                                        "refresh_token": stored["refresh_token"]}, timeout=left)
     except GoogleError as exc:
         if exc.status in (400, 401, 403):  # invalid_grant (revoked or expired) or invalid_client
             raise ReadAuthError(f"Google refused the read-only Chat authorization (HTTP {exc.status}): run"
@@ -335,7 +336,7 @@ def send(url: str, token: Optional[str], payload: Optional[dict], timeout: Optio
             raw = answer.read(RESPONSE_MAX_BYTES + 1)
     except urllib.error.HTTPError as exc:
         raise GoogleError(f"Google answered HTTP {exc.code}", status=exc.code) from None
-    except (urllib.error.URLError, OSError, ValueError):
+    except (urllib.error.URLError, OSError, ValueError, http.client.HTTPException):
         raise GoogleError("Google could not be reached") from None
     if len(raw) > RESPONSE_MAX_BYTES:
         raise GoogleError("Google answered more than the fleet reads")
@@ -538,11 +539,13 @@ def thread_messages(space: str, thread: str, before_us: int, app_user: str, user
         if not own and (sender.get("type") != "HUMAN" or sender.get("name") not in users):
             messages.append({"created_us": at, "own": False})
             continue
-        text = item.get("text")
+        text, shown = item.get("text"), sender.get("displayName")
         if not isinstance(text, str) or len(text) > TEXT_MAX:
             text = ""  # text longer than Chat sends is read as none, never as a cut prefix
+        if not isinstance(shown, str) or len(shown) > NAME_MAX:
+            shown = ""  # a name is whole or none, so no cut leaves part of a credential for the scrub to miss
         messages.append({"created_us": at, "own": own, "sender": _text(sender.get("name"), NAME_MAX),
-                         "sender_name": _text(sender.get("displayName"), NAME_MAX), "text": text})
+                         "sender_name": shown, "text": text})
     return messages, following
 
 
