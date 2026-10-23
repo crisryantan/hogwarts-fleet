@@ -510,6 +510,13 @@ CHAT_REVIEW_WAIT_NOTICE_SECONDS = 300
 # How many times a request whose turn was cut off (a kill, a restart, the loops stopped) is queued again before it
 # ends with the fixed failure line. A resumed run counts toward no chat cap again.
 CHAT_REVIEW_RESUME_MAX = 2
+# After an app posts a review of a PR from Chat it follows that PR: each followed PR's head is read again at most this
+# often, and new commits there are reviewed again in the thread, at most the third many times a PR, app and cap day,
+# counted toward the desk's caps and the fleet's chat cap but no person's. A follow ends when the PR is merged or
+# closed, and after the second many days with no new commits.
+CHAT_REVIEW_FOLLOW_CHECK_SECONDS = 900
+CHAT_REVIEW_FOLLOW_DAYS = 7
+CHAT_REVIEW_FOLLOW_REVIEWS_PER_DAY = 6
 # Hermione's chat review turn: Read, Grep and Glob only, her settings, her model and budget, and this much of its JSON
 # output read.
 CHAT_REVIEW_OUTPUT_MAX_BYTES = 262144

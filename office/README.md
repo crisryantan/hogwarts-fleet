@@ -166,7 +166,8 @@ The store has none of these:
                                         off)
   chat-reviews/                         one record per message and app it asked something (requests/), each app's
                                         read markers per conversation (read/), the once-per-head-commit GitHub markers
-                                        of each app (github/) and each cap day's counts (caps/)
+                                        of each app (github/), each cap day's counts (caps/) and the PRs each app
+                                        follows (follows/)
   patrol/shadow                         while it is here, the patrol and Gringotts only write files (shadow mode)
   patrol/<job>/                         the Map's snapshot and rows, lineups, keeper's watches, scoreboards, bot passes,
                                         and in shadow mode what a follow-up would have routed (patrol/followup/)
@@ -607,6 +608,12 @@ messages an answer turn reads as its context. Of those that mention it:
   is answered twice, after a kill too. It is checked again before it runs the same way, as of its newest message. Any
   other message there that does not mention the app, a turn not taken included, is dropped like any other: no reply,
   no record, no log line;
+- one from them that only asks the app to follow a PR, "follow <link>" or "watch <link>" (after an optional please
+  or can you, one PR link for a repo in `CHAT_REVIEW_REPOS` and no other address), follows it without reviewing it now
+  (Following, below), with one fixed reply; one that only says "stop following", "unfollow" or "stop watching" (at
+  most 8 words, no link) ends the app's follows of that thread with one fixed line naming them, or says it follows
+  nothing there. In a thread only this app had taken a mention in, the stop works without a mention too, and with
+  nothing followed there it is dropped;
 - one from them that only asks what the app is doing ("status", "what are you working on", "queue", "what's
   pending", "anything running" and a few of their kin, any letter case, at most 8 words, no link or address) gets the
   app's status reply (Status, below) and no turn, even in a thread the app reviewed; a link or a review command in it
@@ -800,6 +807,28 @@ GitHub link. Each line names the PR as `owner/repo#number`, who asked by Chat di
 the thread it came from (`https://mail.google.com/chat/u/0/#chat/space/<space>/<thread>`, built from the space and
 thread names alone). It holds no email and no text a teammate wrote, and is cut whole lines at a time to what Chat
 takes. Each app reports only its own requests.
+
+A status reply also lists the PRs the app follows, each as `owner/repo#number` with its last reviewed head, when it
+was last checked and its thread's link.
+
+Following. After an app's review of a PR from Chat goes to its thread, whatever its verdict, the app follows that
+PR, so nobody has to ask again: one small record per app and PR in `chat-reviews/follows/`, holding the thread to
+report in, the requester's Chat user id and display name (never an email), the last reviewed head and when it was
+checked. One app follows a PR once; a later review of it in another thread moves the follow there. Each pass, while
+the intake is on, every follow last checked at least `CHAT_REVIEW_FOLLOW_CHECK_SECONDS` (900) ago reads its PR with
+the same read a review makes. It waits while its own review of new commits is still open, while its desk is off, and
+while a stop of its desk's family is in place, as any turn of that desk does. When the PR was merged or closed, the
+follow ends with one line in its thread ("#442 was merged; I've stopped following it.", or closed). When its head
+moved past the last reviewed one, the app queues a review of the new head for the same thread and requester, which
+the thread hears as "New commits on #442 (abc1234). Reviewing again.", and which runs, replies and posts on GitHub
+like any review: once per app, PR and head commit, and an approval only through the switches above, so a clean pass
+after an earlier change request approves only while `chat-review-approve` is on. Each head is queued at most once (its
+request's key is made from the app, PR and head, create-exclusive), so a kill never queues it twice and a review that
+failed is not retried for that head. A follow ends with one line after `CHAT_REVIEW_FOLLOW_DAYS` (7) with no new
+commits, and reviews a PR at most `CHAT_REVIEW_FOLLOW_REVIEWS_PER_DAY` (6) times a cap day; past that it waits for the
+next day and says so once. These reviews count toward the desk's own caps and the fleet's chat cap, never toward the
+requester's. "stop following" ends a follow and a review of it still queued, and "follow <link>" starts one with no
+head reviewed yet, so its first check reviews the PR.
 
 A request that waits keeps what it waits on in its record. A review acknowledged in its thread that then waited
 longer than `CHAT_REVIEW_WAIT_NOTICE_SECONDS` (300) before its turn started gets one fixed line there as it starts,
