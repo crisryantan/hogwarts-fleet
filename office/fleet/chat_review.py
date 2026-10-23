@@ -1559,7 +1559,7 @@ def _flat(text: str) -> str:
     every credential shape, defanged, every character but printable ASCII made a space) and its whitespace collapsed,
     so no character between words, none the defang turns into another and no shape the scrub replaces hides an
     echo."""
-    cleaned = GOOGLE_SECRET.sub("[token]", common.untrusted_text(text))
+    cleaned = GOOGLE_SECRET.sub("[token]", common.untrusted_text(typographic(text)))
     return " ".join(NOT_PRINTABLE.sub(" ", defanged(cleaned)).split())
 
 
@@ -1756,9 +1756,23 @@ def _findings(lines: list, letter: str) -> list:
     return found
 
 
+# Typography a model writes, folded to the printable ASCII the posted text keeps, so the scrub never turns "can't"
+# written with a curly apostrophe into "can t".
+TYPOGRAPHY = str.maketrans({"\u2018": "'", "\u2019": "'", "\u201a": "'", "\u201b": "'", "\u2032": "'",
+                            "\u201c": '"', "\u201d": '"', "\u201e": '"', "\u201f": '"', "\u2033": '"',
+                            "\u2010": "-", "\u2011": "-", "\u2012": "-", "\u2013": "-", "\u2014": "-",
+                            "\u2015": "-", "\u2212": "-", "\u2026": "...", "\u00a0": " ", "\u202f": " "})
+
+
+def typographic(text: str) -> str:
+    """text with its curly quotes, dashes, ellipses and non-breaking spaces as their printable ASCII forms."""
+    return text.translate(TYPOGRAPHY)
+
+
 def scrubbed(text: str) -> str:
-    """A finding with every credential shape out, the shared scrub's and Google's, before and after it is one line."""
-    once = common.scrubbed_line(GOOGLE_SECRET.sub("[token]", common.normalized(text)), FINDING_MAX)
+    """A finding with every credential shape out, the shared scrub's and Google's, before and after it is one line,
+    its typography folded first (typographic) so the scrub keeps it."""
+    once = common.scrubbed_line(GOOGLE_SECRET.sub("[token]", common.normalized(typographic(text))), FINDING_MAX)
     return GOOGLE_SECRET.sub("[token]", once)
 
 

@@ -69,6 +69,12 @@ PR_LINK = re.compile(r"https?://(?:www\.)?github\.com/[^/\s]+/[^/\s]+/pull/", re
 ADDRESS = re.compile(r"https?://[^\s<>|]+", re.IGNORECASE)
 MARKUP = re.compile(r"<(https?://[^\s<>|]*)(?:\|[^<>\n]*)?>", re.IGNORECASE)
 WORD = re.compile(MARKUP.pattern + "|" + ADDRESS.pattern, re.IGNORECASE)
+# A host written with no scheme, "docs.example.com" or "example.org/guide", read as an https link. Only common web
+# endings count, so a file name such as "build.py" or "node.js" is never taken for one.
+BARE_TLDS = ("com", "org", "net", "io", "dev", "app", "ai", "co", "edu", "gov", "info", "me", "page", "site", "tech",
+             "us", "uk", "au", "ca", "de", "fr", "jp", "nz", "sg", "in")
+BARE_HOST = re.compile(r"(?<![\w@./:-])((?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+(?:" + "|".join(BARE_TLDS)
+                       + r"))(?![\w-])(/[^\s<>|]*)?", re.IGNORECASE)
 RESOURCE = re.compile(r"[A-Za-z0-9._~+/=-]{1,1000}")
 # A gist file of one of these types is no text, whatever its content says.
 NOT_TEXT = ("image/", "audio/", "video/", "font/", "application/octet-stream", "application/pdf", "application/zip",
@@ -138,6 +144,10 @@ def _addresses(text: str) -> list:
     """Each address in text, in its order, Chat's <url|label> markup taken as its url, with the marks around a word
     let go."""
     found = [match.group(1) or match.group(0) for match in WORD.finditer(text)]
+    # An http link is read over https, the only scheme the reader fetches; a bare host the same way.
+    found = ["https://" + url[len("http://"):] if url.lower().startswith("http://") else url for url in found]
+    bare = WORD.sub(" ", text)
+    found += ["https://" + match.group(1) + (match.group(2) or "") for match in BARE_HOST.finditer(bare)]
     return [url.rstrip(")]>\"'.,;:!?") for url in found if url.rstrip(")]>\"'.,;:!?")]
 
 

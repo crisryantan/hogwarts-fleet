@@ -369,6 +369,15 @@ class WebTests(MaterialCase):
         self.assertIn("2 more links not read: at most 3 are", fenced)
         self.assertEqual(chat_material.plan(f"see {URL} and https://GitHub.com/acme/x/pull/9/files"), {})
 
+    def test_a_bare_host_or_an_http_link_is_read_over_https_and_a_file_name_is_not(self):
+        self.assertEqual(chat_material.plan("can you go to docs.example.com and check?")["links"],
+                         ["https://docs.example.com"])
+        self.assertEqual(chat_material.plan("see example.org/guide/start.")["links"], ["https://example.org/guide/start"])
+        self.assertEqual(chat_material.plan("old one at http://example.net/a")["links"], ["https://example.net/a"])
+        for text in ("edit build.py and node.js", "mail me at dev@example.com", "version 1.2.3", "e.g. this"):
+            with self.subTest(text=text):
+                self.assertEqual(chat_material.plan(text), {})
+
     def test_the_link_rules(self):
         for url in ("http://docs.example.org/", "https://docs.example.org:8443/", "https://user:pw@docs.example.org/",
                     "https://localhost/", "https://127.0.0.1/", "https://[::1]/", "https://2130706433/",
