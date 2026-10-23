@@ -1184,6 +1184,7 @@ def owl_report_argv(brief: str, prompt: str, model: str = None, budget: str = No
     desk = config.HOOK_DESK
     check_report_settings(_read_office(desk, config.OWL_REPORT_SETTINGS_FILE, config.SETTINGS_MAX_BYTES,
                                        "owl report settings"))
+    check_report_tools(config.OWL_REPORT_TOOLS)
     name = brief_name(kind)
     argv = [config.CLAUDE_BIN, "-p", "--restricted", "--settings",
             f"{config.office_desk_dir(desk)}/{config.OWL_REPORT_SETTINGS_FILE}", "--strict-mcp-config",
@@ -1198,7 +1199,10 @@ def owl_report_argv(brief: str, prompt: str, model: str = None, budget: str = No
 CHAT_REVIEW_DESK = "hermione"
 # The desks a chat review may run: Hermione (Claude) and Moody (Codex), each for its own Chat app.
 CHAT_REVIEW_DESKS = ("hermione", "moody")
-CHAT_REVIEW_TOOLS = "Read"
+CHAT_REVIEW_TOOLS = "Read,Grep,Glob"
+# The only tools a report-only turn (an owl report, a chat turn) may name: each reads files, and --restricted confines
+# them to its working folder. None writes, runs a command or reaches the network.
+REPORT_TOOLS = ("Read", "Grep", "Glob")
 # Her chat review turns run under this settings file in her office folder, not her review settings, which let Read
 # into the castle's tasks and worktrees: it allows nothing beyond the default reads of the working folder.
 CHAT_REVIEW_SETTINGS_FILE = "chat-review-settings.json"
@@ -1244,8 +1248,9 @@ def chat_review_argv(conn, brief: str, prompt: str, run_id: str, desk: str = CHA
 
 def chat_review_claude_argv(conn, brief: str, prompt: str, run_id: str, desk: str = CHAT_REVIEW_DESK,
                             budget: Optional[str] = None) -> ReportTurn:
-    """Hermione's chat review turn (fleet/chat_review.py), run like her fleet reviews but with Read as its only tool:
-    claude -p --restricted (file tools confined to its working folder, which holds only the review input) under her
+    """Hermione's chat review turn (fleet/chat_review.py), run like her fleet reviews but with only the read-only file
+    tools Read, Grep and Glob (CHAT_REVIEW_TOOLS, check_report_tools): claude -p --restricted (file tools confined to
+    its working folder, which holds only the turn's input, its images and a review's repo context) under her
     chat review settings, held to the report-only shape (check_report_settings: no allow rule, no write, no network,
     no hooks), no MCP, her model (Ollivander's pick or her registry model) and effort, her per-run budget or budget
     (dollars and cents, BUDGET), the fixed brief in runs/hermione/<run_id>.brief, so the run's own id is in its
@@ -1256,6 +1261,7 @@ def chat_review_claude_argv(conn, brief: str, prompt: str, run_id: str, desk: st
         raise FleetError("that desk runs no Claude chat review")
     check_report_settings(_read_office(desk, CHAT_REVIEW_SETTINGS_FILE, config.SETTINGS_MAX_BYTES,
                                        "chat review settings"), desk)
+    check_report_tools(CHAT_REVIEW_TOOLS)
     if not isinstance(run_id, str) or CHAT_RUN_ID.fullmatch(run_id) is None:
         raise FleetError("a chat review run id is chat- and 16 hex digits")
     if budget is not None and (not isinstance(budget, str) or BUDGET.fullmatch(budget) is None):
@@ -1285,7 +1291,8 @@ def last_message_name(run_id: str) -> str:
 def chat_review_permissions(desk: str) -> list:
     """The -c overrides that define and select a Codex chat review turn's permission profile: Codex's ":minimal"
     platform paths read, so its shell can start, the folder Codex is installed in (CODEX_CHAT_READS) read, so its
-    sandbox helper can start it, and its working folder, which holds only the review input, read; nothing written
+    sandbox helper can start it, and its working folder, which holds only the turn's input, its images and a review's
+    repo context, read; nothing written
     anywhere; the shared temp folder and the office denied; no network. None of the desk's own reads (the castle, its
     tasks, the other toolchain folders) is granted."""
     name = f"fleet-chat-review-{desk}"
@@ -1300,9 +1307,9 @@ def chat_review_codex_argv(conn, brief: str, prompt: str, run_id: str, desk: str
                            images: tuple = ()) -> ReportTurn:
     """Moody's chat review turn (fleet/chat_review.py), run like his fleet reviews (codex exec, his codex.toml with
     --ignore-user-config and --ignore-rules, his model and effort) but in a permission profile of its own
-    (chat_review_permissions: it may read only its working folder, which holds only the review input, and the
-    platform paths its shell needs; it writes nothing and has no network), keeping only CHAT_REVIEW_CODEX_KEPT of his
-    codex.toml, top level or in a profile, with CHAT_REVIEW_CODEX_FORCED over it, no MCP, the brief and fixed prompt on stdin, JSON events on stdout, and --output-last-message in his
+    (chat_review_permissions: it may read only its working folder, which holds only the turn's input, its images and
+    a review's repo context, and the platform paths its shell needs; it writes nothing and has no network), keeping
+    only CHAT_REVIEW_CODEX_KEPT of his codex.toml, top level or in a profile, with CHAT_REVIEW_CODEX_FORCED over it, no MCP, the brief and fixed prompt on stdin, JSON events on stdout, and --output-last-message in his
     runs folder named by the run id, so the run's own id is in its command line. The turn runs at most
     RUN_TIMEOUT_SECONDS. images, the images in his working folder, go with --image, by name, so the CLI reads them from
     that folder for the prompt and the sandbox stays as it is. Gates first: no stop, no CLI update, and his model not
@@ -1351,6 +1358,14 @@ REPORT_REQUIRED_DENY_READ = ("/.hogwarts", "/.ssh", "/.aws", "/.codex", "/.claud
                              "/.claude/projects", "/.netrc", "/.npmrc", "/.docker", "/.kube", "/.gnupg", "/.config/gh")
 REPORT_KEYS = {"disableAllHooks", "permissions", "sandbox"}
 REPORT_PERMISSION_KEYS = {"allow", "deny", "disableBypassPermissionsMode"}
+
+
+def check_report_tools(tools: object) -> str:
+    """A report-only turn's --tools value: a comma list of REPORT_TOOLS, each once, and nothing else."""
+    names = tools.split(",") if isinstance(tools, str) else []
+    if not names or len(set(names)) != len(names) or not set(names) <= set(REPORT_TOOLS):
+        raise FleetError("a report-only turn may use only Read, Grep and Glob")
+    return tools
 
 
 def check_report_settings(raw: bytes, desk: str = config.HOOK_DESK) -> dict:

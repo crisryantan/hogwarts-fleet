@@ -83,6 +83,9 @@ COMPARE_PATH = re.compile(_REPO_PART + r"/compare/([0-9a-f]{40})\.\.\.([0-9a-f]{
 DIFF_ACCEPT = "Accept: application/vnd.github.v3.diff"
 # A chat turn's third read: one gist a teammate linked, by its id.
 GIST_ID = re.compile(r"[0-9a-f]{1,64}")
+# A chat review's repo context reads: the PR head's whole tree, then one blob of it at a time, each by its sha.
+TREE_PATH = re.compile(_REPO_PART + r"/git/trees/([0-9a-f]{40})\?recursive=1")
+BLOB_PATH = re.compile(_REPO_PART + r"/git/blobs/([0-9a-f]{40})")
 # gh api says (HTTP 4xx) when GitHub answered with a refusal, so nothing was posted.
 GH_HTTP_REFUSED = re.compile(r"\(HTTP 4[0-9]{2}\)")
 GH_LOGIN = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})")
@@ -659,14 +662,32 @@ def gist_read_argv(gist_id: str) -> list:
     return [config.GH_BIN, "api", f"gists/{gist_id}"]
 
 
+def tree_read_argv(repo: str, sha: str) -> list:
+    """gh api GET of the whole tree of one commit (a PR's head): every path in it, with its mode, type, blob sha and
+    size, and whether GitHub cut the list short."""
+    return [config.GH_BIN, "api", f"repos/{ids.check('repo', repo)}/git/trees/{ids.check('sha', sha)}?recursive=1"]
+
+
+def blob_read_argv(repo: str, sha: str) -> list:
+    """gh api GET of one blob, by its sha: its size and its content in base64."""
+    return [config.GH_BIN, "api", f"repos/{ids.check('repo', repo)}/git/blobs/{ids.check('sha', sha)}"]
+
+
 def check_read_argv(argv: object) -> str:
-    """The guard on a chat review's gh reads: exactly one of the three shapes above, rebuilt and compared whole. Which
-    one ("pr", "diff" or "gist"), or a FleetError for anything else, a write or another flag or path included."""
+    """The guard on a chat review's gh reads: exactly one of the five shapes above, rebuilt and compared whole. Which
+    one ("pr", "diff", "gist", "tree" or "blob"), or a FleetError for anything else, a write or another flag or path
+    included."""
     if isinstance(argv, list) and len(argv) == 3 and argv[:2] == [config.GH_BIN, "api"] and isinstance(argv[2], str) \
             and argv[2].startswith("repos/"):
         found = PR_READ_PATH.fullmatch(argv[2][len("repos/"):])
         if found is not None and pr_read_argv(found.group(1), int(found.group(2))) == argv:
             return "pr"
+        found = TREE_PATH.fullmatch(argv[2][len("repos/"):])
+        if found is not None and tree_read_argv(found.group(1), found.group(2)) == argv:
+            return "tree"
+        found = BLOB_PATH.fullmatch(argv[2][len("repos/"):])
+        if found is not None and blob_read_argv(found.group(1), found.group(2)) == argv:
+            return "blob"
     if isinstance(argv, list) and len(argv) == 3 and argv[:2] == [config.GH_BIN, "api"] and isinstance(argv[2], str) \
             and argv[2].startswith("gists/") and GIST_ID.fullmatch(argv[2][len("gists/"):]) is not None \
             and gist_read_argv(argv[2][len("gists/"):]) == argv:
@@ -676,7 +697,7 @@ def check_read_argv(argv: object) -> str:
         found = COMPARE_PATH.fullmatch(argv[4][len("repos/"):])
         if found is not None and compare_diff_argv(found.group(1), found.group(2), found.group(3)) == argv:
             return "diff"
-    raise FleetError("a chat review reads GitHub only with its three fixed gh api reads")
+    raise FleetError("a chat review reads GitHub only with its five fixed gh api reads")
 
 
 def run_gh_read(argv: list) -> bytes:

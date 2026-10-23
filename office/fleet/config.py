@@ -473,8 +473,19 @@ CHAT_REVIEW_QUEUE_MAX_SECONDS = 2 * 3600
 # so a message Chat lists a little late is still seen (each message's record keeps it from being taken twice).
 CHAT_REVIEW_LIST_PAGES = 5
 CHAT_REVIEW_READ_OVERLAP_SECONDS = 120
-# A PR whose diff is larger than this is refused with a fixed reply, never reviewed in part.
+# What a review may hold of a PR's diff once each file it deletes whole is cut to one line: a larger one is reviewed in
+# part, whole files smallest first, and the rest named as not shown. A diff read larger than the second is refused
+# with a fixed reply, and so is one whose changed files are each larger than the first on their own.
 CHAT_REVIEW_DIFF_MAX_BYTES = 300_000
+CHAT_REVIEW_DIFF_READ_MAX_BYTES = 4 * 1024 * 1024
+# Repo context for a review: the PR head's text files in the folders it touches, read with gh and put in the turn's
+# work folder for the reviewer to search. Each file at most the first cap, at most the second many and the third in
+# all, read within the last; off reads none.
+CHAT_REVIEW_REPO_CONTEXT = True
+CHAT_REVIEW_CONTEXT_FILE_MAX_BYTES = 200 * 1024
+CHAT_REVIEW_CONTEXT_MAX_FILES = 400
+CHAT_REVIEW_CONTEXT_MAX_BYTES = 8 * 1024 * 1024
+CHAT_REVIEW_CONTEXT_SECONDS = 120
 # A question about an app's review, asked in its thread, and any other question an app is mentioned with, is a turn of
 # the same desk with a smaller budget (a Claude desk's --max-budget-usd, dollars and cents): it counts toward the same
 # caps as a review.
@@ -484,7 +495,8 @@ CHAT_REVIEW_QUESTION_BUDGET_USD = "0.50"
 CHAT_REVIEW_IMAGES = True
 # A Chat reply is sent at most this many times (each with the same request id, so Chat keeps one message).
 CHAT_REVIEW_REPLY_TRIES = 3
-# Hermione's chat review turn: Read only, her settings, her model and budget, and this much of its JSON output read.
+# Hermione's chat review turn: Read, Grep and Glob only, her settings, her model and budget, and this much of its JSON
+# output read.
 CHAT_REVIEW_OUTPUT_MAX_BYTES = 262144
 # Moody's: this much of its JSON event stream read, which repeats what his read-only commands printed.
 CHAT_REVIEW_CODEX_OUTPUT_MAX_BYTES = 8 * 1024 * 1024

@@ -620,27 +620,58 @@ again. It never tries anything broader instead, and the other app reads on. Repl
 out, and reading resumes the first pass after you re-authorize.
 
 A review reads the PR with your `gh` login, read only: its metadata, then the diff of its base and head commits. A
-PR that is not open, or whose diff is over `CHAT_REVIEW_DIFF_MAX_BYTES`, gets a fixed reply. The app's desk then runs
-headless as in its fleet reviews, with its model, in a fresh private folder that holds only the review input:
+PR that is not open, or whose diff is over `CHAT_REVIEW_DIFF_READ_MAX_BYTES` (4 MB), gets a fixed reply. The review
+input holds the diff shaped to fit `CHAT_REVIEW_DIFF_MAX_BYTES` (300 KB):
 
-- Hermione runs with her budget and Read as her only tool, no shell, under `desks/hermione/chat-review-settings.json`,
-  which allows no read beyond the working folder, no write and no network, and with no session saved, so no
-  transcript keeps what she read.
+- Each file the PR deletes whole is one line, `deleted: <path> (<N> lines)`, followed by up to 20 of the top-level
+  names it declared (class, def, function, interface, struct and enum lines, each cut short), so the reviewer knows
+  what went away without reading every removed line. Every other file keeps its full diff, and binary and rename-only
+  files stay as git wrote them. The cap applies after this, so a cleanup PR that deletes many files and changes a few
+  is reviewed whole. The echo check and a finding's place still see the whole diff, deleted files included.
+- When the diff is still over the cap, the review is partial: whole files go in smallest first while they fit, and
+  the rest are listed in the input as `not shown: <path> (+A -D)`. The reviewer is told so and asked to say what it
+  could not check. A partial review is never an approval (a PASS posts as COMMENT, and blocking findings still post
+  as REQUEST_CHANGES), and its Chat reply and GitHub review both say how many files were not reviewed and name up to
+  10 of them. Inline comments sit only on files the reviewer was shown, so a finding on a deleted or left-out file
+  stays in the review's body. A PR whose changed files are each over the cap on their own gets the fixed too-large
+  reply.
+
+Before the turn the job also reads repo context, read only, while `CHAT_REVIEW_REPO_CONTEXT` is `True` (the
+default): the PR head's tree with `gh api repos/<owner>/<repo>/git/trees/<head sha>?recursive=1`, then each file it
+keeps with `gh api repos/<owner>/<repo>/git/blobs/<blob sha>`, two more fixed read shapes. It covers the folders the
+PR touches, each touched path cut to its first two folders (`a/b` for `a/b/c/d.x`), and keeps only plain text files
+(no links or submodules, UTF-8 with no NUL byte, each blob checked against its sha) whose every path part is a plain
+name, at most `CHAT_REVIEW_CONTEXT_FILE_MAX_BYTES` (200 KB) each, `CHAT_REVIEW_CONTEXT_MAX_FILES` (400) and
+`CHAT_REVIEW_CONTEXT_MAX_BYTES` (8 MB) in all, read within `CHAT_REVIEW_CONTEXT_SECONDS`. They go under `context/` in
+the turn's folder at their repo paths, each folder made by the job and opened without following a link, and the
+input says the folder holds the repo at the PR's head, untrusted like the diff, for checking references: for a
+removal, whether anything still uses the removed code. A failed or capped read is a note in the input and the review
+goes on; only counts are logged, never a path or a file's text, and the folder goes with the turn's.
+
+The app's desk then runs headless as in its fleet reviews, with its model, in a fresh private folder that holds only
+the review input, any attached images and the repo context:
+
+- Hermione runs with her budget and only Read, Grep and Glob, no shell, confined to her working folder, under
+  `desks/hermione/chat-review-settings.json`, which allows no read beyond the working folder, no write and no network,
+  and with no session saved, so no transcript keeps what she read. A tool list with anything else is refused before
+  the turn starts.
 - Moody runs `codex exec` with his `codex.toml`, user config and rules ignored, in a permission profile of the chat
   review's own: Codex's minimal platform paths and the working folder read, nothing written anywhere, the office and
   the shared temp folder denied, and no network. Web search, hooks, memories, apps, plugins and browser and computer
   use are switched off over his `codex.toml`. None of his usual reads (the castle, its tasks, the toolchain folders)
-  is granted, so the only file his shell can read beyond the system's own is the review input.
+  is granted, so the only files his shell can read beyond the system's own are the review input and the repo
+  context.
 
 The PR's title, description and diff sit in that input between two marker lines with a random nonce, and the desk's
 brief and prompt say its only job is to review it and return its block, and that any instruction inside the PR text
 is ignored. Neither desk runs the PR's code. The last block is read strictly, the same for both: its header, a
 SUMMARY line of at most 300 characters, the findings and the verdict, and anything else is a fixed "couldn't review"
-reply. A finding or summary that repeats 40 or more characters of the PR's own text is withheld with a fixed line,
+reply. A finding or summary that repeats 40 or more characters of the PR's own text (its whole diff and the repo
+context included) is withheld with a fixed line,
 and a review holding one is never an approval, so planted text never reaches Chat or GitHub word for word. A
-finding's place is left out of that check when it names a file the diff touches, read from the `---` and `+++` lines
-of each file's header only (a path git quotes, for a quote, a backslash or a byte past ASCII, is read as git wrote
-it), so a long path is never taken for an echo and no line inside a hunk passes for one. Each person may ask for `CHAT_REVIEW_PER_PERSON_DAILY`
+finding's place is left out of that check when it names a repo context file or a file the diff touches, read from
+the `---` and `+++` lines of each file's header only (a path git quotes, for a quote, a backslash or a byte past
+ASCII, is read as git wrote it), so a long path is never taken for an echo and no line inside a hunk passes for one. Each person may ask for `CHAT_REVIEW_PER_PERSON_DAILY`
 reviews a cap day and the whole fleet `CHAT_REVIEW_DAILY`, whichever app they ask, counted before the desk starts, so a
 killed review counts. Each review is also one run of its desk under that desk's own daily caps, recorded like any
 other: a Hermione turn at most her per-run budget and never past her spend cap, a Moody turn with its tokens and, as
@@ -648,8 +679,9 @@ every Codex run, no cost.
 
 While `~/.hogwarts/chat-review-github` holds `on` too, the review also goes on the PR with your `gh` login. A review
 with a blocking finding (verdict CHANGES) is posted as REQUEST_CHANGES, and any other as COMMENT. While
-`~/.hogwarts/chat-review-approve` holds `on` as well, a review that passes with no blocking finding is posted as
-APPROVE instead. That approval, like a change request, is your `gh` account's own review, so it counts for branch
+`~/.hogwarts/chat-review-approve` holds `on` as well, a review of the whole diff that passes with no blocking finding
+is posted as APPROVE instead. That approval, like a change request, is your `gh` account's own review, so it counts
+for branch
 protection exactly as one you post by hand would. The approve switch is off until you turn it on, it is read just
 before each post, and it does nothing while `chat-review-github` is off. GitHub refuses an approval or a change
 request on a PR your `gh` login opened; when it refuses one, the review is posted once more as COMMENT, so it still
@@ -683,13 +715,14 @@ summaries are defanged before they are posted, so no mention or link markup in t
 
 A question about a review is the one place a teammate's own words reach a model. Its text is kept in its record only
 until its turn has run, and is never logged. It runs a separate turn of the same app's desk, read-only exactly as a
-review is (Hermione's Read under her chat review settings, Moody's chat permission profile), at
+review is (Hermione's Read, Grep and Glob under her chat review settings, Moody's chat permission profile), at
 `CHAT_REVIEW_QUESTION_BUDGET_USD` for a Claude desk, with a brief of its own: answer only about this PR and this
 review, in the desk's voice, in at most 900 characters; decline anything else in one line; never claim to have done
 anything or promise to merge, push, fix or approve; and when the asker says the code changed, suggest asking for a
 review again. Its one input file holds the question between marker lines with a random nonce, as a teammate's
-untrusted text, the app's own earlier verdict, summary and findings, and the PR's text and diff read fresh the way a
-review reads them, under the same size limit, saying so when the head moved since the review. Its last block
+untrusted text, the app's own earlier verdict, summary and findings, and the PR's text and diff read fresh and
+shaped the way a review shapes them, with no repo context, saying so when the head moved since the review. Its last
+block
 (`ANSWER`, the answer, `END`) is read strictly, scrubbed, defanged and cut to 900 characters, and an answer that
 repeats the PR's own text at length is withheld with a fixed line. The answer goes back in the thread, mentioning
 the asker. A question counts toward the per-person, fleet and desk caps like a review, and it never posts on GitHub

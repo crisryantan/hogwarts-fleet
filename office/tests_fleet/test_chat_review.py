@@ -23,7 +23,7 @@ import urllib.request
 from pathlib import Path
 from unittest import mock
 
-from fleet import chat_material, chat_review, common, config, gitops, google_chat, run_desk, safefs, tools
+from fleet import chat_context, chat_material, chat_review, common, config, gitops, google_chat, run_desk, safefs, tools
 from fleet.safefs import FleetError
 from tests_fleet.support import IN_KIT, OFFICE, ONLY_IN_KIT, FleetCase, kit_setting
 
@@ -252,6 +252,8 @@ class ChatCase(FleetCase):
                    "base": {"sha": BASE, "repo": {"full_name": "acme/web-app"}}, "head": {"sha": HEAD}}
         self.diff = INJECTED_DIFF
         self.reads = []
+        self.tree = {"sha": HEAD, "tree": [], "truncated": False}  # the head's tree for the repo context, and its blobs
+        self.blobs = {}
         self.patch(gitops, "run_gh_read", side_effect=self.gh_read)
         self.writes = []
         self.refused_events = ()
@@ -315,7 +317,25 @@ class ChatCase(FleetCase):
             if gist not in self.gists:
                 raise FleetError("gh failed: HTTP 404")
             return json.dumps(self.gists[gist]).encode("utf-8")
+        if kind == "tree":
+            if isinstance(self.tree, BaseException):
+                raise self.tree
+            return json.dumps(self.tree).encode("utf-8")
+        if kind == "blob":
+            sha = argv[2].rsplit("/", 1)[1]
+            if sha not in self.blobs:
+                raise FleetError("gh failed: HTTP 404")
+            raw = self.blobs[sha]
+            return json.dumps({"sha": sha, "size": len(raw), "encoding": "base64",
+                               "content": base64.encodebytes(raw).decode("ascii")}).encode("utf-8")
         return self.diff.encode("utf-8")
+
+    def repo_file(self, path: str, raw: bytes, mode: str = "100644") -> str:
+        """One file of the head's tree, and its blob, for the repo context: its blob sha, as git hashes it."""
+        sha = hashlib.sha1(b"blob %d\x00" % len(raw) + raw).hexdigest()
+        self.tree["tree"].append({"path": path, "mode": mode, "type": "blob", "sha": sha, "size": len(raw)})
+        self.blobs[sha] = raw
+        return sha
 
     def fetch_media(self, url: str, token: str, limit: int) -> bytes:
         self.media_calls.append((url, token))
@@ -354,8 +374,11 @@ class ChatCase(FleetCase):
         brief = self.office / "runs" / turn.desk / turn.brief_name
         files = sorted(os.listdir(folder))  # the one input file (a review's, or a question's), and any images
         text = next(name for name in files if name.endswith(".txt"))
+        context = folder / chat_context.FOLDER
         self.turns.append({"argv": list(turn.argv), "prompt": turn.prompt, "brief": turn.brief, "cwd": cwd,
                            "files": files, "input": (folder / text).read_text(),
+                           "context": {str(path.relative_to(context)): path.read_bytes()
+                                       for path in sorted(context.rglob("*")) if path.is_file()},
                            "images": {name: (folder / name).read_bytes() for name in files if name.startswith("image-")},
                            "brief_file": brief.read_text() if turn.family == "claude" else None, "hand": hand,
                            "timeout": turn.timeout, "desk": turn.desk, "family": turn.family, "model": turn.model,
@@ -549,7 +572,7 @@ class IntakeTests(ChatCase):
         ended = [line for line in self.log_lines() if line["event"] == "ended"]
         self.assertEqual([(line["requester"], line["repo"], line["number"], line["cost_usd"]) for line in ended],
                          [(SENDER, "acme/web-app", 7, 0.42)])
-        self.assertEqual(self.reads, ["pr", "diff"])
+        self.assertEqual(self.reads, ["pr", "diff", "tree"])
         self.assertEqual(self.writes, [])  # chat-review-github is off
 
     def test_hermione_runs_read_only_on_one_input_file_with_the_pr_marked_untrusted(self):
@@ -558,7 +581,7 @@ class IntakeTests(ChatCase):
         [turn] = self.turns
         argv = turn["argv"]
         self.assertEqual(argv[:3], [config.CLAUDE_BIN, "-p", "--restricted"])
-        self.assertEqual(argv[argv.index("--tools") + 1], "Read")
+        self.assertEqual(argv[argv.index("--tools") + 1], "Read,Grep,Glob")
         self.assertEqual(argv[argv.index("--settings") + 1],
                          f"{config.office_desk_dir('hermione')}/{run_desk.CHAT_REVIEW_SETTINGS_FILE}")
         settings = json.loads((self.office / "desks" / "hermione" / run_desk.CHAT_REVIEW_SETTINGS_FILE).read_text())
@@ -1535,6 +1558,234 @@ class GuardTests(ChatCase):
         self.assertEqual(len(self.writes), 1)
 
 
+def deleted_file(path: str, lines) -> str:
+    """One file's part of a diff that deletes it whole, as git writes it."""
+    lines = list(lines)
+    return (f"diff --git a/{path} b/{path}\ndeleted file mode 100644\nindex 1234567..0000000\n--- a/{path}\n"
+            f"+++ /dev/null\n@@ -1,{len(lines)} +0,0 @@\n" + "".join(f"-{line}\n" for line in lines))
+
+
+def changed_file(path: str, added=("print(2)",), removed=("print(1)",)) -> str:
+    """One file's part of a diff that changes it."""
+    added, removed = list(added), list(removed)
+    return (f"diff --git a/{path} b/{path}\nindex 1111111..2222222 100644\n--- a/{path}\n+++ b/{path}\n"
+            f"@@ -1,{len(removed)} +1,{len(added)} @@\n" + "".join(f"-{line}\n" for line in removed)
+            + "".join(f"+{line}\n" for line in added))
+
+
+def cleanup_diff(deleted: int = 78, changed: int = 6) -> str:
+    """A cleanup PR's diff like the live case: many files deleted whole, about 4.6 KB of diff each, and a few
+    changed, about 2 KB each."""
+    parts = []
+    for index in range(deleted):
+        body = [f"class Widget{index}:", "    def size(self):", "        return 1", f"def helper_{index}(value):"]
+        body += [f"    total_{row} = compute_the_value(value, row={row}, scale=0.5)  # keeps the old layout"
+                 for row in range(60)]
+        parts.append(deleted_file(f"legacy/widgets/widget_{index}.py", body))
+    for index in range(changed):
+        parts.append(changed_file(f"app/module_{index}.py", [f"value = {row}  # the new path" for row in range(40)],
+                                  [f"value = {row}" for row in range(30)]))
+    return "".join(parts)
+
+
+class LargeDiffTests(ChatCase):
+    """A PR whose diff is over the cap: each file it deletes whole is one line, and what is still too large is
+    reviewed in part, smallest files first, never approved."""
+
+    def test_a_deleted_file_becomes_one_line_with_its_names_and_a_changed_file_keeps_its_diff(self):
+        removed = ["class Widget:", "    def size(self):", "        return 1", "def helper():", "    pass",
+                   "export async function loadAll() {}", "type Point struct {", "x = 1"]
+        changed = changed_file("app/main.py")
+        diff = deleted_file("old/widgets.py", removed) + changed
+        shaped = chat_review.shape_diff(diff)
+        self.assertEqual(shaped.text.split("\n")[0],
+                         "deleted: old/widgets.py (8 lines) declared Widget, helper, loadAll, Point")
+        self.assertIn(changed.rstrip("\n"), shaped.text)
+        self.assertNotIn("return 1", shaped.text)
+        self.assertEqual((shaped.not_shown, shaped.files, shaped.deleted), ([], 2, 1))
+        self.assertIn("old/widgets.py", chat_review.diff_paths(diff))  # the whole diff's paths keep it
+        many = deleted_file("old/many.py", [f"def f{index:02}_{'n' * 60}(): pass" for index in range(30)])
+        [line] = chat_review.shape_diff(many).text.split("\n")
+        names = line.split(" declared ", 1)[1].split(", ")
+        self.assertEqual((len(names), {len(name) for name in names}),
+                         (chat_review.DECLARED_MAX, {chat_review.DECLARED_NAME_MAX}))
+
+    def test_binary_and_rename_only_sections_stay_as_they_are(self):
+        binary = ("diff --git a/logo.png b/logo.png\ndeleted file mode 100644\nindex 1234567..0000000\n"
+                  "Binary files a/logo.png and /dev/null differ\n")
+        rename = "diff --git a/a.py b/b.py\nsimilarity index 100%\nrename from a.py\nrename to b.py\n"
+        quoted = deleted_file("x", ["def gone(): pass"]).replace("--- a/x", '--- "a/caf\\303\\251.py"')
+        shaped = chat_review.shape_diff(binary + rename + quoted)
+        self.assertTrue(shaped.text.startswith((binary + rename).rstrip("\n")))
+        self.assertTrue(shaped.text.endswith("deleted: café.py (1 lines) declared gone"))
+
+    def test_the_cap_applies_after_collapsing_so_a_mostly_deleted_diff_is_reviewed_whole(self):
+        self.diff = cleanup_diff()
+        self.assertGreater(len(self.diff.encode("utf-8")), 360_000)
+        self.assertGreater(len(self.diff.encode("utf-8")), config.CHAT_REVIEW_DIFF_MAX_BYTES)
+        copied = "total_7 = compute_the_value(value, row=7, scale=0.5)  # keeps the old layout"
+        self.answer = ("ok", block(verdict="PASS", blocking=(),
+                                   non_blocking=(f"app/module_1.py:3 | it reads {copied}",)))
+        self.deliver(msg())
+        self.run_pass()
+        [turn] = self.turns
+        text = turn["input"]
+        self.assertEqual(text.count("\ndeleted: legacy/widgets/widget_"), 78)
+        self.assertIn("deleted: legacy/widgets/widget_5.py (64 lines) declared Widget5, helper_5", text)
+        self.assertIn("DELETED FILES: 78 files the PR deletes whole", text)
+        self.assertIn(changed_file("app/module_3.py", [f"value = {row}  # the new path" for row in range(40)],
+                                   [f"value = {row}" for row in range(30)]).rstrip("\n"), text)
+        self.assertNotIn("not shown:", text)
+        self.assertNotIn(copied, text)  # the deleted lines never reach the turn...
+        [record] = self.records()
+        self.assertEqual(record["outcome"], "reviewed")
+        self.assertNotIn("not_reviewed_count", record)
+        # ...but the echo guard reads the whole diff, so a finding repeating one is withheld.
+        self.assertEqual(record["non_blocking"], [f"N1 app/module_1.py:3 | {chat_review.WITHHELD}"])
+        self.assertNotIn("Partial review", self.texts()[0])
+
+    def test_a_finding_on_a_deleted_file_parses_and_lands_in_the_github_body(self):
+        self.switch(config.CHAT_REVIEW_GITHUB_FILE, True)
+        gone = "services/legacy/reporting/exporters/csv_exporter_v1.py"  # long, so only its place keeps it out
+        self.diff = deleted_file(gone, ["def export(rows):", "    return rows"]) + changed_file("app/main.py")
+        self.answer = ("ok", block(blocking=(f"{gone}:1 | app/main.py still calls export | keep the module",),
+                                   non_blocking=()))
+        self.deliver(msg())
+        self.run_pass()
+        [record] = self.records()
+        self.assertEqual(record["blocking"], [f"B1 {gone}:1 | app/main.py still calls export | keep the module"])
+        [(argv, payload)] = self.writes
+        self.assertEqual(payload["event"], "REQUEST_CHANGES")
+        self.assertNotIn("comments", payload)  # a deleted file has no line to comment on: it stays in the body
+        said = f"{gone}:1: app/main.py still calls export (fix: keep the module)"
+        self.assertIn("- " + chat_review.github_prose(said), payload["body"])
+
+    def sized(self, path: str, size: int) -> str:
+        """A changed file's part of a diff of about size bytes."""
+        part = changed_file(path, ["x" * 70] * max(1, size // 72), [])
+        return part
+
+    def test_an_oversized_diff_shows_whole_files_smallest_first_and_names_the_rest(self):
+        self.patch(config, "CHAT_REVIEW_DIFF_MAX_BYTES", 2000)
+        small, middle, large, huge = (self.sized("a.py", 300), self.sized("b.py", 800), self.sized("c.py", 1500),
+                                      self.sized("d.py", 3000))
+        self.diff = huge + middle + large + small
+        self.deliver(msg())
+        self.run_pass()
+        [turn] = self.turns
+        text = turn["input"]
+        inside = text.split("DIFF  git diff")[1]
+        self.assertLess(inside.index("+++ b/b.py"), inside.index("+++ b/a.py"))  # shown in the diff's own order
+        self.assertNotIn("+++ b/c.py", inside)
+        self.assertNotIn("+++ b/d.py", inside)
+        self.assertIn("PARTIAL DIFF: 2 of the 4 files are not shown", inside)
+        self.assertIn(f"not shown: d.py (+{huge.count(chr(10) + '+x')} -0)", inside)
+        self.assertIn("not shown: c.py (+", inside)
+        self.assertIn("PARTIAL REVIEW: 2 of the 4 files did not fit", text.split("<<<UNTRUSTED PR DATA")[0])
+        self.assertIn("say in your summary what you could not check", turn["brief"])
+
+    def test_a_partial_review_never_approves_and_names_what_it_left_out(self):
+        self.switch(config.CHAT_REVIEW_GITHUB_FILE, True)
+        self.switch(config.CHAT_REVIEW_APPROVE_FILE, True)
+        self.patch(config, "CHAT_REVIEW_DIFF_MAX_BYTES", 2000)
+        self.diff = self.sized("a.py", 300) + self.sized("big/one.py", 2500) + self.sized("big/two.py", 2600)
+        self.answer = ("ok", block(verdict="PASS", blocking=(), non_blocking=()))
+        self.deliver(msg())
+        self.run_pass()
+        [record] = self.records()
+        self.assertEqual((record["not_reviewed"], record["not_reviewed_count"]), (["big/one.py", "big/two.py"], 2))
+        [(argv, payload)] = self.writes
+        self.assertEqual(payload["event"], "COMMENT")  # a PASS of part of a PR is no approval
+        self.assertIn("Partial review: 2 changed files did not fit and were not reviewed:\n"
+                      f"- {chat_review.github_prose('big/one.py')}\n- {chat_review.github_prose('big/two.py')}",
+                      payload["body"])
+        self.assertIn(chat_review.github_prose(SUMMARY), payload["body"])  # the summary still stands
+        reply = self.texts()[0].splitlines()
+        self.assertEqual(reply[:5], [SUMMARY, f"Verdict: PASS on acme/web-app#7 at {HEAD[:12]}",
+                                     "Partial review: 2 changed files did not fit and were not reviewed:",
+                                     "- big/one.py", "- big/two.py"])
+        self.assertEqual([line["not_reviewed_count"] for line in self.log_lines() if line["event"] == "ended"], [2])
+        self.assertEqual(chat_review.github_event("PASS", [], [], SUMMARY, partial=True), "COMMENT")
+        self.assertEqual(chat_review.github_event("CHANGES", ["B1 a.py:1 | x | y"], [], SUMMARY, partial=True),
+                         "REQUEST_CHANGES")
+        self.assertEqual(chat_review.github_event("PASS", [], [], SUMMARY), "APPROVE")
+
+    def test_a_partial_review_with_blocking_findings_still_requests_changes(self):
+        self.switch(config.CHAT_REVIEW_GITHUB_FILE, True)
+        self.patch(config, "CHAT_REVIEW_DIFF_MAX_BYTES", 2000)
+        self.diff = changed_file("x.py", ["print(1)", "print(2)"], []) + self.sized("big.py", 2500)
+        self.deliver(msg())
+        self.run_pass()
+        [(argv, payload)] = self.writes
+        self.assertEqual(payload["event"], "REQUEST_CHANGES")
+        self.assertIn("Partial review: 1 changed file did not fit and was not reviewed:\n"
+                      f"- {chat_review.github_prose('big.py')}", payload["body"])
+
+    def test_a_partial_review_comments_inline_only_on_files_it_showed(self):
+        self.switch(config.CHAT_REVIEW_GITHUB_FILE, True)
+        self.patch(config, "CHAT_REVIEW_DIFF_MAX_BYTES", 2000)
+        self.diff = (changed_file("x.py", ["print(1)", "print(2)"], []) + self.sized("big.py", 2500)
+                     + deleted_file("old.py", ["def gone(): pass"]))
+        self.answer = ("ok", block(blocking=("big.py:3 | it breaks | fix it", "x.py:2 | prints at import | remove it"),
+                                   non_blocking=("old.py:1 | it went | fine",)))
+        self.deliver(msg())
+        self.run_pass()
+        [record] = self.records()
+        self.assertEqual(record["hunks"], {"x.py": [[1, 2]]})  # nothing of a file not shown or deleted whole
+        [(argv, payload)] = self.writes
+        self.assertEqual([(comment["path"], comment["line"]) for comment in payload["comments"]], [("x.py", 2)])
+        self.assertIn("- " + chat_review.github_prose("big.py:3: it breaks (fix: fix it)"), payload["body"])
+        self.assertIn("- " + chat_review.github_prose("old.py:1: it went"), payload["body"])
+
+    def test_a_file_part_with_no_path_lines_is_named_from_its_header(self):
+        self.patch(config, "CHAT_REVIEW_DIFF_MAX_BYTES", 120)
+        binary = ("diff --git a/img/logo.png b/img/logo.png\nindex 1..2 100644\n"
+                  "Binary files a/img/logo.png and b/img/logo.png differ\n")
+        rename = "diff --git a/a.py b/b.py\nsimilarity index 100%\nrename from a.py\nrename to b.py\n"
+        shaped = chat_review.shape_diff(rename + binary)
+        self.assertEqual([path for path, _, _ in shaped.not_shown], ["img/logo.png"])
+
+    def test_a_partial_review_names_at_most_ten_files_and_counts_the_rest(self):
+        self.patch(config, "CHAT_REVIEW_DIFF_MAX_BYTES", 2000)
+        self.diff = self.sized("a.py", 300) + "".join(self.sized(f"big/f{index:02}.py", 2100) for index in range(13))
+        self.answer = ("ok", block(verdict="PASS", blocking=(), non_blocking=()))
+        self.deliver(msg())
+        self.run_pass()
+        [record] = self.records()
+        self.assertEqual((len(record["not_reviewed"]), record["not_reviewed_count"]), (10, 13))
+        body = chat_review.github_body("Dev", HEAD, "PASS", [], [], summary=SUMMARY,
+                                       **chat_review._left(record))
+        self.assertIn(f"- {chat_review.github_prose('big/f09.py')}\n- and 3 more", body)
+        self.assertNotIn(chat_review.github_prose("big/f10.py"), body)
+        self.assertIn("- big/f09.py\n- and 3 more", self.texts()[0])
+        self.assertEqual(self.turns[0]["input"].count("not shown: big/f"), 13)
+
+    def test_a_pr_whose_changed_files_are_each_over_the_cap_is_too_large(self):
+        self.patch(config, "CHAT_REVIEW_DIFF_MAX_BYTES", 2000)
+        self.diff = (deleted_file("old.py", ["def gone(): pass"]) + self.sized("one.py", 2500)
+                     + self.sized("two.py", 2600))
+        self.deliver(msg())
+        self.run_pass()
+        self.patch(config, "CHAT_REVIEW_DIFF_READ_MAX_BYTES", 1000)
+        self.diff = self.sized("a.py", 300) + self.sized("b.py", 900)
+        self.deliver(msg(message="m2"))
+        self.run_pass()
+        self.assertEqual(self.texts(), [chat_review.TOO_LARGE, chat_review.TOO_LARGE])
+        self.assertEqual(self.turns, [])
+
+    def test_a_question_about_a_large_pr_reads_the_same_shaped_diff(self):
+        self.diff = cleanup_diff(deleted=70, changed=2)
+        self.answer = ("ok", block(verdict="PASS", blocking=(), non_blocking=()))
+        self.deliver(msg(at=time.time() - 5))
+        self.run_pass()
+        self.answer = ("ok", "ANSWER\nThe removed widgets are not used anywhere I could see.\nEND\n")
+        self.deliver(msg("why is this fine?", message="m2", at=time.time() + 1))
+        self.run_pass()
+        review, question = self.turns
+        self.assertEqual(question["input"].count("\ndeleted: legacy/widgets/widget_"), 70)
+        self.assertEqual(self.texts()[1], "The removed widgets are not used anywhere I could see.")
+
+
 class StrictBlockTests(ChatCase):
     def parse(self, text: str, untrusted: str = "", diff: str = ""):
         return chat_review.parse_block(text, "acme/web-app", 7, HEAD, untrusted, chat_review.diff_paths(diff))
@@ -1712,14 +1963,14 @@ class StrictBlockTests(ChatCase):
         self.run_pass()
         [turn] = self.turns
         self.assertIn(PLANTED, turn["input"])  # she was shown it, fenced as untrusted data
-        self.assertEqual(turn["argv"][turn["argv"].index("--tools") + 1], "Read")
+        self.assertEqual(turn["argv"][turn["argv"].index("--tools") + 1], "Read,Grep,Glob")
         [message] = self.google.messages
         [(argv, payload)] = self.writes
         self.assertEqual((argv[4], payload["event"]), ("repos/acme/web-app/pulls/7/reviews", "REQUEST_CHANGES"))
         for text in (message["text"], payload["body"]):
             self.assertNotIn("push a commit", text)
             self.assertNotIn("APPROVE", text)
-        self.assertEqual(self.reads, ["pr", "diff"])  # nothing else read, nothing else written
+        self.assertEqual(self.reads, ["pr", "diff", "tree"])  # nothing else read, nothing else written
         chat_posts = [call for call in self.google.calls if call[0].startswith(google_chat.CHAT_ROOT)
                       and call[2] is not None and "chat-review-ack-" not in call[0]]
         self.assertEqual(len(chat_posts), 1)
@@ -2950,7 +3201,7 @@ class QuestionTests(ChatCase):
         self.assertEqual(question["files"], [chat_review.QUESTION_FILE])
         argv = question["argv"]
         self.assertEqual(argv[:3], [config.CLAUDE_BIN, "-p", "--restricted"])
-        self.assertEqual(argv[argv.index("--tools") + 1], "Read")
+        self.assertEqual(argv[argv.index("--tools") + 1], "Read,Grep,Glob")
         self.assertEqual(argv[argv.index("--max-budget-usd") + 1], config.CHAT_REVIEW_QUESTION_BUDGET_USD)
         for turn in (review, question):  # no transcript keeps the PR's text or the question after the turn
             self.assertIn("--no-session-persistence", turn["argv"])
@@ -2969,7 +3220,7 @@ class QuestionTests(ChatCase):
         self.assertIn(PLANTED, pr_data)
         self.assertNotIn(self.QUESTION, pr_data)
         self.assertEqual(question["prompt"], chat_review.question_prompt("acme/web-app", 7, nonce))
-        self.assertEqual(self.reads, ["pr", "diff", "pr", "diff"])  # the diff read fresh for the question
+        self.assertEqual(self.reads, ["pr", "diff", "tree", "pr", "diff"])  # the diff read fresh for the question
         self.assertEqual(self.google.messages[-1]["text"], said(self.ANSWER))
         self.assertEqual(self.google.messages[-1]["thread"], THREAD)
         self.assertEqual(len(self.google.acks), 1)  # a question is answered, not acknowledged
