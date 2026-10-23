@@ -2214,32 +2214,32 @@ def thread_history(record: dict, deadline: float) -> list:
     """At most HISTORY_MAX of the messages in the record's thread created before its own, oldest first, each one line
     (_history_line) and all of them at most HISTORY_BLOCK_MAX: the app's own replies, and those of the people of
     CHAT_REVIEW_SENDERS who are members of the conversation. Any other sender's message, another app's included, is
-    left out whole. Read with the app's read token, in at most HISTORY_PAGES pages, each call begun before deadline
-    (time.monotonic); FleetError when nothing could be read by then."""
+    left out whole. Read with the app's read token, in at most HISTORY_PAGES pages, every call (the token's refresh
+    included) given only the time left before deadline (time.monotonic) as its timeout; FleetError when nothing could
+    be read by then."""
     app, space, thread = app_of(record), record["space"], record["thread"]
 
-    def in_time() -> None:
-        if time.monotonic() >= deadline:
+    def left() -> float:
+        seconds = deadline - time.monotonic()
+        if seconds <= 0:
             raise FleetError("the thread's messages could not be read in time")
+        return seconds
 
-    token = google_chat.read_token(app)
-    in_time()
-    member = google_chat.app_member(space, token)
+    token = google_chat.read_token(app, timeout=left())
+    member = google_chat.app_member(space, token, timeout=left())
     if member is None:
         raise FleetError("the app is not a member of the conversation")
     users = set()
     for email in config.CHAT_REVIEW_SENDERS:
-        in_time()
-        user = google_chat.member_user(space, email, token)
+        user = google_chat.member_user(space, email, token, timeout=left())
         if user is not None:
             users.add(user)
     kept, page = [], None
     for index in range(HISTORY_PAGES):
         if index and time.monotonic() >= deadline:
             break  # what was read is kept: the turn goes on with it
-        in_time()
         messages, page = google_chat.thread_messages(space, thread, _taken_us(record), member[0], frozenset(users),
-                                                     token, page)
+                                                     token, page, timeout=left())
         kept += [line for line in map(_history_line, (item for item in messages if "text" in item)) if line]
         if len(kept) >= HISTORY_MAX or page is None:
             break
@@ -2263,7 +2263,10 @@ def _history_line(message: dict) -> str:
         return ""
     if len(flat) > HISTORY_TEXT_MAX:
         flat = flat[:HISTORY_TEXT_MAX - 3].rstrip() + "..."
-    label = "FROM YOU" if message.get("own") is True else f"FROM TEAMMATE {display_name(message.get('sender_name'))}"
+    # Google's credential shapes out of the name before display_name cuts it, so no cut leaves part of one.
+    name = message.get("sender_name")
+    name = GOOGLE_SECRET.sub("[token]", common.normalized(name)) if isinstance(name, str) else name
+    label = "FROM YOU" if message.get("own") is True else f"FROM TEAMMATE {display_name(name)}"
     return f"{label}: {flat}"
 
 

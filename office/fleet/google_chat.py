@@ -241,10 +241,10 @@ def authorize_command(app: str) -> str:
     return helper_command(AUTHORIZE_HELPER, app, "<client.json>")
 
 
-def read_token(app: str) -> str:
+def read_token(app: str, timeout: Optional[float] = None) -> str:
     """Your short-lived read-only access token for app's project, minted from its stored refresh token, kept in this
     process's memory only. ReadAuthError when the authorization is missing, refused, or granted any scope but
-    READ_SCOPES; GoogleError when Google could not be asked. It only reads."""
+    READ_SCOPES; GoogleError when Google could not be asked (within timeout, when given: send). It only reads."""
     now = int(time.time())
     held = _READ.get(app)
     if held is not None and held["until"] - TOKEN_MARGIN_SECONDS > now:
@@ -253,7 +253,7 @@ def read_token(app: str) -> str:
     try:
         answer = send(TOKEN_URL, None, {"grant_type": "refresh_token", "client_id": stored["client_id"],
                                         "client_secret": stored["client_secret"],
-                                        "refresh_token": stored["refresh_token"]})
+                                        "refresh_token": stored["refresh_token"]}, timeout=timeout)
     except GoogleError as exc:
         if exc.status in (400, 401, 403):  # invalid_grant (revoked or expired) or invalid_client
             raise ReadAuthError(f"Google refused the read-only Chat authorization (HTTP {exc.status}): run"
@@ -300,11 +300,15 @@ def _opener() -> urllib.request.OpenerDirector:
                                        urllib.request.HTTPSHandler(context=ssl.create_default_context()))
 
 
-def send(url: str, token: Optional[str], payload: Optional[dict]) -> dict:
+def send(url: str, token: Optional[str], payload: Optional[dict], timeout: Optional[float] = None) -> dict:
     """One request and the JSON object answered. The token endpoint gets payload as a form and no token. Chat gets
     payload as JSON with the app's token as its bearer (a post), or no payload with your read token (a read): a read
     with the app's token, or a post with the read token, is refused before anything is sent. Only those two Google
-    hosts are reached. Tests replace this."""
+    hosts are reached, each call within HTTP_TIMEOUT_SECONDS, or timeout when it is less (none left: refused before
+    anything is sent). Tests replace this."""
+    seconds = HTTP_TIMEOUT_SECONDS if timeout is None else min(HTTP_TIMEOUT_SECONDS, timeout)
+    if not seconds > 0:
+        raise GoogleError("no time is left for the call")
     headers = {}
     if url == TOKEN_URL:
         if token is not None or not isinstance(payload, dict):
@@ -327,7 +331,7 @@ def send(url: str, token: Optional[str], payload: Optional[dict]) -> dict:
         raise GoogleError("the chat review calls only Google's token endpoint and Chat")
     request = urllib.request.Request(url, data=body, headers=headers)
     try:
-        with _opener().open(request, timeout=HTTP_TIMEOUT_SECONDS) as answer:
+        with _opener().open(request, timeout=seconds) as answer:
             raw = answer.read(RESPONSE_MAX_BYTES + 1)
     except urllib.error.HTTPError as exc:
         raise GoogleError(f"Google answered HTTP {exc.code}", status=exc.code) from None
@@ -353,13 +357,13 @@ def _space(space: str) -> str:
     return space
 
 
-def _read(url: str, token: str) -> dict:
-    """One Chat read with a read token. Chat refusing the token itself (HTTP 401) is a ReadAuthError, so reading
-    stops as it does when the refresh is refused."""
+def _read(url: str, token: str, timeout: Optional[float] = None) -> dict:
+    """One Chat read with a read token, within timeout when given (send). Chat refusing the token itself (HTTP 401) is
+    a ReadAuthError, so reading stops as it does when the refresh is refused."""
     if not _is_read_token(token):
         raise GoogleError("Chat is read only with the read-only authorization")
     try:
-        return send(url, token, None)
+        return send(url, token, None, timeout=timeout)
     except ReadAuthError:
         raise
     except GoogleError as exc:
@@ -381,12 +385,12 @@ def _joined(answer: dict, space: str, kind: str) -> Optional[str]:
     return name
 
 
-def app_member(space: str, token: str) -> Optional[tuple]:
+def app_member(space: str, token: str, timeout: Optional[float] = None) -> Optional[tuple]:
     """(the app's user name in space, the microsecond its membership began or None) when the app is a joined member
     of it, else None: spaces.members.get of spaces/<id>/members/app, with your read token for that app's project,
     which Chat answers with that project's own app."""
     try:
-        answer = _read(f"{CHAT_ROOT}/{_space(space)}/members/app", token)
+        answer = _read(f"{CHAT_ROOT}/{_space(space)}/members/app", token, timeout)
     except GoogleError as exc:
         if exc.status in (403, 404):  # not a member, or a conversation you are not in
             return None
@@ -395,12 +399,12 @@ def app_member(space: str, token: str) -> Optional[tuple]:
     return None if name is None else (name, time_us(answer.get("createTime")))
 
 
-def member_user(space: str, email: str, token: str) -> Optional[str]:
+def member_user(space: str, email: str, token: str, timeout: Optional[float] = None) -> Optional[str]:
     """The Chat user name of the person with that email when they are a joined human member of space, else None."""
     if not isinstance(email, str) or EMAIL.fullmatch(email) is None:
         raise GoogleError("that is not an email")
     try:
-        answer = _read(f"{CHAT_ROOT}/{_space(space)}/members/{urllib.parse.quote(email, safe='@')}", token)
+        answer = _read(f"{CHAT_ROOT}/{_space(space)}/members/{urllib.parse.quote(email, safe='@')}", token, timeout)
     except GoogleError as exc:
         if exc.status in (403, 404):
             return None
@@ -498,11 +502,12 @@ def list_messages(space: str, after_us: int, app_user: str, token: str, page: Op
 
 
 def thread_messages(space: str, thread: str, before_us: int, app_user: str, users: frozenset, token: str,
-                    page: Optional[str] = None, size: int = HISTORY_PAGE_SIZE) -> tuple:
+                    page: Optional[str] = None, size: int = HISTORY_PAGE_SIZE,
+                    timeout: Optional[float] = None) -> tuple:
     """One page of thread's messages created before before_us, newest first, with your read token: (messages, the next
     page's token or None), for an answer's context. Each is its time and whether the app (app_user) sent it (own); only
     one the app sent, or a person whose Chat user name is in users sent, is also its sender, the sender's display name
-    and its whole text, so nothing else of any other message ever leaves here."""
+    and its whole text, so nothing else of any other message ever leaves here. Within timeout when given (send)."""
     if not isinstance(app_user, str) or USER.fullmatch(app_user) is None:
         raise GoogleError("the app's user name is not a Chat user name")
     if not isinstance(thread, str) or THREAD.fullmatch(thread) is None or not thread.startswith(_space(space) + "/"):
@@ -515,7 +520,7 @@ def thread_messages(space: str, thread: str, before_us: int, app_user: str, user
         if not isinstance(page, str) or PAGE_TOKEN.fullmatch(page) is None:
             raise GoogleError("Chat's page token is not one")
         query["pageToken"] = page
-    answer = _read(f"{CHAT_ROOT}/{space}/messages?{urllib.parse.urlencode(query)}", token)
+    answer = _read(f"{CHAT_ROOT}/{space}/messages?{urllib.parse.urlencode(query)}", token, timeout)
     found = answer.get("messages", [])
     following = answer.get("nextPageToken") or None
     if not isinstance(found, list) or (following is not None and (not isinstance(following, str)
