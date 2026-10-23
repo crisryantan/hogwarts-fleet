@@ -2123,7 +2123,7 @@ def parse_answer(text: object, untrusted: str = "", withheld: str = ANSWER_WITHH
     kept: list = []
     for line in body:
         cleaned = defanged(GOOGLE_SECRET.sub("[token]", common.scrubbed_line(GOOGLE_SECRET.sub(
-            "[token]", common.normalized(line)), ANSWER_MAX)))
+            "[token]", common.normalized(typographic(line))), ANSWER_MAX)))
         if cleaned or (kept and kept[-1]):
             kept.append(cleaned)
     while kept and not kept[-1]:

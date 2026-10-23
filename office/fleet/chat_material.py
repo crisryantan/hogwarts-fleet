@@ -73,8 +73,10 @@ WORD = re.compile(MARKUP.pattern + "|" + ADDRESS.pattern, re.IGNORECASE)
 # endings count, so a file name such as "build.py" or "node.js" is never taken for one.
 BARE_TLDS = ("com", "org", "net", "io", "dev", "app", "ai", "co", "edu", "gov", "info", "me", "page", "site", "tech",
              "us", "uk", "au", "ca", "de", "fr", "jp", "nz", "sg", "in")
+# The whole host must end there (never "example.com.internal" read as "example.com"), and a port, path, query or
+# fragment right after it is kept, so the guard checks the link as written.
 BARE_HOST = re.compile(r"(?<![\w@./:-])((?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+(?:" + "|".join(BARE_TLDS)
-                       + r"))(?![\w-])(/[^\s<>|]*)?", re.IGNORECASE)
+                       + r"))(?![\w-]|\.[a-z0-9])((?::[0-9]+)?(?:[/?#][^\s<>|]*)?)", re.IGNORECASE)
 RESOURCE = re.compile(r"[A-Za-z0-9._~+/=-]{1,1000}")
 # A gist file of one of these types is no text, whatever its content says.
 NOT_TEXT = ("image/", "audio/", "video/", "font/", "application/octet-stream", "application/pdf", "application/zip",
@@ -143,12 +145,14 @@ def _unique(items: list) -> list:
 def _addresses(text: str) -> list:
     """Each address in text, in its order, Chat's <url|label> markup taken as its url, with the marks around a word
     let go."""
-    found = [match.group(1) or match.group(0) for match in WORD.finditer(text)]
-    # An http link is read over https, the only scheme the reader fetches; a bare host the same way.
-    found = ["https://" + url[len("http://"):] if url.lower().startswith("http://") else url for url in found]
-    bare = WORD.sub(" ", text)
-    found += ["https://" + match.group(1) + (match.group(2) or "") for match in BARE_HOST.finditer(bare)]
-    return [url.rstrip(")]>\"'.,;:!?") for url in found if url.rstrip(")]>\"'.,;:!?")]
+    found = [(match.start(), match.group(1) or match.group(0)) for match in WORD.finditer(text)]
+    # An http link is read over https, the only scheme the reader fetches; a bare host the same way, in its place in
+    # the message, with every written link blanked first so none is read twice.
+    found = [(at, "https://" + url[len("http://"):] if url.lower().startswith("http://") else url) for at, url in found]
+    bare = WORD.sub(lambda match: " " * len(match.group(0)), text)
+    found += [(match.start(), "https://" + match.group(1) + match.group(2)) for match in BARE_HOST.finditer(bare)]
+    urls = [url.rstrip(")]>\"'.,;:!?") for _, url in sorted(found, key=lambda pair: pair[0])]
+    return [url for url in urls if url]
 
 
 def _host_of(url: str) -> Optional[str]:

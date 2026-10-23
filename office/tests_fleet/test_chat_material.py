@@ -374,7 +374,15 @@ class WebTests(MaterialCase):
                          ["https://docs.example.com"])
         self.assertEqual(chat_material.plan("see example.org/guide/start.")["links"], ["https://example.org/guide/start"])
         self.assertEqual(chat_material.plan("old one at http://example.net/a")["links"], ["https://example.net/a"])
-        for text in ("edit build.py and node.js", "mail me at dev@example.com", "version 1.2.3", "e.g. this"):
+        self.assertEqual(chat_material.plan("example.org?view=guide and example.org:443/a")["links"],
+                         ["https://example.org?view=guide", "https://example.org:443/a"])
+        self.assertEqual(chat_material.plan("first.example.com then https://a.example.org https://b.example.org "
+                                            "https://c.example.org")["links"],
+                         ["https://first.example.com", "https://a.example.org", "https://b.example.org"])
+        with self.assertRaises(chat_material.Refused):
+            chat_material.check_url(chat_material.plan("example.org:8080/x")["links"][0])
+        for text in ("edit build.py and node.js", "mail me at dev@example.com", "version 1.2.3", "e.g. this",
+                     "see example.com.internal now"):
             with self.subTest(text=text):
                 self.assertEqual(chat_material.plan(text), {})
 

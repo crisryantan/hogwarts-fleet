@@ -1904,6 +1904,8 @@ class StrictBlockTests(ChatCase):
         self.assertEqual(chat_review.scrubbed("I can\u2019t confirm your team\u2019s \u201cusage\u201d \u2014 yet\u2026"),
                          "I can't confirm your team's \"usage\" - yet...")
         self.assertEqual(chat_review._flat("team\u2019s"), chat_review._flat("team's"))
+        answer = chat_review.parse_answer("ANSWER\nI can\u2019t say\u2014yet.\nEND\n", "")
+        self.assertIn("I can't say-yet.", answer if isinstance(answer, str) else " ".join(answer))
 
     def test_github_text_is_plain_prose_that_links_and_references_nothing(self):
         source = "see #12, GH-4, [x](y), *b*, www.example.org and :smile:"
