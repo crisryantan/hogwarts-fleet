@@ -37,8 +37,9 @@ malformed criterion: it never runs, and the evidence gives the plain reason.
 Every check runs in a process group of its own that ends with it, and inherits the locks its caller holds for it
 (run_command): the task's review lock and Ollivander's launch gate, so a check still running after its caller is
 killed keeps every other review, verify or closer pass off its worktree, and no CLI update starts under it. Before the
-merge and after it, each command starts only through command_gate, which reads Ollivander's stop file and update marker
-again under the gate: a stop starts no further command, and the commands that ran keep their results.
+merge and after it, each command starts only through command_gate, which reads Ollivander's stop and update marker
+again under the gate: a stop of the codex family (each check runs in the Codex sandbox), of every family or a CLI update
+starts no further command, and the commands that ran keep their results.
 
 A check's output, before the merge and after it, is read back only through the descriptor its file was made with
 (read_output), never by its name in the scratch folder the command can write, and is normalized and scrubbed whole
@@ -304,16 +305,18 @@ def _end_group(child: subprocess.Popen) -> None:
 def command_gate(still_on: Optional[Callable[[], None]] = None) -> Iterator[int]:
     """Entered right before one check command starts, before the merge (verify) and after it (the closer's
     _command_launch): holds Ollivander's launch gate (his update lock, shared, as every desk run does), calls still_on,
-    the caller's own switch, which raises to start nothing, then reads his stop file and update marker once more under
-    the gate. Yields the gate's fd, which the caller hands over (safefs.hand_over) to the command's process with its
+    the caller's own switch, which raises to start nothing, then reads his stop and update marker once more under
+    the gate: every check runs in the Codex sandbox, so a stop of the codex family holds it, as does a stop of every
+    family. Yields the gate's fd, which the caller hands over (safefs.hand_over) to the command's process with its
     other locks, so no CLI update replaces a binary while the command runs, even if this process is killed.
     run_desk.Stopped when a CLI update holds the gate or a stop is in place: no command starts."""
     with run_desk.launch_gate() as gate_fd:
         if still_on is not None:
             still_on()
-        if run_desk.stop_requested():
-            raise run_desk.Stopped("Ollivander's stop file or a CLI update is in place, so no check command starts;"
-                                   " castle ollivander clear removes a stop")
+        held = run_desk.stop_reason(config.CHECK_STOP_FAMILY)
+        if held is not None:
+            raise run_desk.Stopped(f"{held} is in place, so no check command starts; castle ollivander clear removes"
+                                   " a stop")
         yield gate_fd
 
 

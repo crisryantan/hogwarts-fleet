@@ -22,7 +22,8 @@ falls back only in its own family, since the cross-family review depends on it. 
 the desk waits: no run starts, its owl stays in its inbox, the owner hears once, and the Owl Post starts the run again
 once one of those models is up or half-open (resume_waiting). An automatic review whose reviewer desk waits so keeps
 its handoff pending, and the Owl Post starts that review again the same way (note_waiting with task_id). Only while the owner's cross-family-failover switch is on
-(common.opt_in_on) may a desk whose own family is all down run on the other family, and only a desk with launch settings
+(common.opt_in_on) may a desk whose own family is all down run on the other family, never while Ollivander's stop holds
+that family, and only a desk with launch settings
 for it whose runs no review reads (can_flip): the review loop and the closer pick a reviewer and read its run by the
 desk's registered family, so a build desk or a reviewer never flips. A review round whose author's latest run on the
 task used the reviewer's own family is refused (_check_review), so a review is never same-family.
@@ -401,6 +402,15 @@ def _check_review(conn, plan: dict, now: int) -> None:
                      ())
 
 
+def _family_stopped(family: str) -> bool:
+    """Whether Ollivander's stop holds family's launches now (config.stop_names), True when that cannot be read."""
+    try:
+        with safefs.opened_dir(config.OFFICE_ROOT, config.STATE_DIR) as fd:
+            return any(safefs.lstat(fd, name) is not None for name in config.stop_names(family))
+    except (FleetError, OSError):
+        return True
+
+
 def choose(conn, plan: dict, now: Optional[int] = None, claim: bool = False) -> Optional[dict]:
     """The model the planned run should use instead of its own, {model, effort, family, from}, or None when its own
     is up (or half-open). claim (the last plan, under the launch lock) makes a half-open model this launch's probe.
@@ -417,8 +427,9 @@ def choose(conn, plan: dict, now: Optional[int] = None, claim: bool = False) -> 
             if _take(state, own, model, ts, claim):
                 return None
             tried = [(own, model)]
-            # The other family only by the owner's switch, and only for a desk whose runs no review reads.
-            flip = can_flip(desk, own) and cross_family_on()
+            # The other family only by the owner's switch, only for a desk whose runs no review reads, and never while
+            # Ollivander's stop holds that family, so no probe of a family that cannot launch is ever claimed.
+            flip = can_flip(desk, own) and cross_family_on() and not _family_stopped(other_family(own))
             cap = config.COST_ORDER.index(_cap(conn, desk, own, model))
             for family in (own, other_family(own)) if flip else (own,):
                 for entry in ladder(desk, family):

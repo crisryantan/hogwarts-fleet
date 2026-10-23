@@ -810,16 +810,36 @@ class CliTests(WandsCase):
         state = self.db_path.parent
         code, out, _ = self.cli("ollivander", "clear")
         self.assertEqual(code, 0)
-        self.assertEqual(out["data"], {"cleared": False, "removed": [], "stop_file": str(state / wands.STOP_FILE),
-                                       "note": "no stop was on: neither the stop file nor an update marker was in"
+        self.assertEqual(out["data"], {"cleared": False, "removed": [], "stopped": [],
+                                       "stop_file": str(state / wands.STOP_FILE),
+                                       "note": "no stop was on: neither a stop file nor an update marker was in"
                                                " place, so nothing was removed"})
-        for names, note in (((wands.STOP_FILE,), "removed the stop file"),
-                            ((wands.UPDATING_FILE,), "removed the update marker a CLI update left"),
-                            ((wands.STOP_FILE, wands.UPDATING_FILE),
-                             "removed the stop file and the update marker a CLI update left")):
+        codex, claude = wands.STOP_FAMILY_FILES["codex"], wands.STOP_FAMILY_FILES["claude"]
+        for names, note in (((wands.STOP_FILE,), "removed the stop of every family (why: stopped)"),
+                            ((wands.UPDATING_FILE,), "removed the update marker a CLI update left (why: stopped)"),
+                            ((codex,), "removed the stop of the codex family (why: stopped)"),
+                            ((wands.STOP_FILE, claude, codex, wands.UPDATING_FILE),
+                             "removed the stop of every family (why: stopped); the stop of the claude family (why:"
+                             " stopped); the stop of the codex family (why: stopped); the update marker a CLI update"
+                             " left (why: stopped)")):
             with self.subTest(names=names):
                 for name in names:
                     (state / name).write_text("1 stopped\n")
                 code, out, _ = self.cli("ollivander", "clear")
                 self.assertEqual((code, out["data"]["cleared"], out["data"]["removed"], out["data"]["note"]),
                                  (0, True, list(names), note))
+                self.assertFalse(any((state / name).exists() for name in names))
+
+    def test_ollivander_clear_says_which_family_each_stop_held_and_why(self):
+        state = self.db_path.parent
+        (state / wands.STOP_FAMILY_FILES["codex"]).write_text("1700000000 codex --version went from 1.0 to 1.1\n")
+        (state / wands.STOP_FILE).write_text("")  # one made by hand gives no reason
+        os.symlink(self.tmp / "elsewhere", state / wands.STOP_FAMILY_FILES["claude"])
+        code, out, _ = self.cli("ollivander", "clear")
+        self.assertEqual(code, 0)
+        self.assertEqual(out["data"]["stopped"], [
+            {"stopped": "every", "file": wands.STOP_FILE, "why": "no reason given"},
+            {"stopped": "claude", "file": wands.STOP_FAMILY_FILES["claude"], "why": "it could not be read"},
+            {"stopped": "codex", "file": wands.STOP_FAMILY_FILES["codex"],
+             "why": "codex --version went from 1.0 to 1.1"}])
+        self.assertEqual(os.listdir(state).count(wands.STOP_FAMILY_FILES["claude"]), 0)

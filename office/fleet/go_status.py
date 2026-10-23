@@ -89,7 +89,10 @@ def entries(conn, now: int, watched: Optional[Callable] = None) -> tuple:
         mine = [line for line in builds if line.startswith(f"{task['id']} -> ")][:config.GO_STATUS_BUILDS]
         lines = [f"- {line}" for line in mine] or [f"- {task['id']} -> no build yet -> {task['status']}"]
         if item["held"]:
-            lines.append("  held: Ollivander's stop refused its run; the Owl Post starts it again once the stop clears")
+            families = sorted({config.desk_family(child["desk"]) or "every" for child in item["children"]
+                               if child["id"] in item["held"]})
+            lines.append(f"  held: Ollivander's stop ({', '.join(families)} family) refused its run; the Owl Post"
+                         " starts it again once the stop clears")
         events = [newest[key] for key in [task["id"], *children[task["id"]]] if key in newest]
         if events:
             event = max(events, key=lambda row: row["id"])

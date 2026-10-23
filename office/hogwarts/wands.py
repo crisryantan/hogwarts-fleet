@@ -24,6 +24,7 @@ import errno
 import os
 import re
 import sqlite3
+import stat
 from pathlib import Path
 from typing import Iterable, Optional
 
@@ -37,8 +38,10 @@ MODEL_NAME = re.compile(r"[a-z0-9][a-z0-9.\-]{1,62}")
 CLAUDE_ID = re.compile(r"claude-[a-z0-9-]{1,60}")
 CATALOG_LIMIT = 500
 REVERT_AFTER_FAILURES = 2
-# The file in the office state folder that stops run_desk launching headless desks.
+# The file in the office state folder that stops run_desk launching headless desks of every family.
 STOP_FILE = "ollivander-stop"
+# The stop of one CLI family's desks, also in the state folder (the fleet's STOP_FAMILY_FILES).
+STOP_FAMILY_FILES = {"claude": "ollivander-stop-claude", "codex": "ollivander-stop-codex"}
 # Present while a CLI update runs. run_desk honours it like the stop file, and a crash leaves it for Ryan.
 UPDATING_FILE = "ollivander-updating"
 # Switches Ryan made. Two failed runs after one of these are reported, never reverted over his choice.
@@ -640,19 +643,41 @@ def last_event_key(conn: Conn, desk: str, kind: str) -> Optional[str]:
 # The stop file
 
 
-# What castle ollivander clear says it did, by the files it removed.
-_CLEAR_NOTES = {
-    (): "no stop was on: neither the stop file nor an update marker was in place, so nothing was removed",
-    (STOP_FILE,): "removed the stop file",
-    (UPDATING_FILE,): "removed the update marker a CLI update left",
-    (STOP_FILE, UPDATING_FILE): "removed the stop file and the update marker a CLI update left",
-}
+# What castle ollivander clear says when there was nothing to remove.
+_NOTHING_CLEARED = "no stop was on: neither a stop file nor an update marker was in place, so nothing was removed"
+# Each file clear removes, in order, as (what it held back, how the note names it).
+_CLEAR_FILES = ((STOP_FILE, "every", "the stop of every family"),
+                *((name, family, f"the stop of the {family} family") for family, name in STOP_FAMILY_FILES.items()),
+                (UPDATING_FILE, "update", "the update marker a CLI update left"))
+
+
+def _stop_why(fd: int, name: str) -> Optional[str]:
+    """The reason a stop file gives, after its stamp, or None when it is not there. Never follows a link."""
+    try:
+        file_fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd)
+    except FileNotFoundError:
+        return None
+    except OSError:
+        return "it could not be read"
+    try:
+        raw = os.read(file_fd, 1024) if stat.S_ISREG(os.fstat(file_fd).st_mode) else None
+    except OSError:
+        raw = None
+    finally:
+        os.close(file_fd)
+    if raw is None:
+        return "it could not be read"
+    text = " ".join(raw.decode("ascii", "replace").split())
+    stamp, _, reason = text.partition(" ")
+    reason = reason if stamp.isdigit() else text
+    return reason[:300] or "no reason given"
 
 
 def clear_stop(db_path: Path) -> dict:
-    """Remove the stop file, and any update marker a crashed update left, next to the database. Ryan runs
-    this through castle once he has looked. The result names what it removed and says why in its note, also when
-    there was nothing to remove."""
+    """Remove every stop next to the database: the stop of every family, each CLI family's own stop, and any update
+    marker a crashed update left. Ryan runs this through castle once he has looked. The result names what it removed,
+    which families each held back and why (stopped), and says so in its note, also when there was nothing to
+    remove."""
     state = Path(db_path).parent
     try:
         fd = os.open(str(state), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
@@ -662,15 +687,19 @@ def clear_stop(db_path: Path) -> dict:
         if exc.errno in (errno.ELOOP, errno.ENOTDIR):
             raise ValidationError("the office state folder is not a plain folder") from None
         raise
-    removed = []
+    removed, stopped, said = [], [], []
     try:
-        for name in (STOP_FILE, UPDATING_FILE):
+        for name, held, named in _CLEAR_FILES:
+            why = _stop_why(fd, name)
             try:
                 os.unlink(name, dir_fd=fd)
-                removed.append(name)
             except FileNotFoundError:
-                pass
+                continue
+            removed.append(name)
+            stopped.append({"stopped": held, "file": name, "why": why or "no reason given"})
+            said.append(f"{named} (why: {why or 'no reason given'})")
     finally:
         os.close(fd)
-    return {"cleared": bool(removed), "removed": removed, "stop_file": str(state / STOP_FILE),
-            "note": _CLEAR_NOTES[tuple(removed)]}
+    note = "removed " + "; ".join(said) if said else _NOTHING_CLEARED
+    return {"cleared": bool(removed), "removed": removed, "stopped": stopped, "stop_file": str(state / STOP_FILE),
+            "note": note}

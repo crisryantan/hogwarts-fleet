@@ -609,6 +609,21 @@ class CrossFamilyTests(FailoverCase):
                 mock.patch.dict(config.CLAUDE_READ_DIRS, {"harry": ()}):
             self.assertFalse(failover.can_flip("harry", "codex"))
 
+    def test_a_desk_never_flips_onto_a_family_a_stop_holds_and_takes_none_of_its_probes(self):
+        self.switch_on()
+        ollivander.write_stop("a new codex version", NOW, family="codex")
+        with mock.patch.dict(config.CODEX_ACCESS, {"ron": "read"}), \
+                mock.patch.object(failover, "_take", wraps=failover._take) as taken:
+            owl_id, _ = self.request("ron")
+            with self.fake({}) as started, self.assertRaises(failover.ModelsDown) as caught:
+                run_desk.run(self.conn, "ron", owl_id, now=NOW)
+            self.assertIn("its claude family", str(caught.exception))  # it waits on its own family, as if flip were off
+            started.assert_not_called()
+            self.assertNotIn("codex", [call.args[1] for call in taken.call_args_list])
+            os.unlink(self.office / "state" / config.STOP_FAMILY_FILES["codex"])
+            plan = run_desk.build_plan(self.conn, "ron", owl_id)
+            self.assertEqual(failover.choose(self.conn, plan, NOW)["family"], "codex")  # once clear, it flips again
+
     def test_with_the_switch_on_a_desk_flips_and_no_review_of_it_is_same_family(self):
         self.switch_on()
         with mock.patch.dict(config.CODEX_ACCESS, {"ron": "read"}):

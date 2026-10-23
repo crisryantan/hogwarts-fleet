@@ -122,8 +122,8 @@ STATES = {
     "draft-pr": ("draft PR opened", "Review and merge the PR when you're happy."),
     "merged": ("merged", "Nothing for you; auto-close checks it."),
     "closed": ("closed", "Nothing for you."),
-    "verify-held": ("verify held by Ollivander's stop", "The stop is holding verify; run castle ollivander clear"
-                                                     " once the boundary checks pass."),
+    "verify-held": ("verify held by Ollivander's codex stop", "Its checks run in the Codex sandbox; run castle"
+                                                           " ollivander clear once the boundary checks pass."),
     "changes-hand": ("review CHANGES, no fix round started because the review was run by hand",
                      "Waiting on you: run fleet build for this build to start the fix round."),
 }
@@ -266,7 +266,7 @@ def _verify_key(build_id: str, round_no: int, checks: Optional[list]) -> dict:
         return _key(build_id, "verify", round_no, checks=checks)
     try:
         with safefs.opened_dir(config.OFFICE_ROOT, config.STATE_DIR) as fd:
-            stopped = any(safefs.lstat(fd, name) is not None for name in (config.STOP_FILE, config.UPDATING_FILE))
+            stopped = any(safefs.lstat(fd, name) is not None for name in config.stop_names(config.CHECK_STOP_FAMILY))
     except safefs.Missing:
         stopped = False
     return _key(build_id, "verify-held" if stopped else "handoff", round_no)

@@ -1,17 +1,18 @@
 """Ollivander's stop as every desk session sees it, and the desk runs it held back.
 
-- active_line: one line naming the stop in place (the stop file, else the update marker), with why and the exact
-  command that clears it, or None. The prompt and session start hooks put it at the top of the events banner in every
-  desk session until castle ollivander clear removes it. A stop that cannot be read still shows, as unreadable.
+- active_line: one line naming each stop in place (the stop of every family, else each CLI family's own stop and the
+  update marker), with why, which family's runs it blocks and the exact command that clears it, or None. The prompt
+  and session start hooks put it at the top of the events banner in every desk session until castle ollivander clear
+  removes it. A stop that cannot be read still shows, as unreadable.
 - event_lines: the banner lines of drained headmaster events, with each ollivander.stopped event marked cleared first
-  when no stop file or update marker is in place now, read from the files at that moment, so an unacked stop event
-  never reads as a stop still on.
+  when no stop of any family or update marker is in place now, read from the files at that moment, so an unacked stop
+  event never reads as a stop still on.
 - hold: run_desk keeps a launch the stop refused (desk, owl, task) as one marker per owl in the office state folder
   (config.STOP_HELD_DIR), written create-exclusive, so a run refused again and again is kept once. Never raises.
-- resume: the Owl Post's pass, once no stop or update marker is in place, starts each held run again once through
-  the normal launch (run_desk.spawn, with its caps and locks). It claims each first (resumed), then writes one
-  headmaster event naming them, then launches them. A held owl its desk has acked since, or whose task closed, is
-  dropped with no run.
+- resume: the Owl Post's pass, once no stop of its desk's family or update marker is in place, starts each held run
+  again once through the normal launch (run_desk.spawn, with its caps and locks). It claims each first (resumed),
+  then writes one headmaster event naming them, then launches them. A held owl its desk has acked since, or whose
+  task closed, is dropped with no run.
 - release: the started run itself (run_desk main, before its stop check) removes its marker, which is how a pass
   knows the launch took. A claim no run released is due again after RUNNING_WINDOW_SECONDS, so a launch or a pass
   that died part way never loses a held run, and the run is never started twice while it may still be starting.
@@ -48,29 +49,47 @@ def _stop_text(fd: int, name: str) -> Optional[tuple]:
     return (int(stamp) if stamp.isdigit() and len(stamp) <= 12 else None), (reason or "no reason given")
 
 
+def _since(stamp: Optional[int]) -> str:
+    return "" if stamp is None else time.strftime(" since %Y-%m-%d %H:%M UTC", time.gmtime(stamp))
+
+
 def active_line() -> Optional[str]:
-    """The banner line for a stop in place, or None. Never raises."""
+    """The banner line for the stops in place, or None: each stop with why, then whose runs are blocked, every
+    headless desk's unless only one CLI family's stop is on. Never raises."""
     try:
         with safefs.opened_dir(config.OFFICE_ROOT, config.STATE_DIR) as fd:
-            found = _stop_text(fd, config.STOP_FILE)
-            updating = None if found is not None else _stop_text(fd, config.UPDATING_FILE)
+            every = _stop_text(fd, config.STOP_FILE)
+            families = {family: _stop_text(fd, name) for family, name in config.STOP_FAMILY_FILES.items()}
+            families = {family: found for family, found in families.items() if found is not None}
+            updating = None if every is not None else _stop_text(fd, config.UPDATING_FILE)
     except (FleetError, OSError):
         return None
-    if found is None and updating is None:
+    parts = []
+    if every is not None:
+        parts.append(f"Ollivander's stop is on{_since(every[0])}: {common.one_line(every[1], 300)}.")
+    for family, (stamp, reason) in families.items():
+        parts.append(f"Ollivander's stop of the {family} family is on{_since(stamp)}: {common.one_line(reason, 300)}.")
+    if updating is not None:
+        parts.append(f"Ollivander's CLI update marker is in place{_since(updating[0])}:"
+                     f" {common.one_line(updating[1], 300)}.")
+    if not parts:
         return None
-    stamp, reason = found if found is not None else updating
-    since = "" if stamp is None else time.strftime(" since %Y-%m-%d %H:%M UTC", time.gmtime(stamp))
-    what = "Ollivander's stop is on" if found is not None else "Ollivander's CLI update marker is in place"
-    return (f"{what}{since}: {common.one_line(reason, 300)}. Every headless desk run is blocked until `{CLEAR}` runs"
-            " in your terminal; the Owl Post starts the runs it held once it is clear.")
+    if every is None and updating is None and len(families) == 1:
+        [family] = families
+        rest = ", ".join(sorted(name for name in config.STOP_FAMILY_FILES if name != family))
+        who = f"Every {family} headless desk run and turn is blocked, while the {rest} desks run on,"
+    else:
+        who = "Every headless desk run is blocked"
+    return (" ".join(parts) + f" {who} until `{CLEAR}` runs in your terminal; the Owl Post starts the runs it held once"
+            " it is clear.")
 
 
 def in_place() -> Optional[bool]:
-    """Whether the stop file or the update marker is in place now, None when the state folder cannot be read. Never
-    raises."""
+    """Whether a stop of any family or the update marker is in place now, None when the state folder cannot be read.
+    Never raises."""
     try:
         with safefs.opened_dir(config.OFFICE_ROOT, config.STATE_DIR) as fd:
-            return any(safefs.lstat(fd, name) is not None for name in (config.STOP_FILE, config.UPDATING_FILE))
+            return any(safefs.lstat(fd, name) is not None for name in config.stop_names())
     except (FleetError, OSError):
         return None
 
@@ -179,8 +198,10 @@ def _due(marker: dict, now: int) -> bool:
     return type(started) is int and now - started >= config.RUNNING_WINDOW_SECONDS
 
 
-def resume(conn, spawn: Callable[[str, str], None], stopped: Callable[[], bool], now: Optional[int] = None) -> list:
-    """Start each held run again once, only while stopped() is False, and return them as dicts (desk, owl, task).
+def resume(conn, spawn: Callable[[str, str], None], stopped: Callable[[Optional[str]], bool],
+           now: Optional[int] = None) -> list:
+    """Start each held run again once, only while stopped(family) is False for its desk's CLI family (read once a pass
+    per family), and return them as dicts (desk, owl, task).
     Each is claimed first (resumed, with a count), then one headmaster event names them all, and only then are they
     launched, so a pass killed anywhere loses neither a run nor its event: a claim whose run never started is due
     again after RUNNING_WINDOW_SECONDS, at most config.STOP_RESUMES_MAX launches in all, and then it is dropped and
@@ -188,15 +209,23 @@ def resume(conn, spawn: Callable[[str, str], None], stopped: Callable[[], bool],
     to start is held again; one refused later tells the owner itself. One run that cannot be read or claimed never
     stops the others."""
     found = held()
-    if not found or stopped():
+    if not found:
         return []  # the common case reads one folder
     ts = common.now_stamp(now)
     claimed, given_up = [], []
+    seen = {}
+
+    def held_back(desk: object) -> bool:
+        family = config.desk_family(desk)
+        if family not in seen:
+            seen[family] = stopped(family)
+        return seen[family]
+
     with _held_dir() as fd:
         for name, marker in found:
             if len(claimed) + len(given_up) >= config.STOP_RESTARTS_PER_PASS:
                 break  # the rest wait for the next pass, so one event names every run it handles
-            if not _due(marker, ts):
+            if not _due(marker, ts) or held_back(marker.get("desk")):
                 continue
             try:
                 wanted = _wanted(conn, marker, name)
@@ -250,7 +279,7 @@ def _tell(conn, starting: list, given_up: list, ts: int) -> bool:
         parts.append(f"These never started after {config.STOP_RESUMES_MAX} tries and are no longer started by"
                      f" themselves: {_named(given_up)}; start each with fleet build <task-id>.")
     if starting:
-        parts.append("Ollivander's stop is clear, so the Owl Post is starting again the runs it held:"
+        parts.append("Ollivander's stop of their family is clear, so the Owl Post is starting again the runs it held:"
                      f" {_named(starting)}.")
     items = starting + given_up
     tasks = {item["task"] for item in items}

@@ -24,7 +24,7 @@ class StopsCase(RunDeskCase):
         self.write_file(self.office / "state" / name, text)
 
     def clear(self) -> None:
-        for name in (config.STOP_FILE, config.UPDATING_FILE):
+        for name in config.stop_names():
             path = self.office / "state" / name
             if path.exists():
                 os.unlink(path)
@@ -95,6 +95,25 @@ class StopNoticeTests(StopsCase):
             code, out, _ = self.run_hook(session_start, {**payload, "hook_event_name": "SessionStart",
                                                          "source": "startup"})
             self.assertEqual((code, out), (0, stops.active_line() + "\n"))
+
+    def test_a_family_stop_names_its_family_and_the_family_that_runs_on(self):
+        self.stop(name=config.STOP_FAMILY_FILES["codex"])
+        line = stops.active_line()
+        self.assertIn(f"Ollivander's stop of the codex family is on since 2027-01-15 08:00 UTC: {REASON}.", line)
+        self.assertIn("Every codex headless desk run and turn is blocked, while the claude desks run on, until"
+                      " `castle ollivander clear` runs in your terminal", line)
+        self.stop("1 a CLI update is running\n", config.UPDATING_FILE)  # an update holds both families meanwhile
+        line = stops.active_line()
+        self.assertIn("Ollivander's CLI update marker is in place since", line)
+        self.assertIn("Every headless desk run is blocked until", line)
+        os.unlink(self.office / "state" / config.UPDATING_FILE)
+        self.stop("1 a new claude version\n", config.STOP_FAMILY_FILES["claude"])  # both families: every run
+        line = stops.active_line()
+        self.assertIn("Ollivander's stop of the claude family is on since", line)
+        self.assertIn("Ollivander's stop of the codex family is on since", line)
+        self.assertIn("Every headless desk run is blocked until", line)
+        self.clear()
+        self.assertIsNone(stops.active_line())
 
     def test_an_unreadable_stop_still_shows(self):
         os.mkdir(self.office / "state" / config.STOP_FILE)
@@ -256,6 +275,23 @@ class HeldRunTests(StopsCase):
                 mock.patch.object(run_desk, "spawn") as spawn:
             self.assertEqual(owl_post.run_pass(self.conn, now=NOW + 60)["restarted"], [])
         spawn.assert_not_called()
+
+    def test_a_family_stop_starts_again_only_the_other_familys_held_runs(self):
+        codex_owl, claude_owl = self.refused("moody"), self.refused("hermione")
+        self.clear()
+        self.stop(name=config.STOP_FAMILY_FILES["codex"])
+        with mock.patch.object(run_desk, "spawn") as spawn:
+            restarted = owl_post.run_pass(self.conn, now=NOW + 60)["restarted"]
+            self.assertEqual([item["owl"] for item in restarted], [claude_owl])
+            spawn.assert_called_once_with("hermione", claude_owl)
+        self.assertEqual(self.marker(codex_owl)["state"], "held")
+        code, _, err = self.main("moody", "--owl", codex_owl)  # still refused, by its own family's stop
+        self.assertEqual(code, 1)
+        self.assertIn("stop file for the codex family", err)
+        self.clear()
+        with mock.patch.object(run_desk, "spawn") as spawn:
+            self.assertEqual([item["owl"] for item in owl_post.run_pass(self.conn, now=NOW + 120)["restarted"]],
+                             [codex_owl])
 
     def test_a_held_marker_that_does_not_read_whole_is_kept_never_dropped(self):
         owl_id = self.refused()

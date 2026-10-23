@@ -487,8 +487,9 @@ ANSWER_LINE, END_LINE = "ANSWER", "END"
 
 
 class Later(FleetError):
-    """A review that cannot start now (the desk's review of its PR running, every run slot of the desk busy, a stop or
-    a CLI update): a queued request waits for a later pass, and one by hand is refused with this."""
+    """A review that cannot start now (the desk's review of its PR running, every run slot of the desk busy, a stop of
+    the desk's family or a CLI update): a queued request waits for a later pass, and one by hand is refused with
+    this."""
 
 
 class Unusable(FleetError):
@@ -1947,8 +1948,9 @@ def review(conn, key: str, record: dict, pr_fd: int) -> dict:
         raise Later("the chat review intake is off")
     if not run_desk.is_enabled(desk):
         return finish(COULD_NOT, "desk-off")
-    if run_desk.stop_requested():
-        raise Later("Ollivander's stop or a CLI update is in place")
+    held = run_desk.stop_reason(config.desk_family(desk))
+    if held is not None:
+        raise Later(f"{held} is in place, so {config.desk_family(desk)} turns wait")
     refusal = cap_refusal(requester, now, count=False)
     if refusal is not None:
         return finish(refusal, "capped")
@@ -2086,8 +2088,9 @@ def answer(conn, key: str, record: dict, pr_fd: int) -> dict:
         raise Later("the chat review intake is off")
     if not run_desk.is_enabled(desk):
         return finish(COULD_NOT_ANSWER, "desk-off")
-    if run_desk.stop_requested():
-        raise Later("Ollivander's stop or a CLI update is in place")
+    held = run_desk.stop_reason(config.desk_family(desk))
+    if held is not None:
+        raise Later(f"{held} is in place, so {config.desk_family(desk)} turns wait")
     earlier, question = _earlier(record), record.get("question")
     if earlier is None or not parse_question(question):
         return finish(COULD_NOT_ANSWER, "no-review")
@@ -2159,8 +2162,9 @@ def mention_answer(conn, key: str, record: dict, lock_fd: int) -> dict:
         raise Later("the chat review intake is off")
     if not run_desk.is_enabled(desk):
         return finish(COULD_NOT_ANSWER, "desk-off")
-    if run_desk.stop_requested():
-        raise Later("Ollivander's stop or a CLI update is in place")
+    held = run_desk.stop_reason(config.desk_family(desk))
+    if held is not None:
+        raise Later(f"{held} is in place, so {config.desk_family(desk)} turns wait")
     question = record.get("question")
     if not parse_mention(question):
         return finish(help_text(desk), "help")

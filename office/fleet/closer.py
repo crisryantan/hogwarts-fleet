@@ -960,7 +960,7 @@ def _commands(a: Attempt) -> None:
     if todo:
         if not auto_close_on():
             raise Off()
-        if run_desk.stop_requested():
+        if run_desk.stop_requested(config.CHECK_STOP_FAMILY):
             raise Wait("ollivander")
         merged = _fresh_worktree(a)
         limit = config.AUTO_CLOSE_MARKER_MAX if a.manual else (config.AUTO_CLOSE_MAX_TRIES if sandboxed else 1)
@@ -1297,8 +1297,9 @@ def _judge(a: Attempt) -> None:
         # Ollivander's launch gate, after any wait for them: switched off or stopped meanwhile, nothing starts.
         if not auto_close_on():
             raise Off()
-        if run_desk.stop_requested():
-            raise run_desk.Stopped("Ollivander's stop file or a CLI update is in place")
+        held = run_desk.stop_reason(config.desk_family(a.judge))
+        if held is not None:
+            raise run_desk.Stopped(f"{held} is in place")
         a.record["judge"]["run_id"] = run_id
         a.save()
         launched.append(run_id)

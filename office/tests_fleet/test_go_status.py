@@ -44,7 +44,7 @@ class GoStatusTests(GoCase):
     def test_a_held_run_and_a_closed_go_task_show_as_changes(self):
         build, _ = self.went()
         stops.hold("harry", self.harry_owl(), build["id"])
-        self.assertIn("held: Ollivander's stop refused its run", self.plain())
+        self.assertIn("held: Ollivander's stop (codex family) refused its run", self.plain())
         pensieve.close_task(self.conn, TASK_ID, "abandoned", now=NOW + 5)
         self.assertIn(f"- {TASK_ID}: closed (abandoned)", self.plain())
         self.assertNotIn("Your go tasks", self.plain())

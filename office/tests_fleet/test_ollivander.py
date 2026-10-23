@@ -497,17 +497,55 @@ class UpdateTests(OllivanderCase):
         self.assertEqual(self.castle_cli("ollivander", "clear")[1]["data"]["cleared"], True)
         self.assertFalse(run_desk.stop_requested())
 
-    def test_a_new_codex_version_stops_until_the_boundary_is_proven_again(self):
+    def test_a_new_codex_version_stops_the_codex_family_until_the_boundary_is_proven_again(self):
         self.write_file(self.office / "desks" / "ollivander" / config.UPDATE_MARKER, "", mode=0o644)
         runner = FakeRunner(versions={config.CLAUDE_BIN: [b"2.0.0 (Claude Code)\n"],
                                       config.CODEX_BIN: [b"codex 0.160.0\n", b"codex 0.161.0\n"]})
         plan = self.keeper(runner=runner)
-        self.assertTrue(plan["updates"]["stopped"])
-        self.assertTrue(run_desk.stop_requested())
+        self.assertEqual((plan["updates"]["stopped"], plan["updates"]["stopped_families"]), (True, ["codex"]))
+        state = self.office / "state"
+        self.assertTrue((state / config.STOP_FAMILY_FILES["codex"]).exists())
+        self.assertFalse((state / config.STOP_FILE).exists())
+        self.assertFalse((state / config.STOP_FAMILY_FILES["claude"]).exists())
+        self.assertTrue(run_desk.stop_requested("codex"))
+        self.assertFalse(run_desk.stop_requested("claude"))
+        self.assertTrue(run_desk.stop_requested())  # a launch of no one family waits on either family's stop
         [event] = self.events_of("ollivander.stopped")
         self.assertIn("from codex 0.160.0 to codex 0.161.0", event["summary"])
         self.assertIn("codex-boundary-test.sh", event["summary"])
+        self.assertIn("Ollivander stopped every codex headless desk run and turn", event["summary"])
+        self.assertIn("in your terminal; the claude desks run on. Why:", event["summary"])
         self.assertEqual(self.events_of("ollivander.cli-version"), [])
+        data = self.castle_cli("ollivander", "clear")[1]["data"]
+        self.assertEqual(data["removed"], [config.STOP_FAMILY_FILES["codex"]])
+        self.assertEqual(data["stopped"][0]["stopped"], "codex")
+        self.assertIn("removed the stop of the codex family (why: codex --version went from codex 0.160.0",
+                      data["note"])
+        self.assertFalse(run_desk.stop_requested())
+
+    def test_a_family_stop_event_never_says_the_other_family_runs_while_an_earlier_stop_holds_it(self):
+        self.write_file(self.office / "desks" / "ollivander" / config.UPDATE_MARKER, "", mode=0o644)
+        ollivander.write_stop("a new claude version", NOW, family="claude")
+        runner = FakeRunner(versions={config.CLAUDE_BIN: [b"2.0.0 (Claude Code)\n"],
+                                      config.CODEX_BIN: [b"codex 0.160.0\n", b"codex 0.161.0\n"]})
+        self.assertEqual(self.keeper(runner=runner)["updates"]["stopped_families"], ["codex"])
+        [event] = self.events_of("ollivander.stopped")
+        self.assertIn("Ollivander stopped every headless desk run, and each stays blocked", event["summary"])
+        self.assertNotIn("run on", event["summary"])
+
+    def test_a_new_claude_version_that_stops_stops_only_the_claude_family(self):
+        self.write_file(self.office / "desks" / "ollivander" / config.UPDATE_MARKER, "", mode=0o644)
+        runner = FakeRunner(versions={config.CLAUDE_BIN: [b"2.0.0 (Claude Code)\n", b"2.0.1 (Claude Code)\n"],
+                                      config.CODEX_BIN: [b"codex 0.160.0\n"]})
+        with mock.patch.object(config, "VERSION_STOPS", ("claude", "codex")):
+            plan = self.keeper(runner=runner)
+        self.assertEqual(plan["updates"]["stopped_families"], ["claude"])
+        self.assertTrue(run_desk.stop_requested("claude"))
+        self.assertFalse(run_desk.stop_requested("codex"))
+        [event] = self.events_of("ollivander.stopped")
+        self.assertIn("Ollivander stopped every claude headless desk run and turn", event["summary"])
+        self.assertIn("the codex desks run on", event["summary"])
+        self.assertNotIn("codex-boundary-test.sh", event["summary"])
 
     def test_a_new_claude_version_is_a_fyi_and_launches_go_on(self):
         self.write_file(self.office / "desks" / "ollivander" / config.UPDATE_MARKER, "", mode=0o644)
@@ -519,24 +557,35 @@ class UpdateTests(OllivanderCase):
         [event] = self.events_of("ollivander.cli-version")
         self.assertIn("from 2.0.0 (Claude Code) to 2.0.1 (Claude Code)", event["summary"])
 
-    def test_a_failed_update_or_check_stops_every_headless_desk(self):
+    def test_a_failed_update_or_check_stops_the_family_whose_cli_failed(self):
         self.write_file(self.office / "desks" / "ollivander" / config.UPDATE_MARKER, "", mode=0o644)
-        for codes in ({("upgrade", "--cask", "codex"): 1}, {("--version",): -1}):
+        for now, codes, families in ((OCT4, {("upgrade", "--cask", "codex"): 1}, ["codex"]),
+                                     (OCT4 + 60, {("update",): 1}, ["claude"]),
+                                     (OCT4 + 120, {("--version",): -1}, ["claude", "codex"])):
             with self.subTest(codes=codes):
-                plan = self.keeper(runner=FakeRunner(codes=codes))
-                self.assertTrue(plan["updates"]["stopped"])
-                self.assertTrue(run_desk.stop_requested())
-                self.assertEqual(self.castle_cli("ollivander", "clear")[1]["data"]["cleared"], True)
+                plan = self.keeper(now=now, runner=FakeRunner(codes=codes))
+                self.assertEqual((plan["updates"]["stopped"], plan["updates"]["stopped_families"]), (True, families))
+                for family in config.STOP_FAMILY_FILES:
+                    self.assertEqual(run_desk.stop_requested(family), family in families)
+                summary = self.events_of("ollivander.stopped")[-1]["summary"]
+                if len(families) == 2:
+                    self.assertIn("Ollivander stopped every headless desk run, and each stays blocked", summary)
+                else:
+                    self.assertIn(f"Ollivander stopped every {families[0]} headless desk run and turn", summary)
+                cleared = self.castle_cli("ollivander", "clear")[1]["data"]
+                self.assertEqual([item["stopped"] for item in cleared["stopped"]], families)
                 self.assertFalse(run_desk.stop_requested())
-        self.assertEqual(len(self.events_of("ollivander.stopped")), 1)
+        self.assertEqual(len(self.events_of("ollivander.stopped")), 3)
 
-    def test_a_desk_whose_dry_run_fails_stops_launches(self):
+    def test_a_desk_whose_dry_run_fails_stops_launches_of_its_family(self):
         self.write_file(self.office / "desks" / "ollivander" / config.UPDATE_MARKER, "", mode=0o644)
         self.enable("hermione")
         os.unlink(self.office / "desks" / "hermione" / "BRIEF.md")
         plan = self.keeper()
         self.assertEqual(plan["updates"]["checks"][-1], {"check": "run_desk hermione --dry-run", "ok": False})
-        self.assertTrue(run_desk.stop_requested())
+        self.assertEqual(plan["updates"]["stopped_families"], ["claude"])
+        self.assertTrue(run_desk.stop_requested("claude"))
+        self.assertFalse(run_desk.stop_requested("codex"))
 
 
 class RunDeskModelTests(OllivanderCase):
@@ -956,6 +1005,45 @@ class RunDeskModelTests(OllivanderCase):
         self.assertEqual([owl["id"] for owl in owlery.inbox(self.conn, "hermione")], [owl_id])
         self.assertTrue(self.dry_run("hermione")["stopped"])
         self.assertEqual(config.STOP_FILE, wands.STOP_FILE)
+        self.assertEqual(config.STOP_FAMILY_FILES, wands.STOP_FAMILY_FILES)
+
+    def test_a_family_stop_holds_only_that_familys_launches_and_turns(self):
+        desks = {"codex": "moody", "claude": "hermione"}
+        for desk in desks.values():
+            self.enable(desk)
+        for stopped, other in (("codex", "claude"), ("claude", "codex")):
+            with self.subTest(stopped=stopped):
+                ollivander.write_stop(f"a new {stopped} version", NOW, family=stopped)
+                owl_id = self.request(desks[stopped])
+                with self.assertRaises(run_desk.Stopped) as caught:
+                    run_desk.run(self.conn, desks[stopped], owl_id, now=NOW)
+                self.assertIn(f"stop file for the {stopped} family is in place, so no {stopped} headless desk",
+                              str(caught.exception))
+                self.assertTrue(self.dry_run(desks[stopped])["stopped"])
+                self.assertFalse(self.dry_run(desks[other])["stopped"])
+                self.assertEqual(self.real_run(desks[other], 0), 0)  # the other family launches as before
+                if stopped == "claude":  # the headless Claude turns (owl report, Hermione's chat review) wait too
+                    with self.assertRaises(run_desk.Stopped):
+                        run_desk.check_report_launch(self.conn)
+                else:
+                    run_desk.check_report_launch(self.conn)
+                os.unlink(self.office / "state" / config.STOP_FAMILY_FILES[stopped])
+
+    def test_a_stop_of_every_family_old_or_by_hand_holds_both_families(self):
+        old = "1 codex --version went from 0.1.0 to 0.2.0, so run the real boundary probe first\n"
+        for text in (old, ""):  # the format an older office wrote, and a file made by hand
+            with self.subTest(text=text):
+                self.write_file(self.office / "state" / config.STOP_FILE, text)
+                for desk in ("moody", "hermione"):
+                    self.assertTrue(self.dry_run(desk)["stopped"])
+                for family in (*config.STOP_FAMILY_FILES, None):
+                    self.assertTrue(run_desk.stop_requested(family))
+                with self.assertRaises(run_desk.Stopped) as caught:
+                    run_desk.check_report_launch(self.conn)
+                self.assertIn("stop file for every family", str(caught.exception))
+                data = self.castle_cli("ollivander", "clear")[1]["data"]
+                self.assertEqual([item["stopped"] for item in data["stopped"]], ["every"])
+                self.assertFalse(run_desk.stop_requested())
 
     # Moody B2: an alias's resolution history survives every switch.
 
@@ -1182,6 +1270,8 @@ class RunDeskModelTests(OllivanderCase):
         self.assertEqual([call for call in runner.calls if call[1] is not None], [])
         self.assertTrue((self.office / "state" / config.STOP_FILE).exists())
         self.assertTrue((self.office / "state" / config.UPDATING_FILE).exists())
+        self.assertEqual(updates["stopped_families"], ["every"])  # no one CLI to pin it on: both families stop
+        self.assertTrue(all(run_desk.stop_requested(family) for family in config.STOP_FAMILY_FILES))
         [event] = self.events_of("ollivander.stopped")
         self.assertIn("a CLI update did not finish", event["summary"])
         self.assertIn("codex-boundary-test.sh", event["summary"])

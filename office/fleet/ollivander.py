@@ -9,10 +9,14 @@ One pass:
    brew upgrade --cask codex, output to the office logs. An update marker in the office state folder
    stops headless launches from before the first update until every check passes. Then checks: both
    --version commands and run_desk's dry run for every enabled headless desk. Any failure, or a new
-   Codex version (its sandbox boundary was proven on one version), writes the stop file, so run_desk
-   launches no headless desk until Ryan runs castle ollivander clear. Each stop is one loud event (stopped_summary)
-   naming the failed check and that command; a run it refused is held and started again once it clears
-   (fleet/stops.py). A new Claude Code version is a fyi.
+   Codex version (its sandbox boundary was proven on one version), writes a stop, so run_desk launches no
+   headless desk of the family it holds until Ryan runs castle ollivander clear. The stop is per CLI family
+   (config.STOP_FAMILY_FILES): a failed update or --version of one CLI, a new version of a CLI in VERSION_STOPS,
+   or a failed dry run of a desk stops that CLI's family only, and the other family runs on; anything he cannot
+   pin on one family (an update that never finished) writes the stop of every family (config.STOP_FILE), as
+   does a stop file written by hand. Each stop is one loud event (stopped_summary) naming the families, the
+   failed check and that command; a run it refused is held and started again once it clears (fleet/stops.py).
+   A new Claude Code version is a fyi.
    The update lock (config.UPDATE_LOCK) is held exclusively from before the marker is written until the
    checks end and the marker is gone. run_desk holds it shared from its last stop check until the desk's
    process has exited, and hands it to that process, so no launch can pass its check and then start a
@@ -86,6 +90,8 @@ from fleet.safefs import FleetError  # noqa: E402
 ROLE_KEYS = ("family", "need", "effort", "why")
 WHY_MAX_CHARS = 120
 LOG_NAME = "ollivander-update.log"
+# The family of each CLI, in the order of update_commands and check_commands.
+CLI_FAMILIES = ("claude", "codex")
 _HELP_ALIAS = re.compile(r"'([a-z][a-z0-9-]{1,30})'")
 _AGENT_MODEL = re.compile(r"model:\s*(\S+)")
 
@@ -717,9 +723,11 @@ def check_commands() -> list:
     return [[config.CLAUDE_BIN, "--version"], [config.CODEX_BIN, "--version"]]
 
 
-def write_stop(reason: str, now: int, name: Optional[str] = None) -> None:
+def write_stop(reason: str, now: int, name: Optional[str] = None, family: Optional[str] = None) -> None:
+    """Write a stop: the stop of family's CLI when one is named, else the stop of every family (or name)."""
+    name = name or (config.STOP_FAMILY_FILES[family] if family is not None else config.STOP_FILE)
     with safefs.opened_dir(config.OFFICE_ROOT, config.STATE_DIR) as fd:
-        safefs.write_new(fd, name or config.STOP_FILE, f"{now} {common.one_line(reason, 300)}\n".encode("ascii"))
+        safefs.write_new(fd, name, f"{now} {common.one_line(reason, 300)}\n".encode("ascii"))
 
 
 def remove_updating() -> None:
@@ -733,7 +741,7 @@ def remove_updating() -> None:
 def cli_versions(runner: Runner) -> dict:
     """{claude, codex}: what each --version printed, as one short ASCII line, or None when it failed."""
     found = {}
-    for family, argv in zip(("claude", "codex"), check_commands()):
+    for family, argv in zip(CLI_FAMILIES, check_commands()):
         code, out = runner(argv, config.CHECK_TIMEOUT_SECONDS, None)
         text = common.one_line(out.decode("ascii", "replace"), config.VERSION_MAX_CHARS).strip() if code == 0 else ""
         found[family] = text or None
@@ -765,11 +773,33 @@ def leftover_update() -> Optional[str]:
     return stamp.decode("ascii") if stamp.isdigit() and len(stamp) <= 12 else "unknown"
 
 
-def stopped_summary(reason: str) -> str:
-    """The one loud event of a stop: that every headless desk run is blocked, the exact command that clears it, and
-    the failed check, with the clear command first so a cut never loses it."""
-    return common.one_line(f"Ollivander stopped every headless desk run, and each stays blocked until you run castle"
-                           f" ollivander clear in your terminal. Why: {reason}. The log is"
+def _held_now(families: Optional[list]) -> Optional[list]:
+    """The families held back now: those this pass stopped and any an earlier stop still holds, None for every one
+    (this pass's stop of every family, one already in place, or a state folder that cannot be read)."""
+    if families is None:
+        return None
+    try:
+        with safefs.opened_dir(config.OFFICE_ROOT, config.STATE_DIR) as fd:
+            if safefs.lstat(fd, config.STOP_FILE) is not None:
+                return None
+            return [family for family, name in config.STOP_FAMILY_FILES.items()
+                    if family in families or safefs.lstat(fd, name) is not None]
+    except (FleetError, OSError):
+        return None
+
+
+def stopped_summary(reason: str, families: Optional[list] = None) -> str:
+    """The one loud event of a stop: which headless desk runs are blocked (every one, unless families names one CLI
+    family), the exact command that clears it, and the failed check, with the clear command first so a cut never
+    loses it."""
+    only = families[0] if families and len(families) == 1 and families[0] in config.STOP_FAMILY_FILES else None
+    if only is None:
+        who, others = "every headless desk run", ""
+    else:
+        rest = ", ".join(sorted(family for family in config.STOP_FAMILY_FILES if family != only))
+        who, others = f"every {only} headless desk run and turn", f"; the {rest} desks run on"
+    return common.one_line(f"Ollivander stopped {who}, and each stays blocked until you run castle"
+                           f" ollivander clear in your terminal{others}. Why: {reason}. The log is"
                            f" {config.logs_dir()}/{LOG_NAME}.", 480)
 
 
@@ -778,7 +808,7 @@ def _stop_after_unfinished(conn, stamp: str, now: int, result: dict) -> None:
     reason = ("a CLI update did not finish, so the CLIs may have moved with no check run. Check both versions"
               " and run the real boundary probe (scripts/codex-boundary-test.sh) on the Codex one")
     write_stop(reason, now)
-    result["stopped"] = True
+    result.update(stopped=True, stopped_families=["every"])
     key = stamp if stamp != "unknown" else f"unknown-{now // config.DAY_SECONDS}"
     pensieve.add_event(conn, config.OLLIVANDER_DESK, "ollivander.stopped", "headmaster", stopped_summary(reason),
                        dedupe_key=f"ollivander:unfinished:{key}", now=now)
@@ -792,7 +822,8 @@ def update_clis(conn, runner: Runner, now: int, dry_run: bool) -> dict:
     enabled = update_marker()
     stamp = leftover_update()
     result = {"enabled": enabled, "commands": [" ".join(argv) for argv in update_commands()], "ran": [],
-              "checks": [], "versions": None, "stopped": False, "busy": False, "unfinished": stamp is not None}
+              "checks": [], "versions": None, "stopped": False, "stopped_families": [], "busy": False,
+              "unfinished": stamp is not None}
     if dry_run:
         return result
     if stamp is not None:
@@ -810,6 +841,13 @@ def update_clis(conn, runner: Runner, now: int, dry_run: bool) -> dict:
     return result
 
 
+def _version_reason(family: str, what: str) -> str:
+    if family == "codex":
+        return (f"{what}, and the Codex sandbox boundary is proven per version, so run the real "
+                "boundary probe (scripts/codex-boundary-test.sh) on it first")
+    return f"{what}, and a new {family} version stops its desks until you have checked it"
+
+
 def _update_locked(conn, runner: Runner, now: int, result: dict) -> None:
     before = cli_versions(runner)
     # Left in place if this pass dies part way: run_desk keeps refusing, and the next pass stops launches.
@@ -819,8 +857,16 @@ def _update_locked(conn, runner: Runner, now: int, result: dict) -> None:
         result["ran"].append({"command": " ".join(argv), "exit_code": code})
     after = cli_versions(runner)
     result["versions"] = {"before": before, "after": after}
-    for family, argv in zip(("claude", "codex"), check_commands()):
+    # Each failed command or check is pinned on the CLI family it runs: the update and --version of each CLI, and a
+    # desk's dry run on the desk's family. None is no one family, and stops every one.
+    failed = {}
+    for family, item in zip(CLI_FAMILIES, result["ran"]):
+        if item["exit_code"] != 0:
+            failed.setdefault(family, []).append(item["command"])
+    for family, argv in zip(CLI_FAMILIES, check_commands()):
         result["checks"].append({"check": " ".join(argv), "ok": after[family] is not None})
+        if after[family] is None:
+            failed.setdefault(family, []).append(" ".join(argv))
     for desk in config.HEADLESS_DESKS:
         if not run_desk.is_enabled(desk):
             continue
@@ -830,25 +876,27 @@ def _update_locked(conn, runner: Runner, now: int, result: dict) -> None:
         except (FleetError, StoreError, OSError):
             ok = False
         result["checks"].append({"check": f"run_desk {desk} --dry-run", "ok": ok})
-    failed = [item["command"] for item in result["ran"] if item["exit_code"] != 0]
-    failed += [item["check"] for item in result["checks"] if not item["ok"]]
-    moved = [family for family in ("claude", "codex") if after[family] is not None and before[family] != after[family]]
-    reasons = ["after the CLI update these failed: " + "; ".join(failed)] if failed else []
+        if not ok:
+            failed.setdefault(config.desk_family(desk), []).append(f"run_desk {desk} --dry-run")
+    moved = [family for family in CLI_FAMILIES if after[family] is not None and before[family] != after[family]]
+    reasons = {family: ["after the CLI update these failed: " + "; ".join(names)] for family, names in failed.items()}
     notes = []
     for family in moved:
         what = f"{family} --version went from {before[family] or 'unknown'} to {after[family]}"
         if family in config.VERSION_STOPS:
-            reasons.append(f"{what}, and the Codex sandbox boundary is proven per version, so run the real "
-                           "boundary probe (scripts/codex-boundary-test.sh) on it first")
+            reasons.setdefault(family, []).append(_version_reason(family, what))
         else:
             notes.append((family, what))
-    # The stop file is written before any event, so a store error below never loses it.
+    # The stop files are written before any event, so a store error below never loses them.
     if reasons:
-        reason = ". ".join(reasons)
-        write_stop(reason, now)
-        result["stopped"] = True
-        pensieve.add_event(conn, config.OLLIVANDER_DESK, "ollivander.stopped", "headmaster", stopped_summary(reason),
-                           dedupe_key=f"ollivander:stopped:{now}", now=now)
+        order = sorted(reasons, key=lambda family: (family is not None, family or ""))
+        for family in order:
+            write_stop(". ".join(reasons[family]), now, family=family)
+        stopped = None if None in reasons else order
+        result.update(stopped=True, stopped_families=stopped or ["every"])
+        reason = ". ".join(text for family in order for text in reasons[family])
+        pensieve.add_event(conn, config.OLLIVANDER_DESK, "ollivander.stopped", "headmaster",
+                           stopped_summary(reason, _held_now(stopped)), dedupe_key=f"ollivander:stopped:{now}", now=now)
     for family, what in notes:
         pensieve.add_event(conn, config.OLLIVANDER_DESK, "ollivander.cli-version", "headmaster",
                            common.one_line(f"Ollivander updated the CLIs: {what}.", 480),

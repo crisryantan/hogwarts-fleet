@@ -3690,6 +3690,23 @@ class SecondAppTests(ChatCase):
         self.assertEqual(self.run_pass()["taken"], ["seen before", "seen before"])  # the overlap, once for each
         self.assertEqual(len(self.turns), 2)
 
+    def test_a_codex_stop_holds_only_the_codex_apps_request_and_its_waiting_line_names_the_family(self):
+        self.second_app()
+        stop = self.office / "state" / config.STOP_FAMILY_FILES["codex"]
+        self.write_file(stop, "1 a new codex version\n")
+        self.deliver(msg(also=(MOODY_APP_USER,)))
+        self.run_pass()
+        self.assertEqual([turn["desk"] for turn in self.turns], ["hermione"])  # the Claude app answers as before
+        self.assertEqual([message["app"] for message in self.google.messages], ["hermione"])
+        [held] = [record for record in self.records() if record["app"] == "moody"]
+        self.assertEqual(held["state"], "queued")
+        [waiting] = [line for line in self.log_lines() if line["event"] == "waiting"]
+        self.assertIn("stop file for the codex family is in place, so codex turns wait", waiting["why"])
+        stop.unlink()
+        self.run_pass()
+        self.assertEqual([turn["desk"] for turn in self.turns], ["hermione", "moody"])
+        self.assertEqual(sorted(message["app"] for message in self.google.messages), ["hermione", "moody"])
+
     def test_another_one_with_a_link_is_a_request_for_both_apps(self):
         self.second_app()
         self.deliver(msg(text=f"another one {URL}", also=(MOODY_APP_USER,)))

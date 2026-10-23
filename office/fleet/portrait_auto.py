@@ -500,7 +500,7 @@ def apply(conn, date: str, now: Optional[int] = None) -> dict:
     place: the night ends off and nothing applies. Otherwise one transaction applies what the store takes and ends
     the night done with its one event. A signal rolls it back whole and leaves the night validated for the next job;
     any other failure ends it stopped with one event, or, if even that cannot be written, leaves it validated."""
-    if not auto_portrait_on() or run_desk.stop_requested():
+    if not auto_portrait_on() or run_desk.stop_requested(config.desk_family(DESK)):
         return _hold_for_you(conn, date, now)
     try:
         with db.transaction(conn):

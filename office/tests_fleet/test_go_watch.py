@@ -900,8 +900,8 @@ class VerifyTests(GoWatchCase):
                 f" {malformed} malformed. {action}")
 
     def held_line(self) -> str:
-        return (f"{self.go} / {self.build_row['id']}: verify held by Ollivander's stop. The stop is holding verify;"
-                " run castle ollivander clear once the boundary checks pass.")
+        return (f"{self.go} / {self.build_row['id']}: verify held by Ollivander's codex stop. Its checks run in the"
+                " Codex sandbox; run castle ollivander clear once the boundary checks pass.")
 
     def test_verify_held_before_checks_start_uses_fixed_text_then_resumes(self):
         build = self.build_row
@@ -928,6 +928,19 @@ class VerifyTests(GoWatchCase):
         self.round(build, SHAS[0])
         self.quiet()
         self.assertEqual(self.kept()["tasks"][self.go]["state"], "verify")
+
+    def test_verify_is_held_by_a_codex_stop_and_never_by_a_claude_one(self):
+        build = self.build_row
+        self.handoff(build)
+        self.expect("handoff", build)
+        state = self.office / config.STATE_DIR
+        self.write_file(state / config.STOP_FAMILY_FILES["claude"], "1 a new claude version\n")
+        self.quiet()  # its checks run in the Codex sandbox, so a claude stop holds nothing
+        self.assertEqual(self.kept()["tasks"][self.go]["state"], "handoff")
+        self.write_file(state / config.STOP_FAMILY_FILES["codex"], "1 a new codex version\n")
+        self.assertEqual(self.watch(), ["sent"])
+        self.assertEqual(self.kept()["tasks"][self.go]["state"], "verify-held")
+        self.assertEqual(self.lines()[-1], self.held_line())
 
     def test_verify_an_open_round_with_no_evidence_is_not_held_by_a_later_stop(self):
         build = self.build_row

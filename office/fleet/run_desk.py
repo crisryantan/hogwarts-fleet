@@ -1029,14 +1029,36 @@ def report_failure(conn, desk: str, owl_id: Optional[str], now: Optional[int] = 
     return True
 
 
-def stop_requested() -> bool:
-    """True while Ollivander's stop file or update marker is in the office state folder, or when that
-    cannot be checked."""
+def stop_held(family: Optional[str] = None) -> Optional[str]:
+    """What holds a launch of family back now, in a few words, or None: Ollivander's stop of every family, his stop of
+    that family (of either, for None, a launch of no one family), the update marker, or a state folder that cannot be
+    checked."""
     try:
         with safefs.opened_dir(config.OFFICE_ROOT, config.STATE_DIR) as fd:
-            return any(safefs.lstat(fd, name) is not None for name in (config.STOP_FILE, config.UPDATING_FILE))
+            found = [name for name in config.stop_names(family) if safefs.lstat(fd, name) is not None]
     except (FleetError, OSError):
-        return True
+        return "Ollivander's stop file, which could not be checked,"
+    if not found:
+        return None
+    if found[0] == config.STOP_FILE:
+        return "Ollivander's stop file for every family"
+    if found[0] == config.UPDATING_FILE:
+        return "Ollivander's CLI update marker"
+    named = next(name for name, file in config.STOP_FAMILY_FILES.items() if file == found[0])
+    return f"Ollivander's stop file for the {named} family"
+
+
+def stop_requested(family: Optional[str] = None) -> bool:
+    """True while a stop of family (see stop_held) or the update marker is in the office state folder, or when that
+    cannot be checked."""
+    return stop_held(family) is not None
+
+
+def stop_reason(family: Optional[str] = None) -> Optional[str]:
+    """None while stop_requested(family) is False, else what holds the launch back (stop_held), for its message."""
+    if not stop_requested(family):
+        return None
+    return stop_held(family) or "Ollivander's stop"
 
 
 def is_enabled(desk: str) -> bool:
@@ -1323,7 +1345,7 @@ def chat_review_codex_argv(conn, brief: str, prompt: str, run_id: str, desk: str
     choice = desk_choice(conn, desk)
     chosen = model_overrides(choice, selected_profile(overrides))
     model = choice["model"] or selected or top or CODEX_DEFAULT
-    _check_stop()
+    _check_stop("codex")
     blocked = blocked_model({"model": model, "family": "codex"}, conn)
     if blocked is not None:
         raise Blocked(f"the chat review model {model} is blocked here ({blocked}), so no turn runs")
@@ -1409,8 +1431,9 @@ AUTH_MESSAGES = ("Invalid API key", "Not logged in", "OAuth token has expired", 
 def check_report_launch(conn, model: str = None) -> None:
     """The gates every headless launch passes, for the owl-report turn: no Ollivander stop or CLI update in place
     (Stopped), and its model not blocked here, by name or by any full id the alias is known to have run as
-    (Blocked). model defaults to the owl report's own."""
-    _check_stop()
+    (Blocked). model defaults to the owl report's own. Every such turn runs the Claude CLI, so only a stop of the claude
+    family, of every family or a CLI update holds it back."""
+    _check_stop("claude")
     name = model or config.OWL_REPORT_MODEL
     blocked = blocked_model({"model": name, "family": "claude"}, conn)
     if blocked is not None:
@@ -2379,10 +2402,12 @@ def _refuse_closed(plan: dict) -> None:
         raise TaskClosed(f"task {plan['task_id']} is closed, so {plan['desk']} was not started on it")
 
 
-def _check_stop() -> None:
-    if stop_requested():
-        raise Stopped("Ollivander's stop file or a CLI update is in place, so no headless desk launches; "
-                      "castle ollivander clear removes a stop")
+def _check_stop(family: Optional[str] = None) -> None:
+    """Stopped while a stop of family is in place (stop_reason), naming the stop and the family it holds back."""
+    held = stop_reason(family)
+    if held is not None:
+        who = f"{family} " if family in config.STOP_FAMILY_FILES else ""
+        raise Stopped(f"{held} is in place, so no {who}headless desk launches; castle ollivander clear removes a stop")
 
 
 @contextlib.contextmanager
@@ -2429,7 +2454,7 @@ def run(conn, desk: str, owl_id: str, mcp_job: Optional[str] = None, now: Option
         raise FleetError("lock_held must be the run slot of this desk that the caller holds")
     if not is_enabled(desk):
         raise FleetError(f"{desk} is not enabled; Ryan enables a headless desk by hand")
-    _check_stop()
+    _check_stop(config.desk_family(desk))
     # Refuse a bad desk or owl, a review round's owl outside its review, a closed task, or a blocked model,
     # before waiting for a slot.
     early = build_plan(conn, desk, owl_id, mcp_job)
@@ -2449,15 +2474,17 @@ def run(conn, desk: str, owl_id: str, mcp_job: Optional[str] = None, now: Option
             # From the last stop check until the process has exited, no CLI update can start (see launch_gate).
             keep_fds = (*keep_fds, held.enter_context(launch_gate()))
             # The wait can be long: check the stop again and plan now, so the model is the one chosen last.
-            _check_stop()
+            _check_stop(config.desk_family(desk))
             cap = over_daily_cap(conn, desk, now, launch_held=True)
             if cap is not None:
                 report_cap(conn, desk, now, notes, on_told)
                 raise Capped(cap)
             plan = build_plan(conn, desk, owl_id, mcp_job, slot.index)
             _refuse_closed(plan)
-            # Chosen last, so a half-open model is claimed as the probe only by a launch that goes ahead.
+            # Chosen last, so a half-open model is claimed as the probe only by a launch that goes ahead. A cross-family
+            # fallback is never chosen while a stop holds that family (failover.choose), and is checked again here.
             plan = _failover_plan(conn, plan, mcp_job, slot.index, now, True, notes, on_told)
+            _check_stop(plan["family"])
             _refuse_blocked(conn, plan, now, on_told)
             if plan["cwd"] == work_dir(plan["desk"], slot.index):
                 with safefs.opened_dir(config.CASTLE_ROOT, "desks", plan["desk"],
@@ -2945,10 +2972,10 @@ def _launch(conn, plan: dict, now: Optional[int], keep_fds: tuple = (), own: Opt
                                     input=plan["stdin"].encode("utf-8"), stdout=out_fd, stderr=err_fd,
                                     pass_fds=tuple(keep_fds))
             exit_code = wait_child(child, config.RUN_TIMEOUT_SECONDS)
-            if _auth_miss(run_fd, plan, exit_code, time.monotonic() - started) and not stop_requested():
+            if _auth_miss(run_fd, plan, exit_code, time.monotonic() - started) and not stop_requested(plan["family"]):
                 # Until the retry starts, the first try's files stay the run's, so an unwinding here ends it as that.
                 auth_miss_wait()
-                if not stop_requested() and _keep_aside(run_fd, run_id):
+                if not stop_requested(plan["family"]) and _keep_aside(run_fd, run_id):
                     with common.signals_held():
                         _empty_run_files(out_fd, err_fd)
                         # From here the run's files are the retry's. One that fails to start ends as its first try.
@@ -3085,7 +3112,8 @@ def main(argv: Optional[list] = None) -> int:
     try:
         if args.dry_run:
             plan = build_plan(conn, args.desk, args.owl, args.mcp_job)
-            result = {"ok": True, "dry_run": True, "enabled": is_enabled(plan["desk"]), "stopped": stop_requested(),
+            result = {"ok": True, "dry_run": True, "enabled": is_enabled(plan["desk"]),
+                      "stopped": stop_requested(plan["family"]),
                       "blocked": blocked_model(plan, conn) is not None,
                       **{key: plan[key] for key in ("desk", "family", "owl_id", "task_id", "pad", "model", "effort",
                                                     "cwd", "argv", "stdin")}}

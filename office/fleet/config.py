@@ -6,6 +6,8 @@ comes from the environment.
 """
 from __future__ import annotations
 
+from typing import Optional
+
 # Where things live. The office holds the store and every control; the castle is where desks work.
 OFFICE_ROOT = "/Users/crisryantan/.hogwarts"
 CASTLE_ROOT = "/Users/crisryantan/hogwarts"
@@ -608,9 +610,15 @@ HELP_MAX_BYTES = 1024 * 1024
 UPDATE_MARKER = "update-clis"
 UPDATE_TIMEOUT_SECONDS = 900
 CHECK_TIMEOUT_SECONDS = 60
-# Kept in the office state folder. While it exists run_desk launches no headless desk.
+# Kept in the office state folder. While it exists run_desk launches no headless desk of either family: the stop
+# Ollivander writes when he cannot pin a failure on one CLI, the stop of an older office, or one written by hand.
 STATE_DIR = "state"
 STOP_FILE = "ollivander-stop"
+# Also in the state folder: the stop of one CLI family, written when every failure or new version Ollivander found is
+# that CLI's. While one exists run_desk launches no desk or turn of that family, and the other family runs on.
+STOP_FAMILY_FILES = {"claude": "ollivander-stop-claude", "codex": "ollivander-stop-codex"}
+# Every verify and after-merge check command runs in the Codex sandbox, so this family's stop holds checks back.
+CHECK_STOP_FAMILY = "codex"
 # Also in the state folder, only while a CLI update and its checks run. run_desk honours it like the stop file.
 UPDATING_FILE = "ollivander-updating"
 # Also in the state folder: one marker per desk run a stop refused (fleet/stops.py), which the Owl Post's first pass
@@ -693,6 +701,21 @@ CODEX_CONFIG_DIR = "/Users/crisryantan/.codex"
 BACKUP_DIR = "backups"
 BACKUP_KEEP_DAYS = 14
 BACKUP_FILE_MAX_BYTES = 64 * 1024 * 1024
+
+
+def desk_family(desk: object) -> Optional[str]:
+    """The CLI family a headless desk launches, or None for any other name."""
+    if desk in HEADLESS_CODEX:
+        return "codex"
+    return "claude" if desk in HEADLESS_CLAUDE else None
+
+
+def stop_names(family: Optional[str] = None) -> tuple:
+    """The state files that stop a launch of family: the stop of every family, the update marker and the family's own
+    stop. A launch of no known family (None) is stopped by every one of them."""
+    own = STOP_FAMILY_FILES.get(family) if isinstance(family, str) else None
+    families = (own,) if own is not None else tuple(STOP_FAMILY_FILES.values())
+    return (STOP_FILE, UPDATING_FILE, *families)
 
 
 def office_desk_dir(desk: str) -> str:

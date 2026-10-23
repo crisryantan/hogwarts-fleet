@@ -92,6 +92,8 @@ The store has none of these:
   state/model-breaker.json              each model's breaker (down after two outage, overload or rate limit failures
                                         in a row, for 15 minutes, then one probe), fallback runs and waiting owls
   state/model-ladders.json              Ollivander's fallbacks per headless desk and family, in pick order
+  state/ollivander-stop*                Ollivander's stops: ollivander-stop holds every headless desk, and
+                                        ollivander-stop-claude or ollivander-stop-codex only that CLI family's
   logs/                                 the fleet's job and script logs, review-auto.log for the review loop and
                                         closer.log for auto-close, one JSON line per task each pass
   runs/<desk>/                          each headless run's output, which fleet feed follows, and how its process
@@ -474,7 +476,7 @@ A few commands in more detail:
 
 - `desk cap` raises one desk's runs or spend cap until the next cap reset, which is local midnight unless `CAP_RESET_UTC_SECONDS` in the fleet's config says otherwise.
 - `desk model DESK MODEL` pins a desk to a model of its own family, `--role` unpins it and `--approve` takes a pending costlier pick, once it has checked the pick still qualifies.
-- `ollivander clear` removes Ollivander's stop file, and any update marker a CLI update left. Its result has `cleared`, `removed` (the files it removed), `stop_file` and a `note` saying what it did, or that no stop was on and nothing was removed. While a stop event is still unacked after the clear, the session hooks list it marked "(cleared since: no stop is in place now)".
+- `ollivander clear` removes every Ollivander stop: the stop of every family (`state/ollivander-stop`), each CLI family's own stop (`state/ollivander-stop-claude`, `state/ollivander-stop-codex`), and any update marker a CLI update left. Its result has `cleared`, `removed` (the files it removed), `stopped` (for each one removed, the family it held back, `every`, `claude`, `codex` or `update`, its file and why), `stop_file` and a `note` saying what it removed, which family each held and why, or that no stop was on and nothing was removed. While a stop event is still unacked after the clear, the session hooks list it marked "(cleared since: no stop is in place now)".
 - `desk many-tasks` lets a desk hold many active tasks at once, for good. It refuses `mcgonagall`, `snape`, `portrait`, the human desk and the script desks.
 - `task list` with no flag lists the open tasks as one line each, newest first. `--open` lists queued, active and awaiting-close tasks as full records, `--all` lists every task, and each refuses `--status` with it. `task builds` shows one line per build: go task, build task, branch and state.
 - `task board` prints `in_flight`.

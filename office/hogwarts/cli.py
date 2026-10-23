@@ -576,7 +576,10 @@ def _model_parsers(commands: argparse._SubParsersAction) -> None:
     line = _sub(_group(commands, "model"), "line", "model line")
     line.add_argument("name")
     line.add_argument("line", choices=db.MODEL_LINES)
-    _sub(_group(commands, "ollivander"), "clear", "ollivander clear")
+    clear = _sub(_group(commands, "ollivander"), "clear", "ollivander clear")
+    clear.description = ("Remove every Ollivander stop: the stop of every family, the claude and codex families' own"
+                         " stops and a crashed update's marker. The output names each stop removed, the family it"
+                         " held back and why.")
 
 
 def _task_parsers(commands: argparse._SubParsersAction) -> None:

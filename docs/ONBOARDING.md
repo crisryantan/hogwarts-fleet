@@ -444,7 +444,7 @@ To take the job off again: `launchctl bootout gui/$(id -u)/com.hogwarts.ollivand
 
 - `launchctl print gui/$(id -u)/com.hogwarts.ollivander | head -5` shows the job.
 - `~/.hogwarts/bin/castle desk models` lists every desk that has a role card (McGonagall, Hermione, Moody, Dumbledore, Snape, Harry and Ron) with a tier and a model. Your own sessions' desk, `ryan-claude-1`, has no role card, so it shows no tier.
-- `ls ~/.hogwarts/state/` shows no `ollivander-stop` file.
+- `ls ~/.hogwarts/state/` shows no `ollivander-stop`, `ollivander-stop-claude` or `ollivander-stop-codex` file.
 
 ### 5.6 The live view
 
