@@ -2817,9 +2817,10 @@ def _acknowledge(key: str, record: dict) -> dict:
 def _notice(key: str, record: dict, now: int) -> dict:
     """The one fixed line a Chat request's thread gets as its turn starts, if any: RESUMED_NOTICE for one picked back
     up after an interruption, else WAIT_NOTICE for a review acknowledged there that waited (Later) longer than
-    CHAT_REVIEW_WAIT_NOTICE_SECONDS, naming what it waited on. Each at most once per request: marked in the record
-    before it is sent, with a request id of its own. Best effort, one try, never the end of the turn. The record as
-    it is after."""
+    CHAT_REVIEW_WAIT_NOTICE_SECONDS, naming what it waited on. Each is one Chat message per request: sent with a
+    request id of its own, so a send again after a kill is the same message, and marked in the record once Chat took
+    it, so one that failed is tried again the next time the request starts. Best effort, one try a start, never the end
+    of the turn. The record as it is after."""
     if record.get("source") != "chat" or not intake_on(record):
         return record
     since, reason = record.get("waiting_since"), record.get("waiting")
@@ -2830,17 +2831,18 @@ def _notice(key: str, record: dict, now: int) -> dict:
         field, text, name = "wait_noticed", WAIT_NOTICE.format(reason=WAIT_REASONS[reason]), "waited"
     else:
         return record
-    record = _save(key, {**record, field: True})
     app = app_of(record)
     try:
         token = google_chat.access_token(google_chat.CHAT_BOT_SCOPE, app)
+        if not intake_on(record):  # switched off while the token was minted: nothing sent, still due
+            return record
         google_chat.create_message(record["space"], record["thread"], addressed(record, text),
                                    f"chat-review-note-{name}-{key}", token, app)
     except FleetError as exc:
         log("notice-failed", request=key[:12], notice=name, why=common.scrubbed_line(exc, 200))
         return record
     log("noticed", request=key[:12], app=app, notice=name)
-    return record
+    return _save(key, {**record, field: True})
 
 
 def _waits(key: str, reason: str) -> None:
@@ -3412,7 +3414,8 @@ def _resume(key: str, record: dict) -> str:
         return _send_reply(key, record)["state"]
     left = {name: value for name, value in record.items()
             if name not in ("run_id", "started", "cost_usd", "waiting", "waiting_since")}
-    record = _save(key, {**left, "state": "queued", "resumes": resumes + 1})
+    # A request is saved running only once its launch counted its caps, so it never counts them again.
+    record = _save(key, {**left, "state": "queued", "resumes": resumes + 1, "counted": True})
     log(_event(record, "resumed"), request=key[:12], app=app_of(record), resumes=resumes + 1)
     return "resumed"
 

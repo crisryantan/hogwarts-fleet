@@ -4225,6 +4225,46 @@ class ResumeTests(ChatCase):
         self.run_pass()
         self.assertEqual(len(self.turns), 2)
 
+    def test_a_running_record_from_before_the_counted_field_is_not_counted_again(self):
+        self.patch(config, "CHAT_REVIEW_PER_PERSON_DAILY", 1)
+        self.deliver(msg())
+        record = self.kill()
+        [(key, _)] = chat_review._records()
+        chat_review._save(key, {name: value for name, value in record.items() if name != "counted"})
+        self.run_pass()
+        self.run_pass()
+        self.assertEqual((self.records()[0]["outcome"], caps_used()), ("reviewed", (1, 1)))
+
+    def test_a_notice_chat_refused_is_sent_on_the_next_start(self):
+        self.deliver(msg())
+        self.kill()
+        self.run_pass()  # resumed
+        self.google.fail_chat = True
+        self.kill()  # the resume line fails to send, and the turn is cut off again
+        self.google.fail_chat = False
+        self.assertFalse(self.records()[0].get("resume_noticed"))
+        self.run_pass()  # resumed again
+        self.run_pass()
+        self.assertEqual([MENTION.sub("", note["text"], count=1) for note in self.google.notes],
+                         [chat_review.RESUMED_NOTICE])
+        self.assertTrue(self.records()[0]["resume_noticed"])
+
+    def test_no_notice_goes_once_the_intake_is_switched_off_while_its_token_is_minted(self):
+        self.deliver(msg())
+        self.kill()
+        self.run_pass()  # resumed
+        real = google_chat.access_token
+
+        def off_at_the_chat_token(scope, app):
+            if scope == google_chat.CHAT_BOT_SCOPE:
+                self.switch(config.CHAT_REVIEW_FILE, False)
+            return real(scope, app)
+
+        with mock.patch.object(google_chat, "access_token", side_effect=off_at_the_chat_token):
+            self.run_pass()
+        self.assertEqual((self.google.notes, self.google.messages), ([], []))
+        self.assertFalse(self.records()[0].get("resume_noticed"))
+
     def test_a_killed_question_is_resumed_with_its_text(self):
         self.deliver(msg())
         self.run_pass()
