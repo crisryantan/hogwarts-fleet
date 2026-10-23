@@ -595,6 +595,10 @@ messages an answer turn reads as its context. Of those that mention it:
   be, so "What is a widget store?" sent after the app answered needs no tag. It is checked again before it runs the
   same way. Any other message there that does not mention the app is dropped like any other: no reply, no record, no
   log line;
+- one from them that only asks what the app is doing ("status", "what are you working on", "queue", "what's
+  pending", "anything running" and a few of their kin, any letter case, at most 8 words, no link or address) gets the
+  app's status reply (Status, below) and no turn, even in a thread the app reviewed; a link or a review command in it
+  still makes it a request or follow-up;
 - one from them that is none of those, holds no review or approve word anywhere and has at most 2000 characters, in
   a thread where the same app has a review request on record whose outcome is reviewed, is a question about that
   review (Questions, below). A message that does not mention the app is one only as a conversation turn (above), and
@@ -684,7 +688,7 @@ finding's place is left out of that check when it names a repo context file or a
 the `---` and `+++` lines of each file's header only (a path git quotes, for a quote, a backslash or a byte past
 ASCII, is read as git wrote it), so a long path is never taken for an echo and no line inside a hunk passes for one. Each person may ask for `CHAT_REVIEW_PER_PERSON_DAILY`
 reviews a cap day and the whole fleet `CHAT_REVIEW_DAILY`, whichever app they ask, counted before the desk starts, so a
-killed review counts. Each review is also one run of its desk under that desk's own daily caps, recorded like any
+killed review counts, once however often it is resumed. Each review is also one run of its desk under that desk's own daily caps, recorded like any
 other: a Hermione turn at most her per-run budget and never past her spend cap, a Moody turn with its tokens and, as
 every Codex run, no cost.
 
@@ -775,6 +779,33 @@ the address it checked, with the certificate checked for the host, and follows a
 the same way. The material sits in the turn's input between marker lines with its nonce, as untrusted data, and
 every finding, summary and answer is echo-checked against it as against the PR's own text. A link or image that
 cannot be read is a note in the input, never the end of the turn.
+
+A status reply is built by the job, never by a model: the app's own requests from conversations in
+`CHAT_REVIEW_SPACES` that are still open, oldest first, each queued, running, finishing or waiting with what it waits
+on (another review of this PR, a free run slot, the caps lock, a CLI update, a fleet stop or the intake switch), then
+the last 5 it finished this cap day, newest first, with the outcome, the verdict and, when the review was posted, its
+GitHub link. Each line names the PR as `owner/repo#number`, who asked by Chat display name, how long ago, and links
+the thread it came from (`https://mail.google.com/chat/u/0/#chat/space/<space>/<thread>`, built from the space and
+thread names alone). It holds no email and no text a teammate wrote, and is cut whole lines at a time to what Chat
+takes. Each app reports only its own requests.
+
+A request that waits keeps what it waits on in its record. A review acknowledged in its thread that then waited
+longer than `CHAT_REVIEW_WAIT_NOTICE_SECONDS` (300) before its turn started gets one fixed line there as it starts,
+"Picked this up now; it was waiting on <what it waited on>.", once. Every request ends with one reply in its thread,
+whatever its outcome: the review or answer, or the fixed line for a desk that is off, a cap, a PR that is not open or
+too large, a PR that could not be read, a turn that failed, could not sign in or gave no usable block, a blocked
+model, a wait past the queue limit or an interruption. The one silent end is a request that mentioned no one and
+turned out to be in a thread the other app took first.
+
+A request left running whose turn is gone (its turn lock, the PR's or a mention answer's own, and its run lock are
+free, so the turn's process ended: a kill, a restart, the loops stopped) is queued again on the next pass with its
+resume count, logged as `resumed`, and when it runs again its thread gets one fixed line, "Back on this after an
+interruption.", once. A question's text and the attached material stay in its record until its turn has run, so a
+resumed one still has them. After `CHAT_REVIEW_RESUME_MAX` (2) resumes it ends with the fixed failure line instead.
+One request never runs as two turns, the PR lock, GitHub marker and caps work as before, and its chat caps were
+counted at its first launch, so a resumed run counts toward no person's or fleet cap again (its desk's own run caps
+count every launch, as for any run). A review by hand that was cut off is ended, since no one is there to run it
+again.
 
 Every request, its app, its outcome and its cost is one JSON line in `logs/chat-review.log`; a question's and a
 mention answer's lines hold only its request id, app and outcome, a turn's material line only counts and outcomes,

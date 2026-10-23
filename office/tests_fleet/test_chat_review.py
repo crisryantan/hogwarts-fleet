@@ -149,7 +149,7 @@ class FakeGoogle:
     Chat reply sent again with a request id Chat has seen gives back the message it made, as Chat does."""
 
     def __init__(self) -> None:
-        self.acks = []
+        self.acks, self.notes = [], []  # acknowledgements, and the lines a turn's start posts, kept apart from replies
         self.calls, self.messages, self.by_request, self.grants, self.refreshes = [], [], {}, [], []
         self.posted = {}  # space: the messages in it, as spaces.messages.list gives them
         self.members = {SPACE: {SENDER: SENDER_USER, LEAD: LEAD_USER, "stranger@example.com": STRANGER_USER}}
@@ -245,6 +245,12 @@ class FakeGoogle:
                 self.acks.append({"space": space, "text": payload["text"], "thread": payload["thread"]["name"],
                                   "request_id": request_id, "app": APPS_BY_TOKEN[token]})
                 self.by_request[request_id] = f"{space}/messages/ack-{len(self.acks)}"
+        elif request_id.startswith("chat-review-note-"):
+            space = path[:-len("/messages")]
+            if request_id not in self.by_request:
+                self.notes.append({"space": space, "text": payload["text"], "thread": payload["thread"]["name"],
+                                   "request_id": request_id, "app": APPS_BY_TOKEN[token]})
+                self.by_request[request_id] = f"{space}/messages/note-{len(self.notes)}"
         elif request_id not in self.by_request:
             space = path[:-len("/messages")]
             self.messages.append({"space": space, "text": payload["text"], "thread": payload["thread"]["name"],
@@ -700,7 +706,8 @@ class IntakeTests(ChatCase):
         self.assertEqual(self.run_pass()["taken"].count("review"), 1)
         self.assertEqual([record["message"] for record in self.records()], [f"{SPACE}/messages/m6"])
 
-    def test_a_review_killed_part_way_is_answered_once_and_never_run_again(self):
+    def test_a_review_killed_part_way_with_no_resume_left_is_answered_once_and_never_run_again(self):
+        self.patch(config, "CHAT_REVIEW_RESUME_MAX", 0)
         self.deliver(msg())
         self.answer = SystemExit(143)
         with self.assertRaises(SystemExit):
@@ -1642,6 +1649,7 @@ class GuardTests(ChatCase):
         self.assertEqual(self.google.calls, [])
 
     def test_a_turn_left_running_past_its_time_is_killed_and_its_folder_cleared(self):
+        self.patch(config, "CHAT_REVIEW_RESUME_MAX", 0)
         self.deliver(msg())
         self.answer = SystemExit(143)
         with self.assertRaises(SystemExit):
@@ -4005,6 +4013,306 @@ class UpgradeTests(ChatCase):
         self.assertEqual(self.github("m2"), ("posted", "APPROVE"))
 
 
+def caps_used(who: str = SENDER) -> tuple:
+    """(the fleet's chat reviews counted this cap day, who's)."""
+    with chat_review._folder(chat_review.CAPS) as fd:
+        data = chat_review._caps(fd, chat_review._day(int(time.time())))
+    return data["total"], data["people"].get(who, 0)
+
+
+class StatusTests(ChatCase):
+    """A status ask gets the app's own status, built by the script with no turn: what it has open, with what each
+    waits on, and what it finished today, each line its PR, who asked, how long ago and its thread, and never a
+    teammate's text or an email."""
+
+    def record(self, key: str, state: str, kind: str = "review", app: str = "hermione", ago: int = 60,
+               **fields) -> None:
+        now = int(time.time())
+        chat_review._create(key, {"state": state, "kind": kind, "source": "chat", "app": app, "space": SPACE,
+                                  "thread": f"{SPACE}/threads/{key[:6]}", "message": f"{SPACE}/messages/{key[:6]}",
+                                  "at": now - ago, "requester": SENDER, "requester_name": "Dev Person",
+                                  "repo": "acme/web-app", "number": 7, **fields})
+
+    def test_the_grammar_takes_a_few_fixed_asks_and_nothing_else(self):
+        for text in ("status", "Status?", "what are you working on?", "What's pending", "whats queued", "queue",
+                     "your queue", "anything running?", "is anything waiting", "hey, status update",
+                     "what’s running right now", "are you busy", "what's the status"):
+            with self.subTest(text=text):
+                self.assertTrue(chat_review.parse_status(text))
+        for text in ("what is a queue?", "status of the deploy", "review status", f"status {URL}",
+                     "status https://example.org/x", "what are you working on today and why is it so slow", "",
+                     "approve", "help", None, "what is the status of acme/web-app#7?", "statuses"):
+            with self.subTest(text=text):
+                self.assertFalse(chat_review.parse_status(text))
+
+    def test_status_lists_open_and_finished_requests_with_reasons_and_links_and_no_teammate_text(self):
+        self.patch(chat_review, "_day", return_value=0)  # every record here ended this cap day, whatever the hour
+        now = int(time.time())
+        self.record("a" * 32, "queued", ago=120, waiting="update", waiting_since=now - 60)
+        self.record("b" * 32, "running", ago=600, requester_name=SENDER)  # a name that is an email shows as no one
+        self.record("c" * 32, "queued", kind="question", ago=30, question=SECRET_MARK, about="a" * 32)
+        self.record("d" * 32, "done", ago=3600, ended=now - 1800, outcome="reviewed", verdict="CHANGES",
+                    github="posted", github_url="https://github.com/acme/web-app/pull/7#pullrequestreview-901")
+        for index in range(6):
+            self.record(f"e{index}" + "0" * 30, "done", ago=7200, ended=now - 3000 - index, outcome="not-open")
+        self.record("f" * 32, "queued", space="spaces/ZZZZ")  # not an allowed conversation
+        self.record("9" * 32, "queued", kind="status")
+        text = chat_review.status_text("hermione", now)
+        lines = text.splitlines()
+        self.assertEqual(lines[:4], [
+            "Open (3):",
+            "- review of acme/web-app#7 for a teammate, asked 10m ago: running"
+            " <https://mail.google.com/chat/u/0/#chat/space/AAAA/bbbbbb|thread>",
+            "- review of acme/web-app#7 for Dev Person, asked 2m ago: waiting: a CLI update"
+            " <https://mail.google.com/chat/u/0/#chat/space/AAAA/aaaaaa|thread>",
+            "- question about acme/web-app#7 for Dev Person, asked just now: queued"
+            " <https://mail.google.com/chat/u/0/#chat/space/AAAA/cccccc|thread>"])
+        self.assertEqual(lines[4], "Finished today (latest 5):")
+        self.assertEqual(lines[5], "- review of acme/web-app#7 for Dev Person, done 30m ago: reviewed, CHANGES, on"
+                                   " GitHub <https://github.com/acme/web-app/pull/7#pullrequestreview-901|review>"
+                                   " <https://mail.google.com/chat/u/0/#chat/space/AAAA/dddddd|thread>")
+        self.assertEqual(len(lines), 10)  # the newest five finished only
+        self.assertTrue(all(": not-open" in line for line in lines[6:]))
+        for absent in (SECRET_MARK, SENDER, "ZZZZ"):
+            self.assertNotIn(absent, text)
+
+    def test_a_status_ask_gets_the_fixed_reply_with_no_turn_even_in_a_reviewed_thread(self):
+        self.switch(config.CHAT_REVIEW_GITHUB_FILE, True)
+        self.deliver(msg())
+        self.run_pass()
+        self.deliver(msg(text="What are you working on?", message="m2"))
+        self.assertEqual([outcome for outcome in self.run_pass()["taken"] if outcome != "seen before"], ["status"])
+        self.assertEqual(len(self.turns), 1)  # the review's only
+        reply = self.google.messages[-1]["text"]
+        self.assertTrue(reply.startswith(said("Nothing open.")))
+        self.assertIn("- review of acme/web-app#7 for Dev Person, done just now: reviewed, CHANGES, on GitHub"
+                      " <https://github.com/acme/web-app/pull/7#pullrequestreview-901|review>", reply)
+        record = [record for record in self.records() if record["kind"] == "status"][0]
+        self.assertEqual((record["state"], record["outcome"]), ("done", "status"))
+        self.assertNotIn("What are you working on", self.office_text())
+
+    def test_a_link_still_makes_a_review_request_and_a_stranger_still_gets_the_refusal(self):
+        self.deliver(msg(text=f"status {URL}"), msg(text="status", sender=STRANGER_USER, message="m2"))
+        self.assertEqual(self.run_pass()["taken"], ["review", "refusal"])
+        self.assertEqual(len(self.turns), 1)
+
+    def test_each_app_reports_only_its_own_requests(self):
+        self.second_app()
+        self.record("a" * 32, "queued", app="moody", ago=120)
+        self.record("b" * 32, "running", app="hermione", ago=60)
+        now = int(time.time())
+        self.assertEqual(chat_review.status_text("moody", now).splitlines()[:2],
+                         ["Open (1):", "- review of acme/web-app#7 for Dev Person, asked 2m ago: queued"
+                          " <https://mail.google.com/chat/u/0/#chat/space/AAAA/aaaaaa|thread>"])
+        self.assertIn("running", chat_review.status_text("hermione", now))
+        self.assertNotIn("running", chat_review.status_text("moody", now))
+
+    def test_a_long_status_is_cut_whole_lines_to_what_chat_takes(self):
+        for index in range(80):
+            self.record(f"{index:02d}" + "0" * 30, "queued", ago=60)
+        text = chat_review.status_text("hermione", int(time.time()))
+        self.assertLessEqual(len(text), google_chat.MESSAGE_MAX_CHARS - chat_review.MENTION_ROOM)
+        self.assertRegex(text.splitlines()[-1], r"\([0-9]+ more lines not shown\)")
+
+
+class NoticeTests(ChatCase):
+    """A review acknowledged in its thread that waited long gets one line there as its turn starts."""
+
+    def wait_once(self) -> str:
+        self.deliver(msg())
+        with chat_review.pr_lock("acme/web-app", 7, "hermione"):  # another review of this PR holds it
+            self.assertEqual(self.run_pass()["settled"], ["queued"])
+        [(key, record)] = chat_review._records()
+        self.assertEqual((record["acked"], record["waiting"]), (True, "pr"))
+        return key
+
+    def test_a_review_that_waited_past_the_threshold_says_so_once_when_it_starts(self):
+        key = self.wait_once()
+        record = chat_review.read_record(key)
+        chat_review._save(key, {**record, "waiting_since": record["waiting_since"]
+                                - config.CHAT_REVIEW_WAIT_NOTICE_SECONDS - 1})
+        self.run_pass()
+        self.run_pass()
+        self.assertEqual([MENTION.sub("", note["text"], count=1) for note in self.google.notes],
+                         ["Picked this up now; it was waiting on another review of this PR."])
+        self.assertEqual(self.google.notes[0]["thread"], THREAD)
+        self.assertEqual(len(self.google.messages), 1)  # the review's reply, once
+        self.assertTrue(chat_review.read_record(key)["wait_noticed"])
+
+    def test_a_short_wait_posts_no_notice(self):
+        self.wait_once()
+        self.run_pass()
+        self.assertEqual((self.google.notes, len(self.google.messages)), ([], 1))
+
+    def test_status_names_what_a_waiting_request_waits_on(self):
+        self.wait_once()
+        self.assertIn(": waiting: another review of this PR", chat_review.status_text("hermione", int(time.time())))
+
+
+class ResumeTests(ChatCase):
+    """A request whose turn was cut off is picked back up, at most CHAT_REVIEW_RESUME_MAX times, never as two turns
+    and never counted twice against a cap."""
+
+    def kill(self) -> dict:
+        self.answer = SystemExit(143)
+        with self.assertRaises(SystemExit):
+            self.run_pass()
+        self.answer = ("ok", block())
+        [record] = self.records()
+        self.assertEqual(record["state"], "running")
+        return record
+
+    def test_a_killed_review_is_resumed_and_answered_with_one_line_saying_so(self):
+        self.deliver(msg())
+        self.kill()
+        self.assertEqual(self.run_pass()["settled"], ["resumed"])
+        [record] = self.records()
+        self.assertEqual((record["state"], record["resumes"], "run_id" in record), ("queued", 1, False))
+        self.assertEqual([line["event"] for line in self.log_lines()].count("resumed"), 1)
+        self.run_pass()
+        self.run_pass()
+        self.assertEqual(len(self.turns), 2)
+        self.assertEqual([MENTION.sub("", note["text"], count=1) for note in self.google.notes],
+                         [chat_review.RESUMED_NOTICE])
+        self.assertEqual(len(self.google.messages), 1)
+        self.assertIn("Verdict: CHANGES", self.texts()[0])
+        self.assertEqual(len(self.google.acks), 1)
+        [record] = self.records()
+        self.assertEqual((record["state"], record["outcome"]), ("done", "reviewed"))
+        self.assertEqual(caps_used(), (1, 1))  # counted at its first launch only
+
+    def test_a_resumed_review_is_not_refused_by_the_cap_it_already_used(self):
+        self.patch(config, "CHAT_REVIEW_PER_PERSON_DAILY", 1)
+        self.patch(config, "CHAT_REVIEW_DAILY", 1)
+        self.deliver(msg())
+        self.kill()
+        self.run_pass()
+        self.run_pass()
+        self.assertEqual(self.records()[0]["outcome"], "reviewed")
+        self.assertEqual(caps_used(), (1, 1))
+
+    def test_after_the_most_resumes_it_ends_with_the_could_not_reply(self):
+        self.patch(config, "CHAT_REVIEW_RESUME_MAX", 2)
+        self.deliver(msg())
+        self.kill()
+        for _ in range(2):
+            self.assertEqual(self.run_pass()["settled"], ["resumed"])
+            self.kill()
+        self.run_pass()
+        self.run_pass()
+        self.assertEqual(len(self.turns), 3)
+        self.assertEqual(self.texts(), [chat_review.COULD_NOT])
+        self.assertEqual(len(self.google.notes), 1)  # the resume line once, however many resumes
+        [record] = self.records()
+        self.assertEqual((record["state"], record["outcome"], record["resumes"]), ("done", "interrupted", 2))
+        self.assertEqual(caps_used(), (1, 1))
+
+    def test_a_turn_still_holding_its_turn_lock_or_run_lock_is_never_resumed_or_run_twice(self):
+        self.deliver(msg())
+        record = self.kill()
+        with chat_review.pr_lock("acme/web-app", 7, "hermione"):  # the turn's process still holds its PR lock
+            self.run_pass()
+        self.assertEqual(self.records()[0]["state"], "running")
+        runs = self.office / "runs" / "hermione"
+        runs.mkdir(parents=True, exist_ok=True)
+        name = run_desk.run_lock_name(record["run_id"])
+        self.write_file(runs / name, "")
+        with safefs.opened_dir(config.OFFICE_ROOT, "runs", "hermione") as fd, \
+                safefs.held_lock(fd, name, blocking=False):  # or only its run lock
+            self.run_pass()
+        self.assertEqual((self.records()[0]["state"], len(self.turns)), ("running", 1))
+        self.assertEqual(self.run_pass()["settled"], ["resumed"])
+        self.run_pass()
+        self.assertEqual(len(self.turns), 2)
+
+    def test_a_killed_question_is_resumed_with_its_text(self):
+        self.deliver(msg())
+        self.run_pass()
+        self.deliver(msg(text="Why is the print a problem?", message="m2"))
+        self.answer = SystemExit(143)
+        with self.assertRaises(SystemExit):
+            self.run_pass()
+        self.answer = ("ok", "ANSWER\nIt runs at import.\nEND\n")
+        question = [record for record in self.records() if record["kind"] == "question"][0]
+        self.assertEqual((question["state"], question["question"]), ("running", "Why is the print a problem?"))
+        self.run_pass()
+        self.run_pass()
+        self.assertIn("Why is the print a problem?", self.turns[-1]["input"])
+        self.assertEqual(self.texts()[-1], "It runs at import.")
+        question = [record for record in self.records() if record["kind"] == "question"][0]
+        self.assertEqual((question["state"], question["outcome"], "question" in question),
+                         ("done", "answered", False))
+
+
+class EndPathTests(ChatCase):
+    """Every way a request ends posts exactly one reply in its thread."""
+
+    def ends(self, outcome: str, text: str = chat_review.COULD_NOT) -> None:
+        self.deliver(msg())
+        self.run_pass()
+        self.run_pass()
+        [record] = self.records()
+        self.assertEqual((record["state"], record["outcome"]), ("done", outcome))
+        self.assertEqual(self.texts(), [text])
+
+    def test_desk_off(self):
+        (self.office / "desks" / "hermione" / config.ENABLED_MARKER).unlink()
+        self.ends("desk-off")
+
+    def test_capped(self):
+        self.patch(config, "CHAT_REVIEW_PER_PERSON_DAILY", 1)
+        chat_review.cap_refusal(SENDER, int(time.time()), count=True)
+        self.ends("capped", chat_review.CAPPED_PERSON)
+
+    def test_desk_capped(self):
+        self.patch(run_desk, "over_daily_cap", return_value="its run cap")
+        self.ends("desk-capped")
+
+    def test_too_large(self):
+        self.patch(config, "CHAT_REVIEW_DIFF_READ_MAX_BYTES", 1)
+        self.ends("too-large", chat_review.TOO_LARGE)
+
+    def test_unusable(self):
+        self.answer = ("ok", "no block here")
+        self.ends("unusable")
+
+    def test_turn_failed(self):
+        self.answer = ("failed", "")
+        self.ends("turn-failed")
+
+    def test_auth(self):
+        self.answer = ("auth", "")
+        self.ends("auth")
+
+    def test_model_blocked(self):
+        self.patch(run_desk, "chat_review_argv", side_effect=run_desk.Blocked("that model is blocked"))
+        self.ends("model-blocked")
+
+    def test_github_read_failed(self):
+        self.patch(gitops, "run_gh_read", side_effect=FleetError("gh failed: HTTP 502"))
+        self.ends("github-read-failed")
+
+    def test_not_open(self):
+        self.pr["state"] = "closed"
+        self.ends("not-open", chat_review.NOT_OPEN)
+
+    def test_expired(self):
+        self.deliver(msg(at=time.time() - 30))
+        with chat_review.pr_lock("acme/web-app", 7, "hermione"):
+            self.run_pass()
+        self.patch(config, "CHAT_REVIEW_QUEUE_MAX_SECONDS", 10)
+        self.run_pass()
+        [record] = self.records()
+        self.assertEqual((record["outcome"], self.texts()), ("expired", [chat_review.COULD_NOT]))
+
+    def test_a_mention_answer_whose_turn_failed(self):
+        self.answer = ("failed", "")
+        self.deliver(msg(text="What is a race condition?"))
+        self.run_pass()
+        [record] = self.records()
+        self.assertEqual((record["outcome"], self.texts()), ("turn-failed", [chat_review.COULD_NOT_ANSWER]))
+
+
 class HandTests(ChatCase):
     def test_fleet_review_pr_runs_the_same_review_with_no_chat_reply(self):
         self.switch(config.CHAT_REVIEW_FILE, False)  # the intake's switch does not gate a run by hand
@@ -4242,6 +4550,7 @@ class SecondAppTests(ChatCase):
             run_desk.chat_review_argv(self.conn, chat_review.MOODY_BRIEF, "p", run_id, "harry")
 
     def test_a_moody_turn_killed_part_way_is_answered_once_and_leaves_nothing_behind(self):
+        self.patch(config, "CHAT_REVIEW_RESUME_MAX", 0)
         self.second_app()
         self.deliver(msg(app=MOODY_APP_USER))
         self.answer = SystemExit(143)

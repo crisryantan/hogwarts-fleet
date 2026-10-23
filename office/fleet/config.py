@@ -500,6 +500,12 @@ CHAT_REVIEW_QUESTION_BUDGET_USD = "0.50"
 CHAT_REVIEW_IMAGES = True
 # A Chat reply is sent at most this many times (each with the same request id, so Chat keeps one message).
 CHAT_REVIEW_REPLY_TRIES = 3
+# A review acknowledged in its thread that then waited longer than this before its turn started gets one line there
+# saying it was picked up and what it waited on.
+CHAT_REVIEW_WAIT_NOTICE_SECONDS = 300
+# How many times a request whose turn was cut off (a kill, a restart, the loops stopped) is queued again before it
+# ends with the fixed failure line. A resumed run counts toward no chat cap again.
+CHAT_REVIEW_RESUME_MAX = 2
 # Hermione's chat review turn: Read, Grep and Glob only, her settings, her model and budget, and this much of its JSON
 # output read.
 CHAT_REVIEW_OUTPUT_MAX_BYTES = 262144

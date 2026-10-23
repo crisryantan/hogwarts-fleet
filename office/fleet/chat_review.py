@@ -131,6 +131,21 @@ Anyone in the company's Chat can send an app text, so everything here treats a m
 - Each reply carries a request id made from its record, so a reply sent again after a kill is the same Chat message.
   It goes as the app that was mentioned (spaces.messages.create with the chat.bot scope, that app's worker service
   account's token, which never reads) in the request's thread.
+- A status ask: a mention of the app from an allowed sender whose text is one of a few fixed asks (parse_status: "status",
+  "what are you working on", "queue", "what's pending", "anything running" and their kin, at most STATUS_WORDS_MAX
+  words, no link) gets a fixed reply built by the script, never a model turn (status_text): that app's requests from
+  allowed conversations that are queued, running or waiting (with what they wait on), and the last STATUS_DONE_MAX it
+  finished this cap day with their outcome, verdict and GitHub link, each line the PR, the asker's display name, how
+  long ago and a link to its thread. Never an email, and never any text a teammate wrote. It wins over a question, but
+  a review request or follow-up wins over it.
+- A request that waits (Later) keeps what it waits on in its record (waiting, waiting_since). A review acknowledged in
+  its thread that waited longer than CHAT_REVIEW_WAIT_NOTICE_SECONDS gets one fixed line there as its turn starts
+  (WAIT_NOTICE), once.
+- A request left running whose turn is gone (its turn lock and its run lock free, so the turn's process ended: a kill,
+  a restart, the loops stopped) is queued again with its resume count and the log line resumed, at most
+  CHAT_REVIEW_RESUME_MAX times, and its thread gets RESUMED_NOTICE once when it runs again; after that it ends with the
+  fixed failure line. Its caps were counted at its first launch (counted), so a resumed run counts toward no chat cap
+  again, and the turn lock it runs under means one request never has two turns.
 - Every request, its outcome and its cost is one JSON line in logs/chat-review.log, and its record stays in the office
   folder chat-reviews/ for CHAT_REVIEW_KEEP_SECONDS.
 
@@ -170,7 +185,7 @@ READ_STOPPED = "read-stopped.json"
 SPACE_MARK = "space"
 QUIET = "quiet"
 # What taking a message that mentions the app can make: a record, each counted toward CHAT_REVIEW_PULL_MAX.
-TAKEN = ("review", "question", "mention", "help", "refusal")
+TAKEN = ("review", "question", "mention", "help", "refusal", "status")
 LOG = "chat-review.log"
 JOB_LOCK = "chat-review-job.lock"
 CAPS_LOCK = "chat-review-caps.lock"
@@ -245,6 +260,24 @@ HISTORY_SECONDS = 30
 USER_MARKUP = re.compile(r"<users/[^<>\s]{0,60}>")
 # A mention that only asks for help gets the help reply, never a turn.
 HELP_WORD = re.compile(r"\s*(?:help|usage|commands|what can you do)\s*[.!?]*\s*", re.IGNORECASE)
+# A mention that only asks what the app is doing gets its status (status_text), never a turn: one of these few asks,
+# after an optional greeting, in at most STATUS_WORDS_MAX words, with no link.
+STATUS_ASK = re.compile(r"(?:(?:hey|hi|hello|ok|okay|so|please|pls)[,!]?\s+)*"
+                        r"(?:(?:what(?:'s|s| is)\s+)?(?:the\s+|your\s+)?status(?:\s+(?:update|check))?"
+                        r"|(?:what(?:'s|s| is)\s+(?:in\s+)?)?(?:the\s+|your\s+)?queue"
+                        r"|what(?:'s|s| is)\s+(?:pending|queued|running|waiting)"
+                        r"|what\s+are\s+you\s+(?:working\s+on|doing|up\s+to)"
+                        r"|(?:is\s+)?anything\s+(?:running|pending|queued|waiting)"
+                        r"|(?:are\s+)?you\s+busy)"
+                        r"(?:\s+(?:right\s+)?now)?\s*[.!?]*", re.IGNORECASE)
+STATUS_WORDS_MAX = 8
+# A status reply lists at most this many requests finished this cap day, newest first.
+STATUS_DONE_MAX = 5
+# Where a status line's thread link opens: Chat on the web, at the request's space and thread.
+CHAT_THREAD_LINK = "https://mail.google.com/chat/u/0/#chat/space/{space}/{thread}"
+GITHUB_REVIEW_LINK = re.compile(r"https://github\.com/[A-Za-z0-9._-]{1,100}/[A-Za-z0-9._-]{1,100}/pull/[1-9][0-9]{0,9}"
+                                r"(?:#pullrequestreview-[0-9]{1,20})?")
+OUTCOME_WORD = re.compile(r"[a-z][a-z-]{0,39}")
 GITHUB_BODY_MAX = 20000
 # A finding that repeats this many characters of the PR's own text in a row is refused, so text planted in a PR is
 # never carried, word for word, into Chat or onto GitHub in the desk's voice.
@@ -285,6 +318,13 @@ ANSWER_TOO_LARGE = "That PR's diff is now too large for me to read, so I can't a
 ANSWER_WITHHELD = "I won't answer that one: my answer repeated the PR's own text at length."
 MENTION_WITHHELD = "I won't answer that one: my answer repeated the attached material at length."
 OPENING = "This is an automated review by {name}, requested by {requester} in Chat."
+# The fixed lines a thread gets as a request's turn starts: once after it waited long (with what it waited on, a
+# WAIT_REASONS phrase), and once after it was picked back up from an interruption.
+WAIT_NOTICE = "Picked this up now; it was waiting on {reason}."
+RESUMED_NOTICE = "Back on this after an interruption."
+# What a request waits on (Later's reason), in the words a notice and a status line use.
+WAIT_REASONS = {"pr": "another review of this PR", "turn": "its own turn", "slot": "a free run slot",
+                "caps": "the caps lock", "update": "a CLI update", "stop": "a fleet stop", "intake": "the intake switch"}
 READ_STOPPED_EVENT = ("Chat reviews stopped reading Chat for the {desk} app: its read-only authorization is missing,"
                       " revoked, expired or broader than read only. Run {command} again to resume.")
 # Who the opening names: the sender's Chat display name, never an email, which stays in the office's own log.
@@ -531,7 +571,16 @@ ANSWER_LINE, END_LINE = "ANSWER", "END"
 class Later(FleetError):
     """A review that cannot start now (the desk's review of its PR running, every run slot of the desk busy, a stop of
     the desk's family or a CLI update): a queued request waits for a later pass, and one by hand is refused with
-    this."""
+    this. reason is what it waits on, a key of WAIT_REASONS."""
+
+    def __init__(self, message: str, reason: str = "slot") -> None:
+        super().__init__(message)
+        self.reason = reason if reason in WAIT_REASONS else "slot"
+
+
+def _held_back(held: str) -> str:
+    """The WAIT_REASONS key of what holds a launch back (run_desk.stop_reason, or a Stopped's message)."""
+    return "update" if "CLI update" in held else "stop"
 
 
 class Unusable(FleetError):
@@ -568,9 +617,10 @@ def config_problems(intake: bool) -> list:
         value = getattr(config, name)
         if type(value) is not int or value < 1:
             bad(name, value, "must be a whole number of at least 1")
-    grace = config.CHAT_REVIEW_JOIN_GRACE_SECONDS
-    if type(grace) is not int or grace < 0:
-        bad("CHAT_REVIEW_JOIN_GRACE_SECONDS", grace, "must be a whole number of at least 0")
+    for name in ("CHAT_REVIEW_JOIN_GRACE_SECONDS", "CHAT_REVIEW_WAIT_NOTICE_SECONDS", "CHAT_REVIEW_RESUME_MAX"):
+        value = getattr(config, name)
+        if type(value) is not int or value < 0:
+            bad(name, value, "must be a whole number of at least 0")
     if question_budget() is None:
         bad("CHAT_REVIEW_QUESTION_BUDGET_USD", config.CHAT_REVIEW_QUESTION_BUDGET_USD,
             "must be dollars and cents above zero, such as \"0.50\"")
@@ -829,6 +879,16 @@ def parse_mention(text: object) -> bool:
         and chat_material.PR_LINK.search(text) is None
 
 
+def parse_status(text: object) -> bool:
+    """Whether text, with the app mention already out, only asks what the app is doing (STATUS_ASK, any letter case):
+    at most STATUS_WORDS_MAX words and no address or link of any kind. Nothing else in the text is read or kept."""
+    if not isinstance(text, str) or LINKISH.search(text) is not None or LINK_MARKUP.search(text) is not None \
+            or ANY_ADDRESS.search(text) is not None:
+        return False
+    plain = " ".join(typographic(text).split())
+    return len(plain.split()) <= STATUS_WORDS_MAX and STATUS_ASK.fullmatch(plain) is not None
+
+
 # Office records
 
 
@@ -1037,7 +1097,7 @@ def pr_lock(repo: str, number: int, app: str) -> Iterator[int]:
         try:
             fd = held.enter_context(safefs.held_lock(locks_fd, name, blocking=False))
         except safefs.Busy:
-            raise Later("a review of this PR is running") from None
+            raise Later("a review of this PR is running", "pr") from None
         yield fd
 
 
@@ -1063,7 +1123,7 @@ def turn_lock(key: str, record: dict) -> Iterator[int]:
         try:
             fd = held.enter_context(safefs.held_lock(locks_fd, name, blocking=False))
         except safefs.Busy:
-            raise Later("this mention answer is running") from None
+            raise Later("this mention answer is running", "turn") from None
         yield fd
 
 
@@ -1119,6 +1179,18 @@ def cap_refusal(requester: str, now: int, count: bool) -> Optional[str]:
             data = {**data, "total": data["total"] + 1, "people": {**data["people"], who: mine + 1}}
             markers.replace(fd, f"{day}.json", data)
     return None
+
+
+def _cap_check(record: dict, now: int, count: bool) -> Optional[str]:
+    """cap_refusal for the record's requester, but None for a request whose caps an earlier launch of it already
+    counted (counted: one resumed after an interruption), so no request counts twice. Later while the caps lock is
+    busy."""
+    if record.get("counted") is True:
+        return None
+    try:
+        return cap_refusal(record["requester"], now, count)
+    except safefs.Busy:
+        raise Later("the caps lock is busy", "caps") from None
 
 
 # Reading the PR
@@ -1968,12 +2040,12 @@ def _launch(conn, key: str, record: dict, pr_fd: int, brief: str, prompt: str, i
             budget: Optional[str] = None, images: Optional[dict] = None, context: Optional[dict] = None) -> tuple:
     """Run one turn of the record's desk on input_text, its only input file, under one of the desk's run slots, the
     launch gate, its own run lock and the lock of its PR (pr_fd), after its own daily caps and the shared chat caps are
-    checked and counted: (the turn's outcome, its text, the record as it is after, holding the turn's run id and
-    cost), or, when a cap or the desk's blocked model stops it before it launches, (one of REFUSED, the fixed reply for
+    checked and counted, once per request (_cap_check), with the thread's notice, if one is due, sent as it starts
+    (_notice): (the turn's outcome, its text, the record as it is after, holding the turn's run id and cost), or, when a cap or the desk's blocked model stops it before it launches, (one of REFUSED, the fixed reply for
     a chat cap or None, the record as it was). Later when it cannot start now. budget is the Claude turn's, else the
     desk's per-run one; images go in its working folder beside its input, and a review's repo context under
     context/ there."""
-    desk, requester = app_of(record), record["requester"]
+    desk = app_of(record)
     run_id = f"chat-{secrets.token_hex(8)}"
     found: dict = {}
     try:
@@ -1984,20 +2056,23 @@ def _launch(conn, key: str, record: dict, pr_fd: int, brief: str, prompt: str, i
             with run_desk.launch_lock(desk):
                 now = int(time.time())  # the cap day of the launch itself
                 if not intake_on(record):
-                    raise Later("the chat review intake was switched off")
+                    raise Later("the chat review intake was switched off", "intake")
                 # The desk's own daily caps hold too, and the turn counts toward them like any run of its.
                 if run_desk.over_daily_cap(conn, desk, now, launch_held=True) is not None:
                     return "desk-capped", None, record
-                refusal = cap_refusal(requester, now, count=True)
+                refusal = _cap_check(record, now, count=True)
                 if refusal is not None:
                     return "capped", refusal, record
                 capacity.record_launch(conn, desk, run_id, model, now=now)
                 # Until its usage is in, a desk that holds spend keeps the run lock: a killed launcher leaves it to
                 # reconcile_launches. A Codex desk holds none, and its launch already counts toward its run cap.
                 own.keep = run_desk.holds_spend(desk)
-            record = _save(key, {**_unasked(record), "state": "running", "run_id": run_id, "started": now,
-                                 "cost_usd": _budget(desk, budget)})
+            # A question's text and the material stay until the turn has run, so one resumed after a kill still has
+            # them; its caps are counted, so a resumed launch counts toward none again.
+            record = _save(key, {**record, "state": "running", "run_id": run_id, "started": now,
+                                 "cost_usd": _budget(desk, budget), "counted": True})
             log(_event(record, "started"), **_logged(key, record))
+            record = _notice(key, record, now)
             begun = time.monotonic()
             with _workdir(key, input_text, input_name, images, context) as folder:
                 outcome, text = run_desk.run_report_turn(turn, folder, (pr_fd, slot.fd, gate_fd, own.fd),
@@ -2005,12 +2080,12 @@ def _launch(conn, key: str, record: dict, pr_fd: int, brief: str, prompt: str, i
             _record_usage(conn, run_id, model, found, int((time.monotonic() - begun) * 1000), desk, budget)
             own.keep = False
     except safefs.Busy:
-        raise Later(f"every {desk} run slot, or the caps lock, is busy") from None
+        raise Later(f"every {desk} run slot is busy", "slot") from None
     except run_desk.Stopped as exc:
-        raise Later(str(exc)) from None
+        raise Later(str(exc), _held_back(str(exc))) from None
     except run_desk.Blocked:
         return "model-blocked", None, record
-    return outcome, text, {**record, "cost_usd": _cost(found, desk, budget)}
+    return outcome, text, {**_unasked(record), "cost_usd": _cost(found, desk, budget)}
 
 
 def review(conn, key: str, record: dict, pr_fd: int) -> dict:
@@ -2018,7 +2093,7 @@ def review(conn, key: str, record: dict, pr_fd: int) -> dict:
     return the record as it ends: state "reply" with the reply text, its outcome, and the verdict, summary and findings
     when the desk gave them. Later when it cannot start now; the record is then as it was, unless the review began and
     was then saved as running."""
-    repo, number, requester = record["repo"], record["number"], record["requester"]
+    repo, number = record["repo"], record["number"]
     desk = app_of(record)
     now = int(time.time())
 
@@ -2026,13 +2101,13 @@ def review(conn, key: str, record: dict, pr_fd: int) -> dict:
         return {**record, **fields, "state": "reply", "reply": reply, "outcome": outcome}
 
     if not intake_on(record):
-        raise Later("the chat review intake is off")
+        raise Later("the chat review intake is off", "intake")
     if not run_desk.is_enabled(desk):
         return finish(COULD_NOT, "desk-off")
     held = run_desk.stop_reason(config.desk_family(desk))
     if held is not None:
-        raise Later(f"{held} is in place, so {config.desk_family(desk)} turns wait")
-    refusal = cap_refusal(requester, now, count=False)
+        raise Later(f"{held} is in place, so {config.desk_family(desk)} turns wait", _held_back(held))
+    refusal = _cap_check(record, now, count=False)
     if refusal is not None:
         return finish(refusal, "capped")
     try:
@@ -2158,7 +2233,7 @@ def answer(conn, key: str, record: dict, pr_fd: int) -> dict:
     lock of its desk and PR (pr_fd), and return the record as it ends: state "reply" with the answer or a fixed line,
     and its outcome, the question's text gone from it. A question never posts on GitHub and never approves: its record
     holds no verdict, and only a review's reaches GitHub. Later when it cannot start now."""
-    repo, number, requester = record["repo"], record["number"], record["requester"]
+    repo, number = record["repo"], record["number"]
     desk = app_of(record)
     now = int(time.time())
 
@@ -2166,16 +2241,16 @@ def answer(conn, key: str, record: dict, pr_fd: int) -> dict:
         return {**_unasked(record), **fields, "state": "reply", "reply": reply, "outcome": outcome}
 
     if not intake_on(record):
-        raise Later("the chat review intake is off")
+        raise Later("the chat review intake is off", "intake")
     if not run_desk.is_enabled(desk):
         return finish(COULD_NOT_ANSWER, "desk-off")
     held = run_desk.stop_reason(config.desk_family(desk))
     if held is not None:
-        raise Later(f"{held} is in place, so {config.desk_family(desk)} turns wait")
+        raise Later(f"{held} is in place, so {config.desk_family(desk)} turns wait", _held_back(held))
     earlier, question = _earlier(record), record.get("question")
     if earlier is None or not parse_question(question):
         return finish(COULD_NOT_ANSWER, "no-review")
-    refusal = cap_refusal(requester, now, count=False)
+    refusal = _cap_check(record, now, count=False)
     if refusal is not None:
         return finish(refusal, "capped")
     try:
@@ -2310,23 +2385,23 @@ def mention_answer(conn, key: str, record: dict, lock_fd: int) -> dict:
     (lock_fd), and return the record as it ends: state "reply" with the answer or a fixed line, its text gone from it.
     A message it cannot use (empty, too long, over a cap) gets the help reply. It never posts on GitHub and never
     approves, and it holds no repo or verdict. Later when it cannot start now."""
-    requester, desk = record["requester"], app_of(record)
+    desk = app_of(record)
     now = int(time.time())
 
     def finish(reply: str, outcome: str) -> dict:
         return {**_unasked(record), "state": "reply", "reply": reply, "outcome": outcome}
 
     if not intake_on(record):
-        raise Later("the chat review intake is off")
+        raise Later("the chat review intake is off", "intake")
     if not run_desk.is_enabled(desk):
         return finish(COULD_NOT_ANSWER, "desk-off")
     held = run_desk.stop_reason(config.desk_family(desk))
     if held is not None:
-        raise Later(f"{held} is in place, so {config.desk_family(desk)} turns wait")
+        raise Later(f"{held} is in place, so {config.desk_family(desk)} turns wait", _held_back(held))
     question = record.get("question")
     if not parse_mention(question):
         return finish(help_text(desk), "help")
-    if cap_refusal(requester, now, count=False) is not None:
+    if _cap_check(record, now, count=False) is not None:
         return finish(help_text(desk), "capped")
     nonce = secrets.token_hex(16)
     found = _gather(key, record, nonce)
@@ -2635,6 +2710,77 @@ def _send_reply(key: str, record: dict) -> dict:
     return _github_or_done(key, {**record, "replied": True})
 
 
+def _ago(seconds: int) -> str:
+    if seconds < 60:
+        return "just now"
+    if seconds < 3600:
+        return f"{seconds // 60}m ago"
+    return f"{seconds // 3600}h ago" if seconds < 86400 else f"{seconds // 86400}d ago"
+
+
+def _thread_link(record: dict) -> str:
+    """Chat markup linking the record's thread, built only from its space and thread names as Chat gave them, or ""
+    when they are not a thread of that space."""
+    space, thread = record.get("space"), record.get("thread")
+    if not isinstance(space, str) or google_chat.SPACE.fullmatch(space) is None or not isinstance(thread, str) \
+            or google_chat.THREAD.fullmatch(thread) is None or not thread.startswith(space + "/threads/"):
+        return ""
+    url = CHAT_THREAD_LINK.format(space=space[len("spaces/"):], thread=thread[len(space + "/threads/"):])
+    return f" <{url}|thread>"
+
+
+def _status_line(record: dict, now: int) -> str:
+    """One request on one line of a status reply: what it is (its repo and PR number, never a teammate's text), who
+    asked by display name, how long ago and where it stands, then its thread's link."""
+    repo, number = record.get("repo"), record.get("number")
+    pr = f"{repo}#{number}" if isinstance(repo, str) and _repo_ok(repo) and type(number) is int else "a PR"
+    what = {"review": f"review of {pr}", "question": f"question about {pr}"}.get(record.get("kind"), "a message")
+    who = display_name(record.get("requester_name"))
+    state, reason = record["state"], record.get("waiting")
+    if state == "done":
+        ended = record.get("ended")
+        outcome = record.get("outcome")
+        said = [outcome if isinstance(outcome, str) and OUTCOME_WORD.fullmatch(outcome) else "ended"]
+        if record.get("verdict") in ("PASS", "CHANGES"):
+            said.append(record["verdict"])
+        url = record.get("github_url")
+        if record.get("github") == "posted" and isinstance(url, str) and GITHUB_REVIEW_LINK.fullmatch(url):
+            said.append(f"on GitHub <{url}|review>")
+        when = _ago(max(0, now - ended)) if type(ended) is int else "today"
+        return f"- {what} for {who}, done {when}: {', '.join(said)}{_thread_link(record)}"
+    at = record.get("at")
+    when = _ago(max(0, now - at)) if type(at) is int else "a while ago"
+    where = {"running": "running", "reply": "finishing", "github": "finishing"}.get(state) \
+        or (f"waiting: {WAIT_REASONS[reason]}" if reason in WAIT_REASONS else "queued")
+    return f"- {what} for {who}, asked {when}: {where}{_thread_link(record)}"
+
+
+def status_text(app: str, now: int) -> str:
+    """The fixed status reply of app: its requests from conversations in CHAT_REVIEW_SPACES that are still open
+    (queued, waiting with what they wait on, running or finishing), oldest first, then the last STATUS_DONE_MAX it
+    finished this cap day, newest first, one line each (_status_line), cut whole lines at a time to what Chat takes
+    with the mention in front. Only reviews, questions and mention answers are listed: never a status ask, help reply,
+    refusal or drop, never an email and never any text a teammate wrote."""
+    day, open_lines, finished = _day(now), [], []
+    for _, record in _records():
+        if record.get("app", DEFAULT_APP) != app or record.get("source") != "chat" \
+                or not isinstance(record.get("space"), str) or not _space_allowed(record["space"]) \
+                or record.get("kind") not in ("review", "question", "mention"):
+            continue
+        if record["state"] in ("queued", "running", "reply", "github"):
+            open_lines.append(_status_line(record, now))
+        elif record["state"] == "done" and type(record.get("ended")) is int and record["ended"] >= day:
+            finished.append(record)
+    finished.sort(key=lambda record: record["ended"], reverse=True)
+    lines = [f"Open ({len(open_lines)}):" if open_lines else "Nothing open.", *open_lines]
+    if finished:
+        lines += [f"Finished today (latest {min(len(finished), STATUS_DONE_MAX)}):",
+                  *(_status_line(record, now) for record in finished[:STATUS_DONE_MAX])]
+    else:
+        lines.append("Nothing finished today.")
+    return _whole_lines(lines, google_chat.MESSAGE_MAX_CHARS - MENTION_ROOM)
+
+
 def ack_text(key: str, app: str, number: int, other_work: bool = False) -> str:
     """The fixed acknowledgement for the request with this key, in its app's desk's voice: one of its lines chosen by
     the key, naming the PR by its number, then its review-only line when the request asked for other work too."""
@@ -2666,6 +2812,45 @@ def _acknowledge(key: str, record: dict) -> dict:
         log("ack-failed", request=key[:12], why=common.scrubbed_line(exc, 200))
         return _save(key, {**record, "acked": False}) if tries + 1 >= config.CHAT_REVIEW_REPLY_TRIES else record
     return _save(key, {**record, "acked": True})
+
+
+def _notice(key: str, record: dict, now: int) -> dict:
+    """The one fixed line a Chat request's thread gets as its turn starts, if any: RESUMED_NOTICE for one picked back
+    up after an interruption, else WAIT_NOTICE for a review acknowledged there that waited (Later) longer than
+    CHAT_REVIEW_WAIT_NOTICE_SECONDS, naming what it waited on. Each at most once per request: marked in the record
+    before it is sent, with a request id of its own. Best effort, one try, never the end of the turn. The record as
+    it is after."""
+    if record.get("source") != "chat" or not intake_on(record):
+        return record
+    since, reason = record.get("waiting_since"), record.get("waiting")
+    if type(record.get("resumes")) is int and record["resumes"] > 0 and record.get("resume_noticed") is not True:
+        field, text, name = "resume_noticed", RESUMED_NOTICE, "resumed"
+    elif record.get("kind") == "review" and record.get("acked") is True and record.get("wait_noticed") is not True \
+            and type(since) is int and now - since > config.CHAT_REVIEW_WAIT_NOTICE_SECONDS and reason in WAIT_REASONS:
+        field, text, name = "wait_noticed", WAIT_NOTICE.format(reason=WAIT_REASONS[reason]), "waited"
+    else:
+        return record
+    record = _save(key, {**record, field: True})
+    app = app_of(record)
+    try:
+        token = google_chat.access_token(google_chat.CHAT_BOT_SCOPE, app)
+        google_chat.create_message(record["space"], record["thread"], addressed(record, text),
+                                   f"chat-review-note-{name}-{key}", token, app)
+    except FleetError as exc:
+        log("notice-failed", request=key[:12], notice=name, why=common.scrubbed_line(exc, 200))
+        return record
+    log("noticed", request=key[:12], app=app, notice=name)
+    return record
+
+
+def _waits(key: str, reason: str) -> None:
+    """Keep in a queued request's record what it waits on (a WAIT_REASONS key) and since when, for its notice and the
+    status reply."""
+    record = read_record(key)
+    if record is None or record.get("state") != "queued" or record.get("waiting") == reason:
+        return
+    since = record.get("waiting_since")
+    _save(key, {**record, "waiting": reason, "waiting_since": since if type(since) is int else int(time.time())})
 
 
 # Reading Chat
@@ -2754,7 +2939,7 @@ def _ignored(name: str, why: str) -> str:
 def take_message(message: dict, space: str, token: str, known: dict, now: int, app: str,
                  app_user: Optional[str] = None) -> str:
     """Take one message that mentions app, once for that app: a review request from an allowed sender becomes a queued
-    review by its desk, a question about the app's review there or any other message a queued answer (parse_question,
+    review by its desk, a status ask (parse_status) the app's status reply (status_text), a question about the app's review there or any other message a queued answer (parse_question,
     parse_mention), with what it attaches (_material), anything else from them the app's fixed help reply, and
     anything from a person not allowed
     the fixed refusal, each as a record made create-exclusive, so a message read again (the overlap of each read, or
@@ -2829,10 +3014,14 @@ def take_message(message: dict, space: str, token: str, known: dict, now: int, a
             asked = earlier_request(space, thread, app, message["created_us"])
             if asked is not None:
                 record = {**record, "follow_up": True}
+        # A status ask gets the app's status, a fixed reply with no turn, even in a thread it reviewed.
+        status = asked is None and parse_status(message["argument"])
         # Anything else that mentions the app, in a thread where it reviewed a PR, is a question about that review.
         reviewed = reviewed_request(space, thread, app, message["created_us"]) \
-            if asked is None and parse_question(message["argument"]) else None
-        if reviewed is not None:
+            if asked is None and not status and parse_question(message["argument"]) else None
+        if status:
+            record = {**record, "state": "reply", "kind": "status", "reply": status_text(app, now), "outcome": "status"}
+        elif reviewed is not None:
             record = {**record, "state": "queued", "kind": "question", "repo": allowed_repo(reviewed[1]["repo"]),
                       "number": reviewed[1]["number"], "about": reviewed[0],
                       "question": message["argument"].strip(), **_material(message)}
@@ -3153,14 +3342,12 @@ def settle(conn, now: Optional[int] = None, only_hand: bool = False) -> list:
             elif state == "queued" and record.get("source") != "chat":
                 if not _pr_busy(record["repo"], record["number"], app_of(record)):  # killed before its review began
                     done.append(_end(key, record, "interrupted")["state"])
-            elif state == "running" and _busy(key, record):
+            elif state == "running" and (_busy(key, record) or _run_held(record)):
                 _reap_hung(key, record, now)
             elif state == "running":
                 _clear_workdir(key)
                 _clear_turn_files(record)
-                record = _save(key, {**_unasked(record), "state": "reply", "reply": _could_not(record),
-                                     "outcome": "interrupted"})
-                done.append(_send_reply(key, record)["state"])
+                done.append(_resume(key, record))
             elif state == "queued" and now - int(record.get("at", 0)) > config.CHAT_REVIEW_QUEUE_MAX_SECONDS:
                 record = _save(key, {**_unasked(record), "state": "reply", "reply": _could_not(record),
                                      "outcome": "expired"})
@@ -3191,6 +3378,43 @@ def _reap_hung(key: str, record: dict, now: int) -> None:
     for pid in run_desk.chat_review_turns(run_id):  # found by its own run id, so no other run is ever hit
         if run_desk.kill_chat_review_turn(pid, run_id):
             log("killed-hung-turn", request=key[:12])
+
+
+def _run_held(record: dict) -> bool:
+    """Whether the run lock of the record's launch (run_desk.run_lock) is still held: its turn's process, which
+    inherits it, still runs. False when its file is gone or cannot be read, which the turn lock then decides alone."""
+    desk, run_id = app_of(record), record.get("run_id")
+    if not isinstance(run_id, str) or run_desk.CHAT_RUN_ID.fullmatch(run_id) is None:
+        return False
+    name = run_desk.run_lock_name(run_id)
+    try:
+        with safefs.opened_dir(config.OFFICE_ROOT, "runs", desk) as fd:
+            if safefs.lstat(fd, name) is None:
+                return False
+            with safefs.held_lock(fd, name, blocking=False):
+                return False
+    except safefs.Busy:
+        return True
+    except (FleetError, OSError):
+        return False
+
+
+def _resume(key: str, record: dict) -> str:
+    """A Chat request left running whose launch is gone (its turn lock and run lock free: the turn's process ended
+    with no one left to finish it) is queued again with its resume count, at most CHAT_REVIEW_RESUME_MAX times, and
+    runs on a later pass under the same turn lock, with its caps already counted. After that, or for a run by hand,
+    which has no one to run it again, it ends with the fixed failure line. What happened, for the pass."""
+    resumes = record.get("resumes", 0)
+    resumes = resumes if type(resumes) is int and resumes >= 0 else config.CHAT_REVIEW_RESUME_MAX
+    if record.get("source") != "chat" or resumes >= config.CHAT_REVIEW_RESUME_MAX:
+        record = _save(key, {**_unasked(record), "state": "reply", "reply": _could_not(record),
+                             "outcome": "interrupted"})
+        return _send_reply(key, record)["state"]
+    left = {name: value for name, value in record.items()
+            if name not in ("run_id", "started", "cost_usd", "waiting", "waiting_since")}
+    record = _save(key, {**left, "state": "queued", "resumes": resumes + 1})
+    log(_event(record, "resumed"), request=key[:12], app=app_of(record), resumes=resumes + 1)
+    return "resumed"
 
 
 def _clear_workdir(key: str) -> None:
@@ -3230,6 +3454,7 @@ def _run_queued(conn, key: str, record: dict) -> str:
             record = _save(key, run(conn, key, again, pr_fd))
     except Later as exc:
         log("waiting", request=key[:12], why=str(exc))
+        _waits(key, exc.reason)
         return "queued"
     return _send_reply(key, record)["state"]
 
