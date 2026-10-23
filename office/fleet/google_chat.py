@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import base64
 import calendar
+import http.client
 import json
 import re
 import ssl
@@ -531,7 +532,7 @@ def fetch_media(url: str, token: str, limit: int) -> bytes:
             raw = answer.read(limit + 1)
     except urllib.error.HTTPError as exc:
         raise GoogleError(f"Google answered HTTP {exc.code}", status=exc.code) from None
-    except (urllib.error.URLError, OSError, ValueError):
+    except (urllib.error.URLError, OSError, ValueError, http.client.HTTPException):
         raise GoogleError("Google could not be reached") from None
     if len(raw) > limit:
         raise GoogleError("the attachment is larger than the fleet reads")

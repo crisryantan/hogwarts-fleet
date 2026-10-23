@@ -700,17 +700,18 @@ def unmentioned_asks(text: object) -> bool:
 
 def parse_question(text: object) -> bool:
     """Whether text, with the app mention already out, may be a question about the app's review, when it is neither a
-    request nor a follow-up: some words, at most QUESTION_MAX characters, and no review or approve word anywhere in it,
-    so a request or follow-up that breaks their rules gets the help reply, never an answer."""
+    request nor a follow-up: some words, at most QUESTION_MAX characters, no review or approve word anywhere in it and
+    no plea for help alone (HELP_WORD), so a request or follow-up that breaks their rules, or "help", gets the help
+    reply, never an answer."""
     return isinstance(text, str) and text.strip() != "" and len(text) <= QUESTION_MAX \
-        and REVIEW_WORD.search(text) is None and APPROVE_WORD.search(text) is None
+        and REVIEW_WORD.search(text) is None and APPROVE_WORD.search(text) is None and HELP_WORD.fullmatch(text) is None
 
 
 def parse_mention(text: object) -> bool:
     """Whether text, with the app mention already out, is a message for a mention answer when it is no request,
-    follow-up or question about a review: a question (parse_question) that names no PR in any way and is no plea for
-    help (HELP_WORD), so a request that breaks its rules gets the help reply, never an answer."""
-    if not parse_question(text) or HELP_WORD.fullmatch(text) is not None:
+    follow-up or question about a review: a question (parse_question) that names no PR in any way, so a request that
+    breaks its rules gets the help reply, never an answer."""
+    if not parse_question(text):
         return False
     found = _links(text)
     return found is not None and not found[0] and gitops.PR_URL.search(text) is None \

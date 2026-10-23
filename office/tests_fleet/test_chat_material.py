@@ -4,7 +4,9 @@ are read by the job (never the model) and handed to its turn as untrusted, fence
 turn are fakes here (tests_fleet.test_chat_review.ChatCase): no call leaves the machine and no model runs."""
 from __future__ import annotations
 
+import http.client
 import json
+import threading
 import time
 import urllib.parse
 from unittest import mock
@@ -14,7 +16,8 @@ from fleet.safefs import FleetError
 from tests_fleet.test_chat_review import (APP_USER, CHAT_TOKEN, MOODY_APP_USER, PLANTED, SECRET_MARK, SENDER,
                                           SENDER_USER, SPACE, URL, USER_TOKEN, ChatCase, block, msg, said)
 
-REAL_GET = chat_material._get  # captured before ChatCase replaces it
+REAL_GET = chat_material._get  # captured before ChatCase replaces these
+REAL_RESOLVE = chat_material._resolve
 REAL_FETCH_MEDIA = google_chat.fetch_media
 PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 64
 JPEG = b"\xff\xd8\xff\xe0" + b"\x00" * 64
@@ -124,6 +127,15 @@ class MentionAnswerTests(MaterialCase):
         self.assertEqual(len(self.turns), 1)
         self.assertEqual(self.texts(), [ANSWER, chat_review.help_text("hermione")])
         self.assertEqual(sorted(record["outcome"] for record in self.mention_records()), ["answered", "capped"])
+
+    def test_help_in_a_reviewed_thread_is_the_help_reply_never_a_turn(self):
+        self.answer = ("ok", block())
+        self.assertEqual(self.mention(f"review {URL}", message="r1"), ["review"])
+        for index, text in enumerate(("help", "Help!", "what can you do?")):
+            with self.subTest(text=text):
+                self.assertEqual(self.mention(text, message=f"h{index}"), ["help"])
+        self.assertEqual(len(self.turns), 1)
+        self.assertFalse(chat_review.parse_question("help"))
 
     def test_requests_follow_ups_and_review_questions_keep_their_paths(self):
         self.answer = ("ok", block())
@@ -255,6 +267,11 @@ class ImageTests(MaterialCase):
                 with self.subTest(url=url), self.assertRaises(google_chat.GoogleError):
                     REAL_FETCH_MEDIA(url, token, 100)
         self.assertEqual(len(self.media_calls), 1)
+        broken = mock.Mock()
+        broken.open.side_effect = http.client.IncompleteRead(b"x")
+        with mock.patch.object(google_chat, "_opener", return_value=broken), \
+                self.assertRaises(google_chat.GoogleError):  # a protocol error is an unreadable image, never a crash
+            REAL_FETCH_MEDIA(f"{google_chat.CHAT_ROOT}/media/x?alt=media", USER_TOKEN, 100)
 
     def test_list_messages_gives_back_only_uploaded_image_attachments(self):
         google_chat._READ["hermione"] = {"token": USER_TOKEN, "until": int(time.time()) + 3600}
@@ -431,10 +448,57 @@ class WebTests(MaterialCase):
 
         with mock.patch.object(chat_material.socket, "create_connection", side_effect=connect), \
                 self.assertRaises(OSError):
-            REAL_GET("docs.example.org", "93.184.216.34", "/guide")
+            REAL_GET("docs.example.org", "93.184.216.34", "/guide", time.monotonic() + 60)
         self.assertEqual(connected, [(("93.184.216.34", 443), chat_material.FETCH_TIMEOUT_SECONDS)])
         pinned = chat_material._Pinned("docs.example.org", "93.184.216.34")
         self.assertEqual((pinned.host, pinned.port, pinned._context.check_hostname), ("docs.example.org", 443, True))
+
+    def test_a_server_that_drips_its_answer_is_cut_at_the_deadline(self):
+        cut = threading.Event()
+
+        class Sock:
+            def shutdown(self, how):
+                cut.set()
+
+        class Dripping:
+            """A connection whose headers never finish arriving, until it is cut."""
+
+            def __init__(self, host, address, timeout):
+                self.sock = Sock()
+
+            def request(self, method, target, headers):
+                pass
+
+            def getresponse(self):
+                if not cut.wait(5):
+                    raise AssertionError("never cut")
+                raise OSError("the connection was cut")
+
+            def close(self):
+                pass
+
+        begun = time.monotonic()
+        with mock.patch.object(chat_material, "_Pinned", Dripping), self.assertRaises(OSError):
+            REAL_GET("docs.example.org", "93.184.216.34", "/guide", time.monotonic() + 0.3)
+        self.assertTrue(cut.is_set())
+        self.assertLess(time.monotonic() - begun, 3)
+        with self.assertRaises(chat_material.Refused):  # nothing starts once the deadline passed
+            REAL_GET("docs.example.org", "93.184.216.34", "/guide", time.monotonic() - 1)
+        self.assertLessEqual(chat_material.LINK_DEADLINE_SECONDS, 30)
+
+    def test_a_slow_name_lookup_is_given_up_at_the_deadline(self):
+        def slow(*args, **kwargs):
+            time.sleep(2)
+            return [(None, None, None, "", ("93.184.216.34", 443))]
+
+        begun = time.monotonic()
+        with mock.patch.object(chat_material.socket, "getaddrinfo", side_effect=slow), \
+                self.assertRaises(chat_material.Refused):
+            REAL_RESOLVE("docs.example.org", time.monotonic() + 0.2)
+        self.assertLess(time.monotonic() - begun, 1.5)
+        with mock.patch.object(chat_material.socket, "getaddrinfo",
+                               return_value=[(None, None, None, "", ("93.184.216.34", 443))] * 2):
+            self.assertEqual(REAL_RESOLVE("docs.example.org", time.monotonic() + 5), ["93.184.216.34"])
 
     def test_an_echo_of_fetched_text_is_withheld_everywhere(self):
         self.web = {PAGE: (200, {"content-type": "text/html"}, HTML)}

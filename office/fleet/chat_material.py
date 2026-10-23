@@ -20,12 +20,14 @@ outcomes are ever logged: never a link, its query string, a page's text or an im
 """
 from __future__ import annotations
 
+import contextlib
 import html.parser
 import http.client
 import ipaddress
 import re
 import socket
 import ssl
+import threading
 import time
 import urllib.parse
 from typing import NamedTuple, Optional
@@ -46,6 +48,9 @@ PAGE_TEXT_MAX = 30_000
 TEXT_MAX = 120_000
 REDIRECT_MAX = 3
 FETCH_TIMEOUT_SECONDS = 10
+# The whole of one link's fetch, every hop's name lookup, connection, headers and body together, ends by this: a server
+# that answers a byte at a time never holds the job past it.
+LINK_DEADLINE_SECONDS = 20
 URL_MAX = 2000
 # The kinds of image kept, by their first bytes, and the name each gets in the work folder.
 IMAGE_KINDS = (("png", (b"\x89PNG\r\n\x1a\n",)), ("jpg", (b"\xff\xd8\xff",)), ("gif", (b"GIF87a", b"GIF89a")))
@@ -331,29 +336,40 @@ def public(address: str) -> bool:
     return not any(ip in ipaddress.ip_network(net) for net in carrying)
 
 
-def vetted(host: str) -> str:
-    """The address to connect to for host: the first it resolves to, when every one it resolves to is public."""
-    addresses = _resolve(host)
+def vetted(host: str, deadline: float) -> str:
+    """The address to connect to for host: the first it resolves to, when every one it resolves to is public, looked up
+    by the deadline (time.monotonic)."""
+    addresses = _resolve(host, deadline)
     if not addresses or not all(public(address) for address in addresses):
         raise Refused("the host resolves to an address that is not public")
     return addresses[0]
 
 
-def _resolve(host: str) -> list:
-    """Every address host resolves to, for TCP on 443. Tests replace this."""
-    try:
-        found = socket.getaddrinfo(host, 443, type=socket.SOCK_STREAM, proto=socket.IPPROTO_TCP)
-    except (OSError, UnicodeError):
-        raise Refused("the host does not resolve") from None
-    return _unique([item[4][0] for item in found if item[4]])
+def _resolve(host: str, deadline: float) -> list:
+    """Every address host resolves to, for TCP on 443, looked up in a thread of its own so a slow resolver never holds
+    the job past the deadline. Tests replace this."""
+    found: list = []
+
+    def look() -> None:
+        try:
+            found.append(socket.getaddrinfo(host, 443, type=socket.SOCK_STREAM, proto=socket.IPPROTO_TCP))
+        except (OSError, UnicodeError):
+            pass
+
+    worker = threading.Thread(target=look, daemon=True)
+    worker.start()
+    worker.join(max(deadline - time.monotonic(), 0))
+    if not found:
+        raise Refused("the host does not resolve in time")
+    return _unique([item[4][0] for item in found[0] if item[4]])
 
 
 class _Pinned(http.client.HTTPSConnection):
     """An HTTPS connection to one checked address, its certificate checked for the host name. http.client reads no
     proxy setting and sends no cookie."""
 
-    def __init__(self, host: str, address: str) -> None:
-        super().__init__(host, 443, timeout=FETCH_TIMEOUT_SECONDS, context=ssl.create_default_context())
+    def __init__(self, host: str, address: str, timeout: float = FETCH_TIMEOUT_SECONDS) -> None:
+        super().__init__(host, 443, timeout=timeout, context=ssl.create_default_context())
         self._address = address
 
     def connect(self) -> None:
@@ -361,10 +377,25 @@ class _Pinned(http.client.HTTPSConnection):
         self.sock = self._context.wrap_socket(sock, server_hostname=self.host)
 
 
-def _get(host: str, address: str, target: str) -> tuple:
+def _cut(connection: _Pinned) -> None:
+    """End a connection that ran past its deadline: a blocked read on it returns at once."""
+    sock = connection.sock
+    if sock is not None:
+        with contextlib.suppress(OSError):
+            sock.shutdown(socket.SHUT_RDWR)
+
+
+def _get(host: str, address: str, target: str, deadline: float) -> tuple:
     """(status, headers with lowercase names, body of at most PAGE_MAX_BYTES + 1 bytes) of one GET of target from host
-    at address, with no body read for a redirect. Tests replace this."""
-    connection = _Pinned(host, address)
+    at address, with no body read for a redirect, all of it by the deadline (time.monotonic): a timer cuts the
+    connection then, however the server drips its headers or body. Tests replace this."""
+    left = deadline - time.monotonic()
+    if left <= 0:
+        raise Refused("the link took too long")
+    connection = _Pinned(host, address, min(FETCH_TIMEOUT_SECONDS, left))
+    timer = threading.Timer(left, _cut, (connection,))
+    timer.daemon = True
+    timer.start()
     try:
         connection.request("GET", target, headers={"User-Agent": USER_AGENT, "Accept-Encoding": "identity",
                                                    "Accept": "text/html, text/plain, application/json;q=0.9",
@@ -373,29 +404,33 @@ def _get(host: str, address: str, target: str) -> tuple:
         headers = {name.lower(): value for name, value in answer.getheaders()}
         if answer.status in REDIRECTS:
             return answer.status, headers, b""
-        chunks, total, deadline = [], 0, time.monotonic() + FETCH_TIMEOUT_SECONDS * 3
-        while total <= PAGE_MAX_BYTES and time.monotonic() < deadline:
+        chunks, total = [], 0
+        while total <= PAGE_MAX_BYTES:
             chunk = answer.read1(65536)
             if not chunk:
                 break
             chunks.append(chunk)
             total += len(chunk)
+        if time.monotonic() >= deadline:  # cut by the timer: what came is not the whole page
+            raise Refused("the link took too long")
         return answer.status, headers, b"".join(chunks)
     finally:
+        timer.cancel()
         connection.close()
 
 
 def fetch_page(url: str) -> tuple:
     """(host, text) of one public web page: the guarded GET (check_url, vetted), following at most REDIRECT_MAX
     redirects with each hop checked the same way and none visited twice, a 200 answer of a text-like type only, read
-    to PAGE_MAX_BYTES, its HTML reduced to text. Refused for anything else."""
+    to PAGE_MAX_BYTES, its HTML reduced to text, all of it within LINK_DEADLINE_SECONDS. Refused for anything else."""
     seen, first = [], check_url(url)[0]
+    deadline = time.monotonic() + LINK_DEADLINE_SECONDS
     for _ in range(REDIRECT_MAX + 1):
         host, target = check_url(url)
         if url in seen:
             raise Refused("a redirect loop")
         seen.append(url)
-        status, headers, body = _get(host, vetted(host), target)
+        status, headers, body = _get(host, vetted(host, deadline), target, deadline)
         if status in REDIRECTS:
             location = headers.get("location")
             if not isinstance(location, str) or not location:

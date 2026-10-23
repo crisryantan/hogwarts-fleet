@@ -327,10 +327,10 @@ class ChatCase(FleetCase):
             raise google_chat.GoogleError("the attachment is larger than the fleet reads")
         return self.media[resource]
 
-    def resolve(self, host: str) -> list:
+    def resolve(self, host: str, deadline: float) -> list:
         return self.resolved.get(host, ["93.184.216.34"])
 
-    def web_get(self, host: str, address: str, target: str) -> tuple:
+    def web_get(self, host: str, address: str, target: str, deadline: float) -> tuple:
         self.web_calls.append((host, address, target))
         found = self.web.get(f"https://{host}{target}")
         if found is None:
