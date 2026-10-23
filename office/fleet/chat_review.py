@@ -16,9 +16,10 @@ Anyone in the company's Chat can send an app text, so everything here treats a m
 - The chat-review job, which fleet loops runs every minute, reads instead, for each app with your own read-only
   authorization for that app's project (fleet/google_chat.py: chat.messages.readonly and chat.memberships.readonly,
   nothing that writes). It reads only a conversation that is in CHAT_REVIEW_SPACES and that the app is a member of,
-  checked each pass, and only the messages created since the app's read marker for it, a few pages at most. A
-  message that does not mention the app is dropped as it is read, never kept, never logged, but for the thread
-  follow-ups below. Of those that mention it,
+  checked each pass, and only the messages created since the app's read markers for it, a few pages at most. Each
+  pass reads every app's mentions first (read_space), and only then the messages that mention no one (read_quiet),
+  as far as every app's mentions are read (frontier). A message that does not mention the app is dropped as it is
+  read, never kept, never logged, but for the thread follow-ups below. Of those that mention it,
   one from a human whose Chat user is the member of that conversation with an email in CHAT_REVIEW_SENDERS, whose
   text, once the app mention is taken out, has exactly one GitHub PR link (https://github.com/<owner>/<repo>/pull/<n>,
   bare or in <>), for an allowlisted repo, becomes a queued review whatever its other words are (the apps review and
@@ -27,12 +28,13 @@ Anyone in the company's Chat can send an app text, so everything here treats a m
   follow-up: a queued review of that request's PR (the newest one's), under the same lists and caps. Anything else from
   them (no link or no word, two links, a repo not listed, a follow-up in a thread the app never reviewed) gets the
   app's fixed help reply, unless it is a question (below), and a person not on the list the fixed refusal. In a
-  thread only this app took mentions in (a review, or a help reply to an allowed sender), a message that mentions no one at all and has at most
-  UNMENTIONED_WORDS_MAX words outside its addresses, and that starts as an instruction, is taken too, from an allowed
+  thread only this app took mentions in before it (a review, or a help reply to an allowed sender), a message that
+  mentions no one at all and has at most UNMENTIONED_WORDS_MAX words outside its addresses, and that starts as an
+  instruction, is taken too, from an allowed
   sender only: with exactly one PR link for an allowlisted repo it is a review of that PR, with no link at all a
-  follow-up of the thread's earlier review request (none: dropped), and it is checked again before it runs, so one the
-  other app's mention of the thread overtook is dropped unanswered; any other message there that does not mention the
-  app is dropped like any other. Each is taken once
+  follow-up of the thread's earlier review request (none: dropped), and it is checked again before it runs, so one an
+  earlier mention of the thread by the other app, recorded only later, overtook is dropped unanswered; any other
+  message there that does not mention the app is dropped like any other. Each is taken once
   per app, even across kills and the overlap of each read: its record, named by a digest of the app and the Chat
   message's name, is made create-exclusive, and a message whose record for that app exists is never taken by it
   again. At most CHAT_REVIEW_PULL_MAX are taken a pass, across every app, and one waiting longer than
@@ -114,9 +116,12 @@ DIR = "chat-reviews"
 REQUESTS = "requests"
 GITHUB = "github"
 CAPS = "caps"
-# The read markers, one per conversation, and the marker of a stopped read authorization.
+# The read markers, two per conversation and app (its mentions, and its messages that mention no one, by the name's
+# scope), and the marker of a stopped read authorization.
 READS = "read"
 READ_STOPPED = "read-stopped.json"
+SPACE_MARK = "space"
+QUIET = "quiet"
 # What taking a message that mentions the app can make: a record, each counted toward CHAT_REVIEW_PULL_MAX.
 TAKEN = ("review", "question", "help", "refusal")
 LOG = "chat-review.log"
@@ -176,7 +181,7 @@ UNMENTIONED_START = re.compile(r"(?:(?:please|pls|plz|ok|okay|hey|can you|could 
                                re.IGNORECASE)
 PR_TEXT_MAX = 20000
 FINDINGS_MAX = 15
-FINDING_MAX = 300
+FINDING_MAX = 600
 # The review's SUMMARY line, and a question's answer, at most this long.
 SUMMARY_MAX = 300
 ANSWER_MAX = 900
@@ -344,6 +349,12 @@ WITHHELD = "(withheld: this finding repeated the PR's own text at length)"
 PR_TEXT_PLACE = re.compile(r"PR (?:title|description)(?: \([^()|]{1,40}\))?")
 LINE_SUFFIX = re.compile(r":[1-9][0-9]*(?:[-,][1-9][0-9]*)*$")
 DIFF_PATH = re.compile(r"(?:--- a|\+\+\+ b)/(.+?)\t?")
+# The same header line with the path in git's C-style quotes, as git writes one holding a quote, a backslash, a
+# control character or (core.quotePath) a byte above ASCII: its escapes, and each part of what is between them.
+QUOTED_DIFF_PATH = re.compile(r'(---|\+\+\+) "((?:[^"\\]|\\(?:[0-7]{3}|[abtnvfr"\\]))*)"\t?')
+QUOTED_PART = re.compile(r'([^\\]+)|\\([0-7]{3}|[abtnvfr"\\])')
+C_ESCAPES = {"a": b"\a", "b": b"\b", "t": b"\t", "n": b"\n", "v": b"\v", "f": b"\f", "r": b"\r", '"': b'"',
+             "\\": b"\\"}
 # Google credentials the shared scrub has no shape for: OAuth access and refresh tokens, API keys, client secrets.
 GOOGLE_SECRET = re.compile(r"(?<![A-Za-z0-9_-])(?:ya29\.[A-Za-z0-9._-]{10,}|AIza[0-9A-Za-z_-]{30,}"
                            r"|1//[0-9A-Za-z_-]{20,}|GOCSPX-[0-9A-Za-z_-]{10,})")
@@ -732,31 +743,45 @@ def _taken_us(record: dict) -> int:
     return at * 1_000_000 if type(at) is int else 0
 
 
-def _owners(space: str, before_us: Optional[int] = None) -> dict:
-    """Each thread of space where only one app took a mention from Chat that became a review or a help reply (a refusal
-    is a sender who is not allowed), still on record, to that app, of those from messages created before before_us when
-    it is given. A thread two apps took mentions in has no owner, so a message there must mention the app it is for."""
-    apps: dict = {}
+def _first_mentions(space: str) -> dict:
+    """Each thread of space where an app took a mention from Chat that became a review or a help reply (a refusal is
+    a sender who is not allowed), still on record, to {app: the microsecond its first such message was created}."""
+    firsts: dict = {}
     for _, record in _records():
-        thread, owner = record.get("thread"), record.get("app", DEFAULT_APP)
+        thread, app = record.get("thread"), record.get("app", DEFAULT_APP)
         if record.get("source") != "chat" or record.get("kind") not in ("review", "help") \
-                or record.get("mentioned") is False or record.get("space") != space \
-                or not isinstance(thread, str) or (before_us is not None and _taken_us(record) >= before_us):
+                or record.get("mentioned") is False or record.get("space") != space or not isinstance(thread, str):
             continue
-        apps.setdefault(thread, set()).add(owner)
-    return {thread: next(iter(owners)) for thread, owners in apps.items() if len(owners) == 1}
+        apps = firsts.setdefault(thread, {})
+        apps[app] = min(apps.get(app, _taken_us(record)), _taken_us(record))
+    return firsts
+
+
+def _owners(space: str, before_us: Optional[int] = None) -> dict:
+    """Each thread of space where only one app took a mention (_first_mentions), to that app, of those from messages
+    created before before_us when it is given. A thread two apps took mentions in has no owner, so a message there
+    must mention the app it is for."""
+    owners = {}
+    for thread, apps in _first_mentions(space).items():
+        took = [app for app, at in apps.items() if before_us is None or at < before_us]
+        if len(took) == 1:
+            owners[thread] = took[0]
+    return owners
 
 
 def _still_listening(record: dict) -> bool:
-    """Whether the thread of a queued request that mentioned no one is still the app's alone, as of that message: the
-    other app's mention of it may be recorded only after this one was taken, so this is asked again before it runs."""
+    """Whether the thread of a queued request that mentioned no one is still the app's alone, as of that message: an
+    earlier mention of it by the other app is on record before the request is taken, but for one Chat listed late
+    (inside the read overlap) or one read after that app's read was stopped, so this is asked again before it runs."""
     return _owners(record["space"], _taken_us(record)).get(record["thread"]) == app_of(record)
 
 
 def listening_threads(space: str, app: str) -> frozenset:
-    """The threads of space where only app took mentions (_owners): there app also takes a short review request or
-    follow-up that mentions no one."""
-    return frozenset(thread for thread, owner in _owners(space).items() if owner == app)
+    """The threads of space that were app's alone for a while: app took a mention there before any other app did
+    (_first_mentions). Only there app also takes a short review request or follow-up that mentions no one, and only one
+    created while the thread was its alone (_owners as of that message)."""
+    return frozenset(thread for thread, apps in _first_mentions(space).items()
+                     if app in apps and all(at > apps[app] for other, at in apps.items() if other != app))
 
 
 def log(event: str, **fields) -> None:
@@ -1086,7 +1111,8 @@ def _flat(text: str) -> str:
 
 def diff_paths(diff: str) -> frozenset:
     """The paths of the files a diff touches, from the --- and +++ lines of each file's header only: those after its
-    diff --git line and before its first hunk, so no line of a hunk can pass for one."""
+    diff --git line and before its first hunk, so no line of a hunk can pass for one. A path git quoted is read as
+    git wrote it (_git_path)."""
     found, header = set(), False
     for line in diff.split("\n"):  # newlines only: a vertical tab or other separator inside a hunk starts no line
         if line.startswith("diff --git "):
@@ -1095,9 +1121,36 @@ def diff_paths(diff: str) -> frozenset:
             header = False
         elif header:
             match = DIFF_PATH.fullmatch(line)
-            if match is not None:
-                found.add(match.group(1))
+            path = match.group(1) if match is not None else _git_path(line)
+            if path is not None:
+                found.add(path)
     return frozenset(found)
+
+
+def _git_path(line: str) -> Optional[str]:
+    """The path of a --- "a/..." or +++ "b/..." header line in git's C-style quotes: its escapes undone (a backslash,
+    a quote, a tab, a newline and the other C letters, and three octal digits for one byte), the bytes read as UTF-8.
+    None for any other line, or one whose bytes are not UTF-8."""
+    match = QUOTED_DIFF_PATH.fullmatch(line)
+    if match is None:
+        return None
+    raw = bytearray()
+    for part in QUOTED_PART.finditer(match.group(2)):
+        literal, escape = part.groups()
+        if literal is not None:
+            raw += literal.encode("utf-8")
+        elif escape in C_ESCAPES:
+            raw += C_ESCAPES[escape]
+        elif int(escape, 8) > 0xFF:
+            return None
+        else:
+            raw.append(int(escape, 8))
+    try:
+        path = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+    side = "a/" if match.group(1) == "---" else "b/"
+    return path[2:] if path.startswith(side) and len(path) > 2 else None
 
 
 def _echo_text(line: str, paths: set) -> str:
@@ -1182,15 +1235,7 @@ def reply_text(repo: str, number: int, sha: str, verdict: str, blocking: list, n
         lines += ["Notes:", *map(_bullet, non_blocking)]
     if not blocking and not non_blocking:
         lines.append("No findings.")
-    limit = google_chat.MESSAGE_MAX_CHARS - 40 - MENTION_ROOM
-    kept, size = [], 0
-    for line in lines:
-        if size + len(line) + 1 > limit:
-            kept.append(f"({len(lines) - len(kept)} more lines not shown)")
-            break
-        kept.append(line)
-        size += len(line) + 1
-    return "\n".join(kept)
+    return _whole_lines(lines, google_chat.MESSAGE_MAX_CHARS - MENTION_ROOM)
 
 
 def display_name(value: object) -> str:
@@ -1205,7 +1250,8 @@ def display_name(value: object) -> str:
 def github_body(requester: str, sha: str, verdict: str, blocking: list, non_blocking: list,
                 app: str = DEFAULT_APP, summary: str = "") -> str:
     """The PR review's text: the fixed opening line naming the app and the requester by display name, the summary in
-    a code span (it is defanged, so it holds no backtick to end one), then the verdict and findings."""
+    a code span (it is defanged, so it holds no backtick to end one), then the verdict and findings, cut whole lines
+    at a time to GITHUB_BODY_MAX."""
     lines = [OPENING.format(name=app_name(app), requester=requester)]
     if summary:
         lines += ["", f"`{summary}`"]
@@ -1214,7 +1260,19 @@ def github_body(requester: str, sha: str, verdict: str, blocking: list, non_bloc
         lines += ["", "Blocking", *(f"- `{item}`" for item in blocking)]
     if non_blocking:
         lines += ["", "Non-blocking", *(f"- `{item}`" for item in non_blocking)]
-    return "\n".join(lines)[:GITHUB_BODY_MAX]
+    return _whole_lines(lines, GITHUB_BODY_MAX)
+
+
+def _whole_lines(lines: list, limit: int) -> str:
+    """lines joined, cut whole lines at a time so the text and the line saying how many were left out fit in limit."""
+    kept, size = [], 0
+    for line in lines:
+        if size + len(line) + 1 > limit - 40:
+            kept.append(f"({len(lines) - len(kept)} more lines not shown)")
+            break
+        kept.append(line)
+        size += len(line) + 1
+    return "\n".join(kept)
 
 
 def _record_usage(conn, run_id: str, model: str, result: dict, duration_ms: int, desk: str,
@@ -1711,23 +1769,51 @@ def _message_key(name: str, app: str) -> Optional[str]:
     return _digest(_scoped(app, f"chat:{name}")) if MESSAGE_NAME.fullmatch(name) else None
 
 
-def _marker_name(space: str, app: str) -> str:
-    return f"{_digest(_scoped(app, f'space:{space}'))}.json"
+def _marker_name(space: str, app: str, quiet: bool = False) -> str:
+    return f"{_digest(_scoped(app, f'{QUIET if quiet else SPACE_MARK}:{space}'))}.json"
 
 
-def _read_marker(space: str, app: str) -> Optional[dict]:
+def _read_marker(space: str, app: str, quiet: bool = False) -> Optional[dict]:
     with _folder(READS) as fd:
-        return _read(fd, _marker_name(space, app))
+        return _read(fd, _marker_name(space, app, quiet))
 
 
-def _save_marker(space: str, app: str, after_us: int, floor_us: int, member: bool, complete: bool = True) -> None:
-    """app's read marker of the conversation. after_us: how far it was read; floor_us: nothing created before it is
-    ever read (its first read, or the last pass the app was not a member); complete: whether that read reached the
-    newest message, so the next one may reach back by the overlap without stalling on a backlog."""
+def _save_marker(space: str, app: str, after_us: int, floor_us: int, member: bool, complete: bool = True,
+                 through_us: Optional[int] = None) -> None:
+    """app's read marker of the conversation's mentions. after_us: how far it was read; floor_us: nothing created
+    before it is ever read (its first read, or the last pass the app was not a member); complete: whether that read
+    reached the newest message, so the next one may reach back by the overlap without stalling on a backlog;
+    through_us (after_us when not given): every message created at or before it was read for mentions of app, a
+    message timed a little ahead of this Mac's clock included."""
     with _folder(READS) as fd:
-        markers.replace(fd, _marker_name(space, app), {"state": "read", "space": space, "app": app,
-                                                       "after_us": int(after_us), "floor_us": int(floor_us),
-                                                       "member": member, "complete": complete})
+        markers.replace(fd, _marker_name(space, app), {
+            "state": "read", "space": space, "app": app, "after_us": int(after_us), "floor_us": int(floor_us),
+            "member": member, "complete": complete, "through_us": int(after_us if through_us is None else through_us)})
+
+
+def _save_quiet(space: str, app: str, after_us: int, complete: bool) -> None:
+    """app's read marker of the conversation's messages that mention no one: how far they were decided, and whether
+    that read reached as far as it could, as _save_marker's."""
+    with _folder(READS) as fd:
+        markers.replace(fd, _marker_name(space, app, quiet=True), {"state": "quiet", "space": space, "app": app,
+                                                                   "after_us": int(after_us), "complete": complete})
+
+
+def _through(space: str, app: str) -> Optional[int]:
+    """The through_us of app's mention marker of space, or None when it has none."""
+    marker = _read_marker(space, app)
+    if marker is None or type(marker.get("after_us")) is not int:
+        return None
+    through = marker.get("through_us", marker["after_us"])
+    return through if type(through) is int else None
+
+
+def frontier(space: str, apps: list) -> Optional[int]:
+    """How far every one of apps has read space for its mentions (_through): a message that mentions no one, created
+    at or before it, comes after every mention created before it that is on record by then. None, so nothing is
+    decided, while any of them has no marker."""
+    found = [_through(space, app) for app in apps]
+    return None if not found or None in found else min(found)
 
 
 def _senders_in(space: str, token: str, known: dict) -> dict:
@@ -1828,29 +1914,34 @@ def take_message(message: dict, space: str, token: str, known: dict, now: int, a
     return record["kind"]
 
 
-def read_space(space: str, token: str, known: dict, done: list, room: int, now: int, app: str) -> None:
-    """Read one conversation's new messages for app, with its read token, only while the app is a member of it, and
-    take those that mention the app until done (this pass's outcomes, shared by every conversation and app) holds room
-    records. The app's read marker says how
-    far it was read: a first read only sets it to now, and each read after one that reached the newest message starts
+def read_space(space: str, token: str, known: dict, done: list, room: int, now: int, app: str,
+               members: Optional[dict] = None) -> None:
+    """Read one conversation's new messages for app, with its read token, only while the app is a member of it (its
+    Chat user name then goes in members, for read_quiet), and take those that mention the app until done (this pass's
+    outcomes, shared by every conversation and app) holds room records. The app's read marker says how far it was
+    read: a first read only sets it to now, and each read after one that reached the newest message starts
     CHAT_REVIEW_READ_OVERLAP_SECONDS before it, so a message Chat lists late is still seen, and the records make the
     overlap harmless; one cut short (by the page cap, or by room at a message it could not take) goes on from just
     before where it stopped, so a message sharing that microsecond is not lost. It never reads from before its first
     read or the app's current membership began, nor further back than the queue limit, and a message time ahead of
-    this Mac's clock never moves the marker. A message that does not mention the app is never kept or logged, but for
-    a short request or follow-up that mentions no one, from an allowed sender, in a thread where only the app took
-    mentions (listening_threads), which take_message takes as a review."""
+    this Mac's clock never moves the marker. A message that does not mention the app comes back as its time alone
+    here: the ones that mention no one are read_quiet's, once every app's mentions are read."""
     marker = _read_marker(space, app)
     now_us = max(int(time.time() * 1_000_000), now * 1_000_000)
+    valid = marker is not None and type(marker.get("after_us")) is int and type(marker.get("floor_us")) is int
+    if _read_marker(space, app, quiet=True) is None:
+        # Messages that mention no one were decided as far as the mentions were read, by a read before there were
+        # two markers; a first read decides nothing from before it.
+        _save_quiet(space, app, marker["after_us"] if valid else now_us,
+                    not valid or marker.get("complete") is not False)
     member = google_chat.app_member(space, token)
-    threads = listening_threads(space, app) if member is not None else frozenset()
     if member is None:
         if marker is None or marker.get("member") is not False:
             log("not-a-member", space=space, app=app)
         _save_marker(space, app, now_us, now_us, False)  # nothing from while it was out is ever read
         return
     app_user, joined = member
-    if marker is None or type(marker.get("after_us")) is not int or type(marker.get("floor_us")) is not int:
+    if not valid:
         _save_marker(space, app, now_us, now_us, True)  # the first read: nothing from before it is answered
         return
     newest, floor = marker["after_us"], max(marker["floor_us"], joined or 0)
@@ -1858,36 +1949,27 @@ def read_space(space: str, token: str, known: dict, done: list, room: int, now: 
         log("member", space=space, app=app)
         if joined is None:  # just joined, and Chat gave no time it did: only what comes from now on is read
             floor = now_us
+    if members is not None:
+        members[space] = app_user
     overlap = config.CHAT_REVIEW_READ_OVERLAP_SECONDS * 1_000_000 if marker.get("complete") is not False else 0
     after = max(newest - overlap, floor, now_us - config.CHAT_REVIEW_QUEUE_MAX_SECONDS * 1_000_000)
+    ahead = newest  # the newest message read, one ahead of this Mac's clock but within its skew included
     page, complete, waiting = None, False, None
     try:
         for _ in range(config.CHAT_REVIEW_LIST_PAGES):
             if not common.opt_in_on(config.CHAT_REVIEW_FILE):
                 break
-            messages, page = google_chat.list_messages(space, after, app_user, token, page, threads)
-            listened = False
+            messages, page = google_chat.list_messages(space, after, app_user, token, page)
             for message in messages:
-                if message["mentions"] or (message.get("listening") is True
-                                           and unmentioned_asks(message.get("argument"))):
+                if message["mentions"]:
                     if sum(outcome in TAKEN for outcome in done) >= room:
                         waiting = min(message["created_us"], now_us)  # no room: the next read starts here
                         return
-                    outcome = take_message(message, space, token, known, now, app)
-                    if message["mentions"] or outcome != "ignored":  # an unmentioned one ignored leaves no trace
-                        done.append(outcome)
-                    if outcome in ("review", "help") and message["thread"] not in threads:
-                        threads = listening_threads(space, app)
-                        listened = message["thread"] in threads
+                    done.append(take_message(message, space, token, known, now, app))
                 if message["created_us"] <= now_us:  # a time ahead of this Mac's clock never moves the marker
                     newest = max(newest, message["created_us"])
-                if listened:
-                    # Its thread is listened to from now on: list again from just after it, so a follow-up there
-                    # that mentions no one is handed over too.
-                    after, page = message["created_us"], None
-                    break
-            if listened:
-                continue
+                if message["created_us"] <= now_us + CLOCK_SKEW_SECONDS * 1_000_000:
+                    ahead = max(ahead, message["created_us"])
             if page is None:
                 complete = True
                 break
@@ -1896,7 +1978,62 @@ def read_space(space: str, token: str, known: dict, done: list, room: int, now: 
         # waiting message's, so a message sharing it is never skipped.
         if not complete:
             newest = (waiting if waiting is not None else newest) - 1
-        _save_marker(space, app, newest, floor, True, complete)
+        _save_marker(space, app, newest, floor, True, complete, max(newest, ahead) if complete else newest)
+
+
+def read_quiet(space: str, token: str, known: dict, done: list, room: int, now: int, app: str, app_user: str,
+               upto: Optional[int]) -> None:
+    """Decide, for app, the conversation's messages that mention no one, created at or before upto (frontier: every
+    app's mentions are read that far, so each such message is decided against every mention created before it), from
+    its quiet read marker, until done holds room records. Only one in a thread that was app's alone for a while
+    (listening_threads) is read with its text, and take_message takes it only from an allowed sender as a short
+    review request or follow-up, in a thread only app took a mention in before it; anything else of it is dropped
+    with no trace. The marker keeps the mention marker's rules: the overlap after a read that went as far as it could,
+    from just before where one cut short stopped, never before the mention marker's floor or the queue limit, and
+    never ahead of this Mac's clock. Nothing moves while upto is None."""
+    if upto is None:
+        return  # some app has no read of its mentions here yet: nothing that mentions no one is decided
+    mark, floor_mark = _read_marker(space, app, quiet=True), _read_marker(space, app)
+    if mark is None or type(mark.get("after_us")) is not int or floor_mark is None \
+            or type(floor_mark.get("floor_us")) is not int:
+        return
+    now_us = max(int(time.time() * 1_000_000), now * 1_000_000)
+    newest, upto = mark["after_us"], min(upto, now_us + CLOCK_SKEW_SECONDS * 1_000_000)
+    threads = listening_threads(space, app)
+    if not threads:  # no thread there was ever app's alone: nothing up to upto is for it
+        _save_quiet(space, app, max(newest, min(upto, now_us)), True)
+        return
+    overlap = config.CHAT_REVIEW_READ_OVERLAP_SECONDS * 1_000_000 if mark.get("complete") is not False else 0
+    after = max(newest - overlap, floor_mark["floor_us"], now_us - config.CHAT_REVIEW_QUEUE_MAX_SECONDS * 1_000_000)
+    page, complete, waiting = None, False, None
+    try:
+        for _ in range(config.CHAT_REVIEW_LIST_PAGES):
+            if after >= upto or not common.opt_in_on(config.CHAT_REVIEW_FILE):
+                complete = after >= upto
+                break
+            messages, page = google_chat.list_messages(space, after, app_user, token, page, threads)
+            for message in messages:
+                if message["created_us"] > upto:  # not every app's mentions are read this far yet
+                    complete, page = True, None
+                    break
+                if message.get("listening") is True and unmentioned_asks(message.get("argument")):
+                    if sum(outcome in TAKEN for outcome in done) >= room:
+                        waiting = min(message["created_us"], now_us)
+                        return
+                    outcome = take_message(message, space, token, known, now, app)
+                    if outcome != "ignored":  # one ignored leaves no trace
+                        done.append(outcome)
+                if message["created_us"] <= now_us:
+                    newest = max(newest, message["created_us"])
+            if page is None:
+                complete = True
+                break
+    finally:
+        if complete:
+            newest = max(newest, min(upto, now_us))
+        else:
+            newest = (waiting if waiting is not None else newest) - 1
+        _save_quiet(space, app, newest, complete)
 
 
 def _read_stopped_name(app: str) -> str:
@@ -1930,50 +2067,91 @@ def _read_resumed(app: str) -> None:
 
 
 def read_chat(conn, now: Optional[int] = None) -> tuple:
-    """For each app served (served_apps), in turn, read every allowed conversation it is a member of once, with your
-    read-only authorization for it, and take up to CHAT_REVIEW_PULL_MAX messages that mention an app in all.
-    (what happened to each, the read's trouble or None). When an app's authorization fails, reading for that app stops
-    with its one event; nothing broader is ever tried, and the other apps read on."""
-    done, trouble = [], []
-    for app in served_apps():
+    """Read Chat for every app served (served_apps) with your read-only authorization for it, in two rounds, and take
+    up to CHAT_REVIEW_PULL_MAX messages in all. First each app, in turn, reads every allowed conversation it is a
+    member of for its mentions (read_space); only then does each decide the messages there that mention no one
+    (read_quiet), as far as every app's mentions are read (frontier), so a thread another app took a mention in before
+    such a message is never taken as one app's alone because that app's read came later or was cut short. An app
+    whose read authorization failed holds no one back: it reads nothing until it is authorized again. (what happened
+    to each, the read's trouble or None). When an app's authorization fails, reading for that app stops with its one
+    event; nothing broader is ever tried, and the other apps read on."""
+    done, trouble, reading, stopped = [], [], {}, set()
+    apps = served_apps()
+    now = int(time.time()) if now is None else now
+    for app in apps:
         if sum(outcome in TAKEN for outcome in done) >= config.CHAT_REVIEW_PULL_MAX \
                 or not common.opt_in_on(config.CHAT_REVIEW_FILE):
             break  # this pass's share taken, or switched off part way: no further app reads
-        found = _read_app(conn, app, done, now)
+        found, read = _read_app(conn, app, done, now)
+        if read is None:
+            stopped.add(app)
+        elif read:
+            reading[app] = read
         if found is not None:
+            trouble.append(found)
+    for app, (token, known, members) in reading.items():
+        found, refused = _read_quiet_app(conn, app, token, known, members, done, now,
+                                         [other for other in apps if other not in stopped])
+        if refused:
+            stopped.add(app)
+        if found is not None and found not in trouble:
             trouble.append(found)
     return done, "; ".join(trouble) or None
 
 
-def _read_app(conn, app: str, done: list, now: Optional[int]) -> Optional[str]:
-    """One app's read of every allowed conversation, its outcomes added to done. Its trouble, or None."""
+def _read_app(conn, app: str, done: list, now: int) -> tuple:
+    """One app's read of every allowed conversation for its mentions, its outcomes added to done. (its trouble or
+    None, what read_quiet needs of it: (its read token, the senders known, the Chat user name of the app in each
+    conversation it read) when it read, None when its read authorization failed, () when it read nothing)."""
     try:
         token = google_chat.read_token(app)
     except google_chat.ReadAuthError:
         _read_stopped(conn, app)
-        return f"reading stopped for {app}: run {google_chat.authorize_command(app)} again"
+        return f"reading stopped for {app}: run {google_chat.authorize_command(app)} again", None
     except FleetError as exc:
         why = common.scrubbed_line(exc, 300)
         log("read-failed", app=app, why=why)
-        return why
+        return why, ()
     if not common.opt_in_on(config.CHAT_REVIEW_FILE):
-        return None  # switched off while the token was minted: nothing is read
-    now = int(time.time()) if now is None else now
-    known, trouble = {}, None
+        return None, ()  # switched off while the token was minted: nothing is read
+    known, members, trouble = {}, {}, None
     for space in config.CHAT_REVIEW_SPACES:
         if sum(outcome in TAKEN for outcome in done) >= config.CHAT_REVIEW_PULL_MAX \
                 or not common.opt_in_on(config.CHAT_REVIEW_FILE):
             break  # this pass's share taken, or switched off part way: no further conversation is read
         try:
-            read_space(space, token, known, done, config.CHAT_REVIEW_PULL_MAX, now, app)
+            read_space(space, token, known, done, config.CHAT_REVIEW_PULL_MAX, now, app, members)
         except google_chat.ReadAuthError:  # Chat refused the token itself: reading stops as a refused refresh does
             _read_stopped(conn, app)
-            return f"reading stopped for {app}: run {google_chat.authorize_command(app)} again"
+            return f"reading stopped for {app}: run {google_chat.authorize_command(app)} again", None
         except (FleetError, OSError) as exc:  # one conversation's trouble never stops the others
             trouble = common.scrubbed_line(exc, 300) if isinstance(exc, FleetError) else type(exc).__name__
             log("read-failed", app=app, space=space, why=trouble)
     _read_resumed(app)  # Chat took the app's read token this pass, so a stop it was under is over
-    return trouble
+    return trouble, (token, known, members)
+
+
+def _read_quiet_app(conn, app: str, token: str, known: dict, members: dict, done: list, now: int,
+                    apps: list) -> tuple:
+    """app's decision of the messages that mention no one in each conversation it read this pass (read_quiet), as far
+    as each of apps read its mentions there. (its trouble or None, whether Chat refused its read token)."""
+    trouble = None
+    for space in config.CHAT_REVIEW_SPACES:
+        if space not in members:
+            continue
+        if sum(outcome in TAKEN for outcome in done) >= config.CHAT_REVIEW_PULL_MAX \
+                or not common.opt_in_on(config.CHAT_REVIEW_FILE):
+            break
+        try:
+            read_quiet(space, token, known, done, config.CHAT_REVIEW_PULL_MAX, now, app, members[space],
+                       frontier(space, apps))
+        except google_chat.ReadAuthError:
+            _read_stopped(conn, app)
+            return f"reading stopped for {app}: run {google_chat.authorize_command(app)} again", True
+        except (FleetError, OSError) as exc:
+            trouble = common.scrubbed_line(exc, 300) if isinstance(exc, FleetError) else type(exc).__name__
+            log("read-failed", app=app, space=space, why=trouble)
+    return trouble, False
 
 
 def settle(conn, now: Optional[int] = None, only_hand: bool = False) -> list:
@@ -2010,7 +2188,8 @@ def settle(conn, now: Optional[int] = None, only_hand: bool = False) -> list:
                                      "outcome": "expired"})
                 done.append(_send_reply(key, record)["state"])
             elif state == "queued" and record.get("mentioned") is False and not _still_listening(record):
-                # The other app took a mention in the thread after this was taken, maybe in the same pass.
+                # An earlier mention of the thread by the other app was recorded only after this was taken: Chat
+                # listed it late, or that app's read was stopped then.
                 done.append(_end(key, {**record, "kind": "dropped"}, "not-owned")["state"])
             elif state == "queued":
                 record = _acknowledge(key, record)

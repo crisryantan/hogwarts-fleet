@@ -163,7 +163,7 @@ The store has none of these:
                                         branch protection (off when missing, and nothing while chat-review-github is
                                         off)
   chat-reviews/                         one record per message and app it asked something (requests/), each app's
-                                        read marker per conversation (read/), the once-per-head-commit GitHub markers
+                                        read markers per conversation (read/), the once-per-head-commit GitHub markers
                                         of each app (github/) and each cap day's counts (caps/)
   patrol/shadow                         while it is here, the patrol and Gringotts only write files (shadow mode)
   patrol/<job>/                         the Map's snapshot and rows, lineups, keeper's watches, scoreboards, bot passes,
@@ -544,11 +544,16 @@ and can change nothing.
 
 For each app, your token reads only a conversation that is in `CHAT_REVIEW_SPACES` and that you are in, and only
 while that app is a member of it: each pass first asks Chat for the app's own membership there
-(`spaces/<id>/members/app`), and a conversation it has left is not read for it at all. Each app has a read marker per
-conversation in the office. A first read only sets it, so nothing from before is answered, and each read lists the
-messages created since it (back by `CHAT_REVIEW_READ_OVERLAP_SECONDS`, for a message Chat lists a little late), at
-most `CHAT_REVIEW_LIST_PAGES` pages. A message that does not mention the app is dropped as it is read: never kept,
-never logged, but for the short thread follow-up below. Of those that mention it:
+(`spaces/<id>/members/app`), and a conversation it has left is not read for it at all. Each app has two read markers
+per conversation in the office: one for its mentions, one for the messages that mention no one. A first read only
+sets them, so nothing from before is answered, and each read lists the messages created since its marker (back by
+`CHAT_REVIEW_READ_OVERLAP_SECONDS`, for a message Chat lists a little late), at most `CHAT_REVIEW_LIST_PAGES` pages.
+Each pass reads in two rounds: first every app reads every conversation for its mentions, and only then does each
+app read the messages there that mention no one, as far as every app's mentions are read. So a thread the other app
+took a mention in first is never taken as this app's alone just because that app's read came later in the pass or
+was cut short. An app whose read authorization failed holds no one back, and any other read that failed holds the
+messages that mention no one until it reads again. A message that does not mention the app is dropped as it is read:
+never kept, never logged, but for the short thread follow-up below. Of those that mention it:
 
 - one from a person whose membership of that conversation belongs to an email in `CHAT_REVIEW_SENDERS`, whose text,
   once the app mentions are out, holds exactly one GitHub PR link (`https://github.com/<owner>/<repo>/pull/<n>`, bare
@@ -565,15 +570,17 @@ never logged, but for the short thread follow-up below. Of those that mention it
   PR, the newest one's when there are several, under the same sender, space and repo lists and caps. So "review
   again" or "approve" works in a thread the app already reviewed. A follow-up never names another PR, and only the
   app's own requests count, so a thread only the other app reviewed is no thread this one reviewed. In a thread
-  only this app took mentions in, a review or a help reply to an allowed sender (one the other app took a mention in
-  too needs a mention), a message needs no mention either: one that mentions no one at all, from an allowed sender,
+  where only this app had taken a mention when the message was sent, a review or a help reply to an allowed sender
+  (once the other app takes one there too, a message after it needs a mention), a message needs no mention either:
+  one that mentions no one at all, from an allowed sender,
   with at most 8 words outside its addresses and starting as an instruction (review, re-review, another review or
   approve, after an optional please or can you) is taken. With exactly one PR link for a repo in `CHAT_REVIEW_REPOS`
   ("Review PR <link>") it is a review request for that PR, so a link sent after a help reply, without tagging the app,
   works; with no link at all it is the same follow-up as above, so "review again" works without tagging the app, and
-  with no earlier request in the thread it is dropped. It is checked again before it runs, and dropped unanswered if the
-  other app took a mention in the thread meanwhile. Any other message there that does not mention the app is dropped
-  like any other: no reply, no record, no log line;
+  with no earlier request in the thread it is dropped. It is checked again before it runs, and dropped unanswered
+  when a mention of the other app from before it turns up only later (Chat listed it late, or that app's read was
+  stopped). Any other message there that does not mention the app is dropped like any other: no reply, no record, no
+  log line;
 - one from them that is none of those, holds no review or approve word anywhere and has at most 2000 characters, in
   a thread where the same app has a review request on record whose outcome is reviewed, is a question about that
   review (Questions, below). A message that does not mention the app is never a question, and neither is one in a
@@ -596,7 +603,8 @@ Every reply in a thread mentions the person it answers, with Chat's user mention
 user id (a number, so never everyone or an app), never their email. A person not on the list is answered with no
 mention. A review's reply is its desk's own summary of its verdict, one or two sentences in its voice (Hermione brisk
 and precise, Moody gruff and terse), then its verdict (PASS or CHANGES) with the PR and head commit, then its findings
-as bullets under "Blocking:" and "Notes:", each "- path:line: text", cut whole lines at a time to what Chat takes.
+as bullets under "Blocking:" and "Notes:", each "- path:line: text" of at most 600 characters, cut whole lines at a
+time to what Chat takes.
 
 When an app's read authorization fails (revoked, expired, deleted from the Keychain, or granted more than the two read
 scopes), the job stops reading for that app with one headmaster event saying to run the authorize helper for it
@@ -621,7 +629,10 @@ brief and prompt say its only job is to review it and return its block, and that
 is ignored. Neither desk runs the PR's code. The last block is read strictly, the same for both: its header, a
 SUMMARY line of at most 300 characters, the findings and the verdict, and anything else is a fixed "couldn't review"
 reply. A finding or summary that repeats 40 or more characters of the PR's own text is withheld with a fixed line,
-and a review holding one is never an approval, so planted text never reaches Chat or GitHub word for word. Each person may ask for `CHAT_REVIEW_PER_PERSON_DAILY`
+and a review holding one is never an approval, so planted text never reaches Chat or GitHub word for word. A
+finding's place is left out of that check when it names a file the diff touches, read from the `---` and `+++` lines
+of each file's header only (a path git quotes, for a quote, a backslash or a byte past ASCII, is read as git wrote
+it), so a long path is never taken for an echo and no line inside a hunk passes for one. Each person may ask for `CHAT_REVIEW_PER_PERSON_DAILY`
 reviews a cap day and the whole fleet `CHAT_REVIEW_DAILY`, whichever app they ask, counted before the desk starts, so a
 killed review counts. Each review is also one run of its desk under that desk's own daily caps, recorded like any
 other: a Hermione turn at most her per-run budget and never past her spend cap, a Moody turn with its tokens and, as
@@ -637,7 +648,8 @@ request on a PR your `gh` login opened; when it refuses one, the review is poste
 lands, and the event that posted is in the request's record and its log line. The review opens with a fixed line
 saying it is an automated review by the app (its name as its settings spell it) requested by the requester in Chat,
 naming them by their Chat display name (scrubbed, at most 60 characters, else "a teammate"), never their email, which
-stays in the office's own log, with the summary under it in a code span, and it is posted at most once per app, PR and head commit, with one exception: when the
+stays in the office's own log, with the summary under it in a code span, then the verdict and the findings, cut whole
+lines at a time to what GitHub takes. It is posted at most once per app, PR and head commit, with one exception: when the
 app posted a COMMENT there (a pass while the approve switch was off), a later review of that same head commit that
 is an APPROVE is posted once more, so asking it to approve after turning the switch on works. That second post has
 its own create-exclusive marker, made before it is posted, so a kill never posts it twice, and nothing else is ever

@@ -1596,6 +1596,59 @@ class StrictBlockTests(ChatCase):
         self.assertEqual(self.parse(block(non_blocking=(f"{path}:1 | the comment says {PLANTED}",)), diff, diff)[2],
                          [f"N1 {path}:1 | {chat_review.WITHHELD}"])
 
+    def test_a_path_git_quoted_is_read_as_git_wrote_it(self):
+        paths = {'public/some-long-package-name/.run/Say "hi" to Lint.run.xml':
+                 r'"a/public/some-long-package-name/.run/Say \"hi\" to Lint.run.xml"',
+                 "public/some-long-package-name/back\\slash and space.txt":
+                 r'"a/public/some-long-package-name/back\\slash and space.txt"',
+                 "public/some-long-package-name/café über.md":
+                 r'"a/public/some-long-package-name/caf\303\251 \303\274ber.md"',
+                 "docs/tab\there.md": r'"a/docs/tab\there.md"',
+                 'docs/raw café "x".md': '"a/docs/raw café \\"x\\".md"'}
+        diff = "".join(f"diff --git {quoted} {quoted.replace('a/', 'b/', 1)}\n--- {quoted}\n"
+                       f"+++ {quoted.replace('a/', 'b/', 1)}\n@@ -1 +1 @@\n-x\n+y\n" for quoted in paths.values())
+        self.assertEqual(chat_review.diff_paths(diff), frozenset(paths))
+        for path in list(paths)[:3]:
+            with self.subTest(path=path):
+                found = block(non_blocking=(f"{path}:1 | still names live tasks",))
+                self.assertEqual(self.parse(found, diff, diff)[2][0].split(" | ", 1)[1], "still names live tasks")
+        # A line shaped like a quoted header inside a hunk is no path, and neither is a broken or mismatched one.
+        planted = " ".join(PLANTED.split()[:9])
+        hunk = (f"diff --git a/y.py b/y.py\n--- a/y.py\n+++ b/y.py\n@@ -1 +1 @@\n--- \"a/{planted}\"\n"
+                f"+++ \"b/{planted}\"\n")
+        self.assertEqual(chat_review.diff_paths(hunk), {"y.py"})
+        self.assertEqual(self.parse(block(non_blocking=(f"{planted}:1 | a note",)), hunk, hunk)[2],
+                         [f"N1 {chat_review.WITHHELD}"])
+        for line in (r'--- "b/x.py"', r'+++ "a/x.py"', r'--- "a/x\q.py"', r'--- "a/x\400.py"', r'--- "a/x\377.py"',
+                     r'--- "a/x".py', r'--- "a/x\"', '--- "a/"', '--- "x.py"'):
+            with self.subTest(line=line):
+                self.assertEqual(chat_review.diff_paths(f"diff --git a/x b/x\n{line}\n@@ -1 +1 @@\n"), frozenset())
+
+    def test_a_finding_keeps_up_to_its_limit_and_the_reply_and_review_cut_whole_lines(self):
+        self.assertEqual(chat_review.FINDING_MAX, 600)
+        place = "x.py:1 | "
+        whole = place + "n" * (chat_review.FINDING_MAX - len(place))
+        self.assertEqual(self.parse(block(non_blocking=(whole,)))[2], [f"N1 {whole}"])
+        [cut] = self.parse(block(non_blocking=(whole + "n" * 50,)))[2]
+        self.assertEqual(len(cut), len("N1 ") + chat_review.FINDING_MAX)
+        # The longest findings there can be, every one lengthened by the defang, still make whole lines.
+        long = "@" * (chat_review.FINDING_MAX - len(place) - len(" | fix"))
+        parsed = self.parse(block(blocking=[f"{place}{long} | fix"] * chat_review.FINDINGS_MAX,
+                                  non_blocking=[f"{place}{long}"] * chat_review.FINDINGS_MAX,
+                                  summary="x" * chat_review.SUMMARY_MAX))
+        _, blocking, notes, summary = parsed
+        reply = chat_review.reply_text("acme/web-app", 7, HEAD, "CHANGES", blocking, notes, summary)
+        body = chat_review.github_body("Dev Person", HEAD, "CHANGES", blocking, notes, summary=summary)
+        self.assertLessEqual(len(said(reply, "users/" + "9" * 40)), google_chat.MESSAGE_MAX_CHARS)
+        self.assertLessEqual(len(body), chat_review.GITHUB_BODY_MAX)
+        whole_lines = set(map(chat_review._bullet, blocking + notes)) | {f"- `{item}`" for item in blocking + notes}
+        for text in (reply, body):
+            *kept, last = text.splitlines()
+            self.assertRegex(last, r"^\([0-9]+ more lines not shown\)$")
+            for line in kept:
+                if line.startswith("- "):
+                    self.assertIn(line, whole_lines)
+
     def test_an_answer_shaped_by_the_diffs_injection_is_never_posted(self):
         self.switch(config.CHAT_REVIEW_GITHUB_FILE, True)
         self.switch(config.CHAT_REVIEW_APPROVE_FILE, True)
@@ -2199,8 +2252,10 @@ class UnmentionedFollowUpTests(ChatCase):
         self.reviewed(app=MOODY_APP_USER, message="m2", at=now - 4)  # Moody reviews
         self.assertEqual(self.quiet(f"Review PR {URL}"), [])
         self.assertEqual([turn["desk"] for turn in self.turns], ["moody"])
-        for app in ("hermione", "moody"):
-            self.assertEqual(chat_review.listening_threads(SPACE, app), frozenset())
+        self.assertEqual(chat_review._owners(SPACE), {})
+        # Hermione's for the while before Moody's mention, so a message from then is still read for her.
+        self.assertEqual(chat_review.listening_threads(SPACE, "hermione"), frozenset({THREAD}))
+        self.assertEqual(chat_review.listening_threads(SPACE, "moody"), frozenset())
 
     def test_a_help_reply_makes_a_thread_the_apps_only_for_a_message_after_it(self):
         self.helped()
@@ -2235,7 +2290,7 @@ class UnmentionedFollowUpTests(ChatCase):
         self.reviewed(app=MOODY_APP_USER, message="m2", at=now - 4)  # then Moody
         self.assertEqual(self.quiet("can you approve"), [])
         self.assertEqual([turn["desk"] for turn in self.turns], ["hermione", "moody"])
-        self.assertEqual(chat_review.listening_threads(SPACE, "hermione"), frozenset())
+        self.assertEqual(chat_review._owners(SPACE), {})
         self.assertEqual(chat_review.listening_threads(SPACE, "moody"), frozenset())
 
     def test_the_unmentioned_requests_words_never_reach_the_turn_or_the_office(self):
@@ -2247,12 +2302,12 @@ class UnmentionedFollowUpTests(ChatCase):
         self.assertNotIn(SECRET_MARK, self.office_text())
         self.assertNotIn(SECRET_MARK, json.dumps(self.log_lines()))
 
-    def test_an_unmentioned_request_taken_before_the_other_apps_mention_is_recorded_is_dropped_unanswered(self):
+    def test_an_unmentioned_request_after_the_other_apps_mention_in_the_same_pass_is_never_taken(self):
         self.second_app()
         now = time.time() - 30
         t0, t1, t2 = (f"{SPACE}/threads/s{index}" for index in range(3))
         self.deliver(
-            # One message to both apps, then a request: Hermione reads first and takes it before Moody records his.
+            # One message to both apps, then a request: Hermione reads first, but every mention is read before it.
             msg(text="what is this?", message="h0", also=(MOODY_APP_USER,), at=now + 1, thread=t0),
             msg(text=f"Review PR {URL}", message="q0", mention=False, at=now + 2, thread=t0),
             # A help reply from Hermione alone, then a request: hers.
@@ -2267,13 +2322,70 @@ class UnmentionedFollowUpTests(ChatCase):
         found = {record["message"][-2:]: record for record in self.records() if record["message"][-2] == "q"}
         self.assertEqual([(name, record["state"], record["outcome"], record["kind"], record["app"])
                           for name, record in sorted(found.items())],
-                         [("q0", "done", "not-owned", "dropped", "hermione"),
-                          ("q1", "done", "reviewed", "review", "hermione"),
-                          ("q2", "done", "not-owned", "dropped", "hermione")])
-        # Only the thread one app took a mention in was reviewed and acknowledged.
+                         [("q1", "done", "reviewed", "review", "hermione")])
         [turn] = self.turns
         self.assertEqual(turn["desk"], "hermione")
         self.assertEqual([ack["thread"] for ack in self.google.acks], [t1])
+
+    def test_a_mention_the_other_app_has_not_read_yet_holds_an_unmentioned_request_back(self):
+        self.second_app()
+        self.patch(config, "CHAT_REVIEW_LIST_PAGES", 1)
+        self.patch(google_chat, "PAGE_SIZE", 3)
+        now = time.time()
+        self.helped(at=now - 50)  # the thread is Hermione's
+        # Moody's read is behind, with chatter before his mention: his page cap stops him short of it.
+        floor = int((now - 60) * 1e6)
+        for app, read in (("moody", now - 45), ("hermione", now - 20)):
+            chat_review._save_marker(SPACE, app, int(read * 1e6), floor, True, complete=False)
+        self.deliver(*[msg(text="chatter", mention=False, message=f"c{index}", at=now - 40 + index,
+                           thread=f"{SPACE}/threads/t9") for index in range(3)],
+                     msg(text="what is this?", message="m2", app=MOODY_APP_USER, at=now - 6),
+                     msg(text=f"Review PR {URL}", message="q1", mention=False, at=now - 4))
+        self.assertEqual(self.run_pass()["taken"], [])  # Hermione's read reached q1, Moody's did not reach m2
+        self.assertEqual(len(self.records()), 1)
+        for _ in range(4):  # each read goes on a page a pass
+            self.run_pass()
+        self.assertEqual(sorted((record["message"][-2:], record["app"], record["kind"]) for record in self.records()),
+                         [("h1", "hermione", "help"), ("m2", "moody", "help")])
+        self.assertEqual((self.turns, self.google.acks), ([], []))
+
+    def test_an_unmentioned_request_listed_late_from_while_the_thread_was_hers_is_still_taken(self):
+        self.second_app()
+        now = time.time()
+        self.helped(at=now - 30)
+        self.deliver(msg(text="what is this?", message="m2", app=MOODY_APP_USER, at=now - 10))
+        self.assertEqual([outcome for outcome in self.run_pass()["taken"] if outcome != "seen before"],
+                         ["help"])  # now the thread has two apps
+        # Created before Moody's mention, while the thread was Hermione's alone, and listed only now.
+        self.deliver(msg(text=f"Review PR {URL}", message="q1", mention=False, at=now - 20))
+        self.assertEqual([outcome for outcome in self.run_pass()["taken"] if outcome != "seen before"], ["review"])
+        self.assertEqual([turn["desk"] for turn in self.turns], ["hermione"])
+        self.assertEqual(self.quiet("review again", message="q2"), [])  # one from after Moody's mention is not
+
+    def test_a_queued_request_an_earlier_mention_listed_late_overtook_is_dropped_unanswered(self):
+        self.second_app()
+        now = time.time()
+        self.helped(at=now - 30)
+        self.patch(config, "CHAT_REVIEW_PER_PASS", 0)
+        self.assertEqual(self.quiet(f"Review PR {URL}"), ["review"])  # taken, and left queued
+        self.patch(config, "CHAT_REVIEW_PER_PASS", 2)
+        # Moody's mention from before it is listed only now, inside the read overlap.
+        self.deliver(msg(text="what is this?", message="m2", app=MOODY_APP_USER, at=now - 10))
+        self.run_pass()
+        [record] = [record for record in self.records() if record["message"].endswith("/q1")]
+        self.assertEqual((record["state"], record["outcome"], record["kind"]), ("done", "not-owned", "dropped"))
+        self.assertEqual(self.turns, [])
+
+    def test_a_stopped_read_holds_no_one_back_and_a_failed_one_holds_back_until_it_reads(self):
+        self.second_app()
+        self.helped()
+        self.google.moody_refresh_status = 503  # Moody's token could not be had: his mentions are not known
+        self.assertEqual(self.quiet(f"Review PR {URL}"), [])
+        self.google.moody_refresh_status = None
+        self.assertEqual([outcome for outcome in self.run_pass()["taken"] if outcome != "seen before"], ["review"])
+        self.google.moody_refresh_status = 400  # his authorization is gone: he reads nothing until it is back
+        self.assertEqual(self.quiet("review again", message="q2"), ["review"])
+        self.assertEqual([turn["desk"] for turn in self.turns], ["hermione", "hermione"])
 
     def test_one_message_to_both_apps_leaves_the_thread_to_neither(self):
         self.second_app()

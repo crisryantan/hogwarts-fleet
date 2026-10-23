@@ -447,7 +447,7 @@ def list_messages(space: str, after_us: int, app_user: str, token: str, page: Op
     page's token or None). A message that does not mention the app (app_user) is given back as its time alone, so
     nothing else of it ever leaves here; one that does is its name, time, thread, sender and the text Chat gives with
     the app mentions taken out (argumentText). The one exception, for a thread follow-up: a message that mentions no
-    one at all, in one of threads (those where only the app took a mention), is given back the same way,
+    one at all, in one of threads (those that were the app's alone for a while), is given back the same way,
     marked listening, with its whole text."""
     if not isinstance(app_user, str) or USER.fullmatch(app_user) is None:
         raise GoogleError("the app's user name is not a Chat user name")
