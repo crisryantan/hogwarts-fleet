@@ -2822,7 +2822,7 @@ def _send_reply(key: str, record: dict) -> dict:
     except FleetError as exc:
         log("reply-failed", request=key[:12], why=common.scrubbed_line(exc, 200))
         return record
-    _followed(key, record)
+    record = _followed(key, record)
     return _github_or_done(key, {**record, "replied": True})
 
 
@@ -3059,25 +3059,33 @@ def thread_follows(space: str, thread: str, app: str) -> list:
     return sorted(found, key=lambda item: (item[1]["number"], item[0]))
 
 
-def _start_follow(app: str, repo: str, number: int, where: dict, sha: Optional[str], now: int) -> str:
+def _start_follow(app: str, repo: str, number: int, where: dict, sha: Optional[str], now: int,
+                  reviewed_at: Optional[int] = None) -> str:
     """Follow the PR for app, or move its follow: where (its space, thread, requester's Chat user id and display name,
     and asked_us, when it was asked for) replaces the follow's own when it was asked for no earlier, so a later review
-    in another thread moves it there; a reviewed head (sha) becomes its last reviewed head. Its key."""
+    in another thread moves it there; a reviewed head (sha), from a review whose turn started at reviewed_at, becomes
+    its last reviewed head (_reviewed). Its key."""
     fkey = _follow_key(app, repo, number)
     follow = read_follow(fkey)
     if follow is None:
-        follow = {"state": "following", "app": app, "repo": repo, "number": number, **where, "sha": sha,
-                  "seen": sha, "since": now, "moved": now, "checked": None, "pending": None}
+        follow = {"state": "following", "app": app, "repo": repo, "number": number, **where, "sha": None,
+                  "seen": None, "since": now, "moved": now, "checked": None, "pending": None}
     else:
         asked = follow.get("asked_us")
         if type(asked) is not int or where["asked_us"] >= asked:
             follow = {**follow, **where}
-        if sha is not None:
-            follow = {**follow, "sha": sha}
-            if sha != follow.get("seen"):
-                follow = {**follow, "seen": sha, "moved": now}
-    _save_follow(fkey, follow)
+    _save_follow(fkey, _reviewed(follow, sha, reviewed_at, now))
     return fkey
+
+
+def _reviewed(follow: dict, sha: Optional[str], reviewed_at: Optional[int], now: int) -> dict:
+    """The follow with sha as its last reviewed head, from a review whose turn started at reviewed_at, unless a review
+    that started later already set one: a reply that went late never takes the follow back to an older head."""
+    last = follow.get("reviewed_at")
+    if sha is None or (type(last) is int and type(reviewed_at) is int and reviewed_at < last):
+        return follow
+    follow = {**follow, "sha": sha, "reviewed_at": reviewed_at if type(reviewed_at) is int else now}
+    return {**follow, "seen": sha, "moved": now} if sha != follow.get("seen") else follow
 
 
 def _where(record: dict) -> dict:
@@ -3088,33 +3096,36 @@ def _where(record: dict) -> dict:
             "requester_name": display_name(record.get("requester_name")), "asked_us": _taken_us(record)}
 
 
-def _followed(key: str, record: dict) -> None:
+def _followed(key: str, record: dict) -> dict:
     """After a review's reply went to its thread: from Chat, its app follows the PR there (or its follow moves
-    there), with the head it reviewed as the last reviewed; from a follow, that follow, if it still is, has it as its
-    last reviewed head. Never the end of the reply: a failure is a log line."""
+    there), with the head it reviewed as the last reviewed, unless a stop of the thread's follows came after it; from a
+    follow, that follow, if it still is, has it as its last reviewed head. Once per request (follow_done), so a reply
+    sent again after a kill never starts a follow a stop ended since. Never the end of the reply: a failure is a log
+    line. The record as it is after."""
     sha = record.get("sha")
-    if record.get("kind") != "review" or record.get("outcome") != "reviewed" \
+    if record.get("kind") != "review" or record.get("outcome") != "reviewed" or record.get("follow_done") is True \
             or record.get("verdict") not in ("PASS", "CHANGES") or record.get("source") not in IN_THREAD \
             or not isinstance(sha, str) or gitops.SHA.fullmatch(sha) is None:
-        return
-    app, now = app_of(record), int(time.time())
+        return record
+    app, now, started = app_of(record), int(time.time()), record.get("started")
     try:
         if record.get("source") == "follow":
             fkey = record.get("follow")
             follow = read_follow(fkey)
-            if follow is None or follow.get("since") != record.get("follow_since"):
-                return  # it ended since, or was started again: a review never starts or moves one
-            follow = {**follow, "sha": sha, "pending": None if follow.get("pending") == key else follow.get("pending")}
-            if sha != follow.get("seen"):
-                follow = {**follow, "seen": sha, "moved": now}
-            _save_follow(fkey, follow)
-        else:
+            if follow is not None and follow.get("since") == record.get("follow_since"):
+                follow = _reviewed(follow, sha, started, now)
+                _save_follow(fkey, {**follow, "pending": None if follow.get("pending") == key
+                                    else follow.get("pending")})
+                log("followed", request=key[:12], app=app, follow=fkey[:12], sha=sha)
+        elif not _stopped_after(record):
             fkey = _start_follow(app, allowed_repo(record["repo"]) or record["repo"], record["number"],
-                                 _where(record), sha, now)
-        log("followed", request=key[:12], app=app, follow=fkey[:12], sha=sha)
+                                 _where(record), sha, now, started)
+            log("followed", request=key[:12], app=app, follow=fkey[:12], sha=sha)
     except (FleetError, OSError, KeyError, TypeError) as exc:
         log("follow-failed", request=key[:12], app=app,
             why=common.scrubbed_line(exc, 200) if isinstance(exc, FleetError) else type(exc).__name__)
+        return record
+    return _save(key, {**record, "follow_done": True})
 
 
 def _follow_reply(text: str, space: str, thread: str, app: str) -> Optional[dict]:
@@ -3139,7 +3150,8 @@ def _follow_command(key: str, record: dict) -> dict:
     """Carry out a follow command's record once: "follow <link>" follows the PR in its thread with no head reviewed yet,
     so its first check reviews it; "stop following" ends each follow it names. Done as it is taken and again before its
     reply, so a kill between never loses it, and marked done in the record; done late, it never undoes a later
-    command (_stopped_after, and a stop ends only a follow asked for before it). The record as it is after."""
+    command (_stopped_after, and a stop ends only a follow asked for before it), and a stop that mentioned no one ends
+    nothing once its thread is no longer the app's alone (_still_listening). The record as it is after."""
     kind = record.get("kind")
     if kind == "follow" and record.get("followed") is not True:
         if not _stopped_after(record):
@@ -3148,8 +3160,9 @@ def _follow_command(key: str, record: dict) -> dict:
             log("follow-started", request=key[:12], app=app_of(record), follow=fkey[:12])
         return _save(key, {**record, "followed": True})
     if kind == "unfollow" and record.get("unfollowed") is not True:
-        for fkey in record.get("follows") or ():
-            _end_follow(fkey, "unfollowed", _taken_us(record))
+        if record.get("mentioned") is not False or _still_listening(record):
+            for fkey in record.get("follows") or ():
+                _end_follow(fkey, "unfollowed", _taken_us(record))
         return _save(key, {**record, "unfollowed": True})
     return record
 
@@ -3952,7 +3965,10 @@ def settle(conn, now: Optional[int] = None, only_hand: bool = False) -> list:
             done.append("off")  # switched off part way through the pass: no Chat request moves on
             continue
         try:
-            if state == "reply":
+            if state == "reply" and record.get("kind") == "unfollow" and record.get("mentioned") is False \
+                    and not _still_listening(record):  # its thread turned out not to be the app's alone: no reply
+                done.append(_end(key, {**record, "kind": "dropped", "outcome": None}, "not-owned")["state"])
+            elif state == "reply":
                 done.append(_send_reply(key, record)["state"])
             elif state == "github":
                 done.append(_resume_github(key, record)["state"])

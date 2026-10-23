@@ -443,3 +443,42 @@ class FollowKillTests(FollowCase):
         self.deliver(msg(text="stop following", message="q1", mention=False, at=time.time() + 1))
         self.assertEqual([outcome for outcome in self.run_pass()["taken"] if outcome != "seen before"], ["unfollow"])
         self.assertIsNone(self.follow())
+
+    def test_a_review_reply_sent_again_after_a_later_stop_starts_no_follow(self):
+        self.deliver(msg(at=time.time() - 5))
+        with self.dying_at("followed"), self.assertRaises(SystemExit):
+            self.run_pass()  # the follow started, the review's record still waits to say so
+        self.assertIsNotNone(self.follow())
+        self.deliver(msg(text="stop following", message="m2"))
+        self.run_pass()
+        self.assertIsNone(self.follow())
+        [review] = [record for record in self.records() if record["message"].endswith("/m1")]
+        self.assertEqual((review["state"], review["follow_done"]), ("done", True))
+        self.assertEqual(len(self.google.messages), 2)  # the review's reply, once, and the stop's
+
+    def test_a_reply_that_went_late_never_takes_the_follow_back_to_an_older_head(self):
+        self.reviewed()
+        [(key, record)] = chat_review._records()
+        started = record["started"]
+        for sha, at, kept in ((NEWER, started - 10, HEAD), (THIRD, started + 10, THIRD)):
+            with self.subTest(sha=sha):
+                late = {**record, "sha": sha, "started": at, "follow_done": False}
+                chat_review._followed("f" * 31 + sha[0], late)
+                self.assertEqual(self.follow()["sha"], kept)
+
+    def test_an_unmentioned_stop_whose_thread_turns_out_shared_ends_nothing(self):
+        self.reviewed()
+        with mock.patch.object(chat_review, "_follow_command", side_effect=FleetError("cut short")):
+            self.deliver(msg(text="stop following", message="q1", mention=False, at=time.time() + 1))
+            self.assertIn("unfollow", self.run_pass()["taken"])
+        [stop] = [record for record in self.records() if record["message"].endswith("/q1")]
+        # The other app's mention from before it, listed only now: the thread was never this app's alone then.
+        chat_review._create("e" * 32, {"state": "done", "kind": "help", "source": "chat", "app": "moody",
+                                       "space": SPACE, "thread": THREAD, "message": f"{SPACE}/messages/x1",
+                                       "at": stop["at"] - 1, "at_us": stop["at_us"] - 1})
+        replies = len(self.google.messages)
+        self.run_pass()
+        self.assertIsNotNone(self.follow())
+        self.assertEqual(len(self.google.messages), replies)
+        [stop] = [record for record in self.records() if record["message"].endswith("/q1")]
+        self.assertEqual((stop["state"], stop["kind"]), ("done", "dropped"))
