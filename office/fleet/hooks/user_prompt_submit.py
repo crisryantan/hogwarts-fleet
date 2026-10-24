@@ -131,7 +131,9 @@ and the next go refuses because the branch exists until Ryan removes them. Nothi
 carries a token, the prompt's id or the TASK.md hash. A go Ryan's typing could not confirm
 prints the manual steps instead. Every go refusal says how to fix it as well as why (a Fix: line, from
 Refused.fix). A go that applied also says plainly when the jobs a build needs are not running, so it will not move on
-by itself, or run under launchd alone on a repo launchd cannot read (loops.build_notice); neither refuses it.
+by itself, or run under launchd alone on a repo launchd cannot read (loops.build_notice); neither refuses it. A go
+from Ryan's Chat direct message with McGonagall's app (fleet/chat_chief.py) runs this same code (run_go) in place of the
+typed check once its one-time code is used up, refused unless TASK.md still hashes to what that code was made for.
 
 The hook input has no documented field that says a person typed the prompt, so the typed
 check reads the transcript entry, as above. A refused close prints the castle commands, and
@@ -584,8 +586,10 @@ def _undo(claim: dict, inbox_copy: Optional[str], exc: BaseException) -> Optiona
     return None if stuck is None else f"{worktree.cause(exc)}; removing {stuck} also failed, so remove it by hand"
 
 
-def _go(conn, task_id: str, now: int, note: Optional[Callable[[dict], None]] = None) -> tuple:
-    """(lines, started) for a go Ryan's typing confirmed. Every refusal before the commit leaves nothing."""
+def _go(conn, task_id: str, now: int, note: Optional[Callable[[dict], None]] = None,
+        expected: Optional[str] = None) -> tuple:
+    """(lines, started) for a go Ryan's typing confirmed. Every refusal before the commit leaves nothing. expected, the
+    sha256 of the TASK.md a go from Chat was confirmed for (fleet/chat_chief.py), refuses any other bytes."""
     from fleet import verify, worktree  # only a go pays for these imports
 
     try:
@@ -596,6 +600,9 @@ def _go(conn, task_id: str, now: int, note: Optional[Callable[[dict], None]] = N
         raw = verify.read_task_md(task_id)
     except safefs.Missing:
         raise Refused(f"there is no TASK.md at ~/hogwarts/tasks/{task_id}/TASK.md", MISSING_TASK_MD_FIX) from None
+    if expected is not None and hashlib.sha256(raw).hexdigest() != expected:
+        raise Refused("TASK.md changed since its code was sent, so nothing was started",
+                      f"send go {task_id} again to see it and get a new code.")
     drafted = read_spec(raw, task_id)
     try:
         worktree.fetch_base(drafted["repo_dir"], drafted["base"])
@@ -655,13 +662,16 @@ def _go(conn, task_id: str, now: int, note: Optional[Callable[[dict], None]] = N
 
 
 def run_go(conn, task_id: str, now: int, note: Optional[Callable[[dict], None]] = None,
-           session: Optional[str] = None) -> tuple:
+           session: Optional[str] = None, expected: Optional[str] = None) -> tuple:
     """(lines, started) for one go whose typing is confirmed: the go above, ended by SIGTERM or SIGHUP through its
     take-back, with every refusal said in one line. A go that applied is the typing session's to watch
     (fleet/go_owners.py)."""
     try:
         with common.ended_by_signals():
-            lines, started = _go(conn, task_id, now) if note is None else _go(conn, task_id, now, note)
+            if expected is not None:  # a go from Chat: only the TASK.md its code was made for
+                lines, started = _go(conn, task_id, now, note, expected=expected)
+            else:
+                lines, started = _go(conn, task_id, now) if note is None else _go(conn, task_id, now, note)
         if started and session is not None:
             from fleet import go_owners  # only an applied go pays for this import
 

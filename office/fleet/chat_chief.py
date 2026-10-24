@@ -20,12 +20,13 @@ CHAT_REVIEW_OWNER is a placeholder.
   sent, never kept.
 - go <task-id>, one per line, at most GO_MAX_PER_PROMPT: nothing starts. For each task the go's read-only checks run
   (the store does not know it yet, its TASK.md is there, user_prompt_submit.read_spec), and when they pass, a one-time
-  code of CODE_LENGTH characters from CODE_ALPHABET is made for it. The office keeps only a salted sha256 of the code,
-  the TASK.md sha256 it was made for and when (chief-codes/<task-id>.json); the reply names the task, its title and
-  repo and the code. go <task-id> <code>, one per line, within CHAT_CHIEF_GO_CODE_SECONDS: the code is compared in
-  constant time and removed before anything else runs, so it works once; CODE_TRIES wrong codes void it. TASK.md must
-  still hash to what the code was made for. Then the go runs through user_prompt_submit.run_go, the hook's own code,
-  with every check it makes (the task's state, its spec, the branch lock, the worktree, the take-back). Each outcome
+  code of CODE_LENGTH characters from CODE_ALPHABET is made for it as the reply is sent (_send), never before. The
+  office keeps only a salted sha256 of the code, the TASK.md sha256 it was made for and when
+  (chief-codes/<task-id>.json); the reply names the task, its title and repo and the code. go <task-id> <code>, one
+  per line, within CHAT_CHIEF_GO_CODE_SECONDS: the code is compared in constant time and removed before anything else
+  runs, so it works once; CODE_TRIES wrong codes void it. Then the go runs through user_prompt_submit.run_go, the
+  hook's own code, with every check it makes (the task's state, its spec, the branch lock, the worktree, the
+  take-back), and refused unless the TASK.md it reads and registers hashes to what the code was made for. Each outcome
   is a go.confirmed or go.refused headmaster event on McGonagall's desk whose summary starts "Go from Chat:", then
   one go updates pass. The reply is the go's own lines.
 - close, drop, Mischief managed and watch stay in her terminal session, whose checks rest on the typed transcript
@@ -41,12 +42,16 @@ CHAT_REVIEW_OWNER is a placeholder.
   her own format (render): Intent is the owner's words, verbatim, less any criteria lines and their heading, never her
   text; every criterion must parse clean (verify.parse_checks), and the Spec must pass read_spec as a go would read it.
   A draft gets a new task id and its own new folder; a revision rewrites only a TASK.md this app wrote, still the
-  bytes it wrote, of a task the store does not know. It writes nothing else. The reply names the task id, title, repo,
-  branch, base and each criterion, and says how to start it.
+  bytes it wrote, of a task the store does not know, checked again under the lock a go of it takes on its branch
+  (worktree.branch_claim), so no go starts it meanwhile. Its earlier Intent is read back from that TASK.md and the
+  owner's new words appended. It writes nothing else but its own note of the draft (chief-drafts/<task-id>.json: the
+  sha256 it wrote, and the one before). The task id and the sha256 are noted on the record before TASK.md is written,
+  so a turn cut off after the write still tells the owner where the draft is. The reply names the task id, title,
+  repo, branch, base and each criterion, and says how to start it.
 - Go updates: while the office file chat-go-updates holds "on" as well as auto-go-updates, fleet/go_watch.py leaves
   each line it sends in the office folder CHAT_GO_UPDATES_DIR, and each pass posts them in the direct message, in the
-  thread of the owner's newest message there, each once by a request id made from its name. Off, the folder is
-  emptied. A line older than UPDATE_KEEP_SECONDS is dropped unsent.
+  thread of the owner's newest message there, each once by a request id made from its name, with the switches and
+  the direct message checked again before each one. Off, the folder is emptied. A line older than UPDATE_KEEP_SECONDS is dropped unsent.
 - Nothing here logs a message's text, a draft or a code: the log lines in logs/chat-review.log say which record, what
   kind and how it ended.
 """
@@ -65,7 +70,7 @@ from typing import Optional
 from hogwarts import db, pensieve
 from hogwarts.errors import NotFoundError, StoreError
 
-from fleet import chat_fleet, chat_review, common, config, google_chat, markers, run_desk, safefs, verify
+from fleet import chat_fleet, chat_review, common, config, google_chat, markers, run_desk, safefs, verify, worktree
 from fleet.hooks import user_prompt_submit as hook
 from fleet.safefs import FleetError
 
@@ -126,6 +131,8 @@ SIGN_IN = "I couldn't sign in to draft that. Run claude auth login in your termi
 INTERRUPTED_GO = ("That go was cut off part way, so it may or may not have started. castle task show {ids} in your"
                   " terminal says where it stands; nothing runs it again.")
 NOT_A_DRAFT = "I couldn't make a valid draft from that: {why}. Nothing was written."
+CUT_OFF_DRAFTED = ("I was cut off just after writing {id}. TASK.md is at ~/hogwarts/tasks/{id}/TASK.md. Send go {id} to"
+                   " start it, or tell me what to change.")
 GO_WAITING = ("Go for {id}: \"{title}\" in {repo}. To start it, send go {id} {code} within {minutes} minutes. The code"
               " works once.")
 
@@ -417,8 +424,8 @@ def take(conn, message: dict, space: str, now: int) -> str:
         record = {**record, "state": "reply", "kind": kind, "reply": needs, "outcome": "fixed"}
     elif kind == "status":
         record = {**record, "state": "reply", "kind": kind, "outcome": "status"}
-    elif kind == "go-ask":
-        record = {**record, "state": "asking", "kind": kind, "tasks": needs}
+    elif kind == "go-ask":  # its codes are made as its reply is sent, never kept on the record
+        record = {**record, "state": "reply", "kind": kind, "tasks": needs, "outcome": "go-asked"}
     elif kind == "go-confirm":  # the codes stay in this process only, never on the record
         record = {**record, "state": "applying", "kind": kind, "tasks": [task for task, _ in needs]}
     else:
@@ -426,9 +433,7 @@ def take(conn, message: dict, space: str, now: int) -> str:
     if not _create(key, record):
         return "seen before"
     chat_review.log("chief-received", request=key[:12], app=APP, kind=kind)
-    if kind == "go-ask":
-        _reply(key, record, ask_go(conn, record["tasks"], now), "go-asked")
-    elif kind == "go-confirm":
+    if kind == "go-confirm":
         _reply(key, record, confirm_go(conn, needs, key, now), "go")
     return kind
 
@@ -534,18 +539,11 @@ def confirm_go(conn, pairs: list, key: str, now: int) -> str:
     for task_id, code in pairs:
         try:
             sha = _use_code(task_id, code, now)
-            try:
-                raw = verify.read_task_md(task_id)
-            except safefs.Missing:
-                raw = b""
-            if hashlib.sha256(raw).hexdigest() != sha:
-                raise hook.Refused("TASK.md changed since its code was sent, so nothing was started",
-                                   f"send go {task_id} again to see it and get a new code.")
         except (hook.Refused, FleetError, OSError) as exc:
             lines.append(_refusal(task_id, exc) if not isinstance(exc, OSError)
                          else f"Go was not applied to {task_id}: its code could not be read ({type(exc).__name__}).")
             continue
-        said, started = hook.run_go(conn, task_id, now)
+        said, started = hook.run_go(conn, task_id, now, expected=sha)  # refused for any bytes but those
         ran = True
         _record_go(conn, task_id, key, said, started)
         lines.append(" ".join(said))
@@ -674,8 +672,7 @@ def _drafts(conn) -> dict:
             if not (name.endswith(".json") and TASK_ID.fullmatch(name[:-5])):
                 continue
             entry = markers.read(fd, name)
-            if entry is None or entry.get("state") != "draft" or not isinstance(entry.get("sha"), str) \
-                    or not isinstance(entry.get("words"), list):
+            if entry is None or entry.get("state") != "draft" or not isinstance(entry.get("sha"), str):
                 continue
             try:
                 pensieve.get_task(conn, name[:-5])
@@ -724,10 +721,10 @@ def draft_input(text: str, history: list, drafts: dict, repos: list, nonce: str)
     shown = []
     for task_id, _ in sorted(drafts.items(), key=lambda item: item[1].get("at", 0), reverse=True)[:DRAFTS_SHOWN]:
         try:
-            body = verify.read_task_md(task_id).decode("utf-8", "replace")[:DRAFT_SHOWN_MAX]
+            body = common.untrusted_text(verify.read_task_md(task_id).decode("utf-8", "replace"))
         except (FleetError, OSError):
             continue
-        shown.append(f"=== {task_id} ===\n{common.untrusted_text(body)}")
+        shown.append(f"=== {task_id} ===\n{body[:DRAFT_SHOWN_MAX]}")  # scrubbed whole, then cut
     return (f"OWNER MESSAGE {nonce}\n{common.untrusted_text(text)}\nEND OWNER MESSAGE {nonce}\n\n"
             f"RECENT MESSAGES {nonce} (oldest first, context only)\n" + "\n".join(history or ["(none)"])
             + f"\nEND RECENT MESSAGES {nonce}\n\n"
@@ -843,29 +840,64 @@ def draft(conn, key: str, record: dict, token: Optional[str], now: int) -> dict:
         if found["action"] == "reply":
             said = chat_review.defanged(chat_review.scrubbed(found["reply"]))
             return _reply(key, record, said, "replied")
-        task_id, raw = write_draft(conn, found, drafts, record["text"], now)
+        def journal(task_id: str, sha: str) -> None:  # noted before TASK.md is written (_cut_off)
+            _save(key, {**(_read_record(key) or record), "draft_task": task_id, "draft_sha": sha})
+
+        task_id, raw = write_draft(conn, found, drafts, record["text"], now, journal)
     except (Invalid, hook.Refused, FleetError) as exc:
         why = common.scrubbed_line(exc, 300)
         return _reply(key, record, NOT_A_DRAFT.format(why=chat_review.defanged(why)), "invalid")
     return _reply(key, record, summary(task_id, found, raw), "drafted")
 
 
-def write_draft(conn, answer: dict, drafts: dict, text: str, now: int) -> tuple:
+def intent_of(text: str) -> str:
+    """The Intent section of a TASK.md this app wrote: its lines after ## Intent up to the next ## heading."""
+    lines, inside = [], False
+    for line in text.split("\n"):
+        if inside and line.startswith("## "):
+            break
+        if inside:
+            lines.append(line)
+        inside = inside or line == "## Intent"
+    return "\n".join(lines).strip()
+
+
+def _note(task_id: str, sha: str, before: Optional[str], now: int) -> None:
+    with chat_review._folder(DRAFTS) as fd:
+        markers.replace(fd, f"{task_id}.json", {"state": "draft", "sha": sha, "before": before, "at": now})
+
+
+def write_draft(conn, answer: dict, drafts: dict, text: str, now: int, journal) -> tuple:
     """(task id, TASK.md) once it is written: a new task in a new folder, or a revision of one of this app's open
-    drafts whose TASK.md is still the bytes it wrote. Nothing else is written but this app's own note of the draft."""
+    drafts whose TASK.md is still bytes it wrote. journal(task id, sha256) notes what is about to be written, and this
+    app's own note of the draft is written before TASK.md, so a write cut off part way is never lost to it. Nothing
+    else is written."""
     if answer["action"] == "revise":
         task_id = answer["task_id"]
         entry = drafts[task_id]
-        words = [*[item for item in entry["words"] if isinstance(item, str)], text]
-        raw, _ = checked(task_id, answer, words)
+        mine = {entry["sha"], entry.get("before")} - {None}
         with safefs.opened_dir(config.CASTLE_ROOT, "tasks", task_id) as fd:
             current = safefs.read_regular(fd, "TASK.md", verify.TASK_MD_MAX_BYTES, "TASK.md")
-            if hashlib.sha256(current).hexdigest() != entry["sha"]:
+            if hashlib.sha256(current).hexdigest() not in mine:
                 raise Invalid(f"{task_id}'s TASK.md changed since I wrote it, so I left it as it is")
-            safefs.write_new(fd, "TASK.md", raw)
+            raw, _ = checked(task_id, answer, [intent_of(current.decode("utf-8")), text])
+            spec = hook.read_spec(current, task_id)
+            # Under the lock a go of this task takes on its branch: no go starts it while it is checked and written.
+            with worktree.branch_claim(spec["repo_dir"], spec["branch"]):
+                try:
+                    pensieve.get_task(conn, task_id)
+                    raise Invalid(f"{task_id} was started meanwhile, so I left its TASK.md as it is")
+                except NotFoundError:
+                    pass
+                again = safefs.read_regular(fd, "TASK.md", verify.TASK_MD_MAX_BYTES, "TASK.md")
+                if again != current:
+                    raise Invalid(f"{task_id}'s TASK.md changed since I wrote it, so I left it as it is")
+                sha = hashlib.sha256(raw).hexdigest()
+                journal(task_id, sha)
+                _note(task_id, sha, hashlib.sha256(current).hexdigest(), now)
+                safefs.write_new(fd, "TASK.md", raw)
         _forget_code(task_id)  # a code made for the earlier draft never starts this one
     else:
-        words = [text]
         with safefs.opened_dir(config.CASTLE_ROOT, "tasks", create=True) as tasks_fd:
             for _ in range(5):
                 task_id = f"tk_{secrets.token_hex(8)}"
@@ -874,11 +906,16 @@ def write_draft(conn, answer: dict, drafts: dict, text: str, now: int) -> tuple:
                     continue
                 except NotFoundError:
                     pass
-                raw, _ = checked(task_id, answer, words)
+                raw, _ = checked(task_id, answer, [text])
+                if safefs.lstat(tasks_fd, task_id) is not None:
+                    continue
+                sha = hashlib.sha256(raw).hexdigest()
+                journal(task_id, sha)
                 try:
                     os.mkdir(task_id, 0o700, dir_fd=tasks_fd)
                 except FileExistsError:
                     continue
+                _note(task_id, sha, None, now)
                 folder = safefs.open_subdir(tasks_fd, task_id)
                 try:
                     safefs.write_new(folder, "TASK.md", raw)
@@ -887,11 +924,21 @@ def write_draft(conn, answer: dict, drafts: dict, text: str, now: int) -> tuple:
                 break
             else:
                 raise Invalid("no new task id was free")
-    with chat_review._folder(DRAFTS) as fd:
-        markers.replace(fd, f"{task_id}.json", {"state": "draft", "sha": hashlib.sha256(raw).hexdigest(),
-                                                "words": words, "at": now})
     chat_review.log("chief-drafted", app=APP, task=task_id, action=answer["action"])
     return task_id, raw
+
+
+def _cut_off(record: dict) -> tuple:
+    """(reply, outcome) for a drafting turn whose pass was cut off: where its draft is when the TASK.md it noted it was
+    writing is there with those bytes, else the fixed failure line."""
+    task_id, sha = record.get("draft_task"), record.get("draft_sha")
+    if isinstance(task_id, str) and TASK_ID.fullmatch(task_id) and isinstance(sha, str):
+        try:
+            if hashlib.sha256(verify.read_task_md(task_id)).hexdigest() == sha:
+                return CUT_OFF_DRAFTED.format(id=task_id), "drafted"
+        except (FleetError, OSError):
+            pass
+    return COULD_NOT, "interrupted"
 
 
 def summary(task_id: str, answer: dict, raw: bytes) -> str:
@@ -923,10 +970,12 @@ def _turn_running() -> bool:
         return True
 
 
-def _send(key: str, record: dict, token: Optional[str], now: int) -> dict:
+def _send(conn, key: str, record: dict, token: Optional[str], now: int) -> dict:
     """Send the record's reply in its thread as the app, once by its request id, at most CHAT_REVIEW_REPLY_TRIES
     times. Anything but the fixed DM_ONLY line goes only once its conversation is, read again now, still the owner's
-    direct message; otherwise it ends unsent."""
+    direct message; otherwise it ends unsent. A status is built from the store and a go's codes are made (ask_go) as
+    the reply is sent, so neither is ever kept; each try of a go's reply has its own request id and its own codes,
+    each replacing the last."""
     tries = int(record.get("reply_tries", 0))
     if tries >= config.CHAT_REVIEW_REPLY_TRIES:
         return _end(key, record, "reply-failed")
@@ -940,12 +989,15 @@ def _send(key: str, record: dict, token: Optional[str], now: int) -> dict:
         app_token = google_chat.access_token(google_chat.CHAT_BOT_SCOPE, APP)
         if not common.opt_in_on(config.CHAT_REVIEW_FILE):
             return _save(key, {**record, "reply_tries": tries})
+        request = f"chat-chief-{key}"
         if record.get("kind") == "status":
             text = chat_review._whole_lines(chat_fleet.fleet_text(now, chat_review._memory_text).split("\n"),
                                             MESSAGE_MAX)
+        elif record.get("kind") == "go-ask":
+            text, request = ask_go(conn, record.get("tasks", []), now), f"{request}-{tries}"
         else:
             text = record["reply"]
-        google_chat.create_message(record["space"], record["thread"], text, f"chat-chief-{key}", app_token, APP)
+        google_chat.create_message(record["space"], record["thread"], text, request, app_token, APP)
     except FleetError as exc:
         chat_review.log("chief-reply-failed", request=key[:12], app=APP, why=common.scrubbed_line(exc, 200))
         return record
@@ -960,15 +1012,12 @@ def settle(conn, token: Optional[str], now: int) -> list:
         if not common.opt_in_on(config.CHAT_REVIEW_FILE):
             break
         try:
-            if state == "asking":  # its codes were cut off before its reply was kept: made again
-                record = _reply(key, record, ask_go(conn, record.get("tasks", []), now), "go-asked")
-                state = "reply"
-            elif state == "applying":  # cut off part way: it may or may not have started, and never runs again
+            if state == "applying":  # cut off part way: it may or may not have started, and never runs again
                 ids = " ".join(task for task in record.get("tasks", []) if TASK_ID.fullmatch(str(task)))
                 record = _reply(key, record, INTERRUPTED_GO.format(ids=ids or "<task-id>"), "interrupted")
                 state = "reply"
             elif state == "running" and not _turn_running():
-                record = _reply(key, record, COULD_NOT, "interrupted")
+                record = _reply(key, record, *_cut_off(record))
                 state = "reply"
             elif state == "queued" and now - int(record.get("at", 0)) > config.CHAT_REVIEW_QUEUE_MAX_SECONDS:
                 record = _reply(key, record, COULD_NOT, "expired")
@@ -981,7 +1030,7 @@ def settle(conn, token: Optional[str], now: int) -> list:
                     chat_review.log("chief-waiting", request=key[:12], app=APP, why=str(exc))
                 state = record["state"]
             if state == "reply":
-                done.append(_send(key, record, token, now)["state"])
+                done.append(_send(conn, key, record, token, now)["state"])
         except google_chat.ReadAuthError:
             raise
         except (FleetError, StoreError, OSError, KeyError, TypeError, ValueError) as exc:
@@ -1025,6 +1074,10 @@ def updates(token: Optional[str], now: int) -> list:
             if not isinstance(text, str) or type(line.get("at")) is not int or now - line["at"] > UPDATE_KEEP_SECONDS:
                 os.unlink(name, dir_fd=out_fd)
                 continue
+            # Each line only while both switches are still on and the conversation is still the direct message.
+            if not (common.opt_in_on(config.CHAT_REVIEW_FILE) and common.opt_in_on(config.CHAT_GO_UPDATES_FILE)
+                    and common.opt_in_on(config.GO_UPDATES_FILE) and (not sent or _still_dm(dm, token))):
+                break
             google_chat.create_message(dm["space"], dm["thread"], common.scrubbed_line(text, MESSAGE_MAX),
                                        f"chat-chief-update-{chat_review._digest(name)}", app_token, APP)
             os.unlink(name, dir_fd=out_fd)

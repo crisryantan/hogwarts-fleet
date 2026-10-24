@@ -16,10 +16,10 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from hogwarts import pensieve
+from hogwarts import ids, pensieve
 from hogwarts.errors import NotFoundError
 
-from fleet import chat_chief, chat_review, common, config, go_watch, google_chat, run_desk
+from fleet import chat_chief, chat_review, common, config, go_watch, google_chat, run_desk, worktree
 from fleet.hooks import user_prompt_submit as hook
 from tests_fleet import test_chat_review as chat_tests
 from tests_fleet.support import IN_KIT, OFFICE, ONLY_IN_KIT, kit_setting
@@ -347,6 +347,53 @@ class DraftTests(ChiefCase):
         self.assertIn("names none of the open drafts", reply)
         self.assertEqual(self.castle_files(), before)
 
+    def test_a_revision_waits_for_no_go_and_never_rewrites_a_started_task(self):
+        task_id = self.drafted()
+        path = self.castle / "tasks" / task_id / "TASK.md"
+        before = path.read_bytes()
+        self.answer = self.draft_answer(action="revise", task_id=task_id, title="Changed")
+        with worktree.branch_claim(str(self.repo), "fix/widget"):  # a go of it is making its branch
+            [reply] = self.dm("change it")
+        self.assertTrue(reply.startswith("I couldn't make a valid draft from that"), reply)
+        self.assertEqual(path.read_bytes(), before)
+        real = self.turn
+
+        def started_meanwhile(*args, **kwargs):
+            pensieve.create_task(self.conn, "mcgonagall", "started", intent_path=ids.intent_path(task_id),
+                                 task_id=task_id)
+            return real(*args, **kwargs)
+
+        with mock.patch.object(run_desk, "_report_turn", side_effect=started_meanwhile):
+            [reply] = self.dm("change it again")
+        self.assertIn("was started meanwhile", reply)
+        self.assertEqual(path.read_bytes(), before)
+
+    def test_long_messages_still_revise_and_the_note_keeps_no_words(self):
+        long = "word " * 700
+        task_id = self.drafted(f"{ASK} {long}")
+        for turn in range(2):
+            self.answer = self.draft_answer(action="revise", task_id=task_id, title=f"Round {turn}")
+            [reply] = self.dm(f"{long} more {turn}")
+            self.assertTrue(reply.startswith(f"Revised {task_id}: \"Round {turn}\""), reply)
+        text = (self.castle / "tasks" / task_id / "TASK.md").read_text()
+        self.assertIn("more 0", text)
+        self.assertIn("more 1", text)
+        note = json.loads((self.office / chat_review.DIR / chat_chief.DRAFTS / f"{task_id}.json").read_text())
+        self.assertEqual(set(note), {"state", "sha", "before", "at"})
+
+    def test_a_turn_cut_off_after_its_write_still_says_where_the_draft_is(self):
+        self.answer = self.draft_answer()
+        with mock.patch.object(chat_chief, "summary", side_effect=KeyboardInterrupt):
+            with self.assertRaises(KeyboardInterrupt):
+                self.dm(ASK)
+        self.run_pass()
+        reply = self.chief_posts()[-1]["text"]
+        task_id = re.search(r"writing (tk_[0-9a-f]{16})\.", reply).group(1)
+        self.assertTrue((self.castle / "tasks" / task_id / "TASK.md").exists())
+        self.answer = self.draft_answer(action="revise", task_id=task_id, title="Still mine")
+        [reply] = self.dm("tweak it")
+        self.assertTrue(reply.startswith(f"Revised {task_id}"), reply)
+
     def test_the_daily_turn_cap_holds(self):
         self.patch(config, "CHAT_CHIEF_TURNS_PER_DAY", 1)
         self.drafted()
@@ -398,6 +445,36 @@ class GoTests(ChiefCase):
         self.assertIn("no go is waiting for a code for it", reply)
         self.assertFalse(self.registered(task_id))
         self.assertEqual(self.chat_events(), [])
+
+    def test_a_code_is_made_as_its_reply_is_sent_and_never_kept(self):
+        task_id = self.drafted()
+        self.google.fail_chat = True
+        self.assertEqual(self.dm(f"go {task_id}"), [])
+        [record] = [record for _, record in chat_chief._records() if record.get("kind") == "go-ask"]
+        self.assertEqual((record["state"], record["tasks"]), ("reply", [task_id]))
+        self.assertNotIn("reply", record)
+        self.google.fail_chat = False
+        self.run_pass()
+        code = CODE_LINE.search(self.chief_posts()[-1]["text"]).group(2)
+        self.assertNotIn(code, self.office_text())
+        self.dm(f"go {task_id} {code}")
+        self.assertTrue(self.registered(task_id))
+
+    def test_a_task_md_edited_after_the_code_is_checked_is_refused_by_the_go_itself(self):
+        task_id = self.drafted()
+        code = self.code_for(task_id)
+        real = chat_chief._use_code
+        path = self.castle / "tasks" / task_id / "TASK.md"
+
+        def edited_right_after(*args):
+            sha = real(*args)
+            path.write_text(path.read_text() + "\nslipped in\n")
+            return sha
+
+        with mock.patch.object(chat_chief, "_use_code", side_effect=edited_right_after):
+            [reply] = self.dm(f"go {task_id} {code}")
+        self.assertIn("TASK.md changed since its code was sent", reply)
+        self.assertFalse(self.registered(task_id))
 
     def test_a_code_expires(self):
         task_id = self.drafted()
