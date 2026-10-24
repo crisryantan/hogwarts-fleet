@@ -2356,6 +2356,22 @@ class ReviewFactsTests(ChatCase):
                                       "- Partial review: 1 changed file did not fit and was not reviewed:",
                                       "  - big.py"])
 
+    def test_a_base_branch_that_is_not_plain_or_holds_a_credential_shape_is_never_shown(self):
+        for ref in ("main", "release/2.4", "feature_x-1.2"):
+            with self.subTest(ref=ref):
+                self.assertEqual(chat_review.base_ref_shown(ref), ref)
+        for ref in ("ghp_" + "a" * 36, "AKIA" + "B" * 16, "sk-ant-" + "q" * 40, "has space", "<users/all>",
+                    "x" * 101, "", None, 7):
+            with self.subTest(ref=ref):
+                self.assertEqual(chat_review.base_ref_shown(ref), chat_review.BASE_REF_UNNAMED)
+        self.switch(config.CHAT_REVIEW_GITHUB_FILE, True)
+        self.pr["base"]["ref"] = "ghp_" + "a" * 36
+        self.deliver(msg())
+        self.run_pass()
+        [(_, payload)] = self.writes
+        self.assertNotIn("ghp_", payload["body"] + self.turns[0]["input"])
+        self.assertIn(chat_review.github_prose(f"Checked against {chat_review.BASE_REF_UNNAMED} at"), payload["body"])
+
     def test_the_longest_findings_never_cut_a_partial_reviews_files_from_reply_or_body(self):
         named = [f"big/{'d' * 180}{index}.py" for index in range(chat_review.NOT_REVIEWED_NAMED)]
         left = {"not_reviewed": named, "not_reviewed_count": 13}

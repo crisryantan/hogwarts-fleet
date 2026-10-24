@@ -1469,8 +1469,11 @@ def read_linked(repo: str, number: int, body: str) -> list:
 
 
 def base_ref_shown(ref: object) -> str:
-    """A base branch name as a review shows it: the name when it is plain (BASE_REF), else a fixed stand-in."""
-    return ref if isinstance(ref, str) and BASE_REF.fullmatch(ref) is not None else BASE_REF_UNNAMED
+    """A base branch name as a review shows it: the name when it is plain (BASE_REF) and the scrub leaves it as it is,
+    so no credential shape is ever posted, else a fixed stand-in."""
+    if not isinstance(ref, str) or BASE_REF.fullmatch(ref) is None or scrubbed(ref) != ref:
+        return BASE_REF_UNNAMED
+    return ref
 
 
 def checks_line(checks: object) -> str:
