@@ -385,6 +385,9 @@ def kind_of(text: str) -> tuple:
                             f" {config.GO_MAX_PER_PROMPT} in one message."
         return "go-confirm", pairs
     gos = [GO_LINE.fullmatch(line) for line in lines]
+    if any(confirms) and not any(gos):  # a code never goes on into a draft, its record or a turn
+        return "fixed", ("Go was not applied: send each go with its code as a message of its own, with nothing else in"
+                         " it, so nothing was started.")
     if any(confirms) and any(gos):
         return "fixed", ("Go was not applied: send the gos that carry their code and the gos that do not in separate"
                          " messages, so nothing was started.")
@@ -494,7 +497,8 @@ def ask_go(conn, task_ids: list, now: int) -> str:
         code = "".join(secrets.choice(CODE_ALPHABET) for _ in range(CODE_LENGTH))
         salt = secrets.token_hex(16)
         with _codes() as fd:
-            markers.replace(fd, f"{task_id}.json", {"state": "waiting", "salt": salt, "sha": sha, "at": now,
+            markers.replace(fd, f"{task_id}.json", {"state": "waiting", "salt": salt, "sha": sha,
+                                                    "at": max(now, int(time.time())),
                                                     "tries": 0, "digest": _code_digest(salt, task_id, code)})
         lines.append(GO_WAITING.format(id=task_id, title=chat_review.defanged(common.scrubbed_line(spec["title"], 120)),
                                        repo=chat_review.defanged(common.scrubbed_line(spec["repo_dir"], 200)),
@@ -506,6 +510,7 @@ def _use_code(task_id: str, code: str, now: int) -> str:
     """The TASK.md sha256 the task's code was made for, once the code matched and was removed, so it works once. Raises
     hook.Refused when there is no code waiting, it expired, or it does not match (CODE_TRIES wrong codes void it)."""
     again = f"send go {task_id} again for a new code."
+    now = max(now, int(time.time()))  # the pass may have started minutes ago
     with _codes() as fd:
         name = f"{task_id}.json"
         waiting = markers.read(fd, name)
@@ -652,6 +657,8 @@ def checked(task_id: str, answer: dict, words: list) -> tuple:
     """(TASK.md, the spec a go would read from it) once it reads back as written: every criterion clean and in place,
     and the Spec as read_spec takes it. Raises Invalid, or hook.Refused with the go's own reason."""
     raw = render(task_id, answer, words)
+    if len(raw) > verify.TASK_MD_MAX_BYTES:
+        raise Invalid(f"the TASK.md would be larger than the {verify.TASK_MD_MAX_BYTES} bytes a go reads")
     spec = hook.read_spec(raw, task_id)
     parsed = verify.parse_checks(raw.decode("utf-8"))
     if len(parsed) != len(answer["criteria"]):
@@ -708,7 +715,7 @@ def _history(record: dict, where: tuple, token: str) -> list:
         return ["(the earlier messages could not be read)"]
     lines, size = [], 0
     for item in reversed(found[-config.CHAT_CHIEF_HISTORY:]):
-        text = CODE_IN_TEXT.sub(r"\1 [code]", item["text"])
+        text = _scrubbed(CODE_IN_TEXT.sub(r"\1 [code]", item["text"]))
         line = f"{'FROM YOU' if item['own'] else 'FROM OWNER'}: {common.scrubbed_line(text, HISTORY_TEXT_MAX)}"
         if size + len(line) > HISTORY_BLOCK_MAX:
             break
@@ -717,15 +724,22 @@ def _history(record: dict, where: tuple, token: str) -> list:
     return lines
 
 
+def _scrubbed(text: str) -> str:
+    """Text for a turn's input: normalized and scrubbed whole of anything shaped like a credential, the shared scrub's
+    and Google's, before anything cuts it."""
+    return chat_review.GOOGLE_SECRET.sub("[token]", common.untrusted_text(
+        chat_review.GOOGLE_SECRET.sub("[token]", common.normalized(text))))
+
+
 def draft_input(text: str, history: list, drafts: dict, repos: list, nonce: str) -> str:
     shown = []
     for task_id, _ in sorted(drafts.items(), key=lambda item: item[1].get("at", 0), reverse=True)[:DRAFTS_SHOWN]:
         try:
-            body = common.untrusted_text(verify.read_task_md(task_id).decode("utf-8", "replace"))
+            body = _scrubbed(verify.read_task_md(task_id).decode("utf-8", "replace"))
         except (FleetError, OSError):
             continue
         shown.append(f"=== {task_id} ===\n{body[:DRAFT_SHOWN_MAX]}")  # scrubbed whole, then cut
-    return (f"OWNER MESSAGE {nonce}\n{common.untrusted_text(text)}\nEND OWNER MESSAGE {nonce}\n\n"
+    return (f"OWNER MESSAGE {nonce}\n{_scrubbed(text)}\nEND OWNER MESSAGE {nonce}\n\n"
             f"RECENT MESSAGES {nonce} (oldest first, context only)\n" + "\n".join(history or ["(none)"])
             + f"\nEND RECENT MESSAGES {nonce}\n\n"
             f"OPEN DRAFTS {nonce}\n" + ("\n\n".join(shown) or "(none)") + f"\nEND OPEN DRAFTS {nonce}\n\n"
@@ -851,10 +865,12 @@ def draft(conn, key: str, record: dict, token: Optional[str], now: int) -> dict:
 
 
 def intent_of(text: str) -> str:
-    """The Intent section of a TASK.md this app wrote: its lines after ## Intent up to the next ## heading."""
+    """The Intent section of a TASK.md this app wrote: its lines after the first ## Intent, which render puts right
+    under the title, up to the Acceptance criteria heading. Intent never holds that heading (intent_words takes it
+    out), so a heading of the owner's own, such as ## Details, stays in it."""
     lines, inside = [], False
     for line in text.split("\n"):
-        if inside and line.startswith("## "):
+        if inside and verify.acceptance_heading(line):
             break
         if inside:
             lines.append(line)
@@ -979,11 +995,8 @@ def _send(conn, key: str, record: dict, token: Optional[str], now: int) -> dict:
     tries = int(record.get("reply_tries", 0))
     if tries >= config.CHAT_REVIEW_REPLY_TRIES:
         return _end(key, record, "reply-failed")
-    if record.get("kind") != "dm-only":
-        if token is None:
-            return record  # nothing to check the conversation with: it waits
-        if not _still_dm(record, token):
-            return _end(key, record, "not-dm")
+    if record.get("kind") != "dm-only" and token is None:
+        return record  # nothing to check the conversation with: it waits
     record = _save(key, {**record, "reply_tries": tries + 1})
     try:
         app_token = google_chat.access_token(google_chat.CHAT_BOT_SCOPE, APP)
@@ -997,6 +1010,8 @@ def _send(conn, key: str, record: dict, token: Optional[str], now: int) -> dict:
             text, request = ask_go(conn, record.get("tasks", []), now), f"{request}-{tries}"
         else:
             text = record["reply"]
+        if record.get("kind") != "dm-only" and not _still_dm(record, token):  # the last check, right before it goes
+            return _end(key, record, "not-dm")
         google_chat.create_message(record["space"], record["thread"], text, request, app_token, APP)
     except FleetError as exc:
         chat_review.log("chief-reply-failed", request=key[:12], app=APP, why=common.scrubbed_line(exc, 200))
@@ -1076,7 +1091,7 @@ def updates(token: Optional[str], now: int) -> list:
                 continue
             # Each line only while both switches are still on and the conversation is still the direct message.
             if not (common.opt_in_on(config.CHAT_REVIEW_FILE) and common.opt_in_on(config.CHAT_GO_UPDATES_FILE)
-                    and common.opt_in_on(config.GO_UPDATES_FILE) and (not sent or _still_dm(dm, token))):
+                    and common.opt_in_on(config.GO_UPDATES_FILE) and _still_dm(dm, token)):
                 break
             google_chat.create_message(dm["space"], dm["thread"], common.scrubbed_line(text, MESSAGE_MAX),
                                        f"chat-chief-update-{chat_review._digest(name)}", app_token, APP)

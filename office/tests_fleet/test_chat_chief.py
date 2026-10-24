@@ -394,6 +394,29 @@ class DraftTests(ChiefCase):
         [reply] = self.dm("tweak it")
         self.assertTrue(reply.startswith(f"Revised {task_id}"), reply)
 
+    def test_credentials_never_reach_the_turn(self):
+        secret = "ya29.a0AfH6SMBfakefakefakefake123"
+        self.answer = ("ok", json.dumps({"action": "reply", "reply": "Noted."}))
+        self.dm(f"use the key {secret} and the secret GOCSPX-abcdefghijklmnop")
+        turn = self.turns[-1]
+        self.assertNotIn(secret, turn["input"])
+        self.assertNotIn("GOCSPX-abcdefghijklmnop", turn["input"])
+        self.assertIn("[token]", turn["input"])
+
+    def test_an_owner_heading_stays_in_intent_through_a_revision(self):
+        task_id = self.drafted(f"{ASK}\n## Details\nkeep this line")
+        self.answer = self.draft_answer(action="revise", task_id=task_id)
+        self.dm("and one more")
+        text = (self.castle / "tasks" / task_id / "TASK.md").read_text()
+        self.assertIn(f"## Intent\n{ASK}\n## Details\nkeep this line\n\nand one more\n\n## Acceptance criteria",
+                      text)
+
+    def test_a_draft_too_large_for_a_go_to_read_is_never_written(self):
+        _, answer = self.draft_answer()
+        found = chat_chief.parse_answer(answer, {})
+        with self.assertRaises(chat_chief.Invalid):
+            chat_chief.checked("tk_" + "c" * 16, found, ["x " * 40000])
+
     def test_the_daily_turn_cap_holds(self):
         self.patch(config, "CHAT_CHIEF_TURNS_PER_DAY", 1)
         self.drafted()
@@ -475,6 +498,23 @@ class GoTests(ChiefCase):
             [reply] = self.dm(f"go {task_id} {code}")
         self.assertIn("TASK.md changed since its code was sent", reply)
         self.assertFalse(self.registered(task_id))
+
+    def test_a_go_with_its_code_and_other_words_is_refused_whole(self):
+        task_id = self.drafted()
+        code = self.code_for(task_id)
+        turns = len(self.turns)
+        [reply] = self.dm(f"go {task_id} {code}\nand also tidy the readme")
+        self.assertIn("send each go with its code as a message of its own", reply)
+        self.assertEqual(len(self.turns), turns)
+        self.assertFalse(self.registered(task_id))
+        self.assertNotIn(code, self.office_text())
+
+    def test_a_code_lasts_its_whole_time_from_when_it_is_made(self):
+        task_id = self.drafted()
+        late = int(time.time()) - config.CHAT_CHIEF_GO_CODE_SECONDS + 5  # a pass that started long ago
+        code = CODE_LINE.search(chat_chief.ask_go(self.conn, [task_id], late)).group(2)
+        reply = chat_chief.confirm_go(self.conn, [(task_id, code)], "1" * 32, late)
+        self.assertTrue(reply.startswith(f"Go: {task_id} is registered"), reply)
 
     def test_a_code_expires(self):
         task_id = self.drafted()
