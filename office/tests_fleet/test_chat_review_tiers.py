@@ -142,12 +142,15 @@ class FallbackTests(TierCase):
             self.assertEqual(self.mention(), ["mention"])
             self.assertEqual(self.flag(self.turns[-1]["argv"], "--model"), "opus")
             self.assertEqual(self.launched(), ["opus"])
-        # The second workhorse of the line is taken when the first is blocked.
-        failover.write_ladders({"hermione": {"claude": [CLAUDE_LADDER[1], {**CLAUDE_LADDER[1], "model": "sonnet-next"}]}},
-                               NOW)
+        # The second workhorse of the line is taken when the first is blocked, and that is the model that launches.
+        second = {**CLAUDE_LADDER[1], "model": "workhorse-two"}
+        failover.write_ladders({"hermione": {"claude": [CLAUDE_LADDER[0], CLAUDE_LADDER[1], second]}}, NOW)
         with mock.patch.object(config, "BLOCKED_MODEL_PREFIXES", ("sonnet", "claude-sonnet-")):
-            self.assertEqual(self.models()["chat"], "opus")  # sonnet-next starts with a blocked prefix too
-        with mock.patch.object(config, "BLOCKED_MODEL_PREFIXES", ("sonnet-x",)):
+            self.assertEqual(self.models(), {"review": "opus", "chat": "workhorse-two"})
+            self.assertEqual(self.mention(message="q2"), ["mention"])
+            self.assertEqual(self.flag(self.turns[-1]["argv"], "--model"), "workhorse-two")
+            self.assertEqual(self.launched(), ["opus", "workhorse-two"])
+        with mock.patch.object(config, "BLOCKED_MODEL_PREFIXES", ("workhorse-",)):
             self.assertEqual(self.models()["chat"], "sonnet")
         # No ladder at all: the desk's own model.
         (self.office / config.STATE_DIR / config.FAILOVER_LADDERS_FILE).unlink()
