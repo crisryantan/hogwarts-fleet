@@ -4,6 +4,7 @@ gh, Chat and every turn are fakes here (tests_fleet.test_chat_review.ChatCase): 
 runs."""
 from __future__ import annotations
 
+import hashlib
 import json
 import time
 from unittest import mock
@@ -119,7 +120,8 @@ class FollowTests(FollowCase):
         self.assertEqual(len(self.turns), 2)
         ack = self.google.acks[-1]
         self.assertEqual((MENTION.sub("", ack["text"], count=1), ack["thread"], ack["text"][:len(SENDER_USER) + 2]),
-                         ("New commits on #7 (bbbbbbb). Reviewing again.", THREAD, f"<{SENDER_USER}>"))
+                         ("New commits on #7. Reviewing again.\n#7 at bbbbbbb: 1 file, +3 -0. I'll look at: the"
+                          " Python code.", THREAD, f"<{SENDER_USER}>"))
         self.assertEqual(self.google.messages[-1]["thread"], THREAD)
         self.assertIn(f"Verdict: CHANGES on acme/web-app#7 at {NEWER[:12]}", self.google.messages[-1]["text"])
         self.assertEqual(self.events(), ["REQUEST_CHANGES", "REQUEST_CHANGES"])  # one post for each head
@@ -214,6 +216,76 @@ class FollowTests(FollowCase):
         self.assertIsNone(self.follow())
 
 
+class FollowSenderTests(FollowCase):
+    """A follow keeps no email, only a one-way digest of its requester's under the office's own salt, and ends with no
+    line once that requester is no longer an allowed sender."""
+
+    def salt_file(self):
+        return self.office / chat_review.DIR / chat_review.SALT
+
+    def test_the_salt_is_made_once_and_the_email_is_never_stored(self):
+        self.assertFalse(self.salt_file().exists())
+        self.reviewed()
+        salt = json.loads(self.salt_file().read_text())["salt"]
+        self.assertRegex(salt, r"^[0-9a-f]{64}$")
+        follow = self.follow()
+        self.assertEqual(follow["requester_digest"], chat_review.requester_digest(bytes.fromhex(salt), SENDER))
+        self.assertEqual(follow["requester_digest"], chat_review.requester_digest(bytes.fromhex(salt),
+                                                                                  SENDER.upper()))
+        self.assertNotEqual(follow["requester_digest"], hashlib.sha256(SENDER.encode()).hexdigest())
+        self.assertNotIn(SENDER, json.dumps(follow))
+        self.assertNotIn(SENDER, self.salt_file().read_text())
+        self.deliver(msg(sender=LEAD_USER, message="m2", thread=f"{SPACE}/threads/t2", name="Lead Person"))
+        self.run_pass()  # a later review moves the follow, and its requester's digest with it, under the same salt
+        self.assertEqual(json.loads(self.salt_file().read_text())["salt"], salt)
+        self.assertEqual(self.follow()["requester_digest"], chat_review.requester_digest(bytes.fromhex(salt), LEAD))
+        self.assertNotIn(LEAD, json.dumps(self.follow()))
+
+    def test_a_broken_salt_file_is_never_replaced(self):
+        self.write_file(self.salt_file(), json.dumps({"state": "salt", "salt": "not-hex"}))
+        with self.assertRaises(FleetError):
+            chat_review._salt()
+        self.assertIn("not-hex", self.salt_file().read_text())
+
+    def test_a_removed_senders_follow_ends_silently_on_its_next_check(self):
+        self.reviewed()
+        self.push(NEWER)
+        self.patch(config, "CHAT_REVIEW_SENDERS", (LEAD,))
+        self.assertEqual(self.run_pass()["followed"], ["sender-removed"])
+        self.assertIsNone(self.follow())
+        self.assertEqual((len(self.turns), len(self.google.acks), self.notes(), len(self.google.messages)),
+                         (1, 1, [], 1))
+        self.assertIn("sender-removed", [line.get("why") for line in self.log_lines()])
+        self.patch(config, "CHAT_REVIEW_SENDERS", (LEAD, SENDER))
+        self.assertEqual(self.run_pass()["followed"], [])  # ended for good: adding them back starts nothing
+
+    def test_an_allowed_sender_in_another_case_keeps_the_follow(self):
+        self.reviewed()
+        self.push(NEWER)
+        self.patch(config, "CHAT_REVIEW_SENDERS", (SENDER.upper(),))
+        self.assertEqual(self.run_pass()["followed"], ["queued"])
+        self.assertEqual(len(self.turns), 2)
+
+    def test_a_removed_senders_queued_review_ends_unanswered(self):
+        self.reviewed()
+        self.push(NEWER)
+        with chat_review.pr_lock("acme/web-app", 7, "hermione"):  # the review of new commits waits
+            self.assertEqual(self.run_pass()["followed"], ["queued"])
+        self.patch(config, "CHAT_REVIEW_SENDERS", (LEAD,))
+        self.run_pass()
+        [record] = self.follow_records()
+        self.assertEqual((record["state"], record["outcome"]), ("done", "unfollowed"))
+        self.assertEqual((len(self.turns), len(self.google.acks), self.notes()), (1, 1, []))
+
+    def test_a_follow_with_no_digest_ends_silently(self):
+        self.reviewed()
+        self.edit_follow(requester_digest=None)
+        self.push(NEWER)
+        self.assertEqual(self.run_pass()["followed"], ["sender-removed"])
+        self.assertIsNone(self.follow())
+        self.assertEqual((len(self.turns), self.notes()), (1, []))
+
+
 class FollowCommandTests(FollowCase):
     def test_stop_following_ends_the_follow_with_one_line(self):
         self.reviewed()
@@ -265,7 +337,8 @@ class FollowCommandTests(FollowCase):
         self.assertEqual(self.run_pass()["followed"], ["queued"])
         self.assertEqual(len(self.turns), 1)
         self.assertEqual(MENTION.sub("", self.google.acks[-1]["text"], count=1),
-                         "New commits on #7 (aaaaaaa). Reviewing again.")
+                         "New commits on #7. Reviewing again.\n#7 at aaaaaaa: 1 file, +3 -0. I'll look at: the Python"
+                         " code.")
         self.assertEqual(self.follow()["sha"], HEAD)
 
     def test_status_lists_the_followed_prs(self):

@@ -568,9 +568,19 @@ messages an answer turn reads as its context. Of those that mention it:
   once the app mentions are out, holds exactly one GitHub PR link (`https://github.com/<owner>/<repo>/pull/<n>`, bare
   or in `<>`) for a repo in `CHAT_REVIEW_REPOS` becomes a queued review, whatever its other words are: the apps do code
   reviews and nothing else, so a mention with a PR link is a review request. Every other word is ignored: never kept, never logged, never shown to the reviewer, which gets only the link rebuilt
-  from what matched. The thread first gets a short fixed acknowledgement as that app, one of its desk's few lines,
-  picked by the request's own digest, naming the PR by the number its link was parsed to ("Fine. Reading #442 now."),
-  never echoing the message. A message that also asks to fix or merge gets the
+  from what matched. Once its review has read the PR and its diff, the thread gets one acknowledgement as that app:
+  one of its desk's few fixed lines, picked by the request's own digest, naming the PR by the number its link was
+  parsed to ("Fine. Reading #442 now."), never echoing the message, and under it the review's plan, which the job
+  builds from what it read, never a model: "#442 at abc1234: 5 files, +120 -48, of which 1 deleted whole. I'll look
+  at: database migrations and SQL, the Python code, the tests, and whether anything still uses what was removed."
+  The areas are fixed phrases found from the touched paths' names alone, never a file's text (database migrations
+  and SQL, auth and security-sensitive paths, public API and schema files, infrastructure and deploy config,
+  dependency manifests and lockfiles, CI and pipeline config, the main language by extension, the tests, docs
+  only), at most four, most significant first, so no file name or other text a PR author chose ever shows. Moody
+  puts the security-relevant ones first and says he looks at secrets, injection and trust boundaries first. A
+  partial review's plan says how many files will not be shown, and the part about removed code shows only while
+  `CHAT_REVIEW_REPO_CONTEXT` is on. A PR that is not open, is too large or could not be read gets its one fixed
+  reply and no acknowledgement. A message that also asks to fix or merge gets the
   desk's line saying a review is all it does, and still gets the review and nothing more. An approve word only asks
   for the review: whether it approves is its verdict and the switches below, nothing the message says;
 - one from them with no link or address at all and the word review (also reviews or reviewing) or an approve word
@@ -843,14 +853,18 @@ was last checked and its thread's link.
 
 Following. After an app's review of a PR from Chat goes to its thread, whatever its verdict, the app follows that
 PR, so nobody has to ask again: one small record per app and PR in `chat-reviews/follows/`, holding the thread to
-report in, the requester's Chat user id and display name (never an email), the last reviewed head and when it was
-checked. One app follows a PR once; a later review of it in another thread moves the follow there. Each pass, while
+report in, the requester's Chat user id and display name, a one-way digest of their email (HMAC-SHA256 under a
+salt the office makes once in `chat-reviews/requester-salt.json`, never the email itself), the last reviewed head
+and when it was checked. One app follows a PR once; a later review of it in another thread moves the follow there. Each pass, while
 the intake is on, every follow last checked at least `CHAT_REVIEW_FOLLOW_CHECK_SECONDS` (900) ago reads its PR with
 the same read a review makes. It waits while its own review of new commits is still open, while its desk is off, and
-while a stop of its desk's family is in place, as any turn of that desk does. When the PR was merged or closed, the
+while a stop of its desk's family is in place, as any turn of that desk does. A follow whose requester is no longer
+in `CHAT_REVIEW_SENDERS` ends on its next check with no line, and so does any review of it still queued. When the PR
+was merged or closed, the
 follow ends with one line in its thread ("#442 was merged; I've stopped following it.", or closed). When its head
 moved past the last reviewed one, the app queues a review of the new head for the same thread and requester, which
-the thread hears as "New commits on #442 (abc1234). Reviewing again.", and which runs, replies and posts on GitHub
+the thread hears as "New commits on #442. Reviewing again." with the same plan under it, naming the new head, and
+which runs, replies and posts on GitHub
 like any review: once per app, PR and head commit, and an approval only through the switches above, so a clean pass
 after an earlier change request approves only while `chat-review-approve` is on. Each head is queued at most once (its
 request's key is made from the app, PR and head, create-exclusive), so a kill never queues it twice and a review that
@@ -862,9 +876,10 @@ toward the requester's. "stop following" ends a follow and any review of it stil
 one with no head reviewed yet, so its first check reviews the PR. Either, carried out again after a kill, never undoes
 a later one: a stop ends only a follow asked for before it, and a follow command after a later stop starts nothing.
 
-A request that waits keeps what it waits on in its record. A review acknowledged in its thread that then waited
-longer than `CHAT_REVIEW_WAIT_NOTICE_SECONDS` (300) before its turn started gets one fixed line there as it starts,
-"Picked this up now; it was waiting on <what it waited on>.", once. Every request ends with one reply in its thread,
+A request that waits keeps what it waits on in its record. A review that waited longer than
+`CHAT_REVIEW_WAIT_NOTICE_SECONDS` (300) before its turn started gets one fixed line in its thread as it starts, after
+its acknowledgement, "Picked this up now; it was waiting on <what it waited on>.", once. Every request ends with one
+reply in its thread,
 whatever its outcome: the review or answer, or the fixed line for a desk that is off, a cap, a PR that is not open or
 too large, a PR that could not be read, a turn that failed, could not sign in or gave no usable block, a blocked
 model, a wait past the queue limit or an interruption. The one silent end is a request that mentioned no one and
