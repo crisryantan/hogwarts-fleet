@@ -825,6 +825,42 @@ class AutoProveTests(OllivanderCase):
                 self.assertNotIn("resumed", note)
         self.assertEqual(self.events_of("ollivander.prove-failed"), [])
 
+    def test_a_codex_stop_written_during_the_update_is_never_overwritten_or_cleared(self):
+        self.switch_on()
+
+        def land(argv):
+            if argv[1:] == ["upgrade", "--cask", "codex"]:
+                ollivander.write_stop("written by hand during the update", OCT4 - 5, family="codex")
+
+        prober = FakeProber()
+        runner = FakeRunner(versions={name: list(said) for name, said in NEW_CODEX.items()}, during=land)
+        updates = self.keeper(runner=runner, prober=prober)["updates"]
+        self.assertIsNone(updates["prove"])
+        self.assertEqual(prober.calls, [])
+        self.assertTrue(self.codex_stop().exists())
+        self.assertIn("codex-boundary-test.sh", self.events_of("ollivander.stopped")[-1]["summary"])
+        self.assertEqual(self.events_of(ollivander.PROVE_KIND), [])
+
+    def test_a_codex_stop_replaced_during_the_proof_stays_and_the_proof_is_stored_first(self):
+        self.switch_on()
+
+        def replace(probe):
+            if probe == config.PROBE_EXEC:
+                ollivander.write_stop("a newer reason", OCT4 + 7, family="codex")
+
+        updates = self.prove_pass(prober=FakeProber(during=replace))
+        self.assertEqual((updates["prove"]["proven"], updates["prove"]["cleared"]), (True, False))
+        self.assertTrue(self.codex_stop().read_text().startswith(f"{OCT4 + 7} a newer reason"))
+        self.assertIn("not the one this proof is for", self.events_of("ollivander.proven")[-1]["summary"])
+        self.assertEqual(len(self.events_of(ollivander.PROVE_RESULT_KIND)), 1)
+        # The removal itself moves the stop aside and checks it there: one of another stamp goes back untouched.
+        self.assertEqual(ollivander._remove_codex_stop(OCT4), "the Codex stop changed while Ollivander cleared it")
+        self.assertTrue(self.codex_stop().read_text().startswith(f"{OCT4 + 7} a newer reason"))
+        self.assertEqual(sorted(path.name for path in self.state.iterdir() if path.name.startswith(".")), [])
+        self.assertIsNone(ollivander._remove_codex_stop(OCT4 + 7))
+        self.assertFalse(self.codex_stop().exists())
+        self.assertEqual(ollivander._remove_codex_stop(OCT4 + 7), ollivander.NOTHING_TO_CLEAR)
+
     def test_codex_moving_while_the_probes_ran_is_no_proof(self):
         self.switch_on()
         versions = {config.CLAUDE_BIN: [b"2.0.0 (Claude Code)\n"],
@@ -852,6 +888,7 @@ class AutoProveTests(OllivanderCase):
         self.assertIn(f'mkdir -m 700 "$OFFICE/{config.PROBES_DIR}"', install)
         self.assertIn(f'cp "$REPO_DIR/scripts/{config.PROBE_SHELL}" "$REPO_DIR/scripts/{config.PROBE_EXEC}"'
                       f' "$OFFICE/{config.PROBES_DIR}/"', install)
+        self.assertIn('sed "s#^CODEX=.*#CODEX=$codex_bin#" "$probe"', install)
 
 
 class RunProbeTests(FleetCase):

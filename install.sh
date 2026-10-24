@@ -194,6 +194,12 @@ set_bin CLAUDE_BIN "$HOME/.local/bin/claude" /opt/homebrew/bin/claude /usr/local
 set_bin CODEX_BIN /opt/homebrew/bin/codex /usr/local/bin/codex
 set_bin GH_BIN /opt/homebrew/bin/gh /usr/local/bin/gh
 
+# The installed shell probe tests the Codex the desks run.
+codex_bin=$(sed -n 's#^CODEX_BIN = "\(.*\)"$#\1#p' "$CONFIG")
+probe="$OFFICE/probes/codex-boundary-test.sh"
+sed "s#^CODEX=.*#CODEX=$codex_bin#" "$probe" >"$probe.rewrite" && mv "$probe.rewrite" "$probe"
+grep -qx "CODEX=$codex_bin" "$probe" || die "could not point $probe at $codex_bin."
+
 # --- The castle is a local git repo with no remote --------------------------
 
 if command -v git >/dev/null 2>&1; then

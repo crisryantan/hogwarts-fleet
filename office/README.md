@@ -96,8 +96,9 @@ The store has none of these:
   state/model-ladders.json              Ollivander's fallbacks per headless desk and family, in pick order
   state/ollivander-stop*                Ollivander's stops: ollivander-stop holds every headless desk, and
                                         ollivander-stop-claude or ollivander-stop-codex only that CLI family's
-  probes/                               install.sh's copies of the kit's two Codex boundary probes, which Ollivander
-                                        runs on a new Codex version while ollivander-auto-prove is on
+  probes/                               install.sh's copies of the kit's two Codex boundary probes, the shell probe
+                                        pointed at CODEX_BIN, which Ollivander runs on a new Codex version while
+                                        ollivander-auto-prove is on
   logs/                                 the fleet's job and script logs, review-auto.log for the review loop and
                                         closer.log for auto-close, one JSON line per task each pass
   runs/<desk>/                          each headless run's output, which fleet feed follows, and how its process

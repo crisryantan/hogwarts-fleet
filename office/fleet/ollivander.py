@@ -89,9 +89,12 @@ import hashlib
 import json
 import os
 import re
+import secrets
+import select
 import signal
 import subprocess
 import sys
+import time
 from typing import Callable, Iterator, Optional
 
 if __name__ == "__main__" and "/Users/crisryantan/.hogwarts" not in sys.path:
@@ -739,11 +742,26 @@ def check_commands() -> list:
     return [[config.CLAUDE_BIN, "--version"], [config.CODEX_BIN, "--version"]]
 
 
-def write_stop(reason: str, now: int, name: Optional[str] = None, family: Optional[str] = None) -> None:
-    """Write a stop: the stop of family's CLI when one is named, else the stop of every family (or name)."""
+def write_stop(reason: str, now: int, name: Optional[str] = None, family: Optional[str] = None,
+               exclusive: bool = False) -> bool:
+    """Write a stop: the stop of family's CLI when one is named, else the stop of every family (or name). exclusive
+    writes it only when no file of that name is there, and says whether it did; otherwise it replaces any."""
     name = name or (config.STOP_FAMILY_FILES[family] if family is not None else config.STOP_FILE)
+    data = f"{now} {common.one_line(reason, 300)}\n".encode("ascii")
     with safefs.opened_dir(config.OFFICE_ROOT, config.STATE_DIR) as fd:
-        safefs.write_new(fd, name, f"{now} {common.one_line(reason, 300)}\n".encode("ascii"))
+        if not exclusive:
+            safefs.write_new(fd, name, data)
+            return True
+        # Written whole under a private name first, then linked in, which fails when the name is taken.
+        temp = f".{name}.{secrets.token_hex(6)}.new"
+        safefs.write_new(fd, temp, data)
+        try:
+            os.link(temp, name, src_dir_fd=fd, dst_dir_fd=fd, follow_symlinks=False)
+            return True
+        except FileExistsError:
+            return False
+        finally:
+            os.unlink(temp, dir_fd=fd)
 
 
 def remove_updating() -> None:
@@ -928,11 +946,22 @@ def _update_locked(conn, runner: Runner, now: int, result: dict) -> None:
             reasons.setdefault(family, []).append(_version_reason(family, what, proving and family == "codex"))
         else:
             notes.append((family, what))
+    # A proof clears only a Codex stop of its own, so that stop is made new, never written over one that landed
+    # during the update. Losing that race means no proof: the stop then reads as today's.
+    written = set()
+    if proving:
+        if write_stop(". ".join(reasons["codex"]), now, family="codex", exclusive=True):
+            written.add("codex")
+        else:
+            proving = False
+            what = f"codex --version went from {before['codex'] or 'unknown'} to {after['codex']}"
+            reasons["codex"][-1] = _version_reason("codex", what)
     # The stop files are written before any event, so a store error below never loses them.
     if reasons:
         order = sorted(reasons, key=lambda family: (family is not None, family or ""))
         for family in order:
-            write_stop(". ".join(reasons[family]), now, family=family)
+            if family not in written:
+                write_stop(". ".join(reasons[family]), now, family=family)
         stopped = None if None in reasons else order
         result.update(stopped=True, stopped_families=stopped or ["every"])
         reason = ". ".join(text for family in order for text in reasons[family])
@@ -1006,8 +1035,21 @@ def run_probe(argv: list, timeout: int, log_name: Optional[str] = None) -> tuple
                 child = subprocess.Popen(argv, cwd=config.OFFICE_ROOT, env=run_desk.child_env(),
                                          stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                                          start_new_session=True, close_fds=True)
-            out, _ = child.communicate(timeout=timeout)
-            return child.returncode, out[:config.PROBE_OUTPUT_MAX_BYTES]
+            deadline, kept, chunks = time.monotonic() + timeout, 0, []
+            fd = child.stdout.fileno()
+            while True:  # read to the end, keeping at most PROBE_OUTPUT_MAX_BYTES
+                left = deadline - time.monotonic()
+                if left <= 0:
+                    return -1, b""
+                if not select.select([fd], [], [], left)[0]:
+                    continue
+                chunk = os.read(fd, 65536)
+                if not chunk:
+                    break
+                if kept < config.PROBE_OUTPUT_MAX_BYTES:
+                    chunks.append(chunk[:config.PROBE_OUTPUT_MAX_BYTES - kept])
+                    kept += len(chunks[-1])
+            return child.wait(timeout=max(1.0, deadline - time.monotonic())), b"".join(chunks)
         except subprocess.TimeoutExpired:
             return -1, b""
         except OSError:
@@ -1088,26 +1130,56 @@ def _exec_result(code: int, out: bytes) -> dict:
     return found
 
 
-def _clear_codex_stop(stamp: int) -> Optional[str]:
-    """Remove the Codex stop the pass at stamp wrote, and nothing else. None once removed, else why it stays: another
-    stop or the update marker in place would keep the Codex desks stopped anyway, and a Codex stop of another stamp
-    holds a reason this proof never saw."""
+def _ours(fd: int, name: str, stamp: int) -> bool:
+    """Whether the stop file name in the state folder fd is the one the pass at stamp wrote."""
+    raw = safefs.read_regular(fd, name, config.STOP_TEXT_MAX_BYTES, "the stop file")
+    return raw.split(b" ", 1)[0] == str(stamp).encode("ascii")
+
+
+def _clear_blocker(stamp: int) -> Optional[str]:
+    """Why the Codex stop the pass at stamp wrote must stay, read only, or None when it may go: another stop or the
+    update marker in place would keep the Codex desks stopped anyway, and a Codex stop of another stamp holds a
+    reason this proof never saw."""
     try:
         with safefs.opened_dir(config.OFFICE_ROOT, config.STATE_DIR) as fd:
             if safefs.lstat(fd, config.STOP_FILE) is not None:
                 return "the stop of every family is in place"
             if safefs.lstat(fd, config.UPDATING_FILE) is not None:
                 return "a CLI update marker is in place"
-            name = config.STOP_FAMILY_FILES["codex"]
-            if safefs.lstat(fd, name) is None:
+            if safefs.lstat(fd, config.STOP_FAMILY_FILES["codex"]) is None:
                 return NOTHING_TO_CLEAR
-            raw = safefs.read_regular(fd, name, config.STOP_TEXT_MAX_BYTES, "the stop file")
-            if raw.split(b" ", 1)[0] != str(stamp).encode("ascii"):
+            if not _ours(fd, config.STOP_FAMILY_FILES["codex"], stamp):
                 return "the Codex stop in place is not the one this proof is for"
-            os.unlink(name, dir_fd=fd)
     except (FleetError, OSError):
         return "the Codex stop could not be read"
     return None
+
+
+def _remove_codex_stop(stamp: int) -> Optional[str]:
+    """Remove the Codex stop the pass at stamp wrote, and nothing else: it is moved aside in one step and checked
+    there, so a stop that replaced it meanwhile is never removed unread. One that is not ours is linked back, unless
+    a newer stop took the name, which then holds the desks. None once removed, else why it stays."""
+    name = config.STOP_FAMILY_FILES["codex"]
+    try:
+        with safefs.opened_dir(config.OFFICE_ROOT, config.STATE_DIR) as fd:
+            aside = f".{name}.{secrets.token_hex(6)}.clearing"
+            try:
+                os.rename(name, aside, src_dir_fd=fd, dst_dir_fd=fd)
+            except FileNotFoundError:
+                return NOTHING_TO_CLEAR
+            try:
+                if _ours(fd, aside, stamp):
+                    return None
+                with contextlib.suppress(FileExistsError):
+                    os.link(aside, name, src_dir_fd=fd, dst_dir_fd=fd, follow_symlinks=False)
+            except (FleetError, OSError):
+                with contextlib.suppress(FileExistsError):
+                    os.link(aside, name, src_dir_fd=fd, dst_dir_fd=fd, follow_symlinks=False)
+            finally:
+                os.unlink(aside, dir_fd=fd)
+    except (FleetError, OSError):
+        return "the Codex stop could not be read"
+    return "the Codex stop changed while Ollivander cleared it"
 
 
 def prove_codex(conn, runner: Runner, prober: Runner, version: str, stamp: int, now: int) -> dict:
@@ -1130,9 +1202,19 @@ def prove_codex(conn, runner: Runner, prober: Runner, version: str, stamp: int, 
         if now_on != version:
             found["exec"] = {"ok": False, "summary": f"Codex moved to {now_on or 'an unknown version'} while it ran"}
     found["proven"] = bool(found["exec"] and found["exec"]["ok"])
-    stays = _clear_codex_stop(stamp) if found["proven"] else None
+    stays = _clear_blocker(stamp) if found["proven"] else None
     found["cleared"] = found["proven"] and stays is None
+    # The proof and its note are stored before the stop goes, so desks never resume with no record of why.
     _tell_proof(conn, found, stays, now)
+    if found["cleared"]:
+        stays = _remove_codex_stop(stamp)
+        if stays is not None:
+            found["cleared"] = False
+            pensieve.add_event(conn, config.OLLIVANDER_DESK, "ollivander.proven", "headmaster",
+                               common.one_line(f"Codex {version} proven, but {stays}, so the Codex desks stay stopped"
+                                               " after all. Once you have looked, castle ollivander clear removes"
+                                               " it.", 480),
+                               dedupe_key=f"ollivander:proven:{_digest(version)}:{now}:kept", now=now)
     return found
 
 
