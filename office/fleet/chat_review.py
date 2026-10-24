@@ -190,9 +190,13 @@ Anyone in the company's Chat can send an app text, so everything here treats a m
   follow-ups still open, and for any other PR says the fleet did not open it. Fixed lines read from the store opened
   read only (fleet/chat_fleet.py), never a model turn, and never TASK.md beyond a title, a diff, a path, a teammate's
   comment or an email. It wins over a review request, since "fleet <link>" holds a PR link. Only in a direct message
-  with the app, a conversation whose membership list (google_chat.members) holds the owner and the app and no one
-  else: asked anywhere else, the owner gets only FLEET_DM_ONLY and no fleet data. Anyone else's fleet ask gets the help
-  reply, and while CHAT_REVIEW_OWNER is a placeholder everyone's does.
+  with the app, a conversation whose membership list (google_chat.members, invited people and groups included) holds
+  the owner and the app and no one else: asked anywhere else, the owner gets only FLEET_DM_ONLY and no fleet data.
+  The record keeps the ask and FLEET_DM_ONLY, never the answer: _send_reply reads the answer from the store as it
+  sends (fleet_answer), after checking again that the asker is still the owner and an allowed sender and the
+  conversation still a direct message, so a reply sent again after a failure or a restart never goes to a
+  conversation that changed. Anyone else's fleet ask gets the help reply, and while CHAT_REVIEW_OWNER is a
+  placeholder everyone's does.
 - Following (follow_pass): after an app's review of a PR from Chat goes to its thread, whatever its verdict, the app
   follows that PR: one record per app and PR in chat-reviews/follows/, holding the thread it reports in, the
   requester's Chat user id and display name and a one-way digest of their email under the office's own salt
@@ -4003,7 +4007,8 @@ def _send_reply(key: str, record: dict) -> dict:
         token = google_chat.access_token(google_chat.CHAT_BOT_SCOPE, app)
         if not intake_on(record):  # switched off while the token was minted: this try is not counted, nothing sent
             return _save(key, {**record, "reply_tries": tries})
-        google_chat.create_message(record["space"], record["thread"], addressed(record, record["reply"]),
+        reply = fleet_answer(record, app, int(time.time())) if record.get("kind") == "fleet" else record["reply"]
+        google_chat.create_message(record["space"], record["thread"], addressed(record, reply),
                                    f"chat-review-{key}", token, app)
     except FleetError as exc:
         log("reply-failed", request=key[:12], why=common.scrubbed_line(exc, 200))
@@ -4151,23 +4156,36 @@ def _private_with(space: str, user: object, app_user: Optional[str], token: str)
         and all(state == "JOINED" for _, _, state in people)
 
 
-def fleet_reply(fleet: tuple, app: str, email: str, user: object, space: str, token: str, app_user: Optional[str],
-                now: int) -> dict:
-    """The record fields of a reply to a fleet ask (parse_fleet) from an allowed sender: from anyone but the owner
-    (_is_owner) the help reply, as for a message that asks nothing it knows; from the owner anywhere but a direct
-    message with the app (_private_with) FLEET_DM_ONLY and no fleet data at all; else the fixed fleet answer
-    (fleet/chat_fleet.py) read from the store, with no turn, cut whole lines at a time to what Chat takes with the
-    mention in front."""
+def fleet_record(fleet: tuple, app: str, email: str) -> dict:
+    """The record fields for a fleet ask (parse_fleet) from an allowed sender: from anyone but the owner (_is_owner) the
+    help reply; from the owner a reply record that holds the ask and, as its reply, only FLEET_DM_ONLY. The answer
+    itself is never kept: _send_reply reads it from the store when it sends (fleet_answer), after checking again who is
+    asking and who is in the conversation, so nothing the store holds is saved in a record or sent to a conversation
+    that changed since the ask."""
     if not _is_owner(email):
         return {"state": "reply", "kind": "help", "reply": help_text(app), "outcome": "help"}
-    if not _private_with(space, user, app_user, token):
-        return {"state": "reply", "kind": "fleet", "reply": FLEET_DM_ONLY, "outcome": "fleet-dm-only"}
-    if fleet[0] == "status":
+    ask = ["status"] if fleet[0] == "status" else ["pr", fleet[1][0], fleet[1][1]]
+    return {"state": "reply", "kind": "fleet", "fleet": ask, "reply": FLEET_DM_ONLY, "outcome": "fleet"}
+
+
+def fleet_answer(record: dict, app: str, now: int) -> str:
+    """The text _send_reply sends for a fleet record: its fleet answer (fleet/chat_fleet.py, read from the store, never
+    by a model), cut whole lines at a time to what Chat takes with the mention in front, only while the asker is still
+    the owner and an allowed sender, the conversation still one the app answers in and still a direct message (a
+    membership list, read now with your read token, of the owner and the app alone); else its reply, FLEET_DM_ONLY."""
+    ask, email, space = record.get("fleet"), record.get("requester"), record.get("space")
+    if not isinstance(ask, list) or not _is_owner(email) or not _sender_allowed(email) \
+            or not isinstance(space, str) or not _space_allowed(space):
+        return record["reply"]
+    token = google_chat.read_token(app)
+    member = google_chat.app_member(space, token)
+    if member is None or not _private_with(space, record.get("requester_user"), member[0], token):
+        return record["reply"]
+    if ask[0] == "status":
         text = chat_fleet.fleet_text(now, _memory_text)
     else:
-        text = chat_fleet.pr_text(fleet[1][0], fleet[1][1], now, _memory_text, _ago)
-    return {"state": "reply", "kind": "fleet", "outcome": "fleet",
-            "reply": _whole_lines(text.split("\n"), google_chat.MESSAGE_MAX_CHARS - MENTION_ROOM)}
+        text = chat_fleet.pr_text(ask[1], ask[2], now, _memory_text, _ago)
+    return _whole_lines(text.split("\n"), google_chat.MESSAGE_MAX_CHARS - MENTION_ROOM)
 
 
 def ack_text(key: str, app: str, number: int, other_work: bool = False) -> str:
@@ -4857,12 +4875,11 @@ def _ignored(name: str, why: str) -> str:
     return "ignored"
 
 
-def take_message(message: dict, space: str, token: str, known: dict, now: int, app: str,
-                 app_user: Optional[str] = None) -> str:
+def take_message(message: dict, space: str, token: str, known: dict, now: int, app: str) -> str:
     """Take one message that mentions app, once for that app: a review request from an allowed sender becomes a queued
-    review by its desk, a status ask (parse_status) the app's status reply (status_text), a fleet ask (parse_fleet) the
-    owner's fleet answer or its refusals (fleet_reply, which needs app_user, the app's own Chat user name, to tell a
-    direct message), a question about the app's review there or any other message a queued answer (parse_question,
+    review by its desk, a status ask (parse_status) the app's status reply (status_text), a fleet ask (parse_fleet) a
+    reply record for the owner's fleet answer, or the help reply for anyone else (fleet_record), a question about the
+    app's review there or any other message a queued answer (parse_question,
     parse_mention), with what it attaches (_material), anything else from them the app's fixed help reply, and
     anything from a person not allowed
     the fixed refusal, each as a record made create-exclusive, so a message read again (the overlap of each read, or
@@ -4942,7 +4959,7 @@ def take_message(message: dict, space: str, token: str, known: dict, now: int, a
             if asked is None and command is None and fleet is None and not status \
             and parse_question(message["argument"]) else None
         if fleet is not None:
-            record = {**record, **fleet_reply(fleet, app, email, message["sender"], space, token, app_user, now)}
+            record = {**record, **fleet_record(fleet, app, email)}
         elif command is not None:
             record = {**record, **command}
         elif status:
@@ -5195,7 +5212,7 @@ def read_space(space: str, token: str, known: dict, done: list, room: int, now: 
                     if sum(outcome in TAKEN for outcome in done) >= room:
                         waiting = min(message["created_us"], now_us)  # no room: the next read starts here
                         return
-                    done.append(take_message(message, space, token, known, now, app, app_user))
+                    done.append(take_message(message, space, token, known, now, app))
                 if message["created_us"] <= now_us:  # a time ahead of this Mac's clock never moves the marker
                     newest = max(newest, message["created_us"])
                 if message["created_us"] <= now_us + CLOCK_SKEW_SECONDS * 1_000_000:
@@ -5272,7 +5289,7 @@ def read_quiet(space: str, token: str, known: dict, done: list, room: int, now: 
                     waiting = min(message["created_us"], now_us)
                     return
                 outcome = take_turn(pending, space, token, known, now, app, app_user) if pending \
-                    else take_message(message, space, token, known, now, app, app_user)
+                    else take_message(message, space, token, known, now, app)
                 if left or outcome != "ignored":  # an unmentioned one ignored leaves no trace
                     done.append(outcome)
             if message["created_us"] <= now_us:

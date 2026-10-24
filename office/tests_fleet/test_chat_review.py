@@ -161,6 +161,7 @@ class FakeGoogle:
         self.members = {SPACE: {SENDER: SENDER_USER, LEAD: LEAD_USER, "stranger@example.com": STRANGER_USER}}
         self.app_in = {SPACE}
         self.invited = {}  # space: the users invited to it, not joined yet
+        self.groups = {}  # space: the Google Groups that are members of it
         self.members_fail = {}  # space: the HTTP status its membership list is refused with
         self.moody_in = {SPACE}  # where the second app is a member, when it is served
         self.joined = time.time() - 86400  # when the app's membership began
@@ -205,13 +206,16 @@ class FakeGoogle:
                 if space in self.members_fail:
                     raise google_chat.GoogleError(f"Google answered HTTP {self.members_fail[space]}",
                                                   status=self.members_fail[space])
-                assert query["showInvited"] == ["true"]
+                assert query["showInvited"] == ["true"] and query["showGroups"] == ["true"]
                 found = [(user, "HUMAN", "JOINED") for user in self.members.get(space, {}).values()]
                 found += [(user, "HUMAN", "INVITED") for user in self.invited.get(space, ())]
+                grouped = [{"name": f"{space}/members/{group[7:]}", "state": "JOINED", "groupMember": {"name": group}}
+                           for group in self.groups.get(space, ())]
                 if space in (self.app_in if token == USER_TOKEN else self.moody_in):
                     found.append((APP_USERS[token], "BOT", "JOINED"))
                 return {"memberships": [{"name": f"{space}/members/{user[6:]}", "state": state,
-                                         "member": {"name": user, "type": kind}} for user, kind, state in found]}
+                                         "member": {"name": user, "type": kind}} for user, kind, state in found]
+                                        + grouped}
             member = re.fullmatch(r"(spaces/[^/]+)/members/([^/]+)", path)
             if member is not None:
                 space, who = member.group(1), urllib.parse.unquote(member.group(2))

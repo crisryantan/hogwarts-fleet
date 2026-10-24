@@ -417,10 +417,11 @@ def member_user(space: str, email: str, token: str, timeout: Optional[float] = N
 
 
 def members(space: str, token: str, timeout: Optional[float] = None) -> Optional[list]:
-    """Everyone in space as [(user name, HUMAN or BOT, state)], invited people too, from one spaces.members.list read
-    with your read token (chat.memberships.readonly), or None when that cannot be known whole: Chat refuses it, the
-    answer is malformed or the list runs past MEMBERS_PAGE_SIZE people."""
-    query = {"pageSize": MEMBERS_PAGE_SIZE, "showInvited": "true"}
+    """Everyone in space as [(user name, HUMAN or BOT, state)], invited people and groups too, from one
+    spaces.members.list read with your read token (chat.memberships.readonly), or None when that cannot be known whole:
+    Chat refuses it, the answer is malformed, it holds a membership that is no user (a Google Group's) or the list runs
+    past MEMBERS_PAGE_SIZE people."""
+    query = {"pageSize": MEMBERS_PAGE_SIZE, "showInvited": "true", "showGroups": "true"}
     try:
         answer = _read(f"{CHAT_ROOT}/{_space(space)}/members?{urllib.parse.urlencode(query)}", token, timeout)
     except GoogleError as exc:

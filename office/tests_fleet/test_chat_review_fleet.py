@@ -52,12 +52,15 @@ class FleetCase(ChatCase):
         self.shas += 1
         return f"{self.shas:040x}"
 
-    def review(self, task_id: str, verdict: str = None, reviewer: str = "hermione", sha: str = None) -> str:
-        """A review round of the task at sha (a fresh commit when none), with its verdict when given; its request's id."""
+    def review(self, task_id: str, verdict: str = None, reviewer: str = "hermione", sha: str = None,
+               followup: str = None) -> str:
+        """A review round of the task at sha (a fresh commit when none), of a follow-up when given, with its verdict
+        when given; its request's id."""
         sha = sha or self.fresh()
         self.heads[task_id] = sha
         opened = capacity.open_review_round(self.conn, task_id, reviewer, sha, "review",
-                                            idempotency_key=ids.new_id("request"), now=self.tick())
+                                            idempotency_key=ids.new_id("request"), now=self.tick(), followup_id=followup,
+                                            followup_max_rounds=None if followup is None else config.FOLLOWUP_ROUND_CAP)
         if verdict is not None:
             pensieve.record_commit(self.conn, task_id, REPO, sha, now=self.tick())
             pensieve.start_task(self.conn, opened["task"]["id"], now=self.tick())
@@ -72,6 +75,18 @@ class FleetCase(ChatCase):
     def bind(self, task_id: str, number: int = 7) -> None:
         followups.bind_pr(self.conn, task_id, REPO, number, SECRET_BRANCH, "main", self.heads[task_id],
                           f"https://github.com/{REPO}/pull/{number}", now=self.tick())
+
+    def follow_up(self, task_id: str) -> str:
+        """Open a PR follow-up of the task and move it to building, where its review rounds are taken."""
+        followup_id = ids.new_id("followup")
+        item = {"label": "T1", "kind": "comment", "thread_id": None, "reply_to": "5", "quote": None,
+                "url": f"https://github.com/{REPO}/pull/7#issuecomment-5"}
+        followups.open_followup(self.conn, task_id, followup_id, self.heads[task_id], [item],
+                                [{"kind": "comment", "comment_id": "5", "label": "T1"}], "map", "follow-up",
+                                "TEAMMATE-WORDS-THAT-MUST-STAY-OUT", config.FOLLOWUP_MAX_PER_TASK, now=self.tick())
+        for state in ("starting", "building"):
+            followups.advance(self.conn, followup_id, state, now=self.tick())
+        return followup_id
 
     def map_saw(self, number: int, head: str, **fields) -> None:
         """The Map's last snapshot, with that PR in it."""
@@ -170,6 +185,24 @@ class StageTests(FleetCase):
         self.review(fixing, "CHANGES")
         self.assertEqual(self.stages()[fixing], "building")
 
+    def test_what_blocks_a_task_or_where_its_review_stands_shows_through_an_open_follow_up_or_a_bound_pr(self):
+        build = self.task("Fix the widget")
+        self.passed(build)
+        self.bind(build)
+        followup = self.follow_up(build)
+        self.assertEqual(self.stages()[build], "building")
+        self.review(build, followup=followup)
+        self.assertEqual(self.stages()[build], "in review round 2")
+        self.review(build, "HEADMASTER", followup=followup)
+        self.assertEqual(self.stages()[build], "blocked: needs the owner")
+        stopped = self.task("Fix the gadget")
+        self.passed(stopped)
+        self.bind(stopped, 8)
+        self.assertEqual(self.stages()[stopped], "draft PR open")
+        pensieve.add_event(self.conn, "harry", "review.loop-stopped", "headmaster", "stopped", task_id=stopped,
+                           now=self.tick())
+        self.assertEqual(self.stages()[stopped], "blocked: review loop stopped")
+
     def test_a_go_task_is_folded_into_its_open_build_and_a_review_rounds_task_is_never_listed(self):
         go = self.task("the go task", desk="mcgonagall")
         build = self.task("the build", parent=go)
@@ -251,11 +284,7 @@ class OwnerTests(FleetCase):
         build = self.task("Fix the widget")
         self.passed(build)
         self.bind(build)
-        item = {"label": "T1", "kind": "comment", "thread_id": None, "reply_to": "5", "quote": None,
-                "url": f"https://github.com/{REPO}/pull/7#issuecomment-5"}
-        followups.open_followup(self.conn, build, ids.new_id("followup"), self.heads[build], [item],
-                                [{"kind": "comment", "comment_id": "5", "label": "T1"}], "map", "follow-up",
-                                "TEAMMATE-WORDS-THAT-MUST-STAY-OUT", config.FOLLOWUP_MAX_PER_TASK, now=self.tick())
+        self.follow_up(build)
         self.ask(f"fleet {FLEET_PR}")
         self.assertIn(f"task {build}, \"Fix the widget\", building.", self.last)
         self.assertIn("Open follow-ups (1): #1 ", self.last)
@@ -329,6 +358,44 @@ class WhereTests(FleetCase):
         with mock.patch.object(google_chat, "MEMBERS_PAGE_SIZE", 1):  # a list longer than one page is never private
             self.assertEqual(self.ask("fleet status", message="f2"), ["fleet"])
         self.assertEqual(self.last, "Ask me in our DM for fleet status.")
+
+    def test_a_google_group_in_the_conversation_makes_it_shared_too(self):
+        self.task("TITLE-THAT-MUST-STAY-OUT")
+        self.google.groups[DM] = ["groups/12345"]
+        self.assertEqual(self.ask("fleet status"), ["fleet"])
+        self.assertEqual(self.last, "Ask me in our DM for fleet status.")
+
+    def test_a_reply_sent_again_is_checked_again_and_never_carries_what_the_store_holds_in_its_record(self):
+        self.task("TITLE-THAT-MUST-STAY-OUT")
+        self.google.fail_chat = True
+        self.assertEqual(self.ask("fleet status"), ["fleet"])
+        self.assertEqual(self.google.messages, [])  # Chat refused it: the reply waits for the next pass
+        waiting = [record for record in self.records() if record["kind"] == "fleet"]
+        self.assertEqual([record["state"] for record in waiting], ["reply"])
+        self.assertNotIn("TITLE-THAT-MUST-STAY-OUT", json.dumps(self.records()))
+        self.assertEqual((waiting[0]["fleet"], waiting[0]["reply"]), (["status"], "Ask me in our DM for fleet status."))
+        self.google.fail_chat = False
+        self.google.invited[DM] = ["users/444"]  # someone is invited to the conversation before the reply goes
+        self.run_pass()
+        self.assertEqual([message["text"].split("> ", 1)[1] for message in self.google.messages],
+                         ["Ask me in our DM for fleet status."])
+        self.assertNotIn("TITLE-THAT-MUST-STAY-OUT", json.dumps(self.records()))
+
+    def test_a_reply_sent_again_after_the_owner_or_the_sender_list_changed_carries_no_fleet_data(self):
+        self.task("TITLE-THAT-MUST-STAY-OUT")
+        for index, (name, value) in enumerate((("CHAT_REVIEW_OWNER", "someone@example.com"),
+                                               ("CHAT_REVIEW_OWNER", "<chat-review-owner-email>"),
+                                               ("CHAT_REVIEW_SENDERS", (SENDER,)))):
+            with self.subTest(name=name, value=value):
+                self.google.fail_chat = True
+                self.assertEqual(self.ask("fleet status", message=f"c{index}"), ["fleet"])
+                self.google.fail_chat = False
+                before = len(self.google.messages)
+                with mock.patch.object(config, name, value), \
+                        mock.patch.object(chat_review, "config_problems", return_value=[]):
+                    self.run_pass()
+                self.assertEqual(self.google.messages[before]["text"].split("> ", 1)[1],
+                                 "Ask me in our DM for fleet status.")
 
     def test_a_bot_other_than_the_app_makes_it_shared_too(self):
         self.task("TITLE-THAT-MUST-STAY-OUT")
@@ -404,13 +471,15 @@ class AllowedFieldsTests(FleetCase):
         self.assertLessEqual(len(shown), chat_fleet.TITLE_MAX)
         self.assertTrue(shown.startswith("Fix (users/all) the widget at [email]"))
 
-    def test_the_record_keeps_no_title_beyond_the_reply(self):
+    def test_the_record_keeps_the_ask_but_never_the_answer(self):
         build = self.task("Fix the widget")
         self.ask("fleet status")
         [record] = [record for record in self.records() if record["kind"] == "fleet"]
         self.assertNotIn("question", record)
-        self.assertEqual(json.dumps(record).count("Fix the widget"), 1)  # in the reply alone
-        self.assertIn(build, record["reply"])
+        self.assertNotIn("Fix the widget", json.dumps(record))  # the answer is read as it is sent, never kept
+        self.assertNotIn(build, json.dumps(record))
+        self.assertEqual((record["fleet"], record["reply"]), (["status"], "Ask me in our DM for fleet status."))
+        self.assertIn(build, self.last)
 
     def test_a_long_list_is_cut_whole_lines_to_what_chat_takes(self):
         for index in range(chat_fleet.OPEN_MAX):

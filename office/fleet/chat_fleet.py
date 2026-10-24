@@ -11,10 +11,12 @@ reviewer desk and the first 12 characters of the commit it read, the Map's last 
 word and a count, and how many follow-ups are open with their state. Never TASK.md beyond its title, a diff, a path, a
 teammate's comment, an email or a branch name.
 
-Stages, from store rows alone: queued; building (a run is going, a fix round or a PR follow-up is under way); in review
-round N; passed (a PASS the owner has not pushed); draft PR open and awaiting merge (the PR is bound to the task; the
-Map last saw it as a draft, or as ready); blocked, with its reason class: needs the owner (HEADMASTER), round cap,
-review died, tooling, review loop stopped. A go task whose build is open is folded into the build.
+Stages, from store rows alone, the first that holds: queued; blocked, with its reason class (a loud stop event after the
+newest round: tooling, review loop stopped, round cap; or the flight state: needs the owner for a HEADMASTER, round cap,
+review died); in review round N (a review is queued or running, a PR follow-up's included); building (a run is going, or
+a fix round or a PR follow-up is under way); passed (a PASS awaiting the owner's push); draft PR open and awaiting merge
+(the PR is bound to the task; the Map last saw it as a draft, or as ready). A go task whose build is open is folded
+into the build.
 """
 from __future__ import annotations
 
@@ -80,17 +82,11 @@ def _blocked_by_event(conn, task_id: str, since: int) -> Optional[str]:
 
 
 def _stage(conn, task: dict, row: Optional[dict], snapshot: dict) -> str:
-    """The stage of one open task, from the fixed table in the module notes."""
+    """The stage of one open task, from the fixed table in the module notes. What blocks it, then where its review
+    stands, come before whether a PR or a follow-up is open, so a stop is never hidden behind either."""
     if row is None:  # not active and no run going: it has not started
         return "queued"
-    if row["followup"] is not None:
-        return "building"
-    pr = followups.pr_for_task(conn, task["id"])
-    if pr is not None:
-        return "awaiting merge" if _ready(snapshot, pr["repo"], pr["number"]) else "draft PR open"
     state = row["state"]
-    if state == "awaiting close":
-        return "passed"
     live = [item for item in capacity.review_rounds(conn, task["id"]) if item["superseded_by"] is None]
     since = max(live[-1]["created_at"] if live else 0, int(task["started_at"] or task["created_at"]))
     stopped = _blocked_by_event(conn, task["id"], since) or BLOCKED_STATES.get(state)
@@ -98,7 +94,12 @@ def _stage(conn, task: dict, row: Optional[dict], snapshot: dict) -> str:
         return f"blocked: {stopped}"
     if state in ("review queued", "in review"):
         return f"in review round {row['round']}"
-    return "building"
+    if state != "awaiting close":
+        return "building"
+    pr = followups.pr_for_task(conn, task["id"])
+    if pr is None:
+        return "passed"
+    return "awaiting merge" if _ready(snapshot, pr["repo"], pr["number"]) else "draft PR open"
 
 
 def _shown(task_id: object) -> str:
@@ -222,6 +223,8 @@ def pr_text(repo: str, number: int, now: int, clean: Clean, ago: Ago) -> str:
         rounds = capacity.review_rounds(conn, task["id"])
         if rounds:
             lines.append(f"Review rounds ({len(rounds)}):")
+            if len(rounds) > ROUNDS_SHOWN:
+                lines.append(f"({len(rounds) - ROUNDS_SHOWN} earlier rounds not shown)")
             lines += [_round_line(item) for item in rounds[-ROUNDS_SHOWN:]]
             live = [item for item in rounds if item["superseded_by"] is None]
             if live:
