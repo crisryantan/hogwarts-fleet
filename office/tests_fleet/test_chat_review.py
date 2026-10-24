@@ -4873,22 +4873,47 @@ class NoticeTests(ChatCase):
         self.assertEqual((len(self.notes()), len(self.google.acks), len(self.turns)), (1, 1, 1))
 
     def test_a_review_held_back_long_after_its_ack_says_so_once_when_it_starts(self):
-        from tests_fleet.support import every_slot
-        self.patch(chat_review, "_launch_held", return_value=None)  # a slot looked free, then was taken
+        real, held = chat_review._cap_check, []
+
+        def caps_busy_once(record, now, count):
+            if count and not held:  # the caps lock busy at the launch's own check, after the acknowledgement
+                held.append(True)
+                raise chat_review.Later("the caps lock is busy", "caps")
+            return real(record, now, count)
+        self.patch(chat_review, "_cap_check", side_effect=caps_busy_once)
         self.deliver(msg())
-        with every_slot("hermione"):  # acknowledged, then every run slot busy
-            self.assertEqual(self.run_pass()["settled"], ["queued"])
+        self.assertEqual(self.run_pass()["settled"], ["queued"])
         [(key, record)] = chat_review._records()
         self.assertEqual((record["acked"], record["waiting"], len(self.google.acks), self.notes()),
-                         (True, "slot", 1, []))
+                         (True, "caps", 1, []))
         chat_review._save(key, {**record, "waiting_since": record["waiting_since"]
                                 - config.CHAT_REVIEW_WAIT_NOTICE_SECONDS - 1})
         self.run_pass()
         self.run_pass()
-        self.assertEqual(self.notes(), ["Picked this up now; it was waiting on a free run slot."])
+        self.assertEqual(self.notes(), ["Picked this up now; it was waiting on the caps lock."])
         self.assertEqual(self.google.notes[0]["thread"], THREAD)
         self.assertEqual((len(self.google.acks), len(self.google.messages)), (1, 1))  # the review's reply, once
         self.assertTrue(chat_review.read_record(key)["wait_noticed"])
+
+    def test_the_slot_and_gate_taken_before_the_ack_are_the_ones_the_turn_runs_under(self):
+        from tests_fleet.support import every_slot
+        seen, real = [], chat_review._acknowledge
+
+        def acknowledge(key, record, plan):
+            with self.assertRaises(chat_review.Later):  # this review holds the desk's only slot now
+                with chat_review._admission("hermione"):
+                    pass
+            seen.append(True)
+            return real(key, record, plan)
+        self.patch(chat_review, "_acknowledge", side_effect=acknowledge)
+        self.patch(config, "RUN_SLOTS", {**config.RUN_SLOTS, "hermione": 1})
+        self.deliver(msg())
+        self.run_pass()
+        self.assertEqual((seen, len(self.turns), self.records()[0]["outcome"]), ([True], 1, "reviewed"))
+        with every_slot("hermione"):
+            with self.assertRaises(chat_review.Later):
+                with chat_review._admission("hermione"):
+                    pass
 
     def test_a_short_wait_posts_no_wait_notice(self):
         self.wait_once()

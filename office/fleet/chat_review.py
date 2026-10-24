@@ -2562,20 +2562,27 @@ REFUSED = ("desk-capped", "capped", "model-blocked")
 
 
 def _launch(conn, key: str, record: dict, pr_fd: int, brief: str, prompt: str, input_name: str, input_text: str,
-            budget: Optional[str] = None, images: Optional[dict] = None, context: Optional[dict] = None) -> tuple:
+            budget: Optional[str] = None, images: Optional[dict] = None, context: Optional[dict] = None,
+            admitted: Optional[tuple] = None) -> tuple:
     """Run one turn of the record's desk on input_text, its only input file, under one of the desk's run slots, the
     launch gate, its own run lock and the lock of its PR (pr_fd), after its own daily caps and the shared chat caps are
     checked and counted, once per request (_cap_check), with the thread's notice, if one is due, sent as it starts
     (_notice): (the turn's outcome, its text, the record as it is after, holding the turn's run id and cost), or, when a cap or the desk's blocked model stops it before it launches, (one of REFUSED, the fixed reply for
     a chat cap or None, the record as it was). Later when it cannot start now. budget is the Claude turn's, else the
     desk's per-run one; images go in its working folder beside its input, and a review's repo context under
-    context/ there."""
+    context/ there. admitted is the run slot and launch gate the caller already holds (_admission), else the turn
+    takes its own."""
     desk = app_of(record)
     run_id = f"chat-{secrets.token_hex(8)}"
     found: dict = {}
     try:
-        with run_desk.desk_lock(desk, wait=False) as slot, run_desk.launch_gate() as gate_fd, \
-                run_desk.run_lock(desk, run_id) as own:
+        with contextlib.ExitStack() as held:
+            if admitted is None:
+                slot = held.enter_context(run_desk.desk_lock(desk, wait=False))
+                gate_fd = held.enter_context(run_desk.launch_gate())
+            else:
+                slot, gate_fd = admitted
+            own = held.enter_context(run_desk.run_lock(desk, run_id))
             turn = run_desk.chat_review_argv(conn, brief, prompt, run_id, desk, budget, tuple(sorted(images or {})))
             model = turn.model
             with run_desk.launch_lock(desk):
@@ -2647,26 +2654,26 @@ def review(conn, key: str, record: dict, pr_fd: int) -> dict:
     shaped = shape_diff(diff) if diff is not None else None
     if shaped is None:
         return finish(TOO_LARGE, "too-large", sha=sha)
-    held_back = _launch_held(desk)
-    if held_back is not None:  # it cannot launch now: its holding line, not its acknowledgement
-        raise held_back
-    record = _acknowledge(key, record, plan_text(desk, number, sha, shaped, shaped.paths))
-    paths = diff_paths(diff)  # of the whole diff, the files it deletes included
-    nonce = secrets.token_hex(16)
-    # The facts the job reads and posts itself, never the model: the base, the CI checks on the head, linked PRs.
-    checks = read_checks(repo, sha)
-    linked = read_linked(repo, number, pr["body"])
-    facts = facts_text(checks, linked)
-    record = {**record, "sha": sha, "base_sha": pr["base_sha"], "base_ref": base_ref_shown(pr["base_ref"]),
-              "checks": checks, "linked": linked}
-    found = _gather(key, record, nonce)
-    context = _context(key, record, sha, paths)
-    past, past_titles = _recall(key, record, nonce, lambda: earlier_heads(desk, repo, number, sha, now))
-    outcome, text, record = _launch(conn, key, record, pr_fd, VOICES[desk].brief,
-                                    prompt_text(repo, number, sha, nonce), INPUT_FILE,
-                                    review_input(repo, number, pr, shaped.body(), nonce, found.lines,
-                                                 shaped.notes() + context.lines, facts, past),
-                                    images=found.images, context=context.files)
+    # A run slot and the launch gate are taken before the acknowledgement and held through the launch, so a review
+    # that cannot start gets its holding line (_hold) instead, and one acknowledged never waits on either.
+    with _admission(desk) as admitted:
+        record = _acknowledge(key, record, plan_text(desk, number, sha, shaped, shaped.paths))
+        paths = diff_paths(diff)  # of the whole diff, the files it deletes included
+        nonce = secrets.token_hex(16)
+        # The facts the job reads and posts itself, never the model: the base, the CI checks on the head, linked PRs.
+        checks = read_checks(repo, sha)
+        linked = read_linked(repo, number, pr["body"])
+        facts = facts_text(checks, linked)
+        record = {**record, "sha": sha, "base_sha": pr["base_sha"], "base_ref": base_ref_shown(pr["base_ref"]),
+                  "checks": checks, "linked": linked}
+        found = _gather(key, record, nonce)
+        context = _context(key, record, sha, paths)
+        past, past_titles = _recall(key, record, nonce, lambda: earlier_heads(desk, repo, number, sha, now))
+        outcome, text, record = _launch(conn, key, record, pr_fd, VOICES[desk].brief,
+                                        prompt_text(repo, number, sha, nonce), INPUT_FILE,
+                                        review_input(repo, number, pr, shaped.body(), nonce, found.lines,
+                                                     shaped.notes() + context.lines, facts, past),
+                                        images=found.images, context=context.files, admitted=admitted)
     if outcome in REFUSED:
         return finish(text or COULD_NOT, outcome)
     if outcome != "ok":
@@ -2690,18 +2697,22 @@ def review(conn, key: str, record: dict, pr_fd: int) -> dict:
                   memory={"title": _memory_text(pr["title"], MEMORY_TITLE_MAX), "folders": _top_folders(paths)})
 
 
-def _launch_held(desk: str) -> Optional[Later]:
-    """What would keep the desk's turn from launching now, as the Later its launch would raise (every run slot busy, a
-    CLI update holding the launch gate), else None: a probe taken and let go before a review is acknowledged, so one
-    that cannot start gets its holding line (_hold) and its acknowledgement only when it starts. The launch takes and
-    checks both again."""
+@contextlib.contextmanager
+def _admission(desk: str) -> Iterator[tuple]:
+    """A free run slot of the desk and the launch gate, taken without waiting, yielding (the Slot, the gate's fd) for
+    _launch to run under: Later, before anything else, while every slot is busy or a CLI update holds the gate."""
+    held = contextlib.ExitStack()
     try:
-        with run_desk.desk_lock(desk, wait=False), run_desk.launch_gate():
-            return None
+        slot = held.enter_context(run_desk.desk_lock(desk, wait=False))
+        gate_fd = held.enter_context(run_desk.launch_gate())
     except safefs.Busy:
-        return Later(f"every {desk} run slot is busy", "slot")
+        held.close()
+        raise Later(f"every {desk} run slot is busy", "slot") from None
     except run_desk.Stopped as exc:
-        return Later(str(exc), _held_back(str(exc)))
+        held.close()
+        raise Later(str(exc), _held_back(str(exc))) from None
+    with held:
+        yield slot, gate_fd
 
 
 def not_reviewed(shaped: Shaped) -> dict:
@@ -3043,8 +3054,8 @@ def remember(key: str, record: dict, now: Optional[int] = None) -> None:
     kept = record.get("memory")
     app, repo, number, sha = app_of(record), record.get("repo"), record.get("number"), record.get("sha")
     if not isinstance(kept, dict) or not isinstance(kept.get("title"), str) \
-            or not isinstance(kept.get("folders"), list) or not _repo_ok(repo) or type(number) is not int or not isinstance(sha, str) \
-            or gitops.SHA.fullmatch(sha) is None or record.get("verdict") not in ("PASS", "CHANGES"):
+            or not isinstance(kept.get("folders"), list) or not _repo_ok(repo) or type(number) is not int \
+            or not isinstance(sha, str) or gitops.SHA.fullmatch(sha) is None or record.get("verdict") not in ("PASS", "CHANGES"):
         return
     risk = record.get("risk")
     note = {"state": "note", "app": app, "repo": repo, "number": number, "sha": sha,

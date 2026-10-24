@@ -584,7 +584,8 @@ messages an answer turn reads as its context. Of those that mention it:
   run slot is busy, the caps lock is held, or a stop of its desk's family or a CLI update is in place) gets one fixed
   line in its thread at once, before any acknowledgement, naming what holds it: "Queued behind another review of this
   PR; I'll start shortly." (or other reviews, a fleet stop or a CLI update). It is sent once, with a request id of its
-  own, and the acknowledgement and plan follow when the review starts. A review that starts at once gets only the
+  own, and the acknowledgement and plan follow when the review starts: its run slot and the update gate are taken
+  before the acknowledgement and held through the launch, so an acknowledged review never waits on either. A review that starts at once gets only the
   acknowledgement, and a follow's review of new commits never gets the holding line. A message that also asks to fix
   or merge gets the
   desk's line saying a review is all it does, and still gets the review and nothing more. An approve word only asks
