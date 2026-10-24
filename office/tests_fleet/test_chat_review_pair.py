@@ -64,6 +64,9 @@ class PairGrammarTests(PairCase):
                              (f"review {URL}", self.SERVED), (f"review {URL} with hermione", self.SERVED),
                              (f"review {URL} moodyish", self.SERVED),  # no whole word
                              (f"review {URL} https://example.org/moody/both", self.SERVED),  # inside an address
+                             (f"review {URL} HTTPS://example.org/moody", self.SERVED),
+                             (f"review {URL} see moody.example.org", self.SERVED),
+                             (f"review {URL} cc moody@example.org", self.SERVED),
                              (f"review <{URL}|moody>", self.SERVED),  # a link's label
                              (f"review {URL} <users/555000111>", self.SERVED),  # mention markup
                              (f"review {URL} pair", self.SERVED), ("", self.SERVED), (None, self.SERVED)):
@@ -293,6 +296,57 @@ class PairSingleTests(PairCase):
                 self.assertEqual(self.writes[-1][1]["event"], "COMMENT")
                 self.answers["hermione"] = ("ok", self.answers["hermione"][1].replace(head, HEAD))
 
+    def test_a_second_turn_that_cannot_launch_posts_the_first_marked_single(self):
+        real = run_desk.chat_review_argv
+
+        def argv(conn, brief, prompt, run_id, desk="hermione", *args, **kwargs):
+            if desk == "moody":
+                raise chat_review.FleetError("the chat review settings are not the report-only shape")
+            return real(conn, brief, prompt, run_id, desk, *args, **kwargs)
+        self.patch(run_desk, "chat_review_argv", side_effect=argv)
+        self.pair()
+        self.assertEqual([turn["desk"] for turn in self.turns], ["hermione"])
+        record = self.record()
+        self.assertEqual((record["outcome"], record["reviewers"], record["single"]),
+                         ("reviewed", ["hermione"], {"desk": "moody", "why": "failed"}))
+        self.assertTrue(self.texts()[0].startswith(f"Single review by Hermione: {SECOND} could not finish."))
+
+    def test_a_half_that_parsed_before_a_kill_is_kept_and_never_run_again_at_that_head(self):
+        half = {"sha": HEAD, "verdict": "CHANGES", "blocking": ["B1 x.py:2 | breaks the bound | fix it"],
+                "non_blocking": [], "summary": "Not yet.", "risk": "medium", "not_verified": []}
+        for sha, turns in ((HEAD, ["moody"]), (NEWER, ["hermione", "moody"])):
+            with self.subTest(sha=sha):
+                self.turns.clear()
+                key = ("1" if sha == HEAD else "2") * 32
+                chat_review._create(key, {
+                    "state": "queued", "kind": "review", "source": "chat", "app": "hermione", "pair": "moody",
+                    "space": SPACE, "thread": f"{SPACE}/threads/k{sha[:1]}", "requester": SENDER,
+                    "requester_name": "Dev Person", "repo": "acme/web-app", "number": 7, "at": int(time.time()),
+                    "counted": True, "counted_by": ["hermione"], "resumes": 1,
+                    "pair_halves": {"hermione": {**half, "sha": sha}}})
+                self.run_pass()
+                self.assertEqual([turn["desk"] for turn in self.turns], turns)
+                record = chat_review.read_record(key)
+                self.assertNotIn("pair_halves", record)
+                if sha == HEAD:  # the kept half's finding is in the combined review, so it never approves
+                    self.assertIn("B1 x.py:2 | Hermione: breaks the bound | fix it", record["blocking"])
+                    self.assertEqual(record["reviewers"], ["hermione", "moody"])
+                else:
+                    self.assertNotIn("breaks the bound", json.dumps(record["blocking"]))
+
+    def test_each_parsed_half_is_kept_on_record_before_the_next_turn_runs(self):
+        seen = []
+        real = run_desk.chat_review_argv
+
+        def argv(conn, brief, prompt, run_id, desk="hermione", *args, **kwargs):
+            if desk == "moody":
+                [(_, record)] = chat_review._records()
+                seen.append(sorted(record.get("pair_halves", {})))
+            return real(conn, brief, prompt, run_id, desk, *args, **kwargs)
+        self.patch(run_desk, "chat_review_argv", side_effect=argv)
+        self.pair()
+        self.assertEqual(seen, [["hermione"]])
+
     def test_both_turns_failing_is_the_fixed_failure(self):
         self.answers = {"hermione": ("failed", ""), "moody": ("failed", "")}
         self.pair()
@@ -328,6 +382,26 @@ class PairAfterTests(PairCase):
         apps = [json.loads(path.read_text())["app"]
                 for path in (self.office / chat_review.DIR / chat_review.MEMORY).glob("*.json")]
         self.assertEqual(apps, ["hermione"])
+
+    def test_the_other_app_follows_only_while_it_is_a_member_of_the_conversation(self):
+        self.google.moody_in = set()
+        self.pair()
+        self.assertEqual(len(self.texts()), 1)
+        self.assertIsNotNone(chat_review.read_follow(chat_review._follow_key("hermione", "acme/web-app", 7)))
+        self.assertIsNone(chat_review.read_follow(chat_review._follow_key("moody", "acme/web-app", 7)))
+
+    def test_a_later_stop_of_one_apps_follows_holds_back_only_that_apps_follow(self):
+        now = time.time()
+        record = {"state": "reply", "kind": "review", "source": "chat", "app": "hermione", "pair": "moody",
+                  "space": SPACE, "thread": THREAD, "requester": SENDER, "requester_name": "Dev Person",
+                  "repo": "acme/web-app", "number": 7, "at": int(now) - 10, "at_us": int((now - 10) * 1e6),
+                  "outcome": "reviewed", "verdict": "PASS", "sha": HEAD, "reviewers": ["hermione", "moody"]}
+        chat_review._create("3" * 32, record)
+        chat_review._create("4" * 32, {"state": "done", "kind": "unfollow", "source": "chat", "app": "moody",
+                                       "space": SPACE, "thread": THREAD, "at": int(now), "at_us": int(now * 1e6)})
+        chat_review._followed("3" * 32, record)
+        self.assertIsNotNone(chat_review.read_follow(chat_review._follow_key("hermione", "acme/web-app", 7)))
+        self.assertIsNone(chat_review.read_follow(chat_review._follow_key("moody", "acme/web-app", 7)))
 
     def test_the_status_reply_names_a_pair_review(self):
         self.write_file(self.office / "state" / config.STOP_FAMILY_FILES["claude"], "1 an update\n")

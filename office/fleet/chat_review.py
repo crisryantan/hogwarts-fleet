@@ -121,7 +121,9 @@ Anyone in the company's Chat can send an app text, so everything here treats a m
   alone is posted marked single, saying why the other is not in it. The lead posts one Chat reply and one GitHub
   review under a marker of the pair's own (_pair_marker), with inline comments from both, so either app may still
   post one review of its own of the same head; an echo-withheld or high-risk part blocks an approval as in one
-  review. Each app whose review it holds follows the PR and writes its own memory note from its own half.
+  review. Each app whose review it holds follows the PR (the other app only while its read marker says it is a member
+  of the conversation) and writes its own memory note from its own half. A half that parsed is kept on the record at
+  once (pair_halves), so one resumed after a kill at the same head never runs that desk again.
 - Every reply in a thread mentions the person it answers with Chat's user mention markup, built only from the
   sender's Chat user id (CHAT_USER) kept on the record, never their email; a person not on the list is answered with
   no mention, and who they are is never kept. An accepted request is acknowledged in its thread, as the app, once
@@ -308,6 +310,10 @@ NEGATION = re.compile(r"\b(?:don'?t|do not|doesn'?t|never|no need|without|not)\b
 # A pair review (parse_pair): a review request to one app whose text, outside its addresses, also names the other app,
 # by its desk or display name, or asks for both with one of these words.
 PAIR_WORDS = re.compile(r"\bboth\b|\bpair[ -]?review", re.IGNORECASE)
+# What parse_pair reads past: any markup in angle brackets (a link, its label, a mention), and any word that looks like
+# an address (a scheme or path, an @, a dotted host), in any letter case.
+MARKUP = re.compile(r"<[^<>]*>")
+ADDRESS_WORD = re.compile(r"[/@\\]|\w\.\w|^www\.", re.IGNORECASE)
 # What each desk takes in a pair review, as its plan says (PAIR_PLAN) and its brief is told (PAIR_BRIEF).
 FOCUS = {"hermione": "correctness, tests and fit", "moody": "security first"}
 PAIR_BRIEF = {
@@ -1218,11 +1224,11 @@ def _names_app(text: str, app: str) -> bool:
 
 def parse_pair(text: object, app: str, served: Iterable) -> Optional[str]:
     """The other app a review request to app asks to review with it (a pair review), else None: its text, outside
-    every address, link and mention markup, names exactly one other app that is served (_names_app), or, naming none,
+    every address, link and markup (MARKUP, ADDRESS_WORD, in any letter case), names exactly one other app that is served (_names_app), or, naming none,
     says "both" or "pair review" while exactly one other app is served. Nothing else in the text is read or kept."""
     if not isinstance(text, str):
         return None
-    plain = typographic(USER_MARKUP.sub(" ", ANY_ADDRESS.sub(" ", LINK_MARKUP.sub(" ", text))))
+    plain = " ".join(word for word in typographic(MARKUP.sub(" ", text)).split() if ADDRESS_WORD.search(word) is None)
     others = [other for other in served if other != app and other in VOICES and other in run_desk.CHAT_REVIEW_DESKS]
     named = [other for other in others if _names_app(plain, other)]
     if len(named) == 1:
@@ -2766,12 +2772,15 @@ def review(conn, key: str, record: dict, pr_fd: int) -> dict:
     if shaped is None:
         return finish(TOO_LARGE, "too-large", sha=sha)
     results, spent, material = {}, 0.0, record.get("material")
+    # A pair's half that parsed before a kill, at this head, is kept and never run again (_carried).
+    carried = _carried(record, sha) if partner is not None else {}
+    parsed, failed, todo = dict(carried), {}, [run for run in runs if run not in carried]
     # A run slot and the launch gate are taken before the acknowledgement and held through the launch, so a review
     # that cannot start gets its holding line (_hold) instead, and one acknowledged never waits on either. A pair takes
     # its other desk's PR lock and a slot of each desk first.
     with contextlib.ExitStack() as holding:
-        hand = (holding.enter_context(pr_lock(repo, number, partner)),) if partner in runs else ()
-        admitted = {run: holding.enter_context(_admission(run)) for run in runs}
+        hand = (holding.enter_context(pr_lock(repo, number, partner)),) if partner in todo else ()
+        admitted = {run: holding.enter_context(_admission(run)) for run in todo}
         plan = plan_text(desk, number, sha, shaped, shaped.paths)
         if partner is not None:
             plan = f"{plan} {pair_plan(desk, partner, runs, absent)}"
@@ -2786,7 +2795,8 @@ def review(conn, key: str, record: dict, pr_fd: int) -> dict:
                   "checks": checks, "linked": linked}
         found = _gather(key, record, nonce)
         context = _context(key, record, sha, paths)
-        for run in runs:
+        untrusted = "\n".join((pr["title"], pr["body"], diff, facts, found.untrusted, context.untrusted))
+        for run in todo:
             past, past_titles = _recall(key, record, nonce, lambda run=run: earlier_heads(run, repo, number, sha, now))
             brief = VOICES[run].brief + (PAIR_BRIEF.get(run, "") if len(runs) > 1 else "")
             try:
@@ -2796,11 +2806,13 @@ def review(conn, key: str, record: dict, pr_fd: int) -> dict:
                                                             shaped.notes() + context.lines, facts, past),
                                                images=found.images, context=context.files, admitted=admitted[run],
                                                desk=run if partner is not None else None, hand=hand)
-            except Later as exc:
-                if not results:
+            except (FleetError, StoreError, OSError) as exc:  # Later too
+                if partner is None or not (results or parsed):
                     raise
-                log("pair-turn-later", request=key[:12], app=run, why=str(exc))  # the other's review stands alone
-                results[run] = ("failed", None, past_titles)
+                # The other's review stands alone.
+                why = common.scrubbed_line(exc, 200) if isinstance(exc, FleetError) else type(exc).__name__
+                log("pair-turn-failed", request=key[:12], app=run, why=why)
+                failed[run] = ("turn-failed", None)
                 continue
             results[run] = (outcome, text, past_titles)
             if partner is None:
@@ -2810,12 +2822,20 @@ def review(conn, key: str, record: dict, pr_fd: int) -> dict:
                 spent += after.get("cost_usd") or 0.0
             # The material stays on record until every turn of the pair has run, so a resumed one still has it.
             record = {**after, "material": material} if material else after
-    untrusted = "\n".join((pr["title"], pr["body"], diff, facts, found.untrusted, context.untrusted))
+            half = _pair_half(key, run, outcome, text, repo, number, sha, "\n".join((untrusted, past_titles)),
+                              paths | frozenset(context.files))
+            if half is None:
+                failed[run] = (outcome, text)
+                continue
+            parsed[run] = half
+            # Kept on record at once, so a kill before the other turn ends never loses it (_carried).
+            record = _save(key, {**record, "pair_halves": {**_halves_kept(record), run: {
+                "sha": sha, **half._asdict()}}})
     # The title and folders its memory note will hold (remember), fit for a note now, so no PR text is kept raw.
     memory = {"title": _memory_text(pr["title"], MEMORY_TITLE_MAX), "folders": _top_folders(paths)}
     if partner is not None:
-        return _pair_ended(key, {**_unasked(record), "cost_usd": round(spent, 4)}, runs, absent, results,
-                           untrusted, paths | frozenset(context.files), shaped, memory)
+        return _pair_ended({**_unasked(record), "cost_usd": round(spent, 4)}, runs, absent, parsed, failed, shaped,
+                           memory)
     outcome, text, past_titles = results[desk]
     if outcome in REFUSED:
         return finish(text or COULD_NOT, outcome)
@@ -2837,41 +2857,70 @@ def review(conn, key: str, record: dict, pr_fd: int) -> dict:
                   memory=memory)
 
 
-def _pair_ended(key: str, record: dict, runs: list, absent: dict, results: dict, untrusted: str, paths: frozenset,
-                shaped: Shaped, memory: dict) -> dict:
-    """How a pair review ends, from each turn's result (results, desk: (outcome, text, the past titles it was shown)):
-    each that ran and gave a block this script accepts is parsed on its own (parse_block, against untrusted and its
-    own past titles), and the reviews that parsed are combined (combine) into the record's verdict, summary, risk,
-    findings and caveats, with each desk's own half kept (halves) for its memory note. One that parsed alone is posted
-    marked single, saying why the other is not in it (single: absent's reason, else failed). None parsed: the first
-    refusal, else the lead's failure, as one review's."""
+def _pair_half(key: str, run: str, outcome: str, text: object, repo: str, number: int, sha: str, untrusted: str,
+               paths: frozenset) -> Optional[Parsed]:
+    """One pair turn's review, read as one review's is (parse_block, against untrusted with its own past titles), or
+    None when it gave no block this script accepts (a refusal, a failed turn, an unusable block)."""
+    if outcome != "ok":
+        return None
+    try:
+        return parse_block(text, repo, number, sha, untrusted, paths)
+    except Unusable as exc:
+        log("unusable", request=key[:12], app=run, why=str(exc))
+        return None
+
+
+def _halves_kept(record: dict) -> dict:
+    found = record.get("pair_halves")
+    return {desk: half for desk, half in found.items() if desk in VOICES} if isinstance(found, dict) else {}
+
+
+def _carried(record: dict, sha: str) -> dict:
+    """The halves of a pair review a kill left on record (pair_halves) that parsed at this head, as Parsed, by desk:
+    each is used as it is and its desk never runs again. One of another head, or not as the job writes one, is
+    none."""
+    found = {}
+    for desk, half in _halves_kept(record).items():
+        if desk not in (app_of(record), _partner(record)) or not isinstance(half, dict) or half.get("sha") != sha:
+            continue
+        lists = [half.get(name) for name in ("blocking", "non_blocking", "not_verified")]
+        if half.get("verdict") not in ("PASS", "CHANGES") or half.get("risk") not in RISK_ORDER \
+                or not isinstance(half.get("summary"), str) \
+                or not all(isinstance(items, list) and all(isinstance(item, str) for item in items) for items in lists):
+            continue
+        found[desk] = Parsed(half["verdict"], *lists[:2], half["summary"], half["risk"], lists[2])
+    return found
+
+
+def _pair_ended(record: dict, runs: list, absent: dict, parsed: dict, failed: dict, shaped: Shaped,
+                memory: dict) -> dict:
+    """How a pair review ends: the halves that parsed (parsed, desk: Parsed, those a kill left on record included)
+    combined (combine) into the record's verdict, summary, risk, findings and caveats, with each desk's own half kept
+    (halves) for its memory note. One that parsed alone is posted marked single, saying why the other is not in it
+    (single: absent's reason, else failed). None parsed: the first refusal among the failed turns (failed, desk:
+    (outcome, text)), else the first failure, as one review's."""
     repo, number, sha = record["repo"], record["number"], record["sha"]
+    record = {name: value for name, value in record.items() if name != "pair_halves"}
 
     def finish(reply: str, outcome: str, **fields) -> dict:
         return {**record, **fields, "state": "reply", "reply": reply, "outcome": outcome}
 
-    parsed = {}
-    for run, (outcome, text, titles) in results.items():
-        if outcome != "ok":
-            continue
-        try:
-            parsed[run] = parse_block(text, repo, number, sha, "\n".join((untrusted, titles)), paths)
-        except Unusable as exc:
-            log("unusable", request=key[:12], app=run, why=str(exc))
     if not parsed:
-        refused = [result for result in results.values() if result[0] in REFUSED]
-        outcome, text, _ = refused[0] if refused else results[runs[0]]
+        ordered = [failed[run] for run in runs if run in failed] + [item for run, item in failed.items()
+                                                                    if run not in runs]
+        refused = [item for item in ordered if item[0] in REFUSED]
+        outcome, text = (refused or ordered or [("turn-failed", None)])[0]
         if outcome in REFUSED:
             return finish(text or COULD_NOT, outcome)
         if outcome == "ok":
             return finish(COULD_NOT, "unusable")
         return finish(COULD_NOT, "auth" if outcome == "auth" else "turn-failed")
-    reviewers = [run for run in runs if run in parsed]
     pair = [app_of(record), _partner(record)]
+    reviewers = [desk for desk in pair if desk in parsed]
     single = {}
     if len(reviewers) == 1:
         other = next(desk for desk in pair if desk != reviewers[0])
-        single = {"single": {"desk": other, "why": absent.get(other, "failed")}}
+        single = {"single": {"desk": other, "why": absent.get(other, "failed") if other not in failed else "failed"}}
     joined = combine({run: parsed[run] for run in reviewers}, reviewers)
     record = {**record, "reviewers": reviewers, **single}
     left = not_reviewed(shaped)
@@ -4313,9 +4362,13 @@ def _followed(key: str, record: dict) -> dict:
                 _save_follow(fkey, {**follow, "pending": None if follow.get("pending") == key
                                     else follow.get("pending")})
                 log("followed", request=key[:12], app=app, follow=fkey[:12], sha=sha)
-        elif not _stopped_after(record):
-            # A pair review: each app whose review it holds follows the PR, each its own follow.
+        else:
+            # A pair review: each app whose review it holds follows the PR, each its own follow, unless a stop of
+            # its own follows there came after, and the other app only while it is a member of the conversation, as
+            # its read marker last found, since its reviews of new commits are posted as itself.
             for desk in _reviewers(record) or [app]:
+                if _stopped_after(record, desk) or (desk != app and not _member(record["space"], desk)):
+                    continue
                 fkey = _start_follow(desk, allowed_repo(record["repo"]) or record["repo"], record["number"],
                                      _where(record), sha, now, started)
                 log("followed", request=key[:12], app=desk, follow=fkey[:12], sha=sha)
@@ -4324,6 +4377,14 @@ def _followed(key: str, record: dict) -> dict:
             why=common.scrubbed_line(exc, 200) if isinstance(exc, FleetError) else type(exc).__name__)
         return record
     return _save(key, {**record, "follow_done": True})
+
+
+def _member(space: object, app: str) -> bool:
+    """Whether app's read marker of the conversation says the app was a member of it when it last read there."""
+    if not isinstance(space, str):
+        return False
+    marker = _read_marker(space, app)
+    return marker is not None and marker.get("member") is True
 
 
 def _follow_reply(text: str, space: str, thread: str, app: str) -> Optional[dict]:
@@ -4365,11 +4426,11 @@ def _follow_command(key: str, record: dict) -> dict:
     return record
 
 
-def _stopped_after(record: dict) -> bool:
-    """Whether a stop of app's follows in the follow command's thread was taken from a message after its own: then
-    the command, carried out late after a kill, starts nothing."""
-    at = _taken_us(record)
-    return any(other.get("kind") == "unfollow" and other.get("app", DEFAULT_APP) == record.get("app", DEFAULT_APP)
+def _stopped_after(record: dict, app: Optional[str] = None) -> bool:
+    """Whether a stop of app's follows (the record's app's unless given) in the follow command's thread was taken
+    from a message after its own: then the command, carried out late after a kill, starts nothing."""
+    at, app = _taken_us(record), app or record.get("app", DEFAULT_APP)
+    return any(other.get("kind") == "unfollow" and other.get("app", DEFAULT_APP) == app
                and other.get("space") == record.get("space") and other.get("thread") == record.get("thread")
                and _taken_us(other) > at for _, other in _records())
 

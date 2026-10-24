@@ -840,8 +840,9 @@ review the same head commit, one turn after the other, each in its own read-only
 its strength (Hermione on correctness, tests and fit, Moody security first), its own past notes of the PR and its
 own desk caps. The person's daily cap counts the pair once and the fleet's twice. The review holds both desks' locks
 of the PR and a run slot of each, and the lead's plan says what each takes. When one desk is off or a stop of its
-family is in place, the lead says so in its plan and only the other reviews, marked single; when both are, the
-request waits. The job then combines the two reviews itself, never a model: CHANGES when either has a blocking
+family is in place, the lead says so in its plan and only the other reviews, marked single; when neither can run,
+the request waits or is refused as the lead's own review would be (a stop waits, a desk switched off gets the fixed
+failure). The job then combines the two reviews itself, never a model: CHANGES when either has a blocking
 finding, the higher risk, the findings blocking first, each tagged with its reviewer's name, two on the same file and
 line merged into one entry naming both, the caveats of both, and each summary on its own labelled line. A turn that
 fails, gives no usable block or is refused by a cap leaves the other's review to be posted alone, marked single and
@@ -849,7 +850,9 @@ saying the other could not finish. The lead posts one Chat reply and one GitHub 
 names, with inline comments from both under the usual rules and caps, under a marker of the pair's own, so either
 app may still post one review of its own of the same head. A summary or finding withheld for repeating the PR's text,
 or a high risk, in either half blocks an approval exactly as in one review. Afterwards each app whose review it holds
-follows the PR, each its own follow, and writes its own memory note from its own half.
+follows the PR, each its own follow (the other app only while its read marker says it is a member of the
+conversation, since it posts its reviews of new commits as itself), and writes its own memory note from its own half.
+A half that parsed before a kill is kept on the record at its head and not run again.
 
 Review memory. Each app answers from the work it has reviewed before. When a review ends reviewed, the job writes one
 note in `chat-reviews/memory/` per app, PR and head commit (a later review of the same head replaces it): the repo,
