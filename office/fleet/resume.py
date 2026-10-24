@@ -23,7 +23,8 @@ owner hears it in one line. A second death in a row waits for him.
   is written before the start, so a kill between them never gives two starts. A restart that ended before its launch
   counted (its run gave up waiting for a slot, hit a cap or was refused) leaves the dead run the newest launch with its
   task's review lock free, since the restart's process holds that lock from its start: the owner then hears once that
-  the task waits for him (build.dead), unless a stop of the desk's family holds the restart to start it later.
+  the task waits for him (build.dead), unless a stop holds the restart or it waits for a model, either of which
+  starts it again by itself later.
   McGonagall's fix-round retry refuses a run this has already started again (orchestrator._why_not_route).
 - Read and act only through those paths: nothing here writes a worktree, a branch or a review.
 """
@@ -55,11 +56,6 @@ def acted_on(conn, run_id: str) -> bool:
     """Whether a dead run already has its line: started again, or left for the owner."""
     return db.fetch_one(conn, "SELECT id FROM events WHERE dedupe_key IN (?, ?)",
                         (resumed_key(run_id), dead_key(run_id))) is not None
-
-
-def resumed(conn, run_id: str) -> bool:
-    """Whether the fleet started a build turn again after this run died."""
-    return _told(conn, resumed_key(run_id))
 
 
 def _told(conn, key: str) -> bool:
@@ -144,9 +140,9 @@ def _restart_ended(conn, task: dict, launch: dict, now: Optional[int]) -> Option
     """The restart of a dead run that never launched: still the task's newest launch, with its task's review lock free.
     The restart's process inherits that lock from its start (start_desk hands it on) and holds it while it waits for a
     run slot, so a free lock means it ended before its launch counted (a slot wait given up, a cap, a refusal). The
-    owner hears once that the task waits for him; it is not started a third time. A stop of the desk's family holds
-    the restart to start it again once cleared, so nothing is said while one holds."""
-    if run_desk.stop_requested(config.desk_family(task["desk"])):
+    owner hears once that the task waits for him; it is not started a third time. A restart something will start
+    again by itself is no such end, so nothing is said while one waits (_restart_waits)."""
+    if _restart_waits(conn, task):
         return None
     try:
         with run_desk.task_lock(task["id"]):
@@ -160,6 +156,23 @@ def _restart_ended(conn, task: dict, launch: dict, now: Optional[int]) -> Option
             return "restart never launched"
     except safefs.Busy:
         return None  # the restart is still waiting for a run slot, or a review runs
+
+
+def _restart_waits(conn, task: dict) -> bool:
+    """Whether the restart's run is kept to start again by itself: a stop of the desk's family holds it (or holds the
+    desk now), or it waits for a model (failover.note_waiting), on the owl start_desk gave it. One that cannot be read
+    counts as waiting, so the owner is never told it waits while it may still start."""
+    from fleet import failover, followup, stops  # here: followup builds on worktree, as start_desk does
+
+    if run_desk.stop_requested(config.desk_family(task["desk"])):
+        return True
+    try:
+        owl_id, _ = followup.run_owl(conn, task)
+        if owl_id in failover.read_state()["waiting"]:
+            return True
+        return any(owl == owl_id and (marker or {}).get("state") == "held" for owl, marker in stops.held(strict=True))
+    except (FleetError, StoreError, OSError):
+        return True
 
 
 def _act(conn, task: dict, launch: dict, streak: int, lock_fd: int, now: Optional[int]) -> str:

@@ -9,7 +9,7 @@ from unittest import mock
 from hogwarts import capacity, ids, owlery, pensieve
 from tests.support import NOW
 
-from fleet import config, orchestrator, owl_post, resume, review, run_desk, safefs, worktree
+from fleet import config, failover, orchestrator, owl_post, resume, review, run_desk, safefs, worktree
 from tests_fleet.support import FleetCase
 
 REPO = "acme/web-app"
@@ -157,6 +157,13 @@ class ResumeTests(ResumeCase):
             self.assertEqual(self.sweep(), [])
         with mock.patch.object(run_desk, "stop_requested", return_value=True):  # a stop holds it to start it later
             self.assertEqual(self.sweep(), [])
+        owl_id = worktree._request_owl(self.conn, self.task)
+        with failover.held_state() as state:  # its run waits for a model, which starts it again once one is back
+            state["waiting"][owl_id] = {"desk": "harry", "models": [], "first": self.clock, "resumed": None,
+                                        "resumes": 0}
+        self.assertEqual(self.sweep(), [])
+        with failover.held_state() as state:
+            del state["waiting"][owl_id]
         self.assertEqual(self.sweep(), [{"task_id": self.task["id"], "outcome": "restart never launched"}])
         [line] = self.events_of(resume.DEAD_KIND)
         self.assertEqual(line["dedupe_key"], f"build:dead:{dead}")
@@ -196,3 +203,11 @@ class StreakTests(ResumeCase):
         self.assertEqual(capacity.newest_launch(self.conn, self.task["id"])["run_id"], dead)
         with self.assertRaisesRegex(orchestrator.Invalid, "the fleet already started the build again"):
             orchestrator.check_legal(self.conn, route)
+        # A dead run the resume left for Ryan is never restarted by her either: the bound held off, by her own check,
+        # the resume's line alone refuses it.
+        dead = self.launch(-1)
+        self.assertEqual(self.sweep()[0]["outcome"], "waits for the owner")
+        with mock.patch.object(run_desk, "dead_streak", return_value=1), \
+                self.assertRaisesRegex(orchestrator.Invalid, "or told Ryan it waits for him"):
+            orchestrator.check_legal(self.conn, route)
+        self.assertTrue(resume.acted_on(self.conn, dead))
