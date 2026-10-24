@@ -443,6 +443,17 @@ def _mentions(message: dict, app_user: str) -> bool:
     return False
 
 
+def _mentions_other_app(message: dict, app_user: str) -> bool:
+    """Whether the message also mentions an app other than the one whose user is app_user."""
+    annotations = message.get("annotations")
+    for item in annotations if isinstance(annotations, list) else []:
+        mention = item.get("userMention") if isinstance(item, dict) and item.get("type") == "USER_MENTION" else None
+        user = mention.get("user") if isinstance(mention, dict) else None
+        if isinstance(user, dict) and user.get("type") == "BOT" and user.get("name") != app_user:
+            return True
+    return False
+
+
 def _mentions_anyone(message: dict) -> bool:
     """Whether the message mentions anyone at all, a person or an app."""
     annotations = message.get("annotations")
@@ -459,7 +470,8 @@ def list_messages(space: str, after_us: int, app_user: str, token: str, page: Op
     """One page of space's messages created after after_us, oldest first, with your read token: (messages, the next
     page's token or None). A message that does not mention the app (app_user) is given back as its time alone, so
     nothing else of it ever leaves here; one that does is its name, time, thread, sender and the text Chat gives with
-    the app mentions taken out (argumentText) and the resource names of its uploaded images (_images). The one
+    the app mentions taken out (argumentText), whether it mentions another app too (other_apps) and the resource names
+    of its uploaded images (_images). The one
     exception, for a thread follow-up: a message that mentions no one at all, in one of threads (those that were the
     app's alone for a while), is given back the same way,
     marked listening, with its whole text. One there that mentions someone else is given back as its time, thread and
@@ -498,6 +510,7 @@ def list_messages(space: str, after_us: int, app_user: str, token: str, page: Op
         if not isinstance(argument, str) or len(argument) > TEXT_MAX:
             argument = ""  # text longer than Chat sends is read as none, never as a cut prefix
         messages.append({"created_us": at, "mentions": mentions, "listening": listening,
+                         "other_apps": _mentions_other_app(item, app_user),
                          "attachments": _images(item.get("attachment")),
                          "name": _text(item.get("name"), NAME_MAX * 2),
                          "thread": _text(thread.get("name"), NAME_MAX * 2),

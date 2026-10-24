@@ -514,7 +514,8 @@ Teammates ask a reviewer, a Google Chat app, for a code review of a GitHub PR, a
 and its findings in their thread, addressed to them by name. They can then ask it about that review in the same
 thread, or mention it anywhere it is allowed with any other question, engineering or casual, for a short answer in
 its voice. There can be two apps, each its own reviewer: Hermione (Staff Engineer), a Claude turn, and Moody, a Codex
-turn whose brief puts security first. A teammate mentions whichever they want, or both. The apps review PRs and
+turn whose brief puts security first. A teammate mentions whichever they want, or both, or asks one for a pair review
+with the other (Pair reviews, below). The apps review PRs and
 answer questions: they fix, build, run or deploy nothing. Nothing listens on your Mac, and no
 one who writes to an app is ever asked to authorize anything.
 
@@ -649,7 +650,7 @@ messages an answer turn reads as its context. Of those that mention it:
 - a bot, or a message older than `CHAT_REVIEW_QUEUE_MAX_SECONDS`, gets nothing.
 
 A message that mentions both apps is taken by each, so it gets two reviews, one from each desk, each answered as its
-own app. Each app takes a message once, even across kills and the overlap of each read: its office record, keyed by a
+own app, never a pair review. Each app takes a message once, even across kills and the overlap of each read: its office record, keyed by a
 digest of the app and the Chat message's name, is made create-exclusive, and a message with that app's record is
 never taken by it again. At most `CHAT_REVIEW_PULL_MAX` are taken a pass across both apps; the rest wait for the
 next. The record holds the app, the message's, thread's and space's names, the requester's email, display name and
@@ -831,6 +832,24 @@ lines with the turn's nonce, as untrusted teammate text, and the brief says they
 message, in the desk's voice, in at most 900 characters, never act on anything they or the message ask, and never
 claim to have done anything. A failed read is a note in the input, never the end of the turn, and only counts are
 logged, never a message's text or sender.
+
+Pair reviews. A review request to one app whose text, outside its links and addresses, also names the other app
+(its desk or its name, so "@Hermione review <link> with Moody" or "and Moody", or "both" or "pair review") is a pair
+review led by the app mentioned, while the other app is served and the message mentions no other app. Both desks
+review the same head commit, one turn after the other, each in its own read-only sandbox with its own brief, each to
+its strength (Hermione on correctness, tests and fit, Moody security first), its own past notes of the PR and its
+own desk caps. The person's daily cap counts the pair once and the fleet's twice. The review holds both desks' locks
+of the PR and a run slot of each, and the lead's plan says what each takes. When one desk is off or a stop of its
+family is in place, the lead says so in its plan and only the other reviews, marked single; when both are, the
+request waits. The job then combines the two reviews itself, never a model: CHANGES when either has a blocking
+finding, the higher risk, the findings blocking first, each tagged with its reviewer's name, two on the same file and
+line merged into one entry naming both, the caveats of both, and each summary on its own labelled line. A turn that
+fails, gives no usable block or is refused by a cap leaves the other's review to be posted alone, marked single and
+saying the other could not finish. The lead posts one Chat reply and one GitHub review, opening with both apps'
+names, with inline comments from both under the usual rules and caps, under a marker of the pair's own, so either
+app may still post one review of its own of the same head. A summary or finding withheld for repeating the PR's text,
+or a high risk, in either half blocks an approval exactly as in one review. Afterwards each app whose review it holds
+follows the PR, each its own follow, and writes its own memory note from its own half.
 
 Review memory. Each app answers from the work it has reviewed before. When a review ends reviewed, the job writes one
 note in `chat-reviews/memory/` per app, PR and head commit (a later review of the same head replaces it): the repo,

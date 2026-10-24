@@ -108,6 +108,20 @@ Anyone in the company's Chat can send an app text, so everything here treats a m
   it never runs the PR's code and has no tool to act with. Its last block is read strictly (parse_block), a finding
   that repeats a long run of the PR's own text, its whole diff or the repo context included; anything else is a fixed
   "couldn't review" reply.
+- A pair review: a review request to one app whose text, outside its addresses, also names the other app (its desk
+  or its name, "with" or "and" it, or "both" or "pair review"), while that app is served and the message mentions no
+  other app, is led by the app mentioned (parse_pair, the record's pair). Both desks review the same head, one turn
+  after the other, each in its own sandbox with its own brief (PAIR_BRIEF: Hermione on correctness, tests and fit,
+  Moody security first), its own memory of earlier heads and its own desk caps; the person's cap counts once for the
+  pair and the fleet's twice (_cap_check), and the review holds the other desk's PR lock and a run slot of each. A
+  desk that is off or whose family is stopped is left out, and the lead says so in its plan; a turn that fails or
+  whose block is unusable is left out too. The job combines what parsed, never a model (combine): CHANGES when
+  either has a blocking finding, the higher risk, the findings tagged with their reviewer's name, two on the same
+  file and line merged into one entry naming both, the caveats of both, and each summary labelled. One that is left
+  alone is posted marked single, saying why the other is not in it. The lead posts one Chat reply and one GitHub
+  review under a marker of the pair's own (_pair_marker), with inline comments from both, so either app may still
+  post one review of its own of the same head; an echo-withheld or high-risk part blocks an approval as in one
+  review. Each app whose review it holds follows the PR and writes its own memory note from its own half.
 - Every reply in a thread mentions the person it answers with Chat's user mention markup, built only from the
   sender's Chat user id (CHAT_USER) kept on the record, never their email; a person not on the list is answered with
   no mention, and who they are is never kept. An accepted request is acknowledged in its thread, as the app, once
@@ -291,6 +305,27 @@ OTHER_WORK = re.compile(r"(?:^|[,.;:!&]|\b(?:and|then|also|please|pls|plz|you)\b
                         r"|to)\s+)*(?:fix|change|update|edit|patch|rewrite|refactor|implement|address|resolve|commit"
                         r"|push|merge|deploy|run|build)\b", re.IGNORECASE | re.MULTILINE)
 NEGATION = re.compile(r"\b(?:don'?t|do not|doesn'?t|never|no need|without|not)\b", re.IGNORECASE)
+# A pair review (parse_pair): a review request to one app whose text, outside its addresses, also names the other app,
+# by its desk or display name, or asks for both with one of these words.
+PAIR_WORDS = re.compile(r"\bboth\b|\bpair[ -]?review", re.IGNORECASE)
+# What each desk takes in a pair review, as its plan says (PAIR_PLAN) and its brief is told (PAIR_BRIEF).
+FOCUS = {"hermione": "correctness, tests and fit", "moody": "security first"}
+PAIR_BRIEF = {
+    "hermione": ("\n\nThis is a pair review: a security reviewer reviews the same diff at the same head alongside you,"
+                 " and the two reviews are posted together. Focus on correctness and failure paths, tests and fit"
+                 " with the repo; still raise any security problem you see."),
+    "moody": ("\n\nThis is a pair review: a staff engineer reviewer covers correctness, tests and fit on the same diff"
+              " at the same head alongside you, and the two reviews are posted together. Put security first; still"
+              " raise any correctness problem you see.")}
+PAIR_PLAN = "Pair review: {first} takes {first_focus}, {second} takes {second_focus}."
+SINGLE_PLAN = "Single review: {other} {why}, so {name} reviews it alone."
+# The line a pair review's reply and GitHub review carry: both reviewed, or one alone and why the other did not.
+PAIR_HEADING = "Pair review by {first} and {second}."
+SINGLE_HEADING = "Single review by {name}: {other} {why}."
+PAIR_WHY = {"failed": "could not finish", "stopped": "is paused by a fleet stop", "off": "is not available right now"}
+PAIR_OPENING = ("This is an automated pair review by {names}, requested by {requester} in Chat. Automated review; not"
+                " an independent human approval.")
+RISK_ORDER = ("low", "medium", "high")
 # The most words, outside its addresses, a message that does not mention the app may have and still be taken in a thread
 # the app took a mention in.
 UNMENTIONED_WORDS_MAX = 8
@@ -1164,6 +1199,39 @@ def parse_follow_command(text: object) -> Optional[tuple]:
     return _allowed_pr(*found[0][0])
 
 
+def reviewer_name(app: str) -> str:
+    """The short name a pair review tags each finding with: the app's name as its settings spell it, less a trailing
+    part in brackets, so "Name (Role)" is Name."""
+    name = app_name(app)
+    return re.sub(r"\s*\([^()]*\)$", "", name) or name
+
+
+def _names_app(text: str, app: str) -> bool:
+    """Whether text names app as a whole word, in any letter case: its desk, its name as its settings spell it, or
+    its short name (reviewer_name)."""
+    try:
+        names = {app, app_name(app), reviewer_name(app)}
+    except FleetError:
+        names = {app}
+    return any(re.search(rf"(?<!\w){re.escape(name)}(?!\w)", text, re.IGNORECASE) is not None for name in names)
+
+
+def parse_pair(text: object, app: str, served: Iterable) -> Optional[str]:
+    """The other app a review request to app asks to review with it (a pair review), else None: its text, outside
+    every address, link and mention markup, names exactly one other app that is served (_names_app), or, naming none,
+    says "both" or "pair review" while exactly one other app is served. Nothing else in the text is read or kept."""
+    if not isinstance(text, str):
+        return None
+    plain = typographic(USER_MARKUP.sub(" ", ANY_ADDRESS.sub(" ", LINK_MARKUP.sub(" ", text))))
+    others = [other for other in served if other != app and other in VOICES and other in run_desk.CHAT_REVIEW_DESKS]
+    named = [other for other in others if _names_app(plain, other)]
+    if len(named) == 1:
+        return named[0]
+    if not named and len(others) == 1 and PAIR_WORDS.search(plain) is not None:
+        return others[0]
+    return None
+
+
 def parse_unfollow(text: object) -> bool:
     """Whether text only asks the app to stop following ("stop following", "unfollow", "stop watching": UNFOLLOW_WORDS,
     any letter case), in at most UNMENTIONED_WORDS_MAX words with no address or link of any kind."""
@@ -1352,7 +1420,8 @@ def _logged(key: str, record: dict) -> dict:
             "cost_usd": record.get("cost_usd"),
             "github": record.get("github"), "github_event": record.get("github_event"),
             "github_inline": record.get("github_inline"),
-            "not_reviewed_count": record.get("not_reviewed_count", 0)}
+            "not_reviewed_count": record.get("not_reviewed_count", 0),
+            **({"pair": record["pair"]} if isinstance(record.get("pair"), str) else {})}
 
 
 def _event(record: dict, event: str) -> str:
@@ -1367,9 +1436,23 @@ def _unasked(record: dict) -> dict:
     return {name: value for name, value in record.items() if name not in ("question", "material")}
 
 
+def _halves(record: dict) -> list:
+    """The record as each app's memory note is written from it (remember): one review's own, or each half of a pair
+    review (halves) as its app's review, the rest of the record shared."""
+    halves = record.get("halves")
+    if not isinstance(halves, dict) or not halves:
+        return [record]
+    return [{**record, "app": desk, **{name: half.get(name) for name in ("verdict", "summary", "risk", "blocking",
+                                                                       "non_blocking")}}
+            for desk, half in halves.items() if desk in VOICES and isinstance(half, dict)]
+
+
 def _end(key: str, record: dict, outcome: str, **fields) -> dict:
     if record.get("kind") == "review" and (record.get("outcome") or outcome) == "reviewed":
-        remember(key, record)  # before it is done, so a kill between the two leaves it to the next pass
+        # Before it is done, so a kill between the two leaves it to the next pass: a pair review's note per app, each
+        # from its own half.
+        for half in _halves(record):
+            remember(key, half)
     record = _save(key, {**_unasked(record), **fields, "state": "done", "outcome": record.get("outcome") or outcome,
                          "ended": int(time.time())})
     log(_event(record, "ended"), **_logged(key, record))
@@ -1475,16 +1558,30 @@ def cap_refusal(requester: Optional[str], now: int, count: bool) -> Optional[str
     return None
 
 
-def _cap_check(record: dict, now: int, count: bool) -> Optional[str]:
+def _cap_check(record: dict, now: int, count: bool, desk: Optional[str] = None) -> Optional[str]:
     """cap_refusal for the record's requester (none for a follow's), but None for a request whose caps an earlier
-    launch of it already counted (counted: one resumed after an interruption), so no request counts twice. Later while
-    the caps lock is busy."""
-    if record.get("counted") is True:
+    launch of it already counted (counted: one resumed after an interruption), so no request counts twice. For the
+    turn of one desk of a pair review (desk), each desk's launch is checked and counted once (counted_by): the first
+    that counts holds the requester's cap and the fleet's, the other the fleet's alone, so a pair counts once toward
+    the person and twice toward the fleet. Later while the caps lock is busy."""
+    if desk is not None:
+        if desk in _counted_by(record):
+            return None
+        person = record.get("counted") is not True
+    elif record.get("counted") is True:
         return None
+    else:
+        person = True
     try:  # a follow's review counts toward the fleet's cap alone: it names no requester's email
-        return cap_refusal(None if record.get("source") == "follow" else record["requester"], now, count)
+        return cap_refusal(None if record.get("source") == "follow" or not person else record["requester"], now, count)
     except safefs.Busy:
         raise Later("the caps lock is busy", "caps") from None
+
+
+def _counted_by(record: dict) -> list:
+    """The desks of a pair review whose launch counted toward the caps already."""
+    found = record.get("counted_by")
+    return [desk for desk in found if desk in VOICES] if isinstance(found, list) else []
 
 
 # Reading the PR
@@ -2396,12 +2493,12 @@ def inline_comments(record: dict) -> tuple:
 
 def reply_text(repo: str, number: int, sha: str, verdict: str, blocking: list, non_blocking: list,
                summary: str = "", not_reviewed: list = (), not_reviewed_count: int = 0, risk: str = "",
-               checks: Optional[dict] = None, not_verified: list = ()) -> str:
-    """The reply for the Chat thread: the summary, the risk, the verdict line (and, for a high-risk pass, that it
-    needs a person to approve), the CI line, the findings as bullets, then what was not verified: the reviewer's own
-    caveats and, for a partial review, the files it left out. Cut whole lines at a time to what Chat takes with the
-    mention in front, a partial review's files always kept (_fitted)."""
-    lines = [summary] if summary else []
+               checks: Optional[dict] = None, not_verified: list = (), heading: str = "") -> str:
+    """The reply for the Chat thread: a pair review's heading (_pair_heading), the summary, the risk, the verdict line
+    (and, for a high-risk pass, that it needs a person to approve), the CI line, the findings as bullets, then what was
+    not verified: the reviewer's own caveats and, for a partial review, the files it left out. Cut whole lines at a
+    time to what Chat takes with the mention in front, a partial review's files always kept (_fitted)."""
+    lines = ([heading] if heading else []) + ([summary] if summary else [])
     if risk:
         lines.append(f"Risk: {risk}")
     lines.append(f"Verdict: {verdict} on {repo}#{number} at {sha[:12]}")
@@ -2468,14 +2565,17 @@ def display_name(value: object) -> str:
 def github_body(requester: str, sha: str, verdict: str, blocking: list, non_blocking: list,
                 app: str = DEFAULT_APP, summary: str = "", not_reviewed: list = (), not_reviewed_count: int = 0,
                 risk: str = "", repo: str = "", base_ref: str = "", base_sha: str = "", checks: Optional[dict] = None,
-                linked: list = (), not_verified: list = ()) -> str:
-    """The PR review's text: the fixed opening line naming the app and the requester by display name; the risk; the
+                linked: list = (), not_verified: list = (), opening: str = "", heading: str = "") -> str:
+    """The PR review's text: the fixed opening line naming the app (or opening, a pair review's: _pair_opening) and the
+    requester by display name, and a pair review's heading (_pair_heading); the risk; the
     summary; the base branch and commit it was checked against and the head; the CI line; the related PRs it read
     (a title only for one of the same repo, so no other repo's title is posted here); the verdict; the findings
     given, those not posted as inline comments, without their tags; then what was not verified (the reviewer's
     caveats, and a partial review's files left out). All of it plain prose (github_prose), cut whole lines at a time
     to GITHUB_BODY_MAX, a partial review's files always kept (_fitted). A line whose fact the record does not hold (one from before the job read it) is left out."""
-    lines = [OPENING.format(name=app_name(app), requester=requester)]
+    lines = [opening or OPENING.format(name=app_name(app), requester=requester)]
+    if heading:
+        lines += ["", github_prose(heading)]
     if risk:
         lines += ["", f"Risk: {risk}"]
     if summary:
@@ -2563,8 +2663,10 @@ REFUSED = ("desk-capped", "capped", "model-blocked")
 
 def _launch(conn, key: str, record: dict, pr_fd: int, brief: str, prompt: str, input_name: str, input_text: str,
             budget: Optional[str] = None, images: Optional[dict] = None, context: Optional[dict] = None,
-            admitted: Optional[tuple] = None) -> tuple:
-    """Run one turn of the record's desk on input_text, its only input file, under one of the desk's run slots, the
+            admitted: Optional[tuple] = None, desk: Optional[str] = None, hand: tuple = ()) -> tuple:
+    """Run one turn of the record's desk (or of desk, for one turn of a pair review, whose launch is then checked and
+    counted as _cap_check says and whose run is the record's run_desk) on input_text, its only input file, with hand
+    (the other PR lock a pair holds) handed to the turn too, under one of the desk's run slots, the
     launch gate, its own run lock and the lock of its PR (pr_fd), after its own daily caps and the shared chat caps are
     checked and counted, once per request (_cap_check), with the thread's notice, if one is due, sent as it starts
     (_notice): (the turn's outcome, its text, the record as it is after, holding the turn's run id and cost), or, when a cap or the desk's blocked model stops it before it launches, (one of REFUSED, the fixed reply for
@@ -2572,7 +2674,8 @@ def _launch(conn, key: str, record: dict, pr_fd: int, brief: str, prompt: str, i
     desk's per-run one; images go in its working folder beside its input, and a review's repo context under
     context/ there. admitted is the run slot and launch gate the caller already holds (_admission), else the turn
     takes its own."""
-    desk = app_of(record)
+    paired = desk is not None and record.get("pair") is not None
+    desk = desk or app_of(record)
     run_id = f"chat-{secrets.token_hex(8)}"
     found: dict = {}
     try:
@@ -2592,7 +2695,8 @@ def _launch(conn, key: str, record: dict, pr_fd: int, brief: str, prompt: str, i
                 # The desk's own daily caps hold too, and the turn counts toward them like any run of its.
                 if run_desk.over_daily_cap(conn, desk, now, launch_held=True) is not None:
                     return "desk-capped", None, record
-                refusal = _cap_check(record, now, count=True)
+                refusal = _cap_check(record, now, count=True, desk=desk) if paired \
+                    else _cap_check(record, now, count=True)
                 if refusal is not None:
                     return "capped", refusal, record
                 capacity.record_launch(conn, desk, run_id, model, now=now)
@@ -2601,13 +2705,14 @@ def _launch(conn, key: str, record: dict, pr_fd: int, brief: str, prompt: str, i
                 own.keep = run_desk.holds_spend(desk)
             # A question's text and the material stay until the turn has run, so one resumed after a kill still has
             # them; its caps are counted, so a resumed launch counts toward none again.
+            pair_fields = {"run_desk": desk, "counted_by": [*_counted_by(record), desk]} if paired else {}
             record = _save(key, {**record, "state": "running", "run_id": run_id, "started": now,
-                                 "cost_usd": _budget(desk, budget), "counted": True})
+                                 "cost_usd": _budget(desk, budget), "counted": True, **pair_fields})
             log(_event(record, "started"), **_logged(key, record))
             record = _notice(key, record, now)
             begun = time.monotonic()
             with _workdir(key, input_text, input_name, images, context) as folder:
-                outcome, text = run_desk.run_report_turn(turn, folder, (pr_fd, slot.fd, gate_fd, own.fd),
+                outcome, text = run_desk.run_report_turn(turn, folder, (pr_fd, *hand, slot.fd, gate_fd, own.fd),
                                                          on_result=found.update)
             _record_usage(conn, run_id, model, found, int((time.monotonic() - begun) * 1000), desk, budget)
             own.keep = False
@@ -2623,8 +2728,10 @@ def _launch(conn, key: str, record: dict, pr_fd: int, brief: str, prompt: str, i
 def review(conn, key: str, record: dict, pr_fd: int) -> dict:
     """Run one review for the request record, by the desk of its app, under the lock of its desk and PR (pr_fd), and
     return the record as it ends: state "reply" with the reply text, its outcome, and the verdict, summary and findings
-    when the desk gave them. Later when it cannot start now; the record is then as it was, unless the review began and
-    was then saved as running."""
+    when the desk gave them. A pair review (_partner) runs a turn of each desk that can run now (_pair_runs) on the
+    same head, one after the other, each with its own brief, input and caps, under the other desk's PR lock too, and
+    ends as one review (combine), or as the one that finished, marked single. Later when it cannot start now; the
+    record is then as it was, unless the review began and was then saved as running."""
     repo, number = record["repo"], record["number"]
     desk = app_of(record)
     now = int(time.time())
@@ -2634,11 +2741,15 @@ def review(conn, key: str, record: dict, pr_fd: int) -> dict:
 
     if not intake_on(record):
         raise Later("the chat review intake is off", "intake")
-    if not run_desk.is_enabled(desk):
-        return finish(COULD_NOT, "desk-off")
-    held = run_desk.stop_reason(config.desk_family(desk))
-    if held is not None:
-        raise Later(f"{held} is in place, so {config.desk_family(desk)} turns wait", _held_back(held))
+    partner = _partner(record)
+    runs, absent = _pair_runs(desk, partner) if partner is not None else ([], {})
+    if not runs:  # one review, or a pair neither desk of which can run now: the lead's own state says why
+        if not run_desk.is_enabled(desk):
+            return finish(COULD_NOT, "desk-off")
+        held = run_desk.stop_reason(config.desk_family(desk))
+        if held is not None:
+            raise Later(f"{held} is in place, so {config.desk_family(desk)} turns wait", _held_back(held))
+        runs = [desk]
     refusal = _cap_check(record, now, count=False)
     if refusal is not None:
         return finish(refusal, "capped")
@@ -2654,10 +2765,17 @@ def review(conn, key: str, record: dict, pr_fd: int) -> dict:
     shaped = shape_diff(diff) if diff is not None else None
     if shaped is None:
         return finish(TOO_LARGE, "too-large", sha=sha)
+    results, spent, material = {}, 0.0, record.get("material")
     # A run slot and the launch gate are taken before the acknowledgement and held through the launch, so a review
-    # that cannot start gets its holding line (_hold) instead, and one acknowledged never waits on either.
-    with _admission(desk) as admitted:
-        record = _acknowledge(key, record, plan_text(desk, number, sha, shaped, shaped.paths))
+    # that cannot start gets its holding line (_hold) instead, and one acknowledged never waits on either. A pair takes
+    # its other desk's PR lock and a slot of each desk first.
+    with contextlib.ExitStack() as holding:
+        hand = (holding.enter_context(pr_lock(repo, number, partner)),) if partner in runs else ()
+        admitted = {run: holding.enter_context(_admission(run)) for run in runs}
+        plan = plan_text(desk, number, sha, shaped, shaped.paths)
+        if partner is not None:
+            plan = f"{plan} {pair_plan(desk, partner, runs, absent)}"
+        record = _acknowledge(key, record, plan)
         paths = diff_paths(diff)  # of the whole diff, the files it deletes included
         nonce = secrets.token_hex(16)
         # The facts the job reads and posts itself, never the model: the base, the CI checks on the head, linked PRs.
@@ -2668,33 +2786,103 @@ def review(conn, key: str, record: dict, pr_fd: int) -> dict:
                   "checks": checks, "linked": linked}
         found = _gather(key, record, nonce)
         context = _context(key, record, sha, paths)
-        past, past_titles = _recall(key, record, nonce, lambda: earlier_heads(desk, repo, number, sha, now))
-        outcome, text, record = _launch(conn, key, record, pr_fd, VOICES[desk].brief,
-                                        prompt_text(repo, number, sha, nonce), INPUT_FILE,
-                                        review_input(repo, number, pr, shaped.body(), nonce, found.lines,
-                                                     shaped.notes() + context.lines, facts, past),
-                                        images=found.images, context=context.files, admitted=admitted)
+        for run in runs:
+            past, past_titles = _recall(key, record, nonce, lambda run=run: earlier_heads(run, repo, number, sha, now))
+            brief = VOICES[run].brief + (PAIR_BRIEF.get(run, "") if len(runs) > 1 else "")
+            try:
+                outcome, text, after = _launch(conn, key, record, pr_fd, brief, prompt_text(repo, number, sha, nonce),
+                                               INPUT_FILE,
+                                               review_input(repo, number, pr, shaped.body(), nonce, found.lines,
+                                                            shaped.notes() + context.lines, facts, past),
+                                               images=found.images, context=context.files, admitted=admitted[run],
+                                               desk=run if partner is not None else None, hand=hand)
+            except Later as exc:
+                if not results:
+                    raise
+                log("pair-turn-later", request=key[:12], app=run, why=str(exc))  # the other's review stands alone
+                results[run] = ("failed", None, past_titles)
+                continue
+            results[run] = (outcome, text, past_titles)
+            if partner is None:
+                record = after
+                continue
+            if outcome not in REFUSED:
+                spent += after.get("cost_usd") or 0.0
+            # The material stays on record until every turn of the pair has run, so a resumed one still has it.
+            record = {**after, "material": material} if material else after
+    untrusted = "\n".join((pr["title"], pr["body"], diff, facts, found.untrusted, context.untrusted))
+    # The title and folders its memory note will hold (remember), fit for a note now, so no PR text is kept raw.
+    memory = {"title": _memory_text(pr["title"], MEMORY_TITLE_MAX), "folders": _top_folders(paths)}
+    if partner is not None:
+        return _pair_ended(key, {**_unasked(record), "cost_usd": round(spent, 4)}, runs, absent, results,
+                           untrusted, paths | frozenset(context.files), shaped, memory)
+    outcome, text, past_titles = results[desk]
     if outcome in REFUSED:
         return finish(text or COULD_NOT, outcome)
     if outcome != "ok":
         return finish(COULD_NOT, "auth" if outcome == "auth" else "turn-failed")
     try:
-        parsed = parse_block(text, repo, number, sha,
-                             "\n".join((pr["title"], pr["body"], diff, facts, found.untrusted, context.untrusted,
-                                        past_titles)),
+        parsed = parse_block(text, repo, number, sha, "\n".join((untrusted, past_titles)),
                              paths | frozenset(context.files))
     except Unusable as exc:
         log("unusable", request=key[:12], why=str(exc))
         return finish(COULD_NOT, "unusable")
     left = not_reviewed(shaped)
     # Inline comments anchor only on what the reviewer was shown: a file left out, or deleted whole, has no hunks.
-    # The title and folders its memory note will hold (remember), fit for a note now, so no PR text is kept raw.
     return finish(reply_text(repo, number, sha, parsed.verdict, parsed.blocking, parsed.non_blocking, parsed.summary,
                              **left, risk=parsed.risk, checks=checks, not_verified=parsed.not_verified), "reviewed",
                   verdict=parsed.verdict, summary=parsed.summary, risk=parsed.risk, blocking=parsed.blocking,
                   non_blocking=parsed.non_blocking, not_verified=parsed.not_verified,
                   hunks=named_hunks(parsed.blocking + parsed.non_blocking, diff_hunks(shaped.text)), **left,
-                  memory={"title": _memory_text(pr["title"], MEMORY_TITLE_MAX), "folders": _top_folders(paths)})
+                  memory=memory)
+
+
+def _pair_ended(key: str, record: dict, runs: list, absent: dict, results: dict, untrusted: str, paths: frozenset,
+                shaped: Shaped, memory: dict) -> dict:
+    """How a pair review ends, from each turn's result (results, desk: (outcome, text, the past titles it was shown)):
+    each that ran and gave a block this script accepts is parsed on its own (parse_block, against untrusted and its
+    own past titles), and the reviews that parsed are combined (combine) into the record's verdict, summary, risk,
+    findings and caveats, with each desk's own half kept (halves) for its memory note. One that parsed alone is posted
+    marked single, saying why the other is not in it (single: absent's reason, else failed). None parsed: the first
+    refusal, else the lead's failure, as one review's."""
+    repo, number, sha = record["repo"], record["number"], record["sha"]
+
+    def finish(reply: str, outcome: str, **fields) -> dict:
+        return {**record, **fields, "state": "reply", "reply": reply, "outcome": outcome}
+
+    parsed = {}
+    for run, (outcome, text, titles) in results.items():
+        if outcome != "ok":
+            continue
+        try:
+            parsed[run] = parse_block(text, repo, number, sha, "\n".join((untrusted, titles)), paths)
+        except Unusable as exc:
+            log("unusable", request=key[:12], app=run, why=str(exc))
+    if not parsed:
+        refused = [result for result in results.values() if result[0] in REFUSED]
+        outcome, text, _ = refused[0] if refused else results[runs[0]]
+        if outcome in REFUSED:
+            return finish(text or COULD_NOT, outcome)
+        if outcome == "ok":
+            return finish(COULD_NOT, "unusable")
+        return finish(COULD_NOT, "auth" if outcome == "auth" else "turn-failed")
+    reviewers = [run for run in runs if run in parsed]
+    pair = [app_of(record), _partner(record)]
+    single = {}
+    if len(reviewers) == 1:
+        other = next(desk for desk in pair if desk != reviewers[0])
+        single = {"single": {"desk": other, "why": absent.get(other, "failed")}}
+    joined = combine({run: parsed[run] for run in reviewers}, reviewers)
+    record = {**record, "reviewers": reviewers, **single}
+    left = not_reviewed(shaped)
+    return finish(reply_text(repo, number, sha, joined["verdict"], joined["blocking"], joined["non_blocking"],
+                             joined["summary"], **left, risk=joined["risk"], checks=record.get("checks"),
+                             not_verified=joined["not_verified"], heading=_pair_heading(record)), "reviewed",
+                  **joined, hunks=named_hunks(joined["blocking"] + joined["non_blocking"], diff_hunks(shaped.text)),
+                  **left, halves={run: {"verdict": parsed[run].verdict, "summary": parsed[run].summary,
+                                        "risk": parsed[run].risk, "blocking": parsed[run].blocking,
+                                        "non_blocking": parsed[run].non_blocking} for run in reviewers},
+                  memory=memory)
 
 
 @contextlib.contextmanager
@@ -2713,6 +2901,138 @@ def _admission(desk: str) -> Iterator[tuple]:
         raise Later(str(exc), _held_back(str(exc))) from None
     with held:
         yield slot, gate_fd
+
+
+# Pair reviews
+
+
+def _partner(record: dict) -> Optional[str]:
+    """The other desk of a pair review's record (pair: parse_pair), or None for one review."""
+    pair, app = record.get("pair"), record.get("app", DEFAULT_APP)
+    if record.get("kind") != "review" or pair not in VOICES or pair not in run_desk.CHAT_REVIEW_DESKS or pair == app:
+        return None
+    return pair
+
+
+def _pair_runs(lead: str, partner: str) -> tuple:
+    """(the desks of a pair review that can run now, the lead first; {desk: why} of each that cannot): a desk is off
+    when it is not enabled (or, for the other, its app is no longer served), and stopped while a stop of its family is
+    in place."""
+    runs, absent = [], {}
+    for desk in (lead, partner):
+        if (desk == partner and desk not in served_apps()) or not run_desk.is_enabled(desk):
+            absent[desk] = "off"
+        elif run_desk.stop_reason(config.desk_family(desk)) is not None:
+            absent[desk] = "stopped"
+        else:
+            runs.append(desk)
+    return runs, absent
+
+
+def pair_plan(lead: str, partner: str, runs: list, absent: dict) -> str:
+    """The line a pair review's plan ends with: what each desk takes (FOCUS), or, when only one can run, that it
+    reviews alone and why the other cannot (PAIR_WHY). Fixed phrases and the apps' names only."""
+    if len(runs) > 1:
+        return PAIR_PLAN.format(first=reviewer_name(lead), first_focus=FOCUS.get(lead, PLAN_ANY),
+                                second=reviewer_name(partner), second_focus=FOCUS.get(partner, PLAN_ANY))
+    name = runs[0] if runs else lead
+    other = partner if name == lead else lead
+    return SINGLE_PLAN.format(other=reviewer_name(other), why=PAIR_WHY[absent.get(other, "off")],
+                              name=reviewer_name(name))
+
+
+def _reviewers(record: dict) -> list:
+    """The desks whose reviews a pair review's record holds, the lead first: [] for one review."""
+    partner = _partner(record)
+    found = record.get("reviewers")
+    if partner is None or not isinstance(found, list):
+        return []
+    return [desk for desk in (app_of(record), partner) if desk in found]
+
+
+def _pair_heading(record: dict) -> str:
+    """The line a pair review's reply and GitHub review carry: both reviewed (PAIR_HEADING), or one alone and why the
+    other is not in it (SINGLE_HEADING). "" for one review."""
+    reviewers = _reviewers(record)
+    if len(reviewers) > 1:
+        return PAIR_HEADING.format(first=reviewer_name(reviewers[0]), second=reviewer_name(reviewers[1]))
+    if not reviewers:
+        return ""
+    other = _partner(record) if reviewers[0] == app_of(record) else app_of(record)
+    single = record.get("single")
+    why = single.get("why") if isinstance(single, dict) and single.get("why") in PAIR_WHY else "failed"
+    return SINGLE_HEADING.format(name=reviewer_name(reviewers[0]), other=reviewer_name(other), why=PAIR_WHY[why])
+
+
+def _pair_opening(record: dict, requester: str) -> str:
+    """The GitHub review's opening line of a pair review: both apps named (PAIR_OPENING), or the one that reviewed
+    alone. "" for one review, which opens as its app (OPENING)."""
+    reviewers = _reviewers(record)
+    if len(reviewers) > 1:
+        return PAIR_OPENING.format(names=" and ".join(app_name(desk) for desk in reviewers), requester=requester)
+    return OPENING.format(name=app_name(reviewers[0]), requester=requester) if reviewers else ""
+
+
+def _finding_parts(item: str) -> tuple:
+    """(its letter, its place or "", what it says, a blocking one's fix or "") of a parsed finding."""
+    letter, _, text = item.partition(" ")
+    fields = [field.strip() for field in text.split("|", 2 if letter.startswith("B") else 1)]
+    if len(fields) == 1:  # withheld whole: no place
+        return letter[:1], "", fields[0], ""
+    return letter[:1], fields[0], fields[1], fields[2] if len(fields) > 2 else ""
+
+
+def _merge_place(item: str) -> Optional[str]:
+    """The place two reviewers' findings are merged on: a file and line (PLACE, with its line), of a finding that is
+    not withheld. None for any other."""
+    if item.endswith(WITHHELD):
+        return None
+    _, place, _, _ = _finding_parts(item)
+    return place if PLACE.fullmatch(place) is not None and LINE_SUFFIX.search(place) is not None else None
+
+
+def combine(halves: dict, order: list) -> dict:
+    """A pair review's record fields from each desk's parsed review (halves, desk: Parsed), in order (the lead first),
+    by the job alone, never a model: the verdict CHANGES when either has a blocking finding, else PASS; the higher
+    risk; the findings, blocking first, each reviewer's in order and each tagged with its reviewer's name
+    (reviewer_name), two from different reviewers on the same file and line (_merge_place) merged into one entry
+    naming both (blocking when either is), and numbered again; the caveats of both, each once; and the summary, each
+    reviewer's on its own line under its name."""
+    names = {desk: reviewer_name(desk) for desk in order}
+    if len(set(names.values())) < len(names):  # two short names alike: the names as the settings spell them
+        names = {desk: app_name(desk) for desk in order}
+    entries, by_place = [], {}
+    for section in ("blocking", "non_blocking"):
+        for desk in order:
+            for item in getattr(halves[desk], section):
+                place = _merge_place(item)
+                entry = by_place.get(place) if place is not None else None
+                if entry is not None and all(part[0] != desk for part in entry["parts"]):
+                    entry["parts"].append((desk, *_finding_parts(item)))
+                    continue
+                entry = {"place": place, "item": item, "parts": [(desk, *_finding_parts(item))]}
+                entries.append(entry)
+                if place is not None:
+                    by_place.setdefault(place, entry)
+    found = {"B": [], "N": []}
+    for entry in entries:
+        letter = "B" if any(part[1] == "B" for part in entry["parts"]) else "N"
+        if len(entry["parts"]) == 1:
+            desk, letter, place, said, fix = entry["parts"][0]
+            text = f"{names[desk]}: {said}"
+            text = f"{place} | {text}" if place else text
+            text = f"{text} | {fix}" if letter == "B" and fix else text
+        else:
+            said = "; ".join(f"{names[desk]}: {what}" for desk, _, _, what, _ in entry["parts"])
+            fixes = [(desk, fix) for desk, kind, _, _, fix in entry["parts"] if kind == "B"]
+            fix = fixes[0][1] if len(fixes) == 1 else "; ".join(f"{names[desk]}: {fix}" for desk, fix in fixes)
+            text = f"{entry['place']} | {said}" + (f" | {fix}" if letter == "B" else "")
+        found[letter].append(f"{letter}{len(found[letter]) + 1} {text}")
+    risks = [halves[desk].risk for desk in order if halves[desk].risk in RISK_ORDER]
+    return {"verdict": "CHANGES" if found["B"] else "PASS", "blocking": found["B"], "non_blocking": found["N"],
+            "risk": max(risks, key=RISK_ORDER.index) if risks else "",
+            "summary": "\n".join(f"{names[desk]}: {halves[desk].summary}" for desk in order),
+            "not_verified": list(dict.fromkeys(item for desk in order for item in halves[desk].not_verified))}
 
 
 def not_reviewed(shaped: Shaped) -> dict:
@@ -3219,6 +3539,25 @@ def _upgrade_marker(repo: str, number: int, sha: str, app: str) -> str:
     return f"{_digest(_scoped(app, f'{repo.lower()}#{number}@{sha}:approve'))}.json"
 
 
+def _pair_marker(repo: str, number: int, sha: str, apps: Iterable, upgrade: bool = False) -> str:
+    """The marker of a pair review of the PR at that head commit by those apps, whichever led it: a kind of its own,
+    so a later review of the same head by either app alone is posted once under its own (_github_marker); with
+    upgrade, the marker of its one APPROVE after a COMMENT."""
+    pair = "+".join(sorted(apps))
+    return f"{_digest(f'pair:{pair}:{repo.lower()}#{number}@{sha}' + (':approve' if upgrade else ''))}.json"
+
+
+def _markers(record: dict) -> tuple:
+    """(the GitHub marker, the upgrade marker) of the record's review: a pair review's (_pair_marker), else its
+    app's."""
+    repo, number, sha, app = record["repo"], record["number"], record["sha"], app_of(record)
+    partner = _partner(record)
+    if partner is not None:
+        return (_pair_marker(repo, number, sha, (app, partner)),
+                _pair_marker(repo, number, sha, (app, partner), upgrade=True))
+    return _github_marker(repo, number, sha, app), _upgrade_marker(repo, number, sha, app)
+
+
 def github_on() -> bool:
     return common.opt_in_on(config.CHAT_REVIEW_GITHUB_FILE)
 
@@ -3236,13 +3575,13 @@ def intake_on(record: dict) -> bool:
 def github_event(verdict: str, blocking: list, non_blocking: list = (), summary: str = "",
                  partial: bool = False, risk: Optional[str] = None) -> str:
     """The PR review's event: REQUEST_CHANGES for a CHANGES verdict, APPROVE for a PASS with no blocking finding and
-    nothing withheld of a review that read the whole diff (not partial) and rated its risk low or medium (a high-risk
+    nothing withheld (a pair's summaries included) of a review that read the whole diff (not partial) and rated its risk low or medium (a high-risk
     change needs a person to approve it) while both chat-review-github and chat-review-approve are on (read now), else
     COMMENT."""
     if verdict == "CHANGES" and blocking:
         return "REQUEST_CHANGES"
     if verdict == "PASS" and not blocking and not any(item.endswith(WITHHELD) for item in non_blocking) \
-            and summary != SUMMARY_WITHHELD and not partial and risk in ("low", "medium") and github_on() \
+            and SUMMARY_WITHHELD not in summary and not partial and risk in ("low", "medium") and github_on() \
             and approve_on():
         return "APPROVE"
     return "COMMENT"
@@ -3263,11 +3602,12 @@ def _github_review(record: dict) -> dict:
     requester, sha, verdict, app = (display_name(record.get("requester_name")), record["sha"], record["verdict"],
                                     app_of(record))
     hunks = record.get("hunks") if isinstance(record.get("hunks"), dict) else {}
+    pair = {"opening": _pair_opening(record, requester), "heading": _pair_heading(record)}
     return {"comments": comments, "hunks": hunks,
             "body": github_body(requester, sha, verdict, blocking, non_blocking, app, _summary(record),
-                                **_left(record), **_facts(record)),
+                                **_left(record), **_facts(record), **pair),
             "flat": github_body(requester, sha, verdict, record.get("blocking", []), record.get("non_blocking", []),
-                                app, _summary(record), **_left(record), **_facts(record))}
+                                app, _summary(record), **_left(record), **_facts(record), **pair)}
 
 
 def _send(poster: Callable, key: str, record: dict, event: str, review: dict) -> tuple:
@@ -3309,12 +3649,11 @@ def post_github(key: str, record: dict, poster: Callable = None) -> dict:
     poster = poster or gitops.post_pr_review
     if record.get("kind") != "review":
         raise FleetError("only a review is posted on GitHub")
-    repo, number, sha, app = record["repo"], record["number"], record["sha"], app_of(record)
     if not intake_on(record):
         return record  # a Chat request waits, its GitHub step not begun, until the intake is on again
     if not github_on():
         return _end(key, record, "reviewed", github="off")
-    name = _github_marker(repo, number, sha, app)
+    name = _markers(record)[0]
     with _folder(GITHUB) as fd:
         if not markers.publish(fd, name, {"state": "posting", "request": key, "at": int(time.time())}):
             marker = _read(fd, name)
@@ -3368,11 +3707,10 @@ def _upgrade(key: str, record: dict, poster: Callable) -> dict:
     under its own marker made create-exclusive before the post, so a kill at any point never posts it twice. It
     carries its own inline comments, posted once more without them when GitHub refuses one (_send). A refused
     APPROVE leaves the COMMENT as it is and posts nothing else. Anything but APPROVE is "already"."""
-    repo, number, sha, app = record["repo"], record["number"], record["sha"], app_of(record)
     if github_event(record["verdict"], record.get("blocking", []), record.get("non_blocking", []),
                     _summary(record), _partial(record), record.get("risk")) != "APPROVE":
         return _end(key, record, "reviewed", github="already")
-    name, upgrade = _github_marker(repo, number, sha, app), _upgrade_marker(repo, number, sha, app)
+    name, upgrade = _markers(record)
     with _folder(GITHUB) as fd:
         if not markers.publish(fd, upgrade, {"state": "posting", "request": key, "at": int(time.time())}):
             return _end(key, record, "reviewed", github="already")
@@ -3446,7 +3784,7 @@ def _github_or_done(key: str, record: dict) -> dict:
 
 def _resume_github(key: str, record: dict) -> dict:
     """A request a kill stopped in its GitHub step: posted only when its marker is not there, so it never began."""
-    name = _github_marker(record["repo"], record["number"], record["sha"], app_of(record))
+    name = _markers(record)[0]
     with _folder(GITHUB) as fd:
         begun = safefs.lstat(fd, name) is not None
         marker = _read(fd, name) if begun else None
@@ -3465,7 +3803,7 @@ def _resume_github(key: str, record: dict) -> dict:
 def _resume_upgrade(key: str, record: dict) -> dict:
     """A request a kill stopped in its GitHub step after another request's post: its upgrade is tried only when its
     marker is not there, so it never began; one it began is posted or uncertain, never tried again."""
-    upgrade = _upgrade_marker(record["repo"], record["number"], record["sha"], app_of(record))
+    upgrade = _markers(record)[1]
     with _folder(GITHUB) as fd:
         begun = safefs.lstat(fd, upgrade) is not None
         marker = _read(fd, upgrade) if begun else None
@@ -3474,8 +3812,7 @@ def _resume_upgrade(key: str, record: dict) -> dict:
     if marker is None or marker.get("request") != key:
         return _end(key, record, "reviewed", github="already" if marker is not None else "uncertain")
     if marker["state"] == "posted":  # posted, perhaps killed before the first marker said so
-        _mark_upgraded(_github_marker(record["repo"], record["number"], record["sha"], app_of(record)), key,
-                       marker.get("url"))
+        _mark_upgraded(_markers(record)[0], key, marker.get("url"))
         return _end(key, record, "reviewed", github="posted", github_url=marker.get("url"), github_event="APPROVE",
                     github_inline=marker.get("inline"))
     return _end(key, record, "reviewed", github="uncertain")
@@ -3539,7 +3876,8 @@ def _status_line(record: dict, now: int) -> str:
     asked by display name, how long ago and where it stands, then its thread's link."""
     repo, number = record.get("repo"), record.get("number")
     pr = f"{repo}#{number}" if isinstance(repo, str) and _repo_ok(repo) and type(number) is int else "a PR"
-    what = {"review": f"review of {pr}", "question": f"question about {pr}"}.get(record.get("kind"), "a message")
+    what = {"review": f"{'pair ' if _partner(record) else ''}review of {pr}",
+            "question": f"question about {pr}"}.get(record.get("kind"), "a message")
     who = display_name(record.get("requester_name"))
     state, reason = record["state"], record.get("waiting")
     if state == "done":
@@ -3976,9 +4314,11 @@ def _followed(key: str, record: dict) -> dict:
                                     else follow.get("pending")})
                 log("followed", request=key[:12], app=app, follow=fkey[:12], sha=sha)
         elif not _stopped_after(record):
-            fkey = _start_follow(app, allowed_repo(record["repo"]) or record["repo"], record["number"],
-                                 _where(record), sha, now, started)
-            log("followed", request=key[:12], app=app, follow=fkey[:12], sha=sha)
+            # A pair review: each app whose review it holds follows the PR, each its own follow.
+            for desk in _reviewers(record) or [app]:
+                fkey = _start_follow(desk, allowed_repo(record["repo"]) or record["repo"], record["number"],
+                                     _where(record), sha, now, started)
+                log("followed", request=key[:12], app=desk, follow=fkey[:12], sha=sha)
     except (FleetError, OSError, KeyError, TypeError) as exc:
         log("follow-failed", request=key[:12], app=app,
             why=common.scrubbed_line(exc, 200) if isinstance(exc, FleetError) else type(exc).__name__)
@@ -4374,6 +4714,11 @@ def take_message(message: dict, space: str, token: str, known: dict, now: int, a
         else:
             record = {**record, "state": "queued", "kind": "review", "repo": asked[0], "number": asked[1],
                       "other_work": asks_other_work(message["argument"]), **_material(message)}
+    if record.get("kind") == "review" and message.get("other_apps") is not True:
+        # One that names the other app too is a pair review, led by this app; one that mentions both apps is not,
+        # since each takes it.
+        pair = parse_pair(message["argument"], app, served_apps())
+        record = {**record, "pair": pair} if pair is not None else record
     if not _create(key, record):
         return "seen before"
     if record["kind"] in ("follow", "unfollow"):  # done again before its reply when this fails or is cut short
@@ -4883,7 +5228,7 @@ def _reap_hung(key: str, record: dict, now: int) -> None:
 def _run_held(record: dict) -> bool:
     """Whether the run lock of the record's launch (run_desk.run_lock) is still held: its turn's process, which
     inherits it, still runs. False when its file is gone or cannot be read, which the turn lock then decides alone."""
-    desk, run_id = app_of(record), record.get("run_id")
+    desk, run_id = _run_desk_of(record), record.get("run_id")
     if not isinstance(run_id, str) or run_desk.CHAT_RUN_ID.fullmatch(run_id) is None:
         return False
     name = run_desk.run_lock_name(run_id)
@@ -4911,7 +5256,7 @@ def _resume(key: str, record: dict) -> str:
                              "outcome": "interrupted"})
         return _send_reply(key, record)["state"]
     left = {name: value for name, value in record.items()
-            if name not in ("run_id", "started", "cost_usd", "waiting", "waiting_since")}
+            if name not in ("run_id", "run_desk", "started", "cost_usd", "waiting", "waiting_since")}
     # A request is saved running only once its launch counted its caps, so it never counts them again.
     record = _save(key, {**left, "state": "queued", "resumes": resumes + 1, "counted": True})
     log(_event(record, "resumed"), request=key[:12], app=app_of(record), resumes=resumes + 1)
@@ -4928,11 +5273,17 @@ def _clear_workdir(key: str) -> None:
             os.close(root_fd)
 
 
+def _run_desk_of(record: dict) -> str:
+    """The desk of the record's launch: a pair review's turn's own (run_desk), else its app's."""
+    desk = record.get("run_desk")
+    return desk if desk in VOICES and desk in run_desk.CHAT_REVIEW_DESKS else app_of(record)
+
+
 def _clear_turn_files(record: dict) -> None:
     """Remove what a Codex turn of the request whose launcher was killed outright left in its desk's runs folder: its
     last-message file, and its run lock, which no reconcile settles for a desk that holds no spend. Called only once
     the request's PR lock is free, so the turn, which inherited it and its run lock, has ended."""
-    desk, run_id = app_of(record), record.get("run_id")
+    desk, run_id = _run_desk_of(record), record.get("run_id")
     if desk in config.HEADLESS_CODEX and isinstance(run_id, str) and run_desk.CHAT_RUN_ID.fullmatch(run_id):
         run_desk.drop_left_brief(desk, run_desk.last_message_name(run_id))
         if not run_desk.holds_spend(desk):
