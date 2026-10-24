@@ -108,22 +108,23 @@ Anyone in the company's Chat can send an app text, so everything here treats a m
   it never runs the PR's code and has no tool to act with. Its last block is read strictly (parse_block), a finding
   that repeats a long run of the PR's own text, its whole diff or the repo context included; anything else is a fixed
   "couldn't review" reply.
-- A pair review: a review request to one app whose text, outside its addresses, also names the other app (its desk
-  or its name, "with" or "and" it, or "both" or "pair review"), while that app is served and the message mentions no
-  other app, is led by the app mentioned (parse_pair, the record's pair). Both desks review the same head, one turn
-  after the other, each in its own sandbox with its own brief (PAIR_BRIEF: Hermione on correctness, tests and fit,
-  Moody security first), its own memory of earlier heads and its own desk caps; the person's cap counts once for the
-  pair and the fleet's twice (_cap_check), and the review holds the other desk's PR lock and a run slot of each. A
-  desk that is off or whose family is stopped is left out, and the lead says so in its plan; a turn that fails or
-  whose block is unusable is left out too. The job combines what parsed, never a model (combine): CHANGES when
-  either has a blocking finding, the higher risk, the findings tagged with their reviewer's name, two on the same
-  file and line merged into one entry naming both, the caveats of both, and each summary labelled. One that is left
-  alone is posted marked single, saying why the other is not in it. The lead posts one Chat reply and one GitHub
-  review under a marker of the pair's own (_pair_marker), with inline comments from both, so either app may still
-  post one review of its own of the same head; an echo-withheld or high-risk part blocks an approval as in one
-  review. Each app whose review it holds follows the PR (the other app only while its read marker says it is a member
-  of the conversation) and writes its own memory note from its own half. A half that parsed is kept on the record at
-  once (pair_halves), so one resumed after a kill at the same head never runs that desk again.
+- A pair review: a review request to one app whose text, outside its addresses, also names the other app (its desk or
+  its name, "with" or "and" it, or "both" or "pair review"), while that app is served and the message mentions no other
+  app, is led by the app mentioned (parse_pair, the record's pair). Both desks review the same head, one turn after the
+  other, each in its own sandbox with its own brief (PAIR_BRIEF: Hermione on correctness, tests and fit, Moody security
+  first), its own memory of earlier heads and its own desk caps; the person's cap counts once for the pair and the
+  fleet's twice (_cap_check), and the review holds the other desk's PR lock and a run slot of each. A desk that is off
+  or whose family is stopped is left out, and the lead says so in its plan; a turn that fails or whose block is
+  unusable, or that cannot launch once a turn of the pair began, is left out too. The job combines what parsed, never a
+  model (combine): CHANGES when either has a blocking finding, the higher risk, the findings tagged with their
+  reviewer's name, two on the same file and line merged into one entry naming both, the caveats of both, and each
+  summary labelled. One that is left alone is posted marked single, saying why the other is not in it. The lead posts
+  one Chat reply and one GitHub review under a marker of the pair's own (_pair_marker), with inline comments from both,
+  so either app may still post one review of its own of the same head; an echo-withheld or high-risk part blocks an
+  approval as in one review. Each app whose review it holds follows the PR (the other app only while its read marker
+  says it is a member of the conversation) and writes its own memory note from its own half. A half that parsed is kept
+  on the record at once (pair_halves), so one resumed after a kill at the same head never runs that desk again, with the
+  review it makes alone (pair_fallback), posted marked single when the pair is interrupted past its resumes or expires.
 - Every reply in a thread mentions the person it answers with Chat's user mention markup, built only from the
   sender's Chat user id (CHAT_USER) kept on the record, never their email; a person not on the list is answered with
   no mention, and who they are is never kept. An accepted request is acknowledged in its thread, as the app, once
@@ -332,6 +333,11 @@ PAIR_WHY = {"failed": "could not finish", "stopped": "is paused by a fleet stop"
 PAIR_OPENING = ("This is an automated pair review by {names}, requested by {requester} in Chat. Automated review; not"
                 " an independent human approval.")
 RISK_ORDER = ("low", "medium", "high")
+# What a pair review's record keeps of the review its parsed halves make alone (pair_fallback), to post marked single
+# when the pair ends interrupted or expired before the other half (_pair_fallen_back).
+PAIR_FALLBACK = ("reply", "outcome", "verdict", "summary", "risk", "blocking", "non_blocking", "not_verified", "hunks",
+                 "not_reviewed", "not_reviewed_count", "halves", "memory", "reviewers", "single", "sha", "base_sha",
+                 "base_ref", "checks", "linked")
 # The most words, outside its addresses, a message that does not mention the app may have and still be taken in a thread
 # the app took a mention in.
 UNMENTIONED_WORDS_MAX = 8
@@ -1224,8 +1230,9 @@ def _names_app(text: str, app: str) -> bool:
 
 def parse_pair(text: object, app: str, served: Iterable) -> Optional[str]:
     """The other app a review request to app asks to review with it (a pair review), else None: its text, outside
-    every address, link and markup (MARKUP, ADDRESS_WORD, in any letter case), names exactly one other app that is served (_names_app), or, naming none,
-    says "both" or "pair review" while exactly one other app is served. Nothing else in the text is read or kept."""
+    every address, link and markup (MARKUP, ADDRESS_WORD, in any letter case), names exactly one other app that is
+    served (_names_app), or, naming none, says "both" or "pair review" while exactly one other app is served. Nothing
+    else in the text is read or kept."""
     if not isinstance(text, str):
         return None
     plain = " ".join(word for word in typographic(MARKUP.sub(" ", text)).split() if ADDRESS_WORD.search(word) is None)
@@ -2771,9 +2778,16 @@ def review(conn, key: str, record: dict, pr_fd: int) -> dict:
     shaped = shape_diff(diff) if diff is not None else None
     if shaped is None:
         return finish(TOO_LARGE, "too-large", sha=sha)
-    results, spent, material = {}, 0.0, record.get("material")
-    # A pair's half that parsed before a kill, at this head, is kept and never run again (_carried).
+    results, spent, material, errors = {}, 0.0, record.get("material"), []
+    # A pair's half that parsed before a kill, at this head, is kept and never run again (_carried); what was kept
+    # at another head is let go.
     carried = _carried(record, sha) if partner is not None else {}
+    if partner is not None:
+        fallback = record.get("pair_fallback") if isinstance(record.get("pair_fallback"), dict) else {}
+        record = {**{name: value for name, value in record.items() if name not in ("pair_halves", "pair_fallback")},
+                  **({"pair_halves": {run: {"sha": sha, **half._asdict()} for run, half in carried.items()}}
+                     if carried else {}),
+                  **({"pair_fallback": fallback} if carried and fallback.get("sha") == sha else {})}
     parsed, failed, todo = dict(carried), {}, [run for run in runs if run not in carried]
     # A run slot and the launch gate are taken before the acknowledgement and held through the launch, so a review
     # that cannot start gets its holding line (_hold) instead, and one acknowledged never waits on either. A pair takes
@@ -2796,6 +2810,8 @@ def review(conn, key: str, record: dict, pr_fd: int) -> dict:
         found = _gather(key, record, nonce)
         context = _context(key, record, sha, paths)
         untrusted = "\n".join((pr["title"], pr["body"], diff, facts, found.untrusted, context.untrusted))
+        # The title and folders its memory note will hold (remember), fit for a note now, so no PR text is kept raw.
+        memory = {"title": _memory_text(pr["title"], MEMORY_TITLE_MAX), "folders": _top_folders(paths)}
         for run in todo:
             past, past_titles = _recall(key, record, nonce, lambda run=run: earlier_heads(run, repo, number, sha, now))
             brief = VOICES[run].brief + (PAIR_BRIEF.get(run, "") if len(runs) > 1 else "")
@@ -2806,13 +2822,15 @@ def review(conn, key: str, record: dict, pr_fd: int) -> dict:
                                                             shaped.notes() + context.lines, facts, past),
                                                images=found.images, context=context.files, admitted=admitted[run],
                                                desk=run if partner is not None else None, hand=hand)
-            except (FleetError, StoreError, OSError) as exc:  # Later too
-                if partner is None or not (results or parsed):
+            except (FleetError, StoreError, OSError) as exc:
+                # A pair's turn that cannot start now (Later) before any other ran waits as one review does; any
+                # other trouble with one desk's turn leaves the other's review to stand alone.
+                if partner is None or (isinstance(exc, Later) and not (results or parsed or failed)):
                     raise
-                # The other's review stands alone.
                 why = common.scrubbed_line(exc, 200) if isinstance(exc, FleetError) else type(exc).__name__
                 log("pair-turn-failed", request=key[:12], app=run, why=why)
                 failed[run] = ("turn-failed", None)
+                errors.append(exc)
                 continue
             results[run] = (outcome, text, past_titles)
             if partner is None:
@@ -2828,11 +2846,15 @@ def review(conn, key: str, record: dict, pr_fd: int) -> dict:
                 failed[run] = (outcome, text)
                 continue
             parsed[run] = half
-            # Kept on record at once, so a kill before the other turn ends never loses it (_carried).
-            record = _save(key, {**record, "pair_halves": {**_halves_kept(record), run: {
-                "sha": sha, **half._asdict()}}})
-    # The title and folders its memory note will hold (remember), fit for a note now, so no PR text is kept raw.
-    memory = {"title": _memory_text(pr["title"], MEMORY_TITLE_MAX), "folders": _top_folders(paths)}
+            # Kept on record at once, so a kill before the other turn ends never loses it (_carried), with the
+            # review it makes alone (pair_fallback), posted as single if the pair never ends otherwise.
+            unfinished = {other: ("turn-failed", None) for other in (desk, partner)
+                          if other not in parsed and other not in absent}
+            alone = _pair_ended(_unasked(record), runs, absent, parsed, {**unfinished, **failed}, shaped, memory)
+            record = _save(key, {**record, "pair_halves": {**_halves_kept(record), run: {"sha": sha, **half._asdict()}},
+                                 "pair_fallback": {name: alone[name] for name in PAIR_FALLBACK if name in alone}})
+    if partner is not None and not parsed and errors and len(errors) == len(failed):
+        raise errors[0]  # nothing but trouble launching: as one review's
     if partner is not None:
         return _pair_ended({**_unasked(record), "cost_usd": round(spent, 4)}, runs, absent, parsed, failed, shaped,
                            memory)
@@ -2900,7 +2922,7 @@ def _pair_ended(record: dict, runs: list, absent: dict, parsed: dict, failed: di
     (single: absent's reason, else failed). None parsed: the first refusal among the failed turns (failed, desk:
     (outcome, text)), else the first failure, as one review's."""
     repo, number, sha = record["repo"], record["number"], record["sha"]
-    record = {name: value for name, value in record.items() if name != "pair_halves"}
+    record = {name: value for name, value in record.items() if name not in ("pair_halves", "pair_fallback")}
 
     def finish(reply: str, outcome: str, **fields) -> dict:
         return {**record, **fields, "state": "reply", "reply": reply, "outcome": outcome}
@@ -3624,9 +3646,9 @@ def intake_on(record: dict) -> bool:
 def github_event(verdict: str, blocking: list, non_blocking: list = (), summary: str = "",
                  partial: bool = False, risk: Optional[str] = None) -> str:
     """The PR review's event: REQUEST_CHANGES for a CHANGES verdict, APPROVE for a PASS with no blocking finding and
-    nothing withheld (a pair's summaries included) of a review that read the whole diff (not partial) and rated its risk low or medium (a high-risk
-    change needs a person to approve it) while both chat-review-github and chat-review-approve are on (read now), else
-    COMMENT."""
+    nothing withheld (a pair's summaries included) of a review that read the whole diff (not partial) and rated its
+    risk low or medium (a high-risk change needs a person to approve it) while both chat-review-github and
+    chat-review-approve are on (read now), else COMMENT."""
     if verdict == "CHANGES" and blocking:
         return "REQUEST_CHANGES"
     if verdict == "PASS" and not blocking and not any(item.endswith(WITHHELD) for item in non_blocking) \
@@ -5256,8 +5278,9 @@ def settle(conn, now: Optional[int] = None, only_hand: bool = False) -> list:
                 # the queue limit.
                 done.append(_end(key, record, "unfollowed")["state"])
             elif state == "queued" and now - int(record.get("at", 0)) > config.CHAT_REVIEW_QUEUE_MAX_SECONDS:
-                record = _save(key, {**_unasked(record), "state": "reply", "reply": _could_not(record),
-                                     "outcome": "expired"})
+                fallen = _pair_fallen_back(key, record)  # a pair's half that parsed is posted alone
+                record = fallen if fallen is not None else _save(key, {
+                    **_unasked(record), "state": "reply", "reply": _could_not(record), "outcome": "expired"})
                 done.append(_send_reply(key, record)["state"])
             elif state == "queued" and record.get("mentioned") is False and not _still_listening(record):
                 # An earlier mention of the thread by the other app was recorded only after this was taken: Chat
@@ -5313,8 +5336,9 @@ def _resume(key: str, record: dict) -> str:
     resumes = record.get("resumes", 0)
     resumes = resumes if type(resumes) is int and resumes >= 0 else config.CHAT_REVIEW_RESUME_MAX
     if record.get("source") not in IN_THREAD or resumes >= config.CHAT_REVIEW_RESUME_MAX:
-        record = _save(key, {**_unasked(record), "state": "reply", "reply": _could_not(record),
-                             "outcome": "interrupted"})
+        fallen = _pair_fallen_back(key, record)
+        record = fallen if fallen is not None else _save(key, {**_unasked(record), "state": "reply",
+                                                               "reply": _could_not(record), "outcome": "interrupted"})
         return _send_reply(key, record)["state"]
     left = {name: value for name, value in record.items()
             if name not in ("run_id", "run_desk", "started", "cost_usd", "waiting", "waiting_since")}
@@ -5322,6 +5346,22 @@ def _resume(key: str, record: dict) -> str:
     record = _save(key, {**left, "state": "queued", "resumes": resumes + 1, "counted": True})
     log(_event(record, "resumed"), request=key[:12], app=app_of(record), resumes=resumes + 1)
     return "resumed"
+
+
+def _pair_fallen_back(key: str, record: dict) -> Optional[dict]:
+    """A pair review that ends before its other half (interrupted past its resumes, or expired in the queue) but has a
+    half that parsed: saved as that review alone, marked single (pair_fallback), to be replied and posted as any
+    review. None when it has none."""
+    fallback = record.get("pair_fallback")
+    if _partner(record) is None or not isinstance(fallback, dict) or fallback.get("outcome") != "reviewed" \
+            or fallback.get("verdict") not in ("PASS", "CHANGES") or not isinstance(fallback.get("reply"), str):
+        return None
+    kept = {name: value for name, value in _unasked(record).items()
+            if name not in ("pair_halves", "pair_fallback", "run_id", "run_desk", "started", "waiting",
+                            "waiting_since")}
+    log("pair-fallen-back", request=key[:12], app=app_of(record))
+    return _save(key, {**kept, **{name: fallback[name] for name in PAIR_FALLBACK if name in fallback},
+                       "state": "reply"})
 
 
 def _clear_workdir(key: str) -> None:

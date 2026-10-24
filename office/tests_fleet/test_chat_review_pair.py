@@ -10,7 +10,7 @@ import time
 
 from fleet import chat_review, config, run_desk
 from tests_fleet.test_chat_review import (HEAD, MENTION, MOODY_APP_USER, MOODY_NAME, NEWER, NOT_HUMAN, SENDER, SPACE,
-                                          THREAD, URL, ChatCase, block, caps_used, msg)
+                                          THREAD, URL, ChatCase, Killed, block, caps_used, msg)
 
 HERMIONE_NAME = "Hermione (Staff Engineer)"
 SECOND = "Second Reviewer"  # the second app's short name: its name less the part in brackets
@@ -155,8 +155,8 @@ class PairRunTests(PairCase):
                                                   "N2 PR title | Hermione: vague", f"N3 b.py:3 | {SECOND}: spacing"])
         self.assertEqual((joined["verdict"], joined["risk"], joined["not_verified"], joined["summary"]),
                          ("CHANGES", "medium", ["v1", "v2"], f"Hermione: h\n{SECOND}: m"))
-        passing = chat_review.combine({"hermione": parsed("PASS", [], [], "low"), "moody": parsed("PASS", [], [], "low")},
-                                      ["hermione", "moody"])
+        passing = chat_review.combine({"hermione": parsed("PASS", [], [], "low"),
+                                       "moody": parsed("PASS", [], [], "low")}, ["hermione", "moody"])
         self.assertEqual((passing["verdict"], passing["risk"], passing["blocking"]), ("PASS", "low", []))
 
     def test_one_chat_reply_and_one_github_review_with_inline_comments_from_both(self):
@@ -346,6 +346,59 @@ class PairSingleTests(PairCase):
         self.patch(run_desk, "chat_review_argv", side_effect=argv)
         self.pair()
         self.assertEqual(seen, [["hermione"]])
+
+    def test_a_first_turn_that_cannot_launch_leaves_the_second_to_review_alone(self):
+        real = run_desk.chat_review_argv
+
+        def argv(conn, brief, prompt, run_id, desk="hermione", *args, **kwargs):
+            if desk == "hermione":
+                raise chat_review.FleetError("the chat review settings are not the report-only shape")
+            return real(conn, brief, prompt, run_id, desk, *args, **kwargs)
+        self.patch(run_desk, "chat_review_argv", side_effect=argv)
+        self.pair()
+        self.assertEqual([turn["desk"] for turn in self.turns], ["moody"])
+        self.assertEqual(self.record()["single"], {"desk": "hermione", "why": "failed"})
+        self.assertTrue(self.texts()[0].startswith(f"Single review by {SECOND}: Hermione could not finish."))
+
+    def test_neither_turn_launching_waits_as_one_review_would(self):
+        self.patch(run_desk, "chat_review_argv", side_effect=chat_review.FleetError("no profile"))
+        self.pair()
+        self.assertEqual((self.texts(), self.record()["state"]), ([], "queued"))
+        self.assertIn("step-failed", [line["event"] for line in self.log_lines()])
+
+    def killed_in_the_second_turn(self) -> str:
+        """A pair whose launcher is killed while Moody's turn runs, after Hermione's half parsed: its key."""
+        self.answers["moody"] = Killed()
+        with self.assertRaises(Killed):
+            self.pair()
+        [(key, record)] = chat_review._records()
+        self.assertEqual((record["state"], sorted(record["pair_halves"])), ("running", ["hermione"]))
+        self.answers["moody"] = ("failed", "")
+        return key
+
+    def test_a_pair_interrupted_past_its_resumes_posts_its_parsed_half_marked_single(self):
+        self.switch(config.CHAT_REVIEW_GITHUB_FILE, True)
+        key = self.killed_in_the_second_turn()
+        self.patch(config, "CHAT_REVIEW_RESUME_MAX", 0)
+        self.run_pass()
+        record = chat_review.read_record(key)
+        self.assertEqual((record["outcome"], record["verdict"], record["reviewers"], record["github"]),
+                         ("reviewed", "PASS", ["hermione"], "posted"))
+        self.assertNotIn("pair_halves", record)
+        self.assertTrue(self.texts()[0].startswith(f"Single review by Hermione: {SECOND} could not finish.\n"))
+        self.assertEqual(len(self.turns), 2)  # no turn ran again
+
+    def test_a_pair_expired_in_the_queue_posts_its_parsed_half_marked_single(self):
+        key = self.killed_in_the_second_turn()
+        for family in ("claude", "codex"):
+            self.write_file(self.office / "state" / config.STOP_FAMILY_FILES[family], "1 an update\n")
+        self.assertEqual(self.run_pass()["settled"], ["resumed"])
+        record = chat_review.read_record(key)
+        chat_review._save(key, {**record, "at": record["at"] - config.CHAT_REVIEW_QUEUE_MAX_SECONDS - 1})
+        self.run_pass()
+        record = chat_review.read_record(key)
+        self.assertEqual((record["outcome"], record["reviewers"]), ("reviewed", ["hermione"]))
+        self.assertTrue(self.texts()[0].startswith(f"Single review by Hermione: {SECOND} could not finish.\n"))
 
     def test_both_turns_failing_is_the_fixed_failure(self):
         self.answers = {"hermione": ("failed", ""), "moody": ("failed", "")}
