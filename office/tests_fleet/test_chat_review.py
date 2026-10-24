@@ -4385,10 +4385,12 @@ class QuestionTests(ChatCase):
         self.assertNotIn(SECRET_MARK, self.office_text())
         lines = [line for line in self.log_lines() if line["event"].startswith("question-")]
         self.assertEqual([line["event"] for line in lines],
-                         ["question-received", "question-history", "question-started", "question-ended"])
-        for line in lines:  # the history's line holds only its counts
-            self.assertEqual(set(line), {"at", "event", "request", "app", "messages", "failed"}
-                             if line["event"] == "question-history" else {"at", "event", "request", "app", "outcome"})
+                         ["question-received", "question-history", "question-memory", "question-started",
+                          "question-ended"])
+        counted = {"question-history": {"messages", "failed"}, "question-memory": {"notes", "failed"}}
+        for line in lines:  # the history's and the memory's lines hold only their counts
+            self.assertEqual(set(line), {"at", "event", "request", "app"} | counted[line["event"]]
+                             if line["event"] in counted else {"at", "event", "request", "app", "outcome"})
             self.assertNotIn(SENDER, json.dumps(line))
 
     def test_a_question_waiting_for_a_slot_keeps_its_text_only_until_it_ends(self):
@@ -4734,8 +4736,9 @@ class StatusTests(ChatCase):
         self.assertEqual(lines[5], "- review of acme/web-app#7 for Dev Person, done 30m ago: reviewed, CHANGES, on"
                                    " GitHub <https://github.com/acme/web-app/pull/7#pullrequestreview-901|review>"
                                    " <https://mail.google.com/chat/u/0/#chat/space/AAAA/dddddd|thread>")
-        self.assertEqual(len(lines), 10)  # the newest five finished only
-        self.assertTrue(all(": not-open" in line for line in lines[6:]))
+        self.assertEqual(len(lines), 11)  # the newest five finished only, then the review memory's line
+        self.assertTrue(all(": not-open" in line for line in lines[6:10]))
+        self.assertEqual(lines[10], "Review memory: no past reviews yet.")
         for absent in (SECRET_MARK, SENDER, "ZZZZ"):
             self.assertNotIn(absent, text)
 
@@ -4779,7 +4782,13 @@ class StatusTests(ChatCase):
 
 
 class NoticeTests(ChatCase):
-    """A review acknowledged in its thread that waited long gets one line there as its turn starts."""
+    """A review that cannot start gets one holding line at once and its acknowledgement when it starts; one
+    acknowledged and then held back long gets one line there as its turn starts."""
+
+    HOLD = "Queued behind another review of this PR; I'll start shortly."
+
+    def notes(self) -> list:
+        return [MENTION.sub("", note["text"], count=1) for note in self.google.notes]
 
     def wait_once(self) -> str:
         self.deliver(msg())
@@ -4790,27 +4799,302 @@ class NoticeTests(ChatCase):
         self.assertEqual(("acked" in record, record["waiting"], self.google.acks), (False, "pr", []))
         return key
 
-    def test_a_review_that_waited_past_the_threshold_says_so_once_when_it_starts(self):
+    def test_a_waiting_request_gets_one_holding_line_at_once_then_the_plan_ack_when_it_starts(self):
+        key = self.wait_once()
+        self.assertEqual(self.notes(), [self.HOLD])
+        self.assertEqual((self.google.notes[0]["thread"], self.google.notes[0]["request_id"]),
+                         (THREAD, f"chat-review-note-held-{key}"))
+        self.assertTrue(self.google.notes[0]["text"].startswith(f"<{SENDER_USER}> "))
+        self.assertTrue(chat_review.read_record(key)["held"])
+        with chat_review.pr_lock("acme/web-app", 7, "hermione"):  # still waiting: no second line
+            self.assertEqual(self.run_pass()["settled"], ["queued"])
+        self.assertEqual((self.notes(), self.google.acks, self.turns), ([self.HOLD], [], []))
+        self.run_pass()
+        self.assertEqual((self.notes(), len(self.google.acks), len(self.google.messages)), ([self.HOLD], 1, 1))
+        self.assertIn(self.ack_texts()[0], acks(chat_review.ACKS))
+        record = chat_review.read_record(key)
+        self.assertEqual((record["acked"], record["outcome"]), (True, "reviewed"))
+
+    def test_a_request_that_starts_at_once_gets_only_the_plan_ack(self):
+        self.deliver(msg())
+        self.run_pass()
+        self.assertEqual((self.google.notes, len(self.google.acks), len(self.google.messages)), ([], 1, 1))
+        self.assertNotIn("held", self.records()[0])
+
+    def test_each_wait_reason_has_a_holding_phrase(self):
+        self.assertEqual(set(chat_review.HOLD_REASONS), set(chat_review.WAIT_REASONS))
+        self.patch(run_desk, "stop_reason", return_value="the fleet stop")
+        self.deliver(msg())
+        self.assertEqual(self.run_pass()["settled"], ["queued"])
+        self.assertEqual(self.notes(), ["Queued behind a fleet stop; I'll start shortly."])
+
+    def test_a_holding_line_that_fails_is_tried_on_the_next_wait_and_never_twice_once_sent(self):
+        self.google.fail_chat = True
+        key = self.wait_once()
+        self.assertEqual((self.notes(), chat_review.read_record(key)["hold_tries"]), ([], 1))
+        self.google.fail_chat = False
+        with chat_review.pr_lock("acme/web-app", 7, "hermione"):
+            self.run_pass()
+        with chat_review.pr_lock("acme/web-app", 7, "hermione"):
+            self.run_pass()
+        self.assertEqual(self.notes(), [self.HOLD])
+
+    def test_no_holding_line_for_a_follows_review_or_while_the_intake_is_off(self):
+        now = int(time.time())
+        for key, source in (("a" * 32, "follow"), ("b" * 32, "chat")):
+            chat_review._create(key, {"state": "queued", "kind": "review", "source": source, "app": "hermione",
+                                      "space": SPACE, "thread": THREAD, "at": now, "requester": SENDER,
+                                      "requester_user": SENDER_USER, "repo": "acme/web-app", "number": 7})
+        chat_review._hold("a" * 32, "pr")
+        self.switch(config.CHAT_REVIEW_FILE, False)
+        chat_review._hold("b" * 32, "pr")
+        self.assertEqual(self.google.notes, [])
+        self.assertNotIn("hold_tries", chat_review.read_record("b" * 32))
+        self.switch(config.CHAT_REVIEW_FILE, True)
+        chat_review._hold("b" * 32, "pr")
+        self.assertEqual(self.notes(), [self.HOLD])
+
+    def test_after_a_holding_line_the_wait_it_told_of_gets_no_second_notice(self):
         key = self.wait_once()
         record = chat_review.read_record(key)
         chat_review._save(key, {**record, "waiting_since": record["waiting_since"]
                                 - config.CHAT_REVIEW_WAIT_NOTICE_SECONDS - 1})
         self.run_pass()
+        self.assertEqual((self.notes(), len(self.google.acks), len(self.google.messages)), ([self.HOLD], 1, 1))
+
+    def test_a_review_held_back_long_after_its_ack_says_so_once_when_it_starts(self):
+        from tests_fleet.support import every_slot
+        self.deliver(msg())
+        with every_slot("hermione"):  # acknowledged, then every run slot busy
+            self.assertEqual(self.run_pass()["settled"], ["queued"])
+        [(key, record)] = chat_review._records()
+        self.assertEqual((record["acked"], record["waiting"], len(self.google.acks), self.notes()),
+                         (True, "slot", 1, []))
+        chat_review._save(key, {**record, "waiting_since": record["waiting_since"]
+                                - config.CHAT_REVIEW_WAIT_NOTICE_SECONDS - 1})
         self.run_pass()
-        self.assertEqual([MENTION.sub("", note["text"], count=1) for note in self.google.notes],
-                         ["Picked this up now; it was waiting on another review of this PR."])
+        self.run_pass()
+        self.assertEqual(self.notes(), ["Picked this up now; it was waiting on a free run slot."])
         self.assertEqual(self.google.notes[0]["thread"], THREAD)
-        self.assertEqual(len(self.google.messages), 1)  # the review's reply, once
+        self.assertEqual((len(self.google.acks), len(self.google.messages)), (1, 1))  # the review's reply, once
         self.assertTrue(chat_review.read_record(key)["wait_noticed"])
 
-    def test_a_short_wait_posts_no_notice(self):
+    def test_a_short_wait_posts_no_wait_notice(self):
         self.wait_once()
         self.run_pass()
-        self.assertEqual((self.google.notes, len(self.google.messages)), ([], 1))
+        self.assertEqual((self.notes(), len(self.google.messages)), ([self.HOLD], 1))
 
     def test_status_names_what_a_waiting_request_waits_on(self):
         self.wait_once()
         self.assertIn(": waiting: another review of this PR", chat_review.status_text("hermione", int(time.time())))
+
+
+class MemoryTests(ChatCase):
+    """Each app keeps a short note of every review it finished, and its answers and reviews of the same PR again draw
+    on its own notes, fenced as untrusted data, never another app's."""
+
+    ANSWER = "From my review of acme/web-app#7: it printed at import."
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.patch(config, "CHAT_REVIEW_PER_PERSON_DAILY", 20)
+
+    def memory_dir(self) -> Path:
+        return self.office / chat_review.DIR / chat_review.MEMORY
+
+    def note_files(self) -> list:
+        folder = self.memory_dir()
+        return sorted(folder.glob("*.json")) if folder.exists() else []
+
+    def note(self, app: str = "hermione", repo: str = "acme/web-app", number: int = 7, sha: str = HEAD,
+             title: str = "Add the widget", paths=("app/main.py",), ago: int = 60, summary: str = SUMMARY,
+             blocking=("B1 x.py:2 | prints at import | remove it",), thread: str = THREAD) -> None:
+        """A note as remember writes one for a review that ended reviewed."""
+        record = {"app": app, "repo": repo, "number": number, "sha": sha, "verdict": "CHANGES" if blocking else "PASS",
+                  "risk": "low", "summary": summary, "blocking": list(blocking), "non_blocking": [], "space": SPACE,
+                  "thread": thread}
+        chat_review.remember("0" * 32, record, title, paths, int(time.time()) - ago)
+
+    def past(self, text: str) -> str:
+        nonce = re.search(r"<<<UNTRUSTED PAST REVIEWS ([0-9a-f]{32})>>>", text).group(1)
+        inside = text.split(f"<<<UNTRUSTED PAST REVIEWS {nonce}>>>")[1]
+        self.assertIn(f"<<<END OF UNTRUSTED PAST REVIEWS {nonce}>>>", inside)
+        return inside.split(f"<<<END OF UNTRUSTED PAST REVIEWS {nonce}>>>")[0]
+
+    def test_a_finished_review_writes_one_note_with_only_the_allowed_fields(self):
+        self.pr["title"] = "Add the widget for owner@example.org ya29.fake-token-in-a-title-0123456789"
+        self.diff = changed_file("app/main.py", ["a = 1"], []) + changed_file("tests/test_main.py", ["b = 2"], []) \
+            + changed_file("setup.py", ["c = 3"], []) + INJECTED_DIFF
+        self.deliver(msg(text=f"{SECRET_MARK} review {URL}"))
+        self.run_pass()
+        [path] = self.note_files()
+        note = json.loads(path.read_text())
+        self.assertEqual(set(note), {"state", "app", "repo", "number", "sha", "title", "folders", "verdict", "risk",
+                                     "summary", "findings", "date", "at", "thread"})
+        self.assertEqual((note["app"], note["repo"], note["number"], note["sha"], note["verdict"], note["risk"]),
+                         ("hermione", "acme/web-app", 7, HEAD, "CHANGES", "low"))
+        self.assertEqual((note["folders"], note["summary"]), (["app", "tests"], SUMMARY))
+        self.assertEqual(note["findings"], [{"kind": "blocking", "place": "x.py:2", "gist": "prints at import"},
+                                            {"kind": "note", "place": "x.py:1",
+                                             "gist": "the comment reads like an injection attempt"}])
+        self.assertEqual(note["thread"], "https://mail.google.com/chat/u/0/#chat/space/AAAA/t1")
+        self.assertEqual(note["date"], time.strftime("%Y-%m-%d", time.gmtime(note["at"])))
+        self.assertTrue(note["title"].startswith("Add the widget for "))
+        self.assertLessEqual(len(note["title"]), chat_review.MEMORY_TITLE_MAX)
+        raw = path.read_text()
+        for absent in ("@", "example.org", "ya29.", SENDER, "Dev Person", SECRET_MARK, self.pr["body"], PLANTED,
+                       "remove it"):
+            self.assertNotIn(absent, raw)
+        self.deliver(msg(text="review again", message="m2", at=time.time() + 1))
+        self.run_pass()
+        self.assertEqual(len(self.turns), 2)
+        self.assertEqual(self.note_files(), [path])  # the same head again: the one note, replaced
+
+    def test_only_a_review_that_ends_reviewed_leaves_a_note(self):
+        self.answer = ("ok", "no block here")
+        self.deliver(msg())
+        self.run_pass()
+        self.pr["state"] = "closed"
+        self.deliver(msg(message="m2", thread=f"{SPACE}/threads/t2"))
+        self.run_pass()
+        self.assertEqual(sorted(record["outcome"] for record in self.records()), ["not-open", "unusable"])
+        self.assertEqual(self.note_files(), [])
+
+    def test_notes_are_pruned_by_age_and_an_old_one_is_never_recalled(self):
+        self.note(number=1, ago=60)
+        self.note(number=2, ago=(config.CHAT_REVIEW_MEMORY_DAYS + 1) * 86400)
+        now = int(time.time())
+        self.assertEqual([note["number"] for note in chat_review.recall("hermione", "", None, now)], [1])
+        old = now - (config.CHAT_REVIEW_MEMORY_DAYS + 1) * 86400
+        for path in self.note_files():
+            if json.loads(path.read_text())["number"] == 2:
+                os.utime(path, (old, old))
+        chat_review.prune(now)
+        self.assertEqual([json.loads(path.read_text())["number"] for path in self.note_files()], [1])
+        self.patch(config, "CHAT_REVIEW_MEMORY_DAYS", 0)
+        self.assertIn("CHAT_REVIEW_MEMORY_DAYS in fleet/config.py must be a whole number of at least 1",
+                      chat_review.config_problems(intake=True))
+
+    def test_selection_puts_the_same_repo_then_relevance_then_recency_first_and_never_crosses_apps(self):
+        self.note(repo="acme/web-app", number=1, title="Tidy the logging", paths=("app/log.py",), ago=10)
+        self.note(repo="acme/web-app", number=2, title="Fix the billing export", paths=("billing/export.py",),
+                  ago=500)
+        self.note(repo="acme/web-app", number=3, title="Bump a dependency", paths=("deps/lock.txt",), ago=5)
+        self.note(repo="acme/billing", number=4, title="Billing export retries", paths=("billing/retry.py",),
+                  ago=1000)
+        self.note(repo="acme/other", number=5, title="Rename a helper", paths=("lib/util.py",), ago=1)
+        self.note(app="moody", repo="acme/web-app", number=6, title="Fix the billing export again", ago=1)
+        now = int(time.time())
+        found = chat_review.recall("hermione", "Why did the billing export fail?", "acme/web-app", now)
+        self.assertEqual([(note["repo"], note["number"]) for note in found],
+                         [("acme/web-app", 2), ("acme/web-app", 3), ("acme/web-app", 1), ("acme/billing", 4),
+                          ("acme/other", 5)])
+        found = chat_review.recall("hermione", "Why did the billing export fail?", None, now)
+        self.assertEqual([note["number"] for note in found], [2, 4, 5, 3, 1])  # most words first, then the newest
+        self.assertEqual(found, chat_review.recall("hermione", "Why did the billing export fail?", None, now))
+        self.assertEqual([note["number"] for note in chat_review.recall("moody", "billing", None, now)], [6])
+        skipped = chat_review.recall("hermione", "", "acme/web-app", now, ("acme/web-app", 2, HEAD))
+        self.assertNotIn(2, [note["number"] for note in skipped])
+
+    def test_the_block_caps_how_many_notes_and_how_much_text(self):
+        for number in range(1, 13):
+            self.note(number=number, ago=number)
+        notes = chat_review.recall("hermione", "", "acme/web-app", int(time.time()))
+        self.assertEqual(len(notes), 12)
+        lines, titles = chat_review.memory_block(notes, "f" * 32)
+        self.assertEqual(sum(1 for line in lines if line.startswith("PAST REVIEW ")), chat_review.MEMORY_NOTES_MAX)
+        self.assertEqual((lines[0], lines[-1]), chat_review.memory_fences("f" * 32))
+        self.assertIn("Add the widget", titles)
+        self.patch(chat_review, "MEMORY_BLOCK_MAX", 700)
+        lines, _ = chat_review.memory_block(notes, "f" * 32)
+        self.assertLessEqual(sum(len(line) + 1 for line in lines[1:-1]), 700)
+        self.assertGreaterEqual(len(lines), 3)
+        self.assertEqual(chat_review.memory_block([], "f" * 32), ([], ""))
+        self.assertEqual(chat_review.memory_block([], "f" * 32, "NOTE none")[0][1], "NOTE none")
+
+    def test_a_mention_answer_gets_its_apps_past_reviews_fenced_and_never_another_apps(self):
+        self.second_app()
+        self.note(number=12, title="Fix the widget cache", paths=("cache/store.py",))
+        self.note(app="moody", number=13, title="Moody only widget audit")
+        self.answer = ("ok", f"ANSWER\n{self.ANSWER}\nEND\n")
+        self.deliver(msg(text="what did you make of the widget cache?", thread=f"{SPACE}/threads/t9"))
+        self.assertEqual([outcome for outcome in self.run_pass()["taken"] if outcome != "seen before"], ["mention"])
+        [turn] = self.turns
+        past = self.past(turn["input"])
+        self.assertIn("PAST REVIEW acme/web-app#12 @ aaaaaaaaaaaa on ", past)
+        self.assertIn("TITLE: Fix the widget cache", past)
+        self.assertIn("FOLDERS: cache", past)
+        self.assertIn("BLOCKING x.py:2: prints at import", past)
+        self.assertNotIn("Moody only", turn["input"])
+        self.assertIn("<<<UNTRUSTED PAST REVIEWS ", turn["prompt"])
+        for brief in (chat_review.MENTION_BRIEF, chat_review.MOODY_MENTION_BRIEF, chat_review.QUESTION_BRIEF,
+                      chat_review.MOODY_QUESTION_BRIEF):
+            self.assertIn("from my review of owner/repo#12", brief)
+            self.assertIn("never present it as the current state of the code", brief)
+        self.assertEqual(self.google.messages[-1]["text"], said(self.ANSWER))
+
+    def test_an_answer_with_no_notes_is_told_so(self):
+        self.answer = ("ok", f"ANSWER\n{self.ANSWER}\nEND\n")
+        self.deliver(msg(text="what is a mutex?", thread=f"{SPACE}/threads/t9"))
+        self.run_pass()
+        self.assertEqual(self.past(self.turns[0]["input"]).strip(), "NOTE you have no past reviews on record.")
+
+    def test_a_question_gets_other_past_reviews_but_not_the_one_it_asks_about(self):
+        self.deliver(msg(at=time.time() - 5))
+        self.run_pass()
+        self.note(repo="acme/web-app", number=3, title="Earlier widget work")
+        self.answer = ("ok", f"ANSWER\n{self.ANSWER}\nEND\n")
+        self.deliver(msg(text="is this like the earlier widget work?", message="q1", at=time.time() + 1))
+        self.assertEqual([outcome for outcome in self.run_pass()["taken"] if outcome != "seen before"], ["question"])
+        past = self.past(self.turns[-1]["input"])
+        self.assertIn("PAST REVIEW acme/web-app#3 ", past)
+        self.assertNotIn("PAST REVIEW acme/web-app#7 ", past)
+        self.assertIn("<<<UNTRUSTED PAST REVIEWS ", self.turns[-1]["prompt"])
+
+    def test_an_answer_repeating_a_past_title_at_length_is_withheld(self):
+        title = "Rework the session cache eviction so stale entries expire"
+        self.note(number=12, title=title)
+        self.answer = ("ok", f"ANSWER\nYou mean {title}.\nEND\n")
+        self.deliver(msg(text="what about the cache?", thread=f"{SPACE}/threads/t9"))
+        self.run_pass()
+        self.assertEqual(self.google.messages[-1]["text"], said(chat_review.MENTION_WITHHELD))
+
+    def test_a_review_of_a_new_head_gets_its_earlier_heads_notes_fenced(self):
+        self.deliver(msg(at=time.time() - 5))
+        self.run_pass()
+        self.assertNotIn("PAST REVIEWS", self.turns[0]["input"])
+        self.note(app="moody", sha=NEWER[:-1] + "c")
+        self.pr["head"]["sha"] = NEWER
+        self.answer = ("ok", block(sha=NEWER))
+        self.deliver(msg(text="review again", message="m2", at=time.time() + 1))
+        self.run_pass()
+        past = self.past(self.turns[1]["input"])
+        self.assertEqual(past.count("PAST REVIEW "), 1)
+        self.assertIn(f"PAST REVIEW acme/web-app#7 @ {HEAD[:12]} on ", past)
+        self.assertIn(f"SUMMARY: {SUMMARY}", past)
+        self.assertIn("PAST REVIEWS marker lines", self.turns[1]["brief"])
+        self.assertEqual(len(self.note_files()), 3)  # each head its own note, and the other app's apart
+
+    def test_status_counts_each_apps_notes_by_repo(self):
+        self.second_app()
+        self.note(repo="acme/web-app", number=1)
+        self.note(repo="acme/web-app", number=2)
+        self.note(repo="acme/billing", number=3)
+        now = int(time.time())
+        self.assertEqual(chat_review.status_text("hermione", now).splitlines()[-1],
+                         "Review memory: 3 past reviews (acme/web-app 2, acme/billing 1).")
+        self.assertEqual(chat_review.status_text("moody", now).splitlines()[-1],
+                         "Review memory: no past reviews yet.")
+
+    def test_a_note_under_another_apps_name_or_out_of_shape_is_never_read(self):
+        self.note(number=1)
+        [path] = self.note_files()
+        note = json.loads(path.read_text())
+        moved = self.memory_dir() / f"{chat_review._memory_key('moody', 'acme/web-app', 1, HEAD)}.json"
+        moved.write_text(json.dumps(note))  # hermione's note under moody's name
+        self.assertEqual(chat_review.recall("moody", "", None, int(time.time())), [])
+        path.write_text(json.dumps({**note, "findings": "not a list"}))
+        self.assertEqual(chat_review.recall("hermione", "", None, int(time.time())), [])
 
 
 class ResumeTests(ChatCase):

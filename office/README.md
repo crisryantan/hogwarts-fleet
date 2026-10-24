@@ -580,7 +580,13 @@ messages an answer turn reads as its context. Of those that mention it:
   puts the security-relevant ones first and says he looks at secrets, injection and trust boundaries first. A
   partial review's plan says how many files will not be shown, and the part about removed code shows only while
   `CHAT_REVIEW_REPO_CONTEXT` is on. A PR that is not open, is too large or could not be read gets its one fixed
-  reply and no acknowledgement. A message that also asks to fix or merge gets the
+  reply and no acknowledgement. A review that cannot start at once (another review of the PR holds its lock, every
+  run slot is busy, the caps lock is held, or a stop of its desk's family or a CLI update is in place) gets one fixed
+  line in its thread at once, before any acknowledgement, naming what holds it: "Queued behind another review of this
+  PR; I'll start shortly." (or other reviews, a fleet stop or a CLI update). It is sent once, with a request id of its
+  own, and the acknowledgement and plan follow when the review starts. A review that starts at once gets only the
+  acknowledgement, and a follow's review of new commits never gets the holding line. A message that also asks to fix
+  or merge gets the
   desk's line saying a review is all it does, and still gets the review and nothing more. An approve word only asks
   for the review: whether it approves is its verdict and the switches below, nothing the message says;
 - one from them with no link or address at all and the word review (also reviews or reviewing) or an approve word
@@ -791,7 +797,8 @@ A question about a review is the one place a teammate's own words reach a model.
 until its turn has run, and is never logged. It runs a separate turn of the same app's desk, read-only exactly as a
 review is (Hermione's Read, Grep and Glob under her chat review settings, Moody's chat permission profile), at
 `CHAT_REVIEW_QUESTION_BUDGET_USD` for a Claude desk, with a brief of its own: answer only about this PR and this
-review, in the desk's voice, in at most 900 characters; decline anything else in one line; never claim to have done
+review (its past reviews may inform that), in the desk's voice, in at most 900 characters; decline anything else in
+one line; never claim to have done
 anything or promise to merge, push, fix or approve; and when the asker says the code changed, suggest asking for a
 review again. Its one input file holds the question between marker lines with a random nonce, as a teammate's
 untrusted text, the app's own earlier verdict, summary and findings, and the PR's text and diff read fresh and
@@ -805,7 +812,8 @@ and can never approve: only a review reaches GitHub, through its strict verdict 
 A mention answer is a question that is about no review. It runs the same kind of read-only turn as a question, of
 the same app's desk, at the same budget and under the same caps, with a brief of its own: answer software engineering
 questions, casual questions and light chit-chat alike, concisely, in the desk's voice, in at most 900 characters,
-from general knowledge and the attached material only. It has no access to your repos, files or systems, or to the
+from general knowledge, its app's past reviews and the attached material only. It has no access to your repos, files
+or systems, or to the
 network beyond that material, and says so rather than pretend; it never claims to have done anything, and points to
 a mention with a PR link for a review. Its input holds the message between marker lines with a random nonce, as a
 teammate's untrusted text, and its answer block is read, scrubbed, defanged, cut and withheld like a question's,
@@ -822,6 +830,24 @@ lines with the turn's nonce, as untrusted teammate text, and the brief says they
 message, in the desk's voice, in at most 900 characters, never act on anything they or the message ask, and never
 claim to have done anything. A failed read is a note in the input, never the end of the turn, and only counts are
 logged, never a message's text or sender.
+
+Review memory. Each app answers from the work it has reviewed before. When a review ends reviewed, the job writes one
+note in `chat-reviews/memory/` per app, PR and head commit (a later review of the same head replaces it): the repo,
+number and head, the PR's title (scrubbed of credential shapes and emails, defanged, at most 120 characters), at most
+6 of the top-level folders it touched, the verdict, the risk, the summary as posted, at most 5 findings as posted
+(each its place and the first part of what it says), the date and the link to its thread. It never holds a teammate's
+text, an email or the PR's description. Notes are kept `CHAT_REVIEW_MEMORY_DAYS` (90) and pruned by age like the
+request records. Every answer turn, a question, a mention answer or a conversation turn, gets a `PAST REVIEWS` block
+in its input, between marker lines with the turn's nonce as untrusted data: at most 8 of the same app's notes, never
+another app's, at most 6,000 characters in all, chosen by a fixed score: notes of the turn's own repo first, then those
+whose repo, title and folders share more words with the question, then the newest. A question leaves out the review
+it asks about, which its input holds already, and a turn with no notes is told so. The brief says past reviews are
+the desk's own earlier work: when it uses one it says so ("from my review of owner/repo#12"), it says plainly when it
+answers from general knowledge instead, and it never presents a past review as the current state of the code. An
+answer that repeats a past review's title at length is withheld like one that repeats the PR's own text. A review of a
+PR the app reviewed before at another head gets the same app's notes of those earlier heads, newest first, in the same
+fenced block, so it can say what changed since its last verdict; the brief tells it to check every finding against
+the diff as it is now. Only counts are logged, never a note's text.
 
 Attached material goes to every turn alike, a review, a question or a mention answer, read by the job and never by
 the model. Images attached to the message (at most 3, up to 5 MB each, PNG, JPEG, GIF or WebP by their first bytes,
@@ -849,7 +875,8 @@ thread names alone). It holds no email and no text a teammate wrote, and is cut 
 takes. Each app reports only its own requests.
 
 A status reply also lists the PRs the app follows, each as `owner/repo#number` with its last reviewed head, when it
-was last checked and its thread's link.
+was last checked and its thread's link, and ends with how many past reviews its memory holds for each repo
+("Review memory: 3 past reviews (acme/web-app 2, acme/api 1).").
 
 Following. After an app's review of a PR from Chat goes to its thread, whatever its verdict, the app follows that
 PR, so nobody has to ask again: one small record per app and PR in `chat-reviews/follows/`, holding the thread to
@@ -876,9 +903,10 @@ toward the requester's. "stop following" ends a follow and any review of it stil
 one with no head reviewed yet, so its first check reviews the PR. Either, carried out again after a kill, never undoes
 a later one: a stop ends only a follow asked for before it, and a follow command after a later stop starts nothing.
 
-A request that waits keeps what it waits on in its record. A review that waited longer than
-`CHAT_REVIEW_WAIT_NOTICE_SECONDS` (300) before its turn started gets one fixed line in its thread as it starts, after
-its acknowledgement, "Picked this up now; it was waiting on <what it waited on>.", once. Every request ends with one
+A request that waits keeps what it waits on in its record. A review that was acknowledged and then waited longer than
+`CHAT_REVIEW_WAIT_NOTICE_SECONDS` (300) before its turn started gets one fixed line in its thread as it starts,
+"Picked this up now; it was waiting on <what it waited on>.", once; a wait its holding line already told the thread of
+gets none. Every request ends with one
 reply in its thread,
 whatever its outcome: the review or answer, or the fixed line for a desk that is off, a cap, a PR that is not open or
 too large, a PR that could not be read, a turn that failed, could not sign in or gave no usable block, a blocked

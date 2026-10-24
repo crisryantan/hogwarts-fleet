@@ -164,10 +164,12 @@ class MentionAnswerTests(MaterialCase):
         self.assertNotIn(SECRET_MARK, self.office_text())
         lines = [line for line in self.log_lines() if line["event"].startswith("mention-")]
         self.assertEqual([line["event"] for line in lines],
-                         ["mention-received", "mention-history", "mention-started", "mention-ended"])
-        for line in lines:  # the history's line holds only its counts
-            self.assertEqual(set(line), {"at", "event", "request", "app", "messages", "failed"}
-                             if line["event"] == "mention-history" else {"at", "event", "request", "app", "outcome"})
+                         ["mention-received", "mention-history", "mention-memory", "mention-started",
+                          "mention-ended"])
+        counted = {"mention-history": {"messages", "failed"}, "mention-memory": {"notes", "failed"}}
+        for line in lines:  # the history's and the memory's lines hold only their counts
+            self.assertEqual(set(line), {"at", "event", "request", "app"} | counted[line["event"]]
+                             if line["event"] in counted else {"at", "event", "request", "app", "outcome"})
             self.assertNotIn(SENDER, json.dumps(line))
         self.assertEqual(self.writes, [])
 

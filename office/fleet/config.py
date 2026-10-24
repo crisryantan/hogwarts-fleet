@@ -526,6 +526,9 @@ CHAT_REVIEW_CODEX_OUTPUT_MAX_BYTES = 8 * 1024 * 1024
 CHAT_REVIEW_ROOT = "/Users/crisryantan/Library/Caches/hogwarts-chat-review"
 # Request records are kept this long after they end, so the owner can see who asked for what.
 CHAT_REVIEW_KEEP_SECONDS = 30 * 86400
+# Each app keeps a short note of every review it finished (repo, PR, title, folders, verdict, risk, summary, a few
+# findings, date and thread) for this many days, and draws on its own notes when it answers in Chat.
+CHAT_REVIEW_MEMORY_DAYS = 90
 # Phone delivery (fleet/phone.py): the loud headmaster events go to Ryan off the machine, one ping each. The primary
 # transport is a command set only in the private overlay: an absolute argv, never holding a secret, that reads one JSON
 # payload on stdin and exits 0 once delivered. None, or a failure, falls back to the macOS notification.
