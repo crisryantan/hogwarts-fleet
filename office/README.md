@@ -838,8 +838,8 @@ number and head, the PR's title (scrubbed of credential shapes and emails, defan
 (each its place and the first part of what it says), the date and the link to its thread. It never holds a teammate's
 text, an email or the PR's description. Notes are kept `CHAT_REVIEW_MEMORY_DAYS` (90) and pruned by age like the
 request records. Every answer turn, a question, a mention answer or a conversation turn, gets a `PAST REVIEWS` block
-in its input, between marker lines with the turn's nonce as untrusted data: at most 8 of the same app's notes, never
-another app's, at most 6,000 characters in all, chosen by a fixed score: notes of the turn's own repo first, then those
+in its input, between marker lines with the turn's nonce as untrusted data: at most 8 of the same app's notes of repos still in
+`CHAT_REVIEW_REPOS`, never another app's, at most 6,000 characters in all, chosen by a fixed score: notes of the turn's own repo first, then those
 whose repo, title and folders share more words with the question, then the newest. A question leaves out the review
 it asks about, which its input holds already, and a turn with no notes is told so. The brief says past reviews are
 the desk's own earlier work: when it uses one it says so ("from my review of owner/repo#12"), it says plainly when it

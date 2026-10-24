@@ -1368,6 +1368,8 @@ def _unasked(record: dict) -> dict:
 
 
 def _end(key: str, record: dict, outcome: str, **fields) -> dict:
+    if record.get("kind") == "review" and (record.get("outcome") or outcome) == "reviewed":
+        remember(key, record)  # before it is done, so a kill between the two leaves it to the next pass
     record = _save(key, {**_unasked(record), **fields, "state": "done", "outcome": record.get("outcome") or outcome,
                          "ended": int(time.time())})
     log(_event(record, "ended"), **_logged(key, record))
@@ -2645,6 +2647,9 @@ def review(conn, key: str, record: dict, pr_fd: int) -> dict:
     shaped = shape_diff(diff) if diff is not None else None
     if shaped is None:
         return finish(TOO_LARGE, "too-large", sha=sha)
+    held_back = _launch_held(desk)
+    if held_back is not None:  # it cannot launch now: its holding line, not its acknowledgement
+        raise held_back
     record = _acknowledge(key, record, plan_text(desk, number, sha, shaped, shaped.paths))
     paths = diff_paths(diff)  # of the whole diff, the files it deletes included
     nonce = secrets.token_hex(16)
@@ -2676,14 +2681,27 @@ def review(conn, key: str, record: dict, pr_fd: int) -> dict:
         return finish(COULD_NOT, "unusable")
     left = not_reviewed(shaped)
     # Inline comments anchor only on what the reviewer was shown: a file left out, or deleted whole, has no hunks.
-    finished = finish(reply_text(repo, number, sha, parsed.verdict, parsed.blocking, parsed.non_blocking,
-                                 parsed.summary, **left, risk=parsed.risk, checks=checks,
-                                 not_verified=parsed.not_verified), "reviewed",
-                      verdict=parsed.verdict, summary=parsed.summary, risk=parsed.risk, blocking=parsed.blocking,
-                      non_blocking=parsed.non_blocking, not_verified=parsed.not_verified,
-                      hunks=named_hunks(parsed.blocking + parsed.non_blocking, diff_hunks(shaped.text)), **left)
-    remember(key, finished, pr["title"], paths)
-    return finished
+    # The title and folders its memory note will hold (remember), fit for a note now, so no PR text is kept raw.
+    return finish(reply_text(repo, number, sha, parsed.verdict, parsed.blocking, parsed.non_blocking, parsed.summary,
+                             **left, risk=parsed.risk, checks=checks, not_verified=parsed.not_verified), "reviewed",
+                  verdict=parsed.verdict, summary=parsed.summary, risk=parsed.risk, blocking=parsed.blocking,
+                  non_blocking=parsed.non_blocking, not_verified=parsed.not_verified,
+                  hunks=named_hunks(parsed.blocking + parsed.non_blocking, diff_hunks(shaped.text)), **left,
+                  memory={"title": _memory_text(pr["title"], MEMORY_TITLE_MAX), "folders": _top_folders(paths)})
+
+
+def _launch_held(desk: str) -> Optional[Later]:
+    """What would keep the desk's turn from launching now, as the Later its launch would raise (every run slot busy, a
+    CLI update holding the launch gate), else None: a probe taken and let go before a review is acknowledged, so one
+    that cannot start gets its holding line (_hold) and its acknowledgement only when it starts. The launch takes and
+    checks both again."""
+    try:
+        with run_desk.desk_lock(desk, wait=False), run_desk.launch_gate():
+            return None
+    except safefs.Busy:
+        return Later(f"every {desk} run slot is busy", "slot")
+    except run_desk.Stopped as exc:
+        return Later(str(exc), _held_back(str(exc)))
 
 
 def not_reviewed(shaped: Shaped) -> dict:
@@ -3013,17 +3031,26 @@ def _memory_findings(record: dict) -> list:
     return found
 
 
-def remember(key: str, record: dict, title: object, paths: Iterable, now: Optional[int] = None) -> None:
+def remember(key: str, record: dict, now: Optional[int] = None) -> None:
     """Keep the note of a review that ended reviewed in its app's memory (chat-reviews/memory/), one per app, PR and
-    head, a later review of the same head replacing it: the repo, number and head, the PR's title (_memory_text, cut to
-    MEMORY_TITLE_MAX), the top-level folders it touched (_top_folders), the verdict, the risk, the summary and a few
-    findings as posted (_memory_findings), the date and the link to its thread. Never a teammate's text, an email or
-    the PR's description. Best effort: a note that cannot be written is one log line, never the end of the review."""
+    head, a later review of the same head replacing it: the repo, number and head, the PR's title and the top-level
+    folders it touched as the review kept them in its record (memory: _memory_text, _top_folders), the verdict, the
+    risk, the summary and a few findings as posted (_memory_findings), the date and the link to its thread. Never a
+    teammate's text, an email or the PR's description. Written as the request ends (_end), from its saved record, so
+    only a review whose outcome is on record leaves one. Best effort: a note that cannot be written is one log line,
+    never the end of the review."""
     now = int(time.time()) if now is None else now
-    app, repo, number, sha = app_of(record), record["repo"], record["number"], record["sha"]
+    kept = record.get("memory")
+    app, repo, number, sha = app_of(record), record.get("repo"), record.get("number"), record.get("sha")
+    if not isinstance(kept, dict) or not isinstance(kept.get("title"), str) \
+            or not isinstance(kept.get("folders"), list) or not _repo_ok(repo) or type(number) is not int or not isinstance(sha, str) \
+            or gitops.SHA.fullmatch(sha) is None or record.get("verdict") not in ("PASS", "CHANGES"):
+        return
     risk = record.get("risk")
     note = {"state": "note", "app": app, "repo": repo, "number": number, "sha": sha,
-            "title": _memory_text(title, MEMORY_TITLE_MAX), "folders": _top_folders(paths),
+            "title": _memory_text(kept["title"], MEMORY_TITLE_MAX),
+            "folders": [_memory_text(item, MEMORY_FOLDER_MAX) for item in kept["folders"][:MEMORY_FOLDERS_MAX]
+                        if isinstance(item, str) and _memory_text(item, MEMORY_FOLDER_MAX)],
             "verdict": record["verdict"], "risk": risk if risk in ("low", "medium", "high") else "",
             "summary": _summary(record), "findings": _memory_findings(record),
             "date": time.strftime("%Y-%m-%d", time.gmtime(now)), "at": now, "thread": _thread_url(record)}
@@ -3062,7 +3089,7 @@ def _note_ok(key: str, note: Optional[dict], app: str) -> bool:
 
 def _notes(app: str, now: int) -> list:
     """(name, note) of each of app's notes from the last CHAT_REVIEW_MEMORY_DAYS that reads as remember writes one
-    (_note_ok), by name: never another app's."""
+    (_note_ok), of a repo still in CHAT_REVIEW_REPOS, by name: never another app's."""
     days = config.CHAT_REVIEW_MEMORY_DAYS
     oldest = now - days * 86400 if type(days) is int and days > 0 else now
     found = []
@@ -3071,7 +3098,7 @@ def _notes(app: str, now: int) -> list:
             if not name.endswith(".json") or KEY.fullmatch(name[:-5]) is None:
                 continue
             note = _read(fd, name)
-            if _note_ok(name[:-5], note, app) and note["at"] >= oldest:
+            if _note_ok(name[:-5], note, app) and note["at"] >= oldest and allowed_repo(note["repo"]) is not None:
                 found.append((name[:-5], note))
     return found
 

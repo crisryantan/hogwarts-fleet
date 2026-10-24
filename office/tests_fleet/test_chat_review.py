@@ -4862,8 +4862,19 @@ class NoticeTests(ChatCase):
         self.run_pass()
         self.assertEqual((self.notes(), len(self.google.acks), len(self.google.messages)), ([self.HOLD], 1, 1))
 
+    def test_busy_run_slots_get_the_holding_line_and_no_ack_until_a_slot_is_free(self):
+        from tests_fleet.support import every_slot
+        self.deliver(msg())
+        with every_slot("hermione"):
+            self.assertEqual(self.run_pass()["settled"], ["queued"])
+        self.assertEqual((self.notes(), self.google.acks, self.turns),
+                         (["Queued behind other reviews; I'll start shortly."], [], []))
+        self.run_pass()
+        self.assertEqual((len(self.notes()), len(self.google.acks), len(self.turns)), (1, 1, 1))
+
     def test_a_review_held_back_long_after_its_ack_says_so_once_when_it_starts(self):
         from tests_fleet.support import every_slot
+        self.patch(chat_review, "_launch_held", return_value=None)  # a slot looked free, then was taken
         self.deliver(msg())
         with every_slot("hermione"):  # acknowledged, then every run slot busy
             self.assertEqual(self.run_pass()["settled"], ["queued"])
@@ -4898,6 +4909,7 @@ class MemoryTests(ChatCase):
     def setUp(self) -> None:
         super().setUp()
         self.patch(config, "CHAT_REVIEW_PER_PERSON_DAILY", 20)
+        self.patch(config, "CHAT_REVIEW_REPOS", ("acme/web-app", "acme/billing", "acme/other"))
 
     def memory_dir(self) -> Path:
         return self.office / chat_review.DIR / chat_review.MEMORY
@@ -4912,8 +4924,8 @@ class MemoryTests(ChatCase):
         """A note as remember writes one for a review that ended reviewed."""
         record = {"app": app, "repo": repo, "number": number, "sha": sha, "verdict": "CHANGES" if blocking else "PASS",
                   "risk": "low", "summary": summary, "blocking": list(blocking), "non_blocking": [], "space": SPACE,
-                  "thread": thread}
-        chat_review.remember("0" * 32, record, title, paths, int(time.time()) - ago)
+                  "thread": thread, "memory": {"title": title, "folders": chat_review._top_folders(paths)}}
+        chat_review.remember("0" * 32, record, int(time.time()) - ago)
 
     def past(self, text: str) -> str:
         nonce = re.search(r"<<<UNTRUSTED PAST REVIEWS ([0-9a-f]{32})>>>", text).group(1)
@@ -4949,6 +4961,25 @@ class MemoryTests(ChatCase):
         self.run_pass()
         self.assertEqual(len(self.turns), 2)
         self.assertEqual(self.note_files(), [path])  # the same head again: the one note, replaced
+
+    def test_the_note_is_written_only_once_the_reviewed_outcome_is_on_record(self):
+        real = chat_review._send_reply
+        calls = []
+
+        def killed_once(key, record):
+            calls.append(record["state"])
+            if len(calls) == 1:
+                raise Killed()
+            return real(key, record)
+        self.patch(chat_review, "_send_reply", side_effect=killed_once)
+        self.deliver(msg())
+        with self.assertRaises(Killed):  # killed once the review's result is saved, before its reply
+            self.run_pass()
+        [record] = self.records()
+        self.assertEqual((record["state"], record["outcome"]), ("reply", "reviewed"))
+        self.assertEqual(self.note_files(), [])
+        self.run_pass()
+        self.assertEqual((self.records()[0]["state"], len(self.note_files())), ("done", 1))
 
     def test_only_a_review_that_ends_reviewed_leaves_a_note(self):
         self.answer = ("ok", "no block here")
@@ -5085,6 +5116,16 @@ class MemoryTests(ChatCase):
                          "Review memory: 3 past reviews (acme/web-app 2, acme/billing 1).")
         self.assertEqual(chat_review.status_text("moody", now).splitlines()[-1],
                          "Review memory: no past reviews yet.")
+
+    def test_a_repo_taken_off_the_list_is_never_recalled_or_counted(self):
+        self.note(repo="acme/web-app", number=1)
+        self.note(repo="acme/billing", number=2)
+        self.patch(config, "CHAT_REVIEW_REPOS", ("acme/web-app",))
+        now = int(time.time())
+        self.assertEqual([note["repo"] for note in chat_review.recall("hermione", "billing", None, now)],
+                         ["acme/web-app"])
+        self.assertEqual(chat_review.status_text("hermione", now).splitlines()[-1],
+                         "Review memory: 1 past review (acme/web-app 1).")
 
     def test_a_note_under_another_apps_name_or_out_of_shape_is_never_read(self):
         self.note(number=1)
