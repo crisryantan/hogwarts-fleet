@@ -16,7 +16,7 @@ from tests_fleet.support import FleetCase
 
 FYI = {"to": "hermione", "kind": "fyi", "subject": "diff is ready", "body": "please look at tk_x"}
 EMPTY = {"delivered": [], "rejected": [], "waiting": [], "errors": [], "reviews": [], "resumed": [],
-         "restarted": []}
+         "restarted": [], "builds_resumed": []}
 
 
 class OwlPostCase(FleetCase):

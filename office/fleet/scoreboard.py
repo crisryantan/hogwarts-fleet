@@ -8,7 +8,10 @@ Every number comes from this script, over the seven days before the run:
 - red rate on main: per watched repo, the share of main-branch commits whose checks finished red, out of
   those whose checks finished at all;
 - cost per desk: runs, tokens and dollars per desk from the store's run metrics;
-- Map rounds that ran no model, from patrol/map/rounds.jsonl. The target is at least 75%.
+- Map rounds that ran no model, from patrol/map/rounds.jsonl. The target is at least 75%;
+- build review rounds: over the fourteen days before the run, the average review rounds per build task with a
+  verdict recorded then, from the store, overall and split by whether the task's first build turn was given lessons
+  from past reviews (its build.lessons event, fleet/lessons.py), so you can see whether they help.
 
 It writes them to patrol/scoreboard/<date>.md and wakes Ron, on the fast tier, for the words only. In shadow
 mode that file is all. Once Ryan removes the shadow file, he also gets one headmaster event that names it.
@@ -19,6 +22,7 @@ Run it with the wrapper line:
 from __future__ import annotations
 
 import math
+import re
 import sys
 import time
 from typing import Optional
@@ -26,15 +30,19 @@ from typing import Optional
 if __name__ == "__main__" and "/Users/crisryantan/.hogwarts" not in sys.path:
     sys.path.insert(0, "/Users/crisryantan/.hogwarts")
 
-from hogwarts import pensieve  # noqa: E402
+from hogwarts import db, pensieve  # noqa: E402
 from hogwarts.errors import StoreError  # noqa: E402
 
-from fleet import common, patrol  # noqa: E402
+from fleet import common, config, patrol  # noqa: E402
 from fleet.safefs import FleetError  # noqa: E402
 
 WEEK = 7 * 86400
 PERCENTILES = (50, 75, 90, 95)
 FINISHED = ("SUCCESS", "FAILURE", "ERROR")
+FORTNIGHT = 14 * 86400
+# The build.lessons event's summary starts with the count (fleet/lessons.py record).
+LESSONS_EVENT = "build.lessons"
+LESSONS_COUNT = re.compile(r"([0-9]{1,4}) lessons ")
 
 
 def percentile(values: list, pct: int) -> Optional[float]:
@@ -83,11 +91,47 @@ def red_rates(repos: list, since: int) -> list:
     return rows
 
 
+def build_rounds(conn, since: int) -> list:
+    """{task_id, rounds, lessons} for each build task with a review verdict recorded since then: how many of its
+    rounds got a verdict then, and how many lessons its first build turn was given (None when it has no record)."""
+    desks = ",".join("?" for _ in config.WORKTREE_DESKS)
+    rows = db.fetch_all(conn, "SELECT review_rounds.task_id, COUNT(*) AS rounds FROM review_rounds"
+                              " JOIN review_passes ON review_passes.id = review_rounds.review_id"
+                              " JOIN tasks ON tasks.id = review_rounds.task_id"
+                              f" WHERE review_passes.created_at >= ? AND tasks.desk IN ({desks})"
+                              " GROUP BY review_rounds.task_id ORDER BY review_rounds.task_id",
+                        (since, *config.WORKTREE_DESKS))
+    found = []
+    for row in rows:
+        told = db.fetch_one(conn, "SELECT summary FROM events WHERE task_id = ? AND kind = ? ORDER BY id LIMIT 1",
+                            (row["task_id"], LESSONS_EVENT))
+        match = None if told is None else LESSONS_COUNT.match(told["summary"])
+        found.append({"task_id": row["task_id"], "rounds": int(row["rounds"]),
+                      "lessons": None if match is None else int(match.group(1))})
+    return found
+
+
+def average(values: list) -> str:
+    return f"{sum(values) / len(values):.1f}" if values else "-"
+
+
+def build_rows(builds: list) -> list:
+    rounds = [item["rounds"] for item in builds]
+    given = [item["rounds"] for item in builds if item["lessons"]]
+    none = [item["rounds"] for item in builds if item["lessons"] == 0]
+    return [("build tasks with a review verdict", len(builds)), ("review rounds with a verdict", sum(rounds)),
+            ("average review rounds per task", average(rounds)),
+            ("tasks whose first build turn got lessons", len(given)),
+            ("average review rounds, given lessons", average(given)),
+            ("average review rounds, given none", average(none))]
+
+
 def hours(seconds: Optional[float]) -> str:
     return "-" if seconds is None else f"{seconds / 3600:.1f}h"
 
 
-def render(merged: list, more: bool, rates: list, costs: list, rounds: list, ts: int, since: int) -> str:
+def render(merged: list, more: bool, rates: list, costs: list, rounds: list, ts: int, since: int,
+           builds: list = ()) -> str:
     reviewed = [item["first_review"] for item in merged if item["first_review"] is not None]
     rounds_per_pr = [item["rounds"] for item in merged]
     model_rounds = sum(1 for row in rounds if row.get("model") is True)
@@ -119,7 +163,9 @@ def render(merged: list, more: bool, rates: list, costs: list, rounds: list, ts:
                   f"{100 * zero / len(ok_rounds):.0f}%" if ok_rounds else "not computed"),
                  ("rounds that ran a model", model_rounds),
                  ("rounds that could not read GitHub", len(rounds) - len(ok_rounds)),
-             ])]
+             ]),
+             "\n## Build review rounds, last two weeks\n\n",
+             patrol.table(("number", "value"), build_rows(list(builds)))]
     return "".join(parts)
 
 
@@ -133,7 +179,8 @@ def scoreboard(conn, now: Optional[int] = None) -> dict:
     rates = red_rates(patrol.main_repos(seen), since)
     costs = pensieve.summary(conn, since)
     rounds = patrol.read_rows("map", "rounds.jsonl", since)
-    text = render(merged, more, rates, costs, rounds, ts, since)
+    builds = build_rounds(conn, ts - FORTNIGHT)
+    text = render(merged, more, rates, costs, rounds, ts, since, builds)
     out = f"{patrol.local_day(ts)}.md"
     path = patrol.write_text("scoreboard", out, text)
     try:

@@ -95,6 +95,12 @@ the review loop's) runs while the desk may be writing in its worktree. fleet bui
 loop's fix round take the lock first and hand it to the run they start (spawn with hold_fd, --task-lock-fd), so it
 is held without a gap from before the run is started until its process ends. A run started any other way takes
 the lock without waiting, and is refused while a review of the task holds it.
+Such a run's stdin also ends with the LESSONS FROM PAST REVIEWS block (fleet/lessons.py): findings reviewers made on
+earlier tasks in the task's repo, fenced as untrusted data, scrubbed and capped, after the owl, in every turn on the
+task, a fix round's included; a repo with none gets no block. How many the task's first launched turn got is kept on
+the task once, as a routine build.lessons event. A run of the task that died (died: one that died idle, or once it is
+over one that never finished, killed by a signal or gone with no usage recorded) counts toward dead_streak, which
+bounds both the fleet's own resume of a dead build turn (fleet/resume.py) and McGonagall's fix-round retry.
 SIGTERM or SIGHUP, sent to a real run the Owl Post started, ends it through its finally blocks: the desk's
 process is killed, a Claude run records its usage as a killed run, the locks are released, the owl stays in
 the inbox and Ryan gets the failed-run event.
@@ -787,6 +793,13 @@ def build_plan(conn, desk: str, owl_id: Optional[str] = None, mcp_job: Optional[
     key = pad_key(conn, task) if task is not None and desk in config.TASK_PAD_DESKS else None
     pad = None if key is None else pad_path(desk, key)
     prompt = DRY_RUN_PROMPT if owl_id is None else _owl_prompt(desk, owl_id, task, pad)
+    lessons_given = None
+    if task is not None and desk in config.WORKTREE_DESKS and task["worktree"]:
+        from fleet import lessons  # here: it reads the worktree's record through worktree, which imports this module
+
+        text, lessons_given = lessons.for_turn(conn, task)
+        if text:
+            prompt += "\n\n" + text
     brief = _text(_read_office(desk, config.BRIEF_FILE, config.BRIEF_MAX_BYTES, "brief"), "brief")
     run_id = "run-" + secrets.token_hex(8)
     temp = None
@@ -815,7 +828,7 @@ def build_plan(conn, desk: str, owl_id: Optional[str] = None, mcp_job: Optional[
             "stdin": stdin, "brief": brief_file, "temp": temp, "slot": slot,
             "task_id": None if task is None else task["id"],
             "task_status": None if task is None else task["status"], "pad": pad, "pad_key": key,
-            "review_round": review_round}
+            "review_round": review_round, "lessons": lessons_given}
 
 
 # Enabling, caps, launching and running
@@ -2561,6 +2574,10 @@ def run(conn, desk: str, owl_id: str, mcp_job: Optional[str] = None, now: Option
             # Counted from here, before the process starts: a run killed or interrupted below still uses a run.
             # The launch lock ends here, so the next run of the desk reads the caps with this launch in them.
             capacity.record_launch(conn, desk, plan["run_id"], plan["model"], task_id=plan.get("task_id"), now=now)
+            if plan.get("lessons") is not None:
+                from fleet import lessons
+
+                lessons.record(conn, desk, plan["task_id"], plan["lessons"], now)  # the task's first launch only
             if plan["failover_from"] is not None:
                 failover.note_run(plan["run_id"], desk, plan["family"], plan["failover_from"])
         result = _launch(conn, plan, now, keep_fds, own, on_told, shadow)
@@ -2782,12 +2799,34 @@ def died_idle(launch: dict) -> bool:
     return run_outcome(launch) == "dead"
 
 
-def dead_streak(conn, task_id: str) -> int:
-    """How many of the task's newest launches in a row died without doing anything (died_idle). Read only; raises as
-    died_idle does, so an end record that cannot be read never cuts the streak short."""
+def died(launch: dict, over: bool = False) -> bool:
+    """Whether a build desk's launch on its own task is a run that died: one that died idle (died_idle), or, once it is
+    over, one that never finished. over says no process of it can be left: a later launch of its task followed it
+    (each holds the task's review lock until its process ends, see run), or the caller holds that lock itself. Such a
+    run never finished when it was killed by a signal (an exit code below -1, a timeout's -1 aside), whatever it used,
+    or when it has no usage recorded and no one is left to record it: it kept no end record (a restart or a SIGKILL
+    took its launcher with it) or an end record with no usage after it (a Codex run killed as the loops stopped). A
+    vendor limit, a sign-in failure, a clean end or a run that worked and ended on its own is no death. Read only;
+    raises as run_outcome does."""
+    outcome = run_outcome(launch)
+    if outcome == "dead":
+        return True
+    if not over or outcome not in ("going", "worked"):
+        return False
+    if outcome == "going":
+        return True
+    end = run_end(launch["desk"], launch["run_id"])
+    return end is not None and end["exit_code"] is not None and end["exit_code"] < -1
+
+
+def dead_streak(conn, task_id: str, over: bool = False) -> int:
+    """How many of the task's newest launches in a row died (died). Every launch but the newest is over, since a later
+    one followed it; the newest is over only when the caller says so (over: it holds the task's review lock), so
+    without it a newest run that is still going, or gone with no record, never counts. Read only; raises as died
+    does, so an end record that cannot be read never cuts the streak short."""
     streak = 0
-    for launch in reversed(capacity.task_launches(conn, task_id)):
-        if not died_idle(launch):
+    for index, launch in enumerate(reversed(capacity.task_launches(conn, task_id))):
+        if not died(launch, over=over or index > 0):
             break
         streak += 1
     return streak

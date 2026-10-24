@@ -17,8 +17,9 @@ changes what any run may do.
   review running only while the review loop holds it (the Owl Post's auto-<owl>.pending record in that folder, with
   no .done); else it is handed off with no review started. And a CHANGES round whose newest run since its verdict
   died without doing anything (run_desk.died_idle: the run's end record in the office runs folder, which no desk can
-  write, and its recorded usage) says the fix round died: retrying while auto-orchestrate is on and fewer than
-  ORCHESTRATOR_DEAD_RUNS_IN_A_ROW of the build's newest runs in a row died that way, else waiting on you. A CHANGES
+  write, and its recorded usage) says the fix round died: retrying while fewer than ORCHESTRATOR_DEAD_RUNS_IN_A_ROW of
+  the build's newest runs in a row died (the fleet's own resume starts it once more, fleet/resume.py) and that resume
+  has not told you it could not, else waiting on you. A CHANGES
   round with no run since its verdict, told by its review.fix-round event, that the review loop did not open (no
   after-<request>.json in that folder naming the handoff it was for) was run by hand, so no fix round started: it
   waits on you to run fleet build. An end record or an after record that cannot be read fails the pass, as
@@ -111,7 +112,7 @@ STATES = {
     "owner": ("McGonagall asked you a question", "Waiting on you: answer McGonagall's question in her session."),
     "verify": ("verify ran {ran} of {total} checks, {passed} passed, {malformed} malformed", "Nothing for you."),
     "changes": ("review CHANGES, fix round started", "Nothing for you."),
-    "fix-retry": ("review CHANGES, fix round died, retrying", "Nothing for you yet; McGonagall can start it again."),
+    "fix-retry": ("review CHANGES, fix round died, retrying", "Nothing for you yet; it is started again once."),
     "fix-dead": ("review CHANGES, fix round died", "Waiting on you: read Harry's run log, then run fleet build for"
                                                    " this build."),
     "pass": ("review PASS", "Nothing for you; the draft PR opens next if auto-draft-pr is on, otherwise push it"
@@ -333,10 +334,10 @@ def _build_state(conn, go_id: str, build: dict, held: set) -> tuple:
     after = [row for row in capacity.task_launches(conn, build_id) if row["launched_at"] >= verdict_at]
     # Each read raises when a run's end record cannot be read, so no pass stands on a half read.
     if after and run_desk.died_idle(after[-1]):
-        # Its newest fix round died without doing anything: McGonagall may start it again only while she is on and
-        # under her bound of dead runs in a row; past that it waits on Ryan.
-        retry = common.opt_in_on(config.ORCHESTRATOR_FILE) and group is None \
-            and run_desk.dead_streak(conn, build_id) < config.ORCHESTRATOR_DEAD_RUNS_IN_A_ROW
+        # Its newest fix round died without doing anything: the fleet's own resume starts it once more under the bound
+        # of dead runs in a row, unless its build.dead line says it could not; past that it waits on Ryan.
+        told = db.fetch_one(conn, "SELECT id FROM events WHERE dedupe_key = ?", (f"build:dead:{after[-1]['run_id']}",))
+        retry = told is None and run_desk.dead_streak(conn, build_id) < config.ORCHESTRATOR_DEAD_RUNS_IN_A_ROW
         return _key(build_id, "fix-retry" if retry else "fix-dead", round_no, verdict), None
     if not after:
         # A review run by hand tells its CHANGES as this event and starts no fix round; the loop's own round tells

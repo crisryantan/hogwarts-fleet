@@ -332,13 +332,17 @@ class TableTests(GoWatchCase):
             self.watch()
         self.assertEqual((len(self.lines()), self.kept()["tasks"][self.go]["state"]), (before, "changes"))
 
-    def test_table_a_fix_round_that_died_with_the_orchestrator_off_waits_on_ryan(self):
+    def test_table_a_fix_round_that_died_with_the_orchestrator_off_retries_until_the_resume_says_it_waits(self):
         build = self.build()
         self.expect("confirmed", build)
         self.round(build, SHAS[0], "CHANGES")
         self.expect("changes", build)
-        self.died(self.launch(build), exit_code=None)  # it never started
-        self.expect("fix-dead", build)
+        run_id = self.launch(build)
+        self.died(run_id, exit_code=None)  # it never started: the fleet's own resume starts it once more
+        self.expect("fix-retry", build)
+        pensieve.add_event(self.conn, "harry", "build.dead", "headmaster", "the fleet could not start it again",
+                           task_id=build["id"], dedupe_key=f"build:dead:{run_id}", now=self.tick())
+        self.expect("fix-dead", build)  # the resume told Ryan it could not, so it waits on him
 
     def told_fix_round(self, build: dict, round_no: int = 1) -> int:
         """The one event a CHANGES that started no fix round tells, with its key, its summary free text."""
@@ -427,7 +431,7 @@ class TableTests(GoWatchCase):
             "owner": ("McGonagall asked you a question", "Waiting on you: answer McGonagall's question in her session."),
             "verify": ("verify ran {ran} of {total} checks, {passed} passed, {malformed} malformed", "Nothing for you."),
             "changes": ("review CHANGES, fix round started", "Nothing for you."),
-            "fix-retry": ("review CHANGES, fix round died, retrying", "Nothing for you yet; McGonagall can start it again."),
+            "fix-retry": ("review CHANGES, fix round died, retrying", "Nothing for you yet; it is started again once."),
             "fix-dead": ("review CHANGES, fix round died", "Waiting on you: read Harry's run log, then run fleet build for"
                                                            " this build."),
             "pass": ("review PASS", "Nothing for you; the draft PR opens next if auto-draft-pr is on, otherwise push it"

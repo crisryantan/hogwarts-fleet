@@ -76,6 +76,13 @@ CODEX_OUTBOX_WRITERS = ("harry",)
 LINKABLE_DEPS = ("node_modules",)
 # Desks that build in a worktree. The Owl Post starts them only once their task has one.
 WORKTREE_DESKS = ("harry",)
+# Lessons from past reviews (fleet/lessons.py): each turn of a build desk on its own task gets at most LESSONS_MAX
+# findings from reviews of earlier tasks in its repo, all of them at most LESSONS_BLOCK_MAX characters and each cut to
+# LESSONS_TEXT_MAX, from the newest LESSONS_REVIEWS_READ fleet reviews of that repo and the chat reviewers' notes.
+LESSONS_MAX = 10
+LESSONS_BLOCK_MAX = 4000
+LESSONS_TEXT_MAX = 300
+LESSONS_REVIEWS_READ = 40
 # Desks that keep one pad per task, castle desks/<desk>/pads/<key>.md, as their Checkpoint for a run. Every
 # review round of one author task shares that task's pad. Only a Claude desk can write its own folder. Harry's per-task memory is the CHECKPOINT in his handoff, and Moody's
 # is review-latest.md in the task folder.
@@ -415,9 +422,13 @@ ORCHESTRATOR_ROOT = "/Users/crisryantan/Library/Caches/hogwarts-orchestrator"
 ORCHESTRATOR_MAX_TURNS = 10
 ORCHESTRATOR_WAKES_PER_TASK = 6
 ORCHESTRATOR_WAKES_PER_DAY = 30
-# Once this many of a build task's newest runs in a row died without doing anything, she may tell Ryan but never start
-# another fix round on it.
+# Once this many of a build task's newest runs in a row died (run_desk.dead_streak), nothing starts it again by
+# itself: the fleet's own resume (fleet/resume.py) starts a dead build turn once more only below it, and she may tell
+# Ryan but never start another fix round on it.
 ORCHESTRATOR_DEAD_RUNS_IN_A_ROW = 2
+# The fleet's own resume starts a dead build turn again only when that turn was launched within this long, and after
+# the resume first ran.
+RESUME_WINDOW_SECONDS = 7 * 86400
 # An owl, a verdict or a dead run wakes her only when it was stored within this long, and after the switch was first
 # seen on.
 ORCHESTRATOR_LAND_WINDOW_SECONDS = 7 * 86400
@@ -581,7 +592,9 @@ PHONE_KINDS = ("push.draft-pr", "push.auto-failed", "go.refused", "review.headma
                # worktree needs rebuilding), a model family down or a run waiting on it, and a CLI that cannot sign in.
                "review.blocked-on-tooling", "failover.down", "failover.wait", "failover.wait-ended", "failover.auth",
                # Ollivander's stop, which blocks every headless desk run until it is cleared by hand.
-               "ollivander.stopped")
+               "ollivander.stopped",
+               # A dead build turn the fleet started once more by itself, or one that now waits for Ryan.
+               "build.resumed", "build.dead")
 # How many new owls in McGonagall's inbox the prompt hook lists at once, with a count of the rest.
 INBOX_NOTICE_CAP = 10
 # McGonagall's go status block (fleet/go_status.py): at most this many open go tasks, newest first, each with at most

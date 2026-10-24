@@ -70,7 +70,9 @@ The store has none of these:
                                         adopt.py (fleet adopt), loops.py
                                         (fleet loops, the background jobs run from a terminal), failover.py (the
                                         model breaker and in-family fallback), orchestrator.py (McGonagall's typed
-                                        next step), owl_report.py (her one-line owl reports), phone.py (loud events to
+                                        next step), lessons.py (the findings of past reviews of a repo, put at the
+                                        end of each of Harry's turns on a task in it), resume.py (starts a build turn
+                                        that died once more by itself), owl_report.py (her one-line owl reports), phone.py (loud events to
                                         the phone), scratchpad.py (keeps each scratchpad and task pad to its latest
                                         Checkpoint, older ones archived), chat_review.py (PR reviews teammates ask
                                         for in Google Chat, and fleet review pr), google_chat.py (Chat read
@@ -152,7 +154,8 @@ The store has none of these:
                                         typed action a script checks, at most 6 wakes per task and 30 a day; a turn
                                         that failed or timed out is woken once more on the next pass, and a fix
                                         round that died idle may be started again until 2 of the build's newest runs
-                                        in a row died that way, after which it is yours (off when missing)
+                                        in a row died, unless the fleet's own resume already started it again, after
+                                        which it is yours (off when missing)
   chat-review                           while it holds exactly "on", the chat-review job reads each served app's
                                         Chat conversations each minute and its desk (Hermione, or Moody for the
                                         second app) reviews the PRs teammates ask for there (off when missing: no
@@ -175,6 +178,8 @@ The store has none of these:
                                         (chief-requests/), the codes a go waits for, as salted digests (chief-codes/),
                                         the drafts it wrote (chief-drafts/), its read markers (chief-reads/) and its
                                         turns per cap day (chief-caps/)
+  resume/since                          when the fleet's resume of dead build turns first ran: a run launched before
+                                        it is never started again by itself
   patrol/shadow                         while it is here, the patrol and Gringotts only write files (shadow mode)
   patrol/<job>/                         the Map's snapshot and rows, lineups, keeper's watches, scoreboards, bot passes,
                                         and in shadow mode what a follow-up would have routed (patrol/followup/)

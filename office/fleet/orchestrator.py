@@ -36,7 +36,9 @@ for her, as one typed action that this script checks and runs. Only while the of
   in), and Ryan's own headmaster events. No push
   beyond that draft PR, merge, close or go is reachable. A fix round is legal only while no launch of the task since
   the CHANGES verdict is still going, ended cleanly or did any work, so one that died idle can be started again, and
-  never once ORCHESTRATOR_DEAD_RUNS_IN_A_ROW of the task's newest runs in a row died idle: from there it is Ryan's.
+  never once ORCHESTRATOR_DEAD_RUNS_IN_A_ROW of the task's newest runs in a row died (run_desk.dead_streak, which also
+  counts an earlier run killed or gone with no usage): from there it is Ryan's. Nor is it legal for a dead run the
+  fleet's own resume already started again (fleet/resume.py), so a dead build turn is never started twice.
 """
 from __future__ import annotations
 
@@ -52,7 +54,8 @@ from typing import Optional
 from hogwarts import capacity, db, followups, ids, owlery, pensieve
 from hogwarts.errors import NotFoundError, StoreError, ValidationError
 
-from fleet import common, config, gitops, go_watch, markers, owl_post, phone, push, review, run_desk, safefs, worktree
+from fleet import (common, config, gitops, go_watch, markers, owl_post, phone, push, resume, review, run_desk, safefs,
+                   worktree)
 from fleet.safefs import FleetError
 
 DESK = config.HOOK_DESK
@@ -403,6 +406,8 @@ def _why_not_route(conn, action: dict) -> Optional[str]:
     if streak >= config.ORCHESTRATOR_DEAD_RUNS_IN_A_ROW:
         return (f"the task's last {config.ORCHESTRATOR_DEAD_RUNS_IN_A_ROW} runs died without doing anything, so"
                 " starting it again is Ryan's")
+    if after and resume.resumed(conn, after[-1]["run_id"]):
+        return "the fleet already started the build again after that run died"
     newest = review.latest_result_owl(conn, task)
     if newest is not None and newest["created_at"] >= since:
         return "the build desk posted a handoff after that verdict"

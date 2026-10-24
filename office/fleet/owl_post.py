@@ -28,7 +28,9 @@ For each regular *.json file in /Users/crisryantan/hogwarts/desks/<sender>/outbo
    outbox folder, so an owl from any other desk never starts a review, and the owl's task must be its
    request's task and the desk's own. A handoff that starts nothing says why in the pass's output, and the
    first delivery of it also leaves a routine event.
-9. With the orchestrator switched on, the end of each pass lands each new owl to McGonagall and each new build verdict
+9. A build desk's turn that died (its process gone, killed, or ended having done nothing) starts once more by itself
+   on the same worktree and branch, and Ryan hears it; a second death in a row waits for him (fleet/resume.py).
+   With the orchestrator switched on, the end of each pass lands each new owl to McGonagall and each new build verdict
    as one item for her headless turn and starts that run (fleet/orchestrator.py). Each pass then sends one line for
    each change in where a go task stands while go updates are on (fleet/go_watch.py), and pings the loud headmaster
    events written since the last one to Ryan's phone, or this Mac (fleet/phone.py).
@@ -697,7 +699,7 @@ def drain_outbox(conn, sender: str, outbox_fd: int, summary: dict, now: Optional
 
 def run_pass(conn, now: Optional[int] = None) -> dict:
     summary: dict = {"delivered": [], "rejected": [], "waiting": [], "errors": [], "reviews": [], "resumed": [],
-                     "restarted": []}
+                     "restarted": [], "builds_resumed": []}
     for desk in pensieve.list_desks(conn):
         sender = desk["name"]
         if sender not in config.CASTLE_DESKS:
@@ -737,6 +739,12 @@ def run_pass(conn, now: Optional[int] = None) -> dict:
         go_confirm.sweep(conn)
     except (StoreError, FleetError, OSError) as exc:
         summary["errors"].append({"desk": config.HOOK_DESK, "error": "could not sweep confirmations: " + _reason(exc)})
+    try:  # a build turn that died starts once more by itself, and a second death waits for Ryan (fleet/resume.py)
+        from fleet import resume
+
+        summary["builds_resumed"] = resume.sweep(conn, now)
+    except (StoreError, FleetError, OSError) as exc:
+        summary["errors"].append({"desk": config.HOOK_DESK, "error": "could not resume dead builds: " + _reason(exc)})
     try:  # the orchestrator: one headless McGonagall run for what landed for her, while its switch is on
         from fleet import orchestrator
 

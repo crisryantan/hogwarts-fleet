@@ -1056,6 +1056,38 @@ class ScoreboardTests(PatrolCase):
             with self.subTest(line=line):
                 self.assertIn(line, text)
 
+    def test_build_review_rounds_over_two_weeks_split_by_lessons(self):
+        def build(rounds: int, lessons, at: int) -> None:
+            task = pensieve.start_task(self.conn, pensieve.create_task(self.conn, "harry", "build", now=at)["id"],
+                                       now=at)
+            if lessons is not None:
+                pensieve.add_event(self.conn, "harry", "build.lessons", "routine",
+                                   f"{lessons} lessons from past reviews went into harry's first build turn on this"
+                                   " task", task_id=task["id"], dedupe_key=f"build:lessons:{task['id']}", now=at)
+            for index in range(rounds):
+                sha = f"{len(self.shas):040x}"
+                self.shas.append(sha)
+                pensieve.record_commit(self.conn, task["id"], REPO, sha, now=at)
+                opened = capacity.open_review_round(self.conn, task["id"], "hermione", sha, "review it",
+                                                    idempotency_key=f"round-{sha}", now=at)
+                pensieve.start_task(self.conn, opened["task"]["id"], now=at)  # the reviewer's run took it
+                capacity.record_round_verdict(self.conn, opened["request"]["id"], REPO, "CHANGES", now=at + index)
+
+        self.shas = []
+        build(1, 4, NOW - 2 * DAY)
+        build(3, 0, NOW - 10 * DAY)
+        build(2, None, NOW - 3 * DAY)  # from before lessons were kept
+        build(2, 2, NOW - 20 * DAY)  # older than two weeks
+        with self.desk_writes("A quiet week.\n"):
+            result = scoreboard.scoreboard(self.conn, now=NOW)
+        text = read_file(result["file"])
+        for line in ("## Build review rounds, last two weeks", "| build tasks with a review verdict | 3 |",
+                     "| review rounds with a verdict | 6 |", "| average review rounds per task | 2.0 |",
+                     "| tasks whose first build turn got lessons | 1 |", "| average review rounds, given lessons | 1.0 |",
+                     "| average review rounds, given none | 3.0 |"):
+            with self.subTest(line=line):
+                self.assertIn(line, text)
+
     def test_percentiles_are_nearest_rank(self):
         values = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
         self.assertEqual([scoreboard.percentile(values, pct) for pct in (50, 75, 90, 95)], [5, 8, 9, 10])
