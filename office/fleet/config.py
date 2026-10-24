@@ -182,11 +182,15 @@ CHAT_REVIEW_APPROVE_FILE = "chat-review-approve"
 # While this office file holds "on", and auto-go-updates too, each go update line also posts in your direct message with
 # McGonagall's Chat app (fleet/chat_chief.py), alongside the phone. Off by default: echo on > ~/.hogwarts/chat-go-updates
 CHAT_GO_UPDATES_FILE = "chat-go-updates"
+# Ollivander proves a new Codex version himself (fleet/ollivander.py), off by default: while this office file holds
+# "on", a pass whose CLI update moved Codex runs both boundary probes from the office probes folder, once per version,
+# and clears only the Codex stop when both pass. echo on > ~/.hogwarts/ollivander-auto-prove
+AUTO_PROVE_FILE = "ollivander-auto-prove"
 # Every office opt-in file. common.opt_in_on reads only these names, so a typo never reads another office file as a
 # switch, every switch is read through that one reader, and a name not listed here always reads off.
 OPT_IN_FILES = (AUTO_DRAFT_PR_FILE, AUTO_PORTRAIT_FILE, PR_FOLLOWUP_FILE, AUTO_CLOSE_FILE, WORKTREE_CLEANUP_FILE,
                 OWL_REPORTS_FILE, CROSS_FAMILY_FAILOVER_FILE, ORCHESTRATOR_FILE, GO_UPDATES_FILE, CHAT_REVIEW_FILE,
-                CHAT_REVIEW_GITHUB_FILE, CHAT_REVIEW_APPROVE_FILE, CHAT_GO_UPDATES_FILE)
+                CHAT_REVIEW_GITHUB_FILE, CHAT_REVIEW_APPROVE_FILE, CHAT_GO_UPDATES_FILE, AUTO_PROVE_FILE)
 # Review rounds of one follow-up, apart from the task's REVIEW_ROUND_CAP, and the follow-ups one task may take.
 FOLLOWUP_ROUND_CAP = 2
 FOLLOWUP_MAX_PER_TASK = 5
@@ -710,9 +714,18 @@ STOP_TEXT_MAX_BYTES = 1024
 UPDATE_LOCK = "ollivander-update.lock"
 UPDATE_LOCK_WAIT_SECONDS = 120
 # The Codex sandbox boundary was proven on one Codex version, so a new Codex version stops the headless
-# desks until Ryan re-proves it and clears the stop. A new Claude Code version is reported only.
+# desks until Ryan re-proves it and clears the stop, or Ollivander proves it himself (AUTO_PROVE_FILE). A new Claude
+# Code version is reported only.
 VERSION_STOPS = ("codex",)
 VERSION_MAX_CHARS = 120
+# The installed copies of the kit's two Codex boundary probes, in this office folder (install.sh puts them there), which
+# Ollivander runs while ollivander-auto-prove is on. Each runs under its timeout, and only its summary lines are kept.
+PROBES_DIR = "probes"
+PROBE_SHELL = "codex-boundary-test.sh"
+PROBE_EXEC = "codex-exec-boundary-test.py"
+PROBE_SHELL_TIMEOUT_SECONDS = 300
+PROBE_EXEC_TIMEOUT_SECONDS = 1500
+PROBE_OUTPUT_MAX_BYTES = 1024 * 1024
 RUN_ERROR_MAX_BYTES = 1024 * 1024
 
 # Model failover (fleet/failover.py). A failed run is classed by the HTTP status in its CLI's structured error output.

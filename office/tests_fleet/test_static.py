@@ -54,6 +54,8 @@ KNOWN_FLAGS = {
     "--verbose", "--all",
     # fleet go-wait: the key an earlier wait printed
     "--since",
+    # fleet ollivander: Ryan's rerun of the Codex proof
+    "--prove",
     # git, run only through gitops with the hardening flags
     "--git-dir", "--work-tree", "--verify", "--end-of-options", "--get", "--porcelain", "--no-verify",
     "--no-ext-diff", "--no-textconv", "--detach", "--no-checkout", "-b", "-m", "-F", "--stdin", "--force", "-z",
@@ -122,14 +124,14 @@ def env_problems(source: str, temp_root_allowed: bool = False) -> list:
 
 OPT_IN_NAMES = ("auto-draft-pr", "auto-portrait", "pr-followup", "auto-close", "worktree-cleanup", "owl-reports",
                 "cross-family-failover", "auto-orchestrate", "auto-go-updates", "chat-review", "chat-review-github",
-                "chat-review-approve", "chat-go-updates")
+                "chat-review-approve", "chat-go-updates", "ollivander-auto-prove")
 # An opt-in file named as a file: the whole string, or the last part of a path. The feature's name in a message
 # ("auto-portrait applied ...") is not a file name.
 OPT_IN_FILE_SHAPE = re.compile(r"(?:^|/)(?:" + "|".join(map(re.escape, OPT_IN_NAMES)) + r")/?$")
 OPT_IN_ATTRIBUTES = {"AUTO_DRAFT_PR_FILE", "AUTO_PORTRAIT_FILE", "PR_FOLLOWUP_FILE", "AUTO_CLOSE_FILE",
                      "WORKTREE_CLEANUP_FILE", "OWL_REPORTS_FILE", "CROSS_FAMILY_FAILOVER_FILE", "ORCHESTRATOR_FILE",
                      "GO_UPDATES_FILE", "CHAT_REVIEW_FILE", "CHAT_REVIEW_GITHUB_FILE", "CHAT_REVIEW_APPROVE_FILE",
-                     "CHAT_GO_UPDATES_FILE", "OPT_IN_FILES"}
+                     "CHAT_GO_UPDATES_FILE", "AUTO_PROVE_FILE", "OPT_IN_FILES"}
 
 
 def _docstrings(tree: ast.AST) -> set:
@@ -234,7 +236,7 @@ class OptInTests(unittest.TestCase):
                                                     config.CROSS_FAMILY_FAILOVER_FILE, config.ORCHESTRATOR_FILE,
                                                     config.GO_UPDATES_FILE, config.CHAT_REVIEW_FILE,
                                                     config.CHAT_REVIEW_GITHUB_FILE, config.CHAT_REVIEW_APPROVE_FILE,
-                                                    config.CHAT_GO_UPDATES_FILE})
+                                                    config.CHAT_GO_UPDATES_FILE, config.AUTO_PROVE_FILE})
         self.assertEqual(len(config.OPT_IN_FILES), len(set(config.OPT_IN_FILES)))
         self.assertEqual(set(OPT_IN_NAMES), set(config.OPT_IN_FILES))
         self.assertIn(FLEET / "hooks" / "session_start.py", SOURCES)

@@ -155,6 +155,9 @@ copy_tree() {
 copy_tree "$REPO_DIR/office" "$OFFICE"
 copy_tree "$REPO_DIR/castle" "$CASTLE"
 mkdir -p "$OFFICE/logs"
+# The two Codex boundary probes, so Ollivander can run the installed copies on a new Codex version (ollivander-auto-prove).
+mkdir -m 700 "$OFFICE/probes"
+cp "$REPO_DIR/scripts/codex-boundary-test.sh" "$REPO_DIR/scripts/codex-exec-boundary-test.py" "$OFFICE/probes/"
 say "Copied the office to $OFFICE and the castle to $CASTLE."
 
 # --- Point the fixed paths at this home folder ------------------------------

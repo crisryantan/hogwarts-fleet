@@ -29,6 +29,19 @@ One pass:
    A marker already there when a pass starts is an update that never finished: the binaries may have
    moved with no check run. The pass then updates nothing, writes the stop file, tells Ryan, and leaves
    the marker for castle ollivander clear.
+   Self-proof, only while Ryan's office file ollivander-auto-prove holds "on" (prove_codex): when a pass's
+   only reason to stop the Codex family is a new Codex version (no failed check of Codex or of no one family,
+   and no stop of every family or Codex stop already in place), he claims his one try for that version in the
+   store, lets go of the update lock, and runs the installed copies of both boundary probes (the office
+   probes folder) on it: codex-boundary-test.sh, then codex-exec-boundary-test.py once it passed, each under a
+   timeout, keeping only their summary lines. The loops run him outside any agent sandbox, in the context
+   run_desk launches desks from, and the probes check the rest: the shell probe must name config.CODEX_BIN
+   and print the new version, its first check fails when the sandbox cannot be applied (as inside another
+   sandbox), and the exec probe must say it ran the installed office's launcher code. Both pass and Codex
+   still at that version: he removes only the Codex stop his pass wrote (never the stop of every family, the
+   other family's stop or the update marker), records the version and both results, and Ryan hears
+   "Codex <version> proven; Codex desks resumed." Anything else keeps the stop, and the note names the probe
+   that failed and the manual steps. A version is tried once; fleet ollivander --prove tries it again.
 2. Reads the Codex catalog (codex debug models) and the Claude Code aliases (CLAUDE_LINES, plus any
    alias claude --help names, best effort; a parse miss falls back to the last aliases seen).
 3. Files each visible name into a line. Ryan's castle model line filing comes first, then
@@ -61,9 +74,11 @@ One pass:
    new catalog look (which --approve then checks against).
 
 --dry-run prints the whole plan as JSON and changes nothing: no update runs and nothing is written.
+--prove runs only the proof again (prove_again), for the Codex version a claimed try was for, while that pass's
+Codex stop is still in place.
 
 Run it with the wrapper line:
-/usr/bin/env -i /usr/bin/python3 -I -B -X pycache_prefix=/var/empty -c 'import sys; sys.path.insert(0, "/Users/crisryantan/.hogwarts"); from fleet.ollivander import main; sys.exit(main())' [--dry-run]
+/usr/bin/env -i /usr/bin/python3 -I -B -X pycache_prefix=/var/empty -c 'import sys; sys.path.insert(0, "/Users/crisryantan/.hogwarts"); from fleet.ollivander import main; sys.exit(main())' [--dry-run | --prove]
 """
 from __future__ import annotations
 
@@ -74,6 +89,7 @@ import hashlib
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
 from typing import Callable, Iterator, Optional
@@ -814,16 +830,18 @@ def _stop_after_unfinished(conn, stamp: str, now: int, result: dict) -> None:
                        dedupe_key=f"ollivander:unfinished:{key}", now=now)
 
 
-def update_clis(conn, runner: Runner, now: int, dry_run: bool) -> dict:
+def update_clis(conn, runner: Runner, now: int, dry_run: bool, prober: Optional[Runner] = None) -> dict:
     """Update both CLIs and check them, only while the update-clis file is there. Headless launches wait
     from before the first update until every check passes. Any failure, a new Codex version, or an update
     an earlier pass left unfinished, stops them. The whole update runs under the update lock, so no launch
-    is between its stop check and its process, and no desk process runs while a binary is replaced."""
+    is between its stop check and its process, and no desk process runs while a binary is replaced.
+    While ollivander-auto-prove is on, a new Codex version that stopped only the Codex family is proven once,
+    after the update lock is let go (prove_codex)."""
     enabled = update_marker()
     stamp = leftover_update()
     result = {"enabled": enabled, "commands": [" ".join(argv) for argv in update_commands()], "ran": [],
               "checks": [], "versions": None, "stopped": False, "stopped_families": [], "busy": False,
-              "unfinished": stamp is not None}
+              "unfinished": stamp is not None, "auto_prove": auto_prove_on(), "prove": None}
     if dry_run:
         return result
     if stamp is not None:
@@ -838,18 +856,37 @@ def update_clis(conn, runner: Runner, now: int, dry_run: bool) -> dict:
             result["busy"] = True  # launches kept it; the next pass tries again
             return result
         _update_locked(conn, runner, now, result)
+    if result["prove"] is not None:
+        # Claude desks launch again while the probes run; the Codex stop holds Codex desks until the proof ends.
+        result["prove"] = prove_codex(conn, runner, prober or run_probe, result["prove"]["version"],
+                                      result["prove"]["stamp"], now)
     return result
 
 
-def _version_reason(family: str, what: str) -> str:
+def _version_reason(family: str, what: str, proving: bool = False) -> str:
+    if family == "codex" and proving:
+        return (f"{what}, and the Codex sandbox boundary is proven per version, so Ollivander runs both boundary"
+                " probes on it now and clears this stop himself only if both pass")
     if family == "codex":
         return (f"{what}, and the Codex sandbox boundary is proven per version, so run the real "
                 "boundary probe (scripts/codex-boundary-test.sh) on it first")
     return f"{what}, and a new {family} version stops its desks until you have checked it"
 
 
+def _codex_stop_clear() -> bool:
+    """True when neither the stop of every family nor the Codex stop is in place, so a Codex stop this pass writes
+    holds no older reason. False when either is there or the state folder cannot be read."""
+    try:
+        with safefs.opened_dir(config.OFFICE_ROOT, config.STATE_DIR) as fd:
+            return all(safefs.lstat(fd, name) is None for name in (config.STOP_FILE, config.STOP_FAMILY_FILES["codex"]))
+    except (FleetError, OSError):
+        return False
+
+
 def _update_locked(conn, runner: Runner, now: int, result: dict) -> None:
     before = cli_versions(runner)
+    # Read before this pass writes any stop: a Codex stop already there holds a reason the owner has not cleared.
+    codex_clear = _codex_stop_clear()
     # Left in place if this pass dies part way: run_desk keeps refusing, and the next pass stops launches.
     write_stop("a CLI update is running", now, config.UPDATING_FILE)
     for argv in update_commands():
@@ -880,11 +917,15 @@ def _update_locked(conn, runner: Runner, now: int, result: dict) -> None:
             failed.setdefault(config.desk_family(desk), []).append(f"run_desk {desk} --dry-run")
     moved = [family for family in CLI_FAMILIES if after[family] is not None and before[family] != after[family]]
     reasons = {family: ["after the CLI update these failed: " + "; ".join(names)] for family, names in failed.items()}
+    # Ollivander proves a new Codex version himself only when its stop would hold that version and nothing else: no
+    # failed check of any family he cannot pin, no Codex failure, no stop already in place, and no earlier try.
+    proving = ("codex" in moved and "codex" in config.VERSION_STOPS and not failed.keys() & {"codex", None}
+               and codex_clear and auto_prove_on() and not _tried(conn, after["codex"]))
     notes = []
     for family in moved:
         what = f"{family} --version went from {before[family] or 'unknown'} to {after[family]}"
         if family in config.VERSION_STOPS:
-            reasons.setdefault(family, []).append(_version_reason(family, what))
+            reasons.setdefault(family, []).append(_version_reason(family, what, proving and family == "codex"))
         else:
             notes.append((family, what))
     # The stop files are written before any event, so a store error below never loses them.
@@ -897,6 +938,15 @@ def _update_locked(conn, runner: Runner, now: int, result: dict) -> None:
         reason = ". ".join(text for family in order for text in reasons[family])
         pensieve.add_event(conn, config.OLLIVANDER_DESK, "ollivander.stopped", "headmaster",
                            stopped_summary(reason, _held_now(stopped)), dedupe_key=f"ollivander:stopped:{now}", now=now)
+    if proving:
+        # The one automatic try for this version, claimed before any probe runs, so a pass that dies part way never
+        # tries it again. Its time is the stamp of the Codex stop it may clear.
+        claim = pensieve.add_event(conn, config.OLLIVANDER_DESK, PROVE_KIND, "routine",
+                                   common.one_line(f"Ollivander is proving Codex {after['codex']} with both boundary"
+                                                   " probes; the Codex stop holds until both pass.", 480),
+                                   dedupe_key=_prove_key(after["codex"]), now=now)
+        if claim["created"]:
+            result["prove"] = {"version": after["codex"], "stamp": now}
     for family, what in notes:
         pensieve.add_event(conn, config.OLLIVANDER_DESK, "ollivander.cli-version", "headmaster",
                            common.one_line(f"Ollivander updated the CLIs: {what}.", 480),
@@ -904,21 +954,255 @@ def _update_locked(conn, runner: Runner, now: int, result: dict) -> None:
     remove_updating()
 
 
+# Proving a new Codex version
+
+
+PROVE_KIND = "ollivander.prove"
+PROVE_RESULT_KIND = "ollivander.prove-result"
+RERUN = "fleet ollivander --prove"
+MANUAL = ("run both probes by hand from your kit clone (sh scripts/codex-boundary-test.sh, then /usr/bin/python3 -I -B"
+          " scripts/codex-exec-boundary-test.py) and then castle ollivander clear")
+SUMMARY_MAX_CHARS = 160
+_SHELL_CODEX = re.compile(r"^CODEX=(\S+)$", re.MULTILINE)
+_SHELL_VERSION = re.compile(r"^Codex version: (.*)$")
+_SHELL_PASSED = re.compile(r"^All \d+ checks passed\.")
+_SHELL_FAILED = re.compile(r"^\d+ check\(s\) failed, \d+ passed\.")
+_EXEC_LAUNCHER = re.compile(r"^Launcher code: (.*)$")
+_EXEC_PASSED = re.compile(r"^All \d+ checks passed for [^.]*\.")
+_EXEC_FAILED = re.compile(r"^\d+ check\(s\) failed or were inconclusive, \d+ passed\.")
+# What the exec probe says when it ran the installed office's own launcher code, with no kit checkout beside it.
+INSTALLED_LAUNCHER = "the installed office"
+NOTHING_TO_CLEAR = "no Codex stop was left to clear"
+
+
+def auto_prove_on() -> bool:
+    """Whether Ryan opted in to Ollivander proving a new Codex version himself (config.AUTO_PROVE_FILE)."""
+    return common.opt_in_on(config.AUTO_PROVE_FILE)
+
+
+def _digest(version: str) -> str:
+    return hashlib.sha256(version.encode("utf-8")).hexdigest()[:16]
+
+
+def _prove_key(version: str) -> str:
+    return f"ollivander:prove:{_digest(version)}"
+
+
+def _tried(conn, version: Optional[str]) -> bool:
+    """Whether a pass already claimed its one automatic try for this Codex version."""
+    return version is not None and bool(pensieve.events_with_key_prefix(conn, _prove_key(version)))
+
+
+def run_probe(argv: list, timeout: int, log_name: Optional[str] = None) -> tuple:
+    """(exit code, stdout) of one boundary probe, as run_command gives them: -1 a timeout, -2 a binary that would not
+    start. The probe runs with the fixed child environment in a process group of its own, which is killed and reaped
+    once it ends, times out or this process gets a signal, so no Codex run it started goes on after it. Its stderr is
+    dropped. log_name is unused: a probe's output is read here and never logged."""
+    run_desk.guard(argv)
+    child = None
+    with common.ended_by_signals():
+        try:
+            with common.signals_held():  # a probe that started always has its handle here, to be ended below
+                child = subprocess.Popen(argv, cwd=config.OFFICE_ROOT, env=run_desk.child_env(),
+                                         stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                         start_new_session=True, close_fds=True)
+            out, _ = child.communicate(timeout=timeout)
+            return child.returncode, out[:config.PROBE_OUTPUT_MAX_BYTES]
+        except subprocess.TimeoutExpired:
+            return -1, b""
+        except OSError:
+            return -2, b""
+        finally:
+            if child is not None:
+                with common.signals_held():
+                    with contextlib.suppress(ProcessLookupError, PermissionError):
+                        os.killpg(child.pid, signal.SIGKILL)
+                    child.wait()
+                    child.stdout.close()
+
+
+def _probe_paths() -> tuple:
+    """(shell probe, exec probe) as absolute paths in the office probes folder, once both are plain files of Ryan's
+    and the shell probe tests the Codex binary the desks run (config.CODEX_BIN). FleetError says what is missing."""
+    try:
+        with safefs.opened_dir(config.OFFICE_ROOT, config.PROBES_DIR) as fd:
+            for name in (config.PROBE_SHELL, config.PROBE_EXEC):
+                if not safefs.is_safe_regular(fd, name):
+                    raise FleetError(f"{config.PROBE_SHELL} and {config.PROBE_EXEC} are not both in the office"
+                                     f" {config.PROBES_DIR} folder")
+            text = safefs.read_regular(fd, config.PROBE_SHELL, 64 * 1024, "the shell probe").decode("utf-8", "replace")
+    except safefs.Missing:
+        raise FleetError(f"the office has no {config.PROBES_DIR} folder") from None
+    except OSError:
+        raise FleetError(f"the office {config.PROBES_DIR} folder could not be read") from None
+    named = _SHELL_CODEX.findall(text)
+    if named != [config.CODEX_BIN]:
+        raise FleetError(f"the shell probe does not test {config.CODEX_BIN}, the Codex the desks run")
+    folder = f"{config.OFFICE_ROOT}/{config.PROBES_DIR}"
+    return f"{folder}/{config.PROBE_SHELL}", f"{folder}/{config.PROBE_EXEC}"
+
+
+def _lines(out: bytes) -> list:
+    return [line.strip() for line in out.decode("ascii", "replace").splitlines()]
+
+
+def _summary(lines: list, pattern: re.Pattern) -> Optional[str]:
+    """The first summary sentence pattern finds at the start of a line, and nothing else of the line."""
+    return next((match.group(0) for match in map(pattern.match, lines) if match), None)
+
+
+def _verdict(code: int, summary: Optional[str], passed: bool, timeout: int) -> dict:
+    """One probe's result: ok, and what is kept of its output, its summary sentence."""
+    if code == -1:
+        return {"ok": False, "summary": f"timed out after {timeout} seconds"}
+    if summary is None:
+        return {"ok": False, "summary": f"exit {code} with no summary line"}
+    line = common.one_line(summary, SUMMARY_MAX_CHARS)
+    if passed and code == 0:
+        return {"ok": True, "summary": line}
+    return {"ok": False, "summary": line if code == 0 else f"exit {code}: {line}"}
+
+
+def _shell_result(code: int, out: bytes, version: str) -> dict:
+    """Passed only on exit 0, its all-passed line with no failed line, and the version it tested being version."""
+    lines = _lines(out)
+    passed, failed = _summary(lines, _SHELL_PASSED), _summary(lines, _SHELL_FAILED)
+    found = _verdict(code, failed or passed, failed is None and passed is not None,
+                     config.PROBE_SHELL_TIMEOUT_SECONDS)
+    tested = next((match.group(1) for match in map(_SHELL_VERSION.match, lines) if match), None)
+    tested = common.one_line(tested, config.VERSION_MAX_CHARS).strip() if tested is not None else None
+    if found["ok"] and tested != version:
+        return {"ok": False, "summary": f"it tested Codex {tested or 'of no known version'}, not {version}"}
+    return found
+
+
+def _exec_result(code: int, out: bytes) -> dict:
+    """Passed only on exit 0, its all-passed line with no failed line, and the installed office's launcher code."""
+    lines = _lines(out)
+    passed, failed = _summary(lines, _EXEC_PASSED), _summary(lines, _EXEC_FAILED)
+    found = _verdict(code, failed or passed, failed is None and passed is not None,
+                     config.PROBE_EXEC_TIMEOUT_SECONDS)
+    launcher = next((match.group(1) for match in map(_EXEC_LAUNCHER.match, lines) if match), None)
+    if found["ok"] and launcher != INSTALLED_LAUNCHER:
+        return {"ok": False, "summary": "it did not run the installed office's launcher code"}
+    return found
+
+
+def _clear_codex_stop(stamp: int) -> Optional[str]:
+    """Remove the Codex stop the pass at stamp wrote, and nothing else. None once removed, else why it stays: another
+    stop or the update marker in place would keep the Codex desks stopped anyway, and a Codex stop of another stamp
+    holds a reason this proof never saw."""
+    try:
+        with safefs.opened_dir(config.OFFICE_ROOT, config.STATE_DIR) as fd:
+            if safefs.lstat(fd, config.STOP_FILE) is not None:
+                return "the stop of every family is in place"
+            if safefs.lstat(fd, config.UPDATING_FILE) is not None:
+                return "a CLI update marker is in place"
+            name = config.STOP_FAMILY_FILES["codex"]
+            if safefs.lstat(fd, name) is None:
+                return NOTHING_TO_CLEAR
+            raw = safefs.read_regular(fd, name, config.STOP_TEXT_MAX_BYTES, "the stop file")
+            if raw.split(b" ", 1)[0] != str(stamp).encode("ascii"):
+                return "the Codex stop in place is not the one this proof is for"
+            os.unlink(name, dir_fd=fd)
+    except (FleetError, OSError):
+        return "the Codex stop could not be read"
+    return None
+
+
+def prove_codex(conn, runner: Runner, prober: Runner, version: str, stamp: int, now: int) -> dict:
+    """Run both boundary probes on Codex version, the shell probe first and the exec probe only after it passed, each
+    once under its timeout. Both passed, and Codex still at version: clear only the Codex stop the pass at stamp
+    wrote. Either way, record the version and both results (a routine event) and send Ryan one note."""
+    found = {"version": version, "stamp": stamp, "shell": None, "exec": None, "proven": False, "cleared": False}
+    try:
+        shell, exec_probe = _probe_paths()
+    except FleetError as exc:
+        found["shell"] = {"ok": False, "summary": f"not run: {common.one_line(exc, SUMMARY_MAX_CHARS)}"}
+    else:
+        code, out = prober(["/bin/sh", shell], config.PROBE_SHELL_TIMEOUT_SECONDS, None)
+        found["shell"] = _shell_result(code, out, version)
+        if found["shell"]["ok"]:
+            code, out = prober([*config.PYTHON_WRAPPER[2:], exec_probe], config.PROBE_EXEC_TIMEOUT_SECONDS, None)
+            found["exec"] = _exec_result(code, out)
+    if found["exec"] is not None and found["exec"]["ok"]:
+        now_on = cli_versions(runner)["codex"]
+        if now_on != version:
+            found["exec"] = {"ok": False, "summary": f"Codex moved to {now_on or 'an unknown version'} while it ran"}
+    found["proven"] = bool(found["exec"] and found["exec"]["ok"])
+    stays = _clear_codex_stop(stamp) if found["proven"] else None
+    found["cleared"] = found["proven"] and stays is None
+    _tell_proof(conn, found, stays, now)
+    return found
+
+
+def _tell_proof(conn, found: dict, stays: Optional[str], now: int) -> None:
+    version, key = found["version"], _digest(found["version"])
+    shell = found["shell"]["summary"]
+    run_exec = "not run" if found["exec"] is None else found["exec"]["summary"]
+    pensieve.add_event(conn, config.OLLIVANDER_DESK, PROVE_RESULT_KIND, "routine",
+                       common.one_line(f"Codex {version} {'proven' if found['proven'] else 'not proven'}. Shell probe:"
+                                       f" {shell}. Exec probe: {run_exec}.", 480),
+                       dedupe_key=f"ollivander:prove-result:{key}:{now}", now=now)
+    if found["cleared"]:
+        note = f"Codex {version} proven; Codex desks resumed."
+    elif found["proven"] and stays == NOTHING_TO_CLEAR:
+        note = f"Codex {version} proven; the Codex stop was already cleared."
+    elif found["proven"]:
+        note = (f"Codex {version} proven, but {stays}, so Ollivander left the Codex stop in place. Once you have"
+                " looked, castle ollivander clear removes it.")
+    else:
+        which, result = ("exec", found["exec"]) if found["exec"] is not None else ("shell", found["shell"])
+        note = (f"Codex {version} not proven: the {which} boundary probe failed ({result['summary']}), so the Codex"
+                f" desks stay stopped. Once the cause is fixed, {RERUN} tries again; or {MANUAL}.")
+    kind = "ollivander.proven" if found["proven"] else "ollivander.prove-failed"
+    pensieve.add_event(conn, config.OLLIVANDER_DESK, kind, "headmaster", common.one_line(note, 480),
+                       dedupe_key=f"ollivander:proven:{key}:{now}", now=now)
+
+
+def prove_again(conn, now: Optional[int] = None, runner: Optional[Runner] = None,
+                prober: Optional[Runner] = None) -> dict:
+    """Ryan's rerun of the proof (fleet ollivander --prove), under ollivander.lock, never by itself. It proves only the
+    Codex version an automatic try was claimed for, and only while the Codex stop that pass wrote is still in place,
+    so it never clears a stop that holds anything else."""
+    ts = common.now_stamp(now)
+    runner = run_command if runner is None else runner
+    with safefs.opened_dir(config.OFFICE_ROOT, "locks", create=True) as locks_fd, \
+            safefs.held_lock(locks_fd, "ollivander.lock", blocking=False):
+        version = cli_versions(runner)["codex"]
+        claim = None if version is None else next(iter(pensieve.events_with_key_prefix(conn, _prove_key(version))),
+                                                   None)
+        if claim is None:
+            raise FleetError("Ollivander never tried to prove the Codex version installed now, so there is nothing to"
+                             f" rerun: {MANUAL}")
+        try:
+            with safefs.opened_dir(config.OFFICE_ROOT, config.STATE_DIR) as fd:
+                held = safefs.read_regular(fd, config.STOP_FAMILY_FILES["codex"], config.STOP_TEXT_MAX_BYTES,
+                                           "the stop file")
+        except (FleetError, OSError):
+            held = None
+        if held is None or held.split(b" ", 1)[0] != str(claim["ts"]).encode("ascii"):
+            raise FleetError("the Codex stop Ollivander wrote for this version is no longer in place, so a proof would"
+                             f" clear nothing it can vouch for: {MANUAL}")
+        return prove_codex(conn, runner, prober or run_probe, version, claim["ts"], ts)
+
+
 # Entry points
 
 
-def run(conn, dry_run: bool = False, now: Optional[int] = None, runner: Optional[Runner] = None) -> dict:
+def run(conn, dry_run: bool = False, now: Optional[int] = None, runner: Optional[Runner] = None,
+        prober: Optional[Runner] = None) -> dict:
     ts = common.now_stamp(now)
     runner = run_command if runner is None else runner
     if dry_run:
-        return _pass(conn, True, ts, runner)
+        return _pass(conn, True, ts, runner, prober)
     with safefs.opened_dir(config.OFFICE_ROOT, "locks", create=True) as locks_fd, \
             safefs.held_lock(locks_fd, "ollivander.lock", blocking=False):
-        return _pass(conn, False, ts, runner)
+        return _pass(conn, False, ts, runner, prober)
 
 
-def _pass(conn, dry_run: bool, now: int, runner: Runner) -> dict:
-    updates = update_clis(conn, runner, now, dry_run)
+def _pass(conn, dry_run: bool, now: int, runner: Runner, prober: Optional[Runner] = None) -> dict:
+    updates = update_clis(conn, runner, now, dry_run, prober)
     codex = fetch_codex(runner)
     claude = fetch_claude(conn, runner)
     cards = {}
@@ -948,7 +1232,9 @@ def _pass(conn, dry_run: bool, now: int, runner: Runner) -> dict:
 
 def main(argv: Optional[list] = None) -> int:
     parser = argparse.ArgumentParser(prog="ollivander", description="Keep each desk on the model its role needs.")
-    parser.add_argument("--dry-run", action="store_true")
+    which = parser.add_mutually_exclusive_group()
+    which.add_argument("--dry-run", action="store_true")
+    which.add_argument("--prove", action="store_true", help="prove the Codex version an automatic try failed on, again")
     args = parser.parse_args(sys.argv[1:] if argv is None else argv)
     try:
         conn = common.connect()
@@ -956,7 +1242,7 @@ def main(argv: Optional[list] = None) -> int:
         sys.stdout.write(json.dumps({"ok": False, "error": common.one_line(exc, 300)}, ensure_ascii=True) + "\n")
         return 1
     try:
-        data = run(conn, dry_run=args.dry_run)
+        data = prove_again(conn) if args.prove else run(conn, dry_run=args.dry_run)
         sys.stdout.write(json.dumps({"ok": True, "data": data}, ensure_ascii=True, indent=2) + "\n")
         return 0
     except (FleetError, StoreError) as exc:

@@ -96,6 +96,8 @@ The store has none of these:
   state/model-ladders.json              Ollivander's fallbacks per headless desk and family, in pick order
   state/ollivander-stop*                Ollivander's stops: ollivander-stop holds every headless desk, and
                                         ollivander-stop-claude or ollivander-stop-codex only that CLI family's
+  probes/                               install.sh's copies of the kit's two Codex boundary probes, which Ollivander
+                                        runs on a new Codex version while ollivander-auto-prove is on
   logs/                                 the fleet's job and script logs, review-auto.log for the review loop and
                                         closer.log for auto-close, one JSON line per task each pass
   runs/<desk>/                          each headless run's output, which fleet feed follows, and how its process
@@ -171,6 +173,11 @@ The store has none of these:
                                         also posts in your direct message with McGonagall's Chat app (off when
                                         missing, and the lines waiting for it are dropped)
   chat-go-updates-outbox/               the go update lines waiting for McGonagall's app, one file each
+  ollivander-auto-prove                 while it holds exactly "on", a CLI update that moved Codex and stopped the
+                                        Codex desks for that alone gets one try per version at both boundary probes
+                                        from probes/; both pass, Ollivander removes only that Codex stop and says
+                                        "Codex <version> proven; Codex desks resumed." (off when missing: the stop
+                                        waits for you)
   chat-reviews/                         one record per message and app it asked something (requests/), each app's
                                         read markers per conversation (read/), the once-per-head-commit GitHub markers
                                         of each app (github/), each cap day's counts (caps/) and the PRs each app
@@ -490,6 +497,7 @@ A few commands in more detail:
 - `desk cap` raises one desk's runs or spend cap until the next cap reset, which is local midnight unless `CAP_RESET_UTC_SECONDS` in the fleet's config says otherwise.
 - `desk model DESK MODEL` pins a desk to a model of its own family, `--role` unpins it and `--approve` takes a pending costlier pick, once it has checked the pick still qualifies.
 - `ollivander clear` removes every Ollivander stop: the stop of every family (`state/ollivander-stop`), each CLI family's own stop (`state/ollivander-stop-claude`, `state/ollivander-stop-codex`), and any update marker a CLI update left. Its result has `cleared`, `removed` (the files it removed), `stopped` (for each one removed, the family it held back, `every`, `claude`, `codex` or `update`, its file and why), `stop_file` and a `note` saying what it removed, which family each held and why, or that no stop was on and nothing was removed. While a stop event is still unacked after the clear, the session hooks list it marked "(cleared since: no stop is in place now)".
+- Ollivander can clear one stop himself, only while `~/.hogwarts/ollivander-auto-prove` holds `on` (`echo on > ~/.hogwarts/ollivander-auto-prove`; `rm` it to switch off). When a pass's CLI update moves Codex and that new version is the only reason it stops the Codex family (no failed check, no stop of every family and no Codex stop already in place), he claims his one try for the version as a routine `ollivander.prove` event, lets go of the update lock, and runs the installed probes in `probes/` with the fixed child environment: `codex-boundary-test.sh` (300 seconds), then `codex-exec-boundary-test.py` (1500 seconds) once it passed. He keeps only their summary lines. A pass needs exit 0 and the all-passed line from each, the shell probe naming `CODEX_BIN` and printing the new version, the exec probe saying it ran the installed office's launcher code, and Codex still on that version afterwards. Then he removes only the Codex stop his pass wrote, records the version and both results as a routine `ollivander.prove-result` event, and sends one headmaster `ollivander.proven` note, "Codex <version> proven; Codex desks resumed." Any failure or timeout keeps the stop, and the headmaster `ollivander.prove-failed` note names the probe and its summary line, the manual steps and `fleet ollivander --prove`, which runs the proof once more for that version while that Codex stop is still in place. The exec probe sends a short prompt to OpenAI and costs a few cents per desk, once per Codex version.
 - `desk many-tasks` lets a desk hold many active tasks at once, for good. It refuses `mcgonagall`, `snape`, `portrait`, the human desk and the script desks.
 - `task list` with no flag lists the open tasks as one line each, newest first. `--open` lists queued, active and awaiting-close tasks as full records, `--all` lists every task, and each refuses `--status` with it. `task builds` shows one line per build: go task, build task, branch and state.
 - `task board` prints `in_flight`.

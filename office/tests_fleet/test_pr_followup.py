@@ -307,7 +307,7 @@ class SwitchTests(FollowupCase):
                                                config.CROSS_FAMILY_FAILOVER_FILE, config.ORCHESTRATOR_FILE,
                                                config.GO_UPDATES_FILE, config.CHAT_REVIEW_FILE,
                                                config.CHAT_REVIEW_GITHUB_FILE, config.CHAT_REVIEW_APPROVE_FILE,
-                                               config.CHAT_GO_UPDATES_FILE))
+                                               config.CHAT_GO_UPDATES_FILE, config.AUTO_PROVE_FILE))
 
     def test_opt_in_off_routes_nothing_and_writes_nothing(self):
         self.switch_off()

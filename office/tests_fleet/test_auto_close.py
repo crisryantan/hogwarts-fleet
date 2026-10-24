@@ -370,7 +370,7 @@ class OptInTests(CloseCase):
                                                config.CROSS_FAMILY_FAILOVER_FILE, config.ORCHESTRATOR_FILE,
                                                config.GO_UPDATES_FILE, config.CHAT_REVIEW_FILE,
                                                config.CHAT_REVIEW_GITHUB_FILE, config.CHAT_REVIEW_APPROVE_FILE,
-                                               config.CHAT_GO_UPDATES_FILE))
+                                               config.CHAT_GO_UPDATES_FILE, config.AUTO_PROVE_FILE))
 
 
 class MapRoundCase(CloseCase):

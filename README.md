@@ -133,13 +133,13 @@ The push gate is a guardrail, not a wall. It reads an agent's Bash command as te
 | `claude-agents/snape.md` | Snape's user-level agent file | `~/.claude/agents/snape.md`, only if absent |
 | `install.sh`, `uninstall.sh` | Install the two homes, or remove them. Uninstall is a dry run unless you pass `--yes`, and keeps an archive | |
 | `scripts/*-setup.sh` | Switch on the Owl Post, the patrol (in shadow mode), Dumbledore's nightly review and the terminal loops, one onboarding stage each | |
-| `scripts/codex-boundary-test.sh`, `scripts/codex-exec-boundary-test.py` | Prove the Codex desks' permission profile on your Mac, including under real `codex exec` runs. Run them before enabling Harry or Moody, and after every Codex upgrade | |
+| `scripts/codex-boundary-test.sh`, `scripts/codex-exec-boundary-test.py` | Prove the Codex desks' permission profile on your Mac, including under real `codex exec` runs. Run them before enabling Harry or Moody, and after every Codex upgrade, or let Ollivander run them on a new Codex version with `~/.hogwarts/ollivander-auto-prove` | |
 | `scripts/installed-office-check.sh` | Installs the kit into a throwaway home with made-up values and runs both suites there, so a test that leans on your own private values fails | |
 
 ## Limits
 
 - The fleet runs on macOS only, for one person on one Mac.
-- The Codex desks' read boundary rests on Codex permission profiles, which Codex marks as beta. Rerun `scripts/codex-boundary-test.sh` after every Codex upgrade.
+- The Codex desks' read boundary rests on Codex permission profiles, which Codex marks as beta. Rerun `scripts/codex-boundary-test.sh` after every Codex upgrade, or switch on `ollivander-auto-prove` so Ollivander runs both probes himself.
 - The review loop, closer, patrol and follow-ups are tested against temporary git repos and a faked GitHub. Try them on a small real task before you rely on them. The patrol starts in shadow mode, where it only writes files under the office, until you take it out.
 
 Tested with Claude Code 2.1.295, Codex 0.162.0 and herdr 0.9.3. [DESIGN.md](docs/DESIGN.md#known-limits) lists every known limit.

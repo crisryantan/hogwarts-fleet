@@ -63,7 +63,7 @@ Harry and Moody stay disabled until your organization approves Codex for its sou
 
 - run_desk runs them under that profile, an allowlist that denies the office and every folder it does not name, with no network.
 - Neither may touch `/private/tmp` or your per-user temp folder. Harry gets a private temp folder of his own, emptied before each run and set as `TMPDIR` and `TEST_TMP_ROOT` with xcrun's cache (`xcrun_db`) inside it, and both may only read xcrun's shared lookup cache.
-- `scripts/codex-boundary-test.sh` in the kit proves that kind of profile on your Mac, and `scripts/codex-exec-boundary-test.py` proves it again under real `codex exec` runs. Run both before enabling Harry, and after every Codex upgrade.
+- `scripts/codex-boundary-test.sh` in the kit proves that kind of profile on your Mac, and `scripts/codex-exec-boundary-test.py` proves it again under real `codex exec` runs. Run both before enabling Harry, and after every Codex upgrade. Once you trust them, `echo on > ~/.hogwarts/ollivander-auto-prove` lets Ollivander run the installed copies in `~/.hogwarts/probes/` himself on a new Codex version and clear the Codex stop only when both pass.
 
 ## (d) Registering and closing a task
 

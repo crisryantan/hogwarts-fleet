@@ -21,7 +21,9 @@
       Waits, read only, until that go task changes where it stands, then prints one line with the key for the next
       wait (fleet/go_wait.py). Run it again with that key to hear each change of the go task until it closes.
   fleet push <task-id> [--yes]
-  fleet ollivander [--dry-run]
+  fleet ollivander [--dry-run | --prove]
+      --prove runs both Codex boundary probes again on the version an automatic try (ollivander-auto-prove) failed
+      on, and clears only the Codex stop that try's pass wrote when both pass (fleet/ollivander.py).
   fleet gringotts [--drill [ARCHIVE]]
   fleet adopt <parent-task-id>
       Records the go spec on a McGonagall task registered by hand, from its TASK.md, once you type its id back, so
@@ -115,7 +117,9 @@ def build_parser() -> argparse.ArgumentParser:
     pushed = commands.add_parser("push", allow_abbrev=False)
     pushed.add_argument("task")
     pushed.add_argument("--yes", action="store_true")
-    commands.add_parser("ollivander", allow_abbrev=False).add_argument("--dry-run", action="store_true")
+    kept = commands.add_parser("ollivander", allow_abbrev=False).add_mutually_exclusive_group()
+    kept.add_argument("--dry-run", action="store_true")
+    kept.add_argument("--prove", action="store_true")
     commands.add_parser("close", allow_abbrev=False).add_argument("task")
     commands.add_parser("patrol-restart", allow_abbrev=False).add_argument("owl")
     commands.add_parser("adopt", allow_abbrev=False).add_argument("task")
@@ -163,7 +167,7 @@ def run(conn, args: argparse.Namespace) -> object:
     if args.command == "push":
         return push.push(conn, args.task, confirm=None if args.yes else push.ask_terminal)
     if args.command == "ollivander":
-        return ollivander.run(conn, dry_run=args.dry_run)
+        return ollivander.prove_again(conn) if args.prove else ollivander.run(conn, dry_run=args.dry_run)
     if args.command == "gringotts":
         return run_gringotts(args.drill)
     if args.command == "close":

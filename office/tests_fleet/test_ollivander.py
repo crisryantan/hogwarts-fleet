@@ -7,6 +7,7 @@ import io
 import json
 import os
 import subprocess
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -118,8 +119,8 @@ class OllivanderCase(FleetCase):
         card = {"family": family, "need": need, "effort": effort, "why": why, **changes}
         self.write_file(self.office / "desks" / desk / "role.json", json.dumps(card))
 
-    def keeper(self, dry_run: bool = False, now: int = OCT4, runner=None) -> dict:
-        return ollivander.run(self.conn, dry_run=dry_run, now=now, runner=runner or self.runner)
+    def keeper(self, dry_run: bool = False, now: int = OCT4, runner=None, prober=None) -> dict:
+        return ollivander.run(self.conn, dry_run=dry_run, now=now, runner=runner or self.runner, prober=prober)
 
     def desk(self, plan: dict, name: str) -> dict:
         return next(entry for entry in plan["desks"] if entry["desk"] == name)
@@ -586,6 +587,292 @@ class UpdateTests(OllivanderCase):
         self.assertEqual(plan["updates"]["stopped_families"], ["claude"])
         self.assertTrue(run_desk.stop_requested("claude"))
         self.assertFalse(run_desk.stop_requested("codex"))
+
+
+SHELL_PASS = (b"Codex version: codex 0.161.0\n\nSetting up a throwaway test folder\n   OK      made a folder\n\n"
+              b"All 11 checks passed. The profile keeps a Codex desk out of the office and out of\n")
+SHELL_FAIL = b"Codex version: codex 0.161.0\n   FAILED  reached example.com\n\n1 check(s) failed, 10 passed. The test folder\n"
+EXEC_PASS = (b"Launcher code: the installed office\nNetwork control outside the sandbox: reached example.com\n\n"
+             b"All 27 checks passed for both desks under real codex exec runs. Test folders deleted.\n")
+EXEC_FAIL = (b"Launcher code: the installed office\n   INCONCLUSIVE has no network: the probe printed nothing\n\n"
+             b"1 check(s) failed or were inconclusive, 26 passed. Copy everything above and paste it to Claude.\n")
+NEW_CODEX = {config.CLAUDE_BIN: [b"2.0.0 (Claude Code)\n"], config.CODEX_BIN: [b"codex 0.160.0\n", b"codex 0.161.0\n"]}
+
+
+class FakeProber:
+    """Stands in for both boundary probes: the shell probe's and the exec probe's (exit code, stdout), or a
+    callable run first. Records each probe it was asked to run."""
+
+    def __init__(self, shell=(0, SHELL_PASS), exec_probe=(0, EXEC_PASS), during=None):
+        self.results = {config.PROBE_SHELL: shell, config.PROBE_EXEC: exec_probe}
+        self.during = during
+        self.calls = []
+
+    def __call__(self, argv, timeout, log_name):
+        name = os.path.basename(argv[-1])
+        self.calls.append((tuple(argv), timeout))
+        if self.during is not None:
+            self.during(name)
+        return self.results[name]
+
+
+class AutoProveTests(OllivanderCase):
+    def setUp(self) -> None:
+        super().setUp()
+        self.write_file(self.office / "desks" / "ollivander" / config.UPDATE_MARKER, "", mode=0o644)
+        self.probes = self.office / config.PROBES_DIR
+        self.probes.mkdir(mode=0o700)
+        self.write_file(self.probes / config.PROBE_SHELL, f"#!/bin/sh\nset -u\n\nCODEX={config.CODEX_BIN}\n")
+        self.write_file(self.probes / config.PROBE_EXEC, "import sys\n")
+        self.state = self.office / "state"
+
+    def switch_on(self) -> None:
+        self.write_file(self.office / config.AUTO_PROVE_FILE, "on\n")
+
+    def codex_stop(self) -> Path:
+        return self.state / config.STOP_FAMILY_FILES["codex"]
+
+    def prove_pass(self, now: int = OCT4, prober=None, versions=None) -> dict:
+        moved = {name: list(said) for name, said in (versions or NEW_CODEX).items()}
+        return self.keeper(now=now, runner=FakeRunner(versions=moved), prober=prober)["updates"]
+
+    def test_two_passes_clear_only_the_codex_stop_and_record_the_proof(self):
+        self.switch_on()
+        ollivander.write_stop("a new claude version", NOW, family="claude")
+        prober = FakeProber()
+        updates = self.prove_pass(prober=prober)
+        self.assertEqual(prober.calls, [
+            (("/bin/sh", str(self.probes / config.PROBE_SHELL)), config.PROBE_SHELL_TIMEOUT_SECONDS),
+            ((*config.PYTHON_WRAPPER[2:], str(self.probes / config.PROBE_EXEC)), config.PROBE_EXEC_TIMEOUT_SECONDS)])
+        self.assertEqual((updates["prove"]["proven"], updates["prove"]["cleared"]), (True, True))
+        self.assertFalse(self.codex_stop().exists())
+        self.assertTrue((self.state / config.STOP_FAMILY_FILES["claude"]).exists())  # never another family's stop
+        self.assertFalse(run_desk.stop_requested("codex"))
+        self.assertTrue(run_desk.stop_requested("claude"))
+        [note] = self.events_of("ollivander.proven")
+        self.assertEqual((note["summary"], note["verdict"]), ("Codex codex 0.161.0 proven; Codex desks resumed.",
+                                                              "headmaster"))
+        [record] = self.events_of(ollivander.PROVE_RESULT_KIND)
+        self.assertEqual(record["verdict"], "routine")
+        self.assertIn("Codex codex 0.161.0 proven.", record["summary"])
+        self.assertIn("Shell probe: All 11 checks passed.", record["summary"])
+        self.assertIn("Exec probe: All 27 checks passed for both desks", record["summary"])
+        [claim] = pensieve.events_with_key_prefix(self.conn, "ollivander:prove:")
+        self.assertEqual((claim["ts"], claim["kind"], claim["verdict"]), (OCT4, ollivander.PROVE_KIND, "routine"))
+        [stopped] = self.events_of("ollivander.stopped")
+        self.assertIn("Ollivander runs both boundary probes on it now", stopped["summary"])
+        self.assertEqual(self.events_of("ollivander.prove-failed"), [])
+
+    def test_a_failed_or_timed_out_probe_keeps_the_stop_and_names_it(self):
+        self.switch_on()
+        cases = (
+            ((0, SHELL_FAIL), (0, EXEC_PASS), 1, "the shell boundary probe failed (1 check(s) failed, 10 passed."),
+            ((-1, b""), (0, EXEC_PASS), 1, "the shell boundary probe failed (timed out after 300 seconds)"),
+            ((1, b"Codex version: codex 0.161.0\n"), (0, EXEC_PASS), 1, "the shell boundary probe failed (exit 1 with no"),
+            ((0, SHELL_PASS.replace(b"0.161.0", b"0.150.0")), (0, EXEC_PASS), 1, "(it tested Codex codex 0.150.0, not"),
+            ((0, SHELL_PASS), (1, EXEC_FAIL), 2, "the exec boundary probe failed (exit 1: 1 check(s) failed or were"),
+            ((0, SHELL_PASS), (-1, b""), 2, "the exec boundary probe failed (timed out after 1500 seconds)"),
+            ((0, SHELL_PASS), (0, EXEC_PASS.replace(b"the installed office", b"this kit checkout")), 2,
+             "the exec boundary probe failed (it did not run the installed office's launcher code)"),
+        )
+        for index, ((code, shell), exec_probe, runs, said) in enumerate(cases):
+            with self.subTest(said=said):
+                self.castle_cli("ollivander", "clear")
+                version = f"0.2{index}.0".encode()
+                prober = FakeProber(shell=(code, shell.replace(b"0.161.0", version)), exec_probe=exec_probe)
+                versions = {config.CLAUDE_BIN: [b"2.0.0 (Claude Code)\n"],
+                            config.CODEX_BIN: [b"codex 0.160.0\n", b"codex " + version + b"\n"]}
+                updates = self.prove_pass(now=OCT4 + index * 60, prober=prober, versions=versions)
+                self.assertEqual(len(prober.calls), runs)
+                self.assertEqual((updates["prove"]["proven"], updates["prove"]["cleared"]), (False, False))
+                self.assertTrue(self.codex_stop().exists())
+                self.assertTrue(run_desk.stop_requested("codex"))
+                note = self.events_of("ollivander.prove-failed")[-1]["summary"]
+                self.assertTrue(note.startswith(f"Codex codex {version.decode()} not proven: "), note)
+                self.assertIn(said, note)
+                self.assertIn("so the Codex desks stay stopped", note)
+                self.assertIn("castle ollivander clear", note)
+                self.assertIn(ollivander.RERUN, note)
+        self.assertEqual(self.events_of("ollivander.proven"), [])
+        self.assertEqual(len(self.events_of(ollivander.PROVE_RESULT_KIND)), len(cases))
+
+    def test_probes_missing_or_testing_another_codex_are_a_failure_with_no_probe_run(self):
+        self.switch_on()
+        self.write_file(self.probes / config.PROBE_SHELL, "#!/bin/sh\nCODEX=/usr/local/bin/other-codex\n")
+        prober = FakeProber()
+        self.prove_pass(prober=prober)
+        self.assertEqual(prober.calls, [])
+        self.assertIn(f"not run: the shell probe does not test {config.CODEX_BIN}",
+                      self.events_of("ollivander.prove-failed")[-1]["summary"])
+        self.assertTrue(self.codex_stop().exists())
+        self.castle_cli("ollivander", "clear")
+        os.unlink(self.probes / config.PROBE_EXEC)
+        versions = {config.CLAUDE_BIN: [b"2.0.0 (Claude Code)\n"],
+                    config.CODEX_BIN: [b"codex 0.161.0\n", b"codex 0.162.0\n"]}
+        self.prove_pass(now=OCT4 + 60, prober=prober, versions=versions)
+        self.assertEqual(prober.calls, [])
+        self.assertIn("are not both in the office probes folder", self.events_of("ollivander.prove-failed")[-1]["summary"])
+        self.assertTrue(self.codex_stop().exists())
+
+    def test_one_automatic_try_per_version_and_a_manual_rerun(self):
+        self.switch_on()
+        prober = FakeProber(shell=(0, SHELL_FAIL))
+        self.prove_pass(prober=prober)
+        self.assertEqual(len(prober.calls), 1)
+        # The same version arrives again later (a rollback and a second update): no second automatic try.
+        self.castle_cli("ollivander", "clear")
+        later = self.prove_pass(now=OCT4 + config.DAY_SECONDS, prober=prober)
+        self.assertEqual(len(prober.calls), 1)
+        self.assertIsNone(later["prove"])
+        self.assertTrue(self.codex_stop().exists())
+        [stopped] = self.events_of("ollivander.stopped")[-1:]
+        self.assertIn("codex-boundary-test.sh", stopped["summary"])
+        self.assertEqual(len(self.events_of(ollivander.PROVE_KIND)), 1)
+        # That stop is not the one the try was for, so a rerun refuses to clear it.
+        with self.assertRaises(FleetError) as caught:
+            ollivander.prove_again(self.conn, now=OCT4 + 2 * config.DAY_SECONDS,
+                                   runner=FakeRunner(versions={config.CLAUDE_BIN: [b"2.0.0 (Claude Code)\n"],
+                                                               config.CODEX_BIN: [b"codex 0.161.0\n"]}),
+                                   prober=FakeProber())
+        self.assertIn("no longer in place", str(caught.exception))
+        self.assertTrue(self.codex_stop().exists())
+
+    def test_the_manual_rerun_proves_the_version_a_try_failed_on(self):
+        self.switch_on()
+        self.prove_pass(prober=FakeProber(exec_probe=(-1, b"")))
+        self.assertTrue(self.codex_stop().exists())
+        runner = FakeRunner(versions={config.CLAUDE_BIN: [b"2.0.0 (Claude Code)\n"], config.CODEX_BIN: [b"codex 0.161.0\n"]})
+        prober = FakeProber()
+        found = ollivander.prove_again(self.conn, now=OCT4 + 600, runner=runner, prober=prober)
+        self.assertEqual((found["proven"], found["cleared"], found["stamp"]), (True, True, OCT4))
+        self.assertEqual(len(prober.calls), 2)
+        self.assertFalse(self.codex_stop().exists())
+        self.assertEqual(self.events_of("ollivander.proven")[-1]["summary"],
+                         "Codex codex 0.161.0 proven; Codex desks resumed.")
+        # A version no try was claimed for has nothing to rerun.
+        runner = FakeRunner(versions={config.CLAUDE_BIN: [b"2.0.0 (Claude Code)\n"], config.CODEX_BIN: [b"codex 9.9.9\n"]})
+        with self.assertRaises(FleetError) as caught:
+            ollivander.prove_again(self.conn, now=OCT4 + 900, runner=runner, prober=prober)
+        self.assertIn("never tried to prove", str(caught.exception))
+        self.assertEqual(len(prober.calls), 2)
+
+    def test_the_switch_off_runs_nothing(self):
+        for index, text in enumerate((None, "off\n", "yes\n")):
+            with self.subTest(text=text):
+                if text is not None:
+                    self.write_file(self.office / config.AUTO_PROVE_FILE, text)
+                self.castle_cli("ollivander", "clear")
+                prober = FakeProber()
+                versions = {config.CLAUDE_BIN: [b"2.0.0 (Claude Code)\n"],
+                            config.CODEX_BIN: [b"codex 0.1.0\n", f"codex 0.{index}.5\n".encode()]}
+                updates = self.prove_pass(now=OCT4 + index * 60, prober=prober, versions=versions)
+                self.assertFalse(updates["auto_prove"])
+                self.assertIsNone(updates["prove"])
+                self.assertEqual(prober.calls, [])
+                self.assertTrue(self.codex_stop().exists())
+                self.assertIn("codex-boundary-test.sh", self.events_of("ollivander.stopped")[-1]["summary"])
+        self.assertEqual([event for event in self.events() if event["kind"].startswith("ollivander.prove")], [])
+        self.switch_on()
+        self.assertTrue(self.keeper(dry_run=True, prober=FakeProber())["updates"]["auto_prove"])
+
+    def test_no_try_when_the_codex_stop_would_hold_more_than_the_new_version(self):
+        self.switch_on()
+        cases = {
+            "a codex stop already in place": lambda: ollivander.write_stop("an earlier failure", NOW, family="codex"),
+            "a stop of every family in place": lambda: ollivander.write_stop("written by hand", NOW),
+            "the codex update failed too": None,
+        }
+        for index, (why, before) in enumerate(cases.items()):
+            with self.subTest(why=why):
+                self.castle_cli("ollivander", "clear")
+                if before is not None:
+                    before()
+                codes = {("upgrade", "--cask", "codex"): 1} if before is None else {}
+                versions = {config.CLAUDE_BIN: [b"2.0.0 (Claude Code)\n"],
+                            config.CODEX_BIN: [b"codex 0.160.0\n", f"codex 0.17{index}.0\n".encode()]}
+                prober = FakeProber()
+                runner = FakeRunner(versions=versions, codes=codes)
+                updates = self.keeper(now=OCT4 + index * 60, runner=runner, prober=prober)["updates"]
+                self.assertIsNone(updates["prove"])
+                self.assertEqual(prober.calls, [])
+                self.assertTrue(self.codex_stop().exists())
+                if before is not None and "every" in why:
+                    self.assertTrue((self.state / config.STOP_FILE).exists())
+        self.assertEqual(self.events_of(ollivander.PROVE_KIND), [])
+
+    def test_a_stop_or_update_marker_that_lands_during_the_proof_is_never_cleared(self):
+        self.switch_on()
+        for index, name in enumerate((config.STOP_FILE, config.UPDATING_FILE)):
+            with self.subTest(name=name):
+                self.castle_cli("ollivander", "clear")
+
+                def land(probe, name=name):
+                    if probe == config.PROBE_EXEC:
+                        ollivander.write_stop("landed meanwhile", OCT4, name)
+
+                versions = {config.CLAUDE_BIN: [b"2.0.0 (Claude Code)\n"],
+                            config.CODEX_BIN: [b"codex 0.160.0\n", f"codex 0.18{index}.0\n".encode()]}
+                prober = FakeProber(during=land)
+                for key, result in prober.results.items():
+                    prober.results[key] = (result[0], result[1].replace(b"0.161.0", f"0.18{index}.0".encode()))
+                updates = self.prove_pass(now=OCT4 + index * 60, prober=prober, versions=versions)
+                self.assertEqual((updates["prove"]["proven"], updates["prove"]["cleared"]), (True, False))
+                self.assertTrue(self.codex_stop().exists())
+                self.assertTrue((self.state / name).exists())
+                note = self.events_of("ollivander.proven")[-1]["summary"]
+                self.assertIn("proven, but", note)
+                self.assertIn("left the Codex stop in place", note)
+                self.assertNotIn("resumed", note)
+        self.assertEqual(self.events_of("ollivander.prove-failed"), [])
+
+    def test_codex_moving_while_the_probes_ran_is_no_proof(self):
+        self.switch_on()
+        versions = {config.CLAUDE_BIN: [b"2.0.0 (Claude Code)\n"],
+                    config.CODEX_BIN: [b"codex 0.160.0\n", b"codex 0.161.0\n", b"codex 0.162.0\n"]}
+        updates = self.prove_pass(prober=FakeProber(), versions=versions)
+        self.assertEqual(updates["prove"]["proven"], False)
+        self.assertIn("Codex moved to codex 0.162.0 while it ran", self.events_of("ollivander.prove-failed")[-1]["summary"])
+        self.assertTrue(self.codex_stop().exists())
+
+    @unittest.skipUnless(IN_KIT, ONLY_IN_KIT)
+    def test_the_parsers_match_the_kits_probes_and_install_copies_them(self):
+        shell = (KIT.parent / "scripts" / config.PROBE_SHELL).read_text()
+        self.assertEqual(ollivander._SHELL_CODEX.findall(shell), [kit_setting("CODEX_BIN")])
+        for line in ('echo "Codex version: ', 'echo "All $passed checks passed.', 'echo "$failed check(s) failed, $passed passed.'):
+            self.assertIn(line, shell)
+        probe = (KIT.parent / "scripts" / config.PROBE_EXEC).read_text()
+        for line in ('print(f"Launcher code: {CODE_FROM}")', 'return INSTALLED, "the installed office", None',
+                     'print(f"All {passed} checks passed for ',
+                     'print(f"{failed} check(s) failed or were inconclusive, {passed} passed.'):
+            self.assertIn(line, probe)
+        self.assertTrue(ollivander._SHELL_PASSED.match("All 11 checks passed. The profile"))
+        self.assertTrue(ollivander._SHELL_FAILED.match("1 check(s) failed, 10 passed. The test folder"))
+        self.assertTrue(ollivander._EXEC_FAILED.match("1 check(s) failed or were inconclusive, 26 passed. Copy"))
+        install = (KIT.parent / "install.sh").read_text()
+        self.assertIn(f'mkdir -m 700 "$OFFICE/{config.PROBES_DIR}"', install)
+        self.assertIn(f'cp "$REPO_DIR/scripts/{config.PROBE_SHELL}" "$REPO_DIR/scripts/{config.PROBE_EXEC}"'
+                      f' "$OFFICE/{config.PROBES_DIR}/"', install)
+
+
+class RunProbeTests(FleetCase):
+    """run_probe starts a real process: its stdout comes back, and a timeout kills its whole process group."""
+
+    def test_output_comes_back_and_a_timeout_kills_the_group(self):
+        script = self.write_file(self.tmp / "probe.sh", "echo started\n/bin/sleep 30 &\necho $! > \"$1\"\nwait\n")
+        marker = self.tmp / "child.pid"
+        self.assertEqual(ollivander.run_probe(["/bin/sh", "-c", "echo All 1 checks passed."], 30),
+                         (0, b"All 1 checks passed.\n"))
+        code, out = ollivander.run_probe(["/bin/sh", str(script), str(marker)], 1)
+        self.assertEqual((code, out), (-1, b""))
+        child = int(marker.read_text().strip())
+        for _ in range(100):  # the killed child is reaped once it is reparented
+            try:
+                os.kill(child, 0)
+            except ProcessLookupError:
+                break
+            time.sleep(0.05)
+        else:
+            self.fail("the probe's child outlived its timeout")
 
 
 class RunDeskModelTests(OllivanderCase):
