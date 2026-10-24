@@ -18,8 +18,9 @@ changes what any run may do.
   no .done); else it is handed off with no review started. And a CHANGES round whose newest run since its verdict
   died without doing anything (run_desk.died_idle: the run's end record in the office runs folder, which no desk can
   write, and its recorded usage) says the fix round died: retrying while fewer than ORCHESTRATOR_DEAD_RUNS_IN_A_ROW of
-  the build's newest runs in a row died (the fleet's own resume starts it once more, fleet/resume.py) and that resume
-  has not told you it could not, else waiting on you. A CHANGES
+  the build's newest runs in a row died, since the fleet's own resume starts it once more (fleet/resume.py), else
+  waiting on you. The resume's own line on that run decides first, for a run gone with no end record or killed after
+  work too: build.dead is waiting on you, and build.resumed is retrying. A CHANGES
   round with no run since its verdict, told by its review.fix-round event, that the review loop did not open (no
   after-<request>.json in that folder naming the handoff it was for) was run by hand, so no fix round started: it
   waits on you to run fleet build. An end record or an after record that cannot be read fails the pass, as
@@ -333,12 +334,23 @@ def _build_state(conn, go_id: str, build: dict, held: set) -> tuple:
         return _key(build_id, "round-cap", round_no, verdict), None
     after = [row for row in capacity.task_launches(conn, build_id) if row["launched_at"] >= verdict_at]
     # Each read raises when a run's end record cannot be read, so no pass stands on a half read.
+    # The fleet's own resume (fleet/resume.py) names the dead run in its line: build.dead once it waits on Ryan,
+    # build.resumed once it started it again. Those also cover a run gone with no end record or killed after work.
+    dead = resumed = False
+    if after:
+        last = after[-1]["run_id"]
+        keys = {row["dedupe_key"] for row in db.fetch_all(conn, "SELECT dedupe_key FROM events WHERE dedupe_key IN"
+                                                          " (?, ?)", (f"build:dead:{last}", f"build:resumed:{last}"))}
+        dead, resumed = f"build:dead:{last}" in keys, f"build:resumed:{last}" in keys
+    if dead:
+        return _key(build_id, "fix-dead", round_no, verdict), None
     if after and run_desk.died_idle(after[-1]):
-        # Its newest fix round died without doing anything: the fleet's own resume starts it once more under the bound
-        # of dead runs in a row, unless its build.dead line says it could not; past that it waits on Ryan.
-        told = db.fetch_one(conn, "SELECT id FROM events WHERE dedupe_key = ?", (f"build:dead:{after[-1]['run_id']}",))
-        retry = told is None and run_desk.dead_streak(conn, build_id) < config.ORCHESTRATOR_DEAD_RUNS_IN_A_ROW
+        # Its newest fix round died without doing anything: the resume starts it once more under the bound of dead
+        # runs in a row; past that it waits on Ryan.
+        retry = run_desk.dead_streak(conn, build_id) < config.ORCHESTRATOR_DEAD_RUNS_IN_A_ROW
         return _key(build_id, "fix-retry" if retry else "fix-dead", round_no, verdict), None
+    if resumed:
+        return _key(build_id, "fix-retry", round_no, verdict), None
     if not after:
         # A review run by hand tells its CHANGES as this event and starts no fix round; the loop's own round tells
         # it only when its fix round failed to start, and that stays the changes line.

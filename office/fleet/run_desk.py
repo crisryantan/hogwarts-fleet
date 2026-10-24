@@ -793,8 +793,8 @@ def build_plan(conn, desk: str, owl_id: Optional[str] = None, mcp_job: Optional[
     key = pad_key(conn, task) if task is not None and desk in config.TASK_PAD_DESKS else None
     pad = None if key is None else pad_path(desk, key)
     prompt = DRY_RUN_PROMPT if owl_id is None else _owl_prompt(desk, owl_id, task, pad)
-    lessons_given = None
-    if task is not None and desk in config.WORKTREE_DESKS and task["worktree"]:
+    lessons_given, lessons_turn = None, task is not None and desk in config.WORKTREE_DESKS and bool(task["worktree"])
+    if lessons_turn:
         from fleet import lessons  # here: it reads the worktree's record through worktree, which imports this module
 
         text, lessons_given = lessons.for_turn(conn, task)
@@ -828,7 +828,7 @@ def build_plan(conn, desk: str, owl_id: Optional[str] = None, mcp_job: Optional[
             "stdin": stdin, "brief": brief_file, "temp": temp, "slot": slot,
             "task_id": None if task is None else task["id"],
             "task_status": None if task is None else task["status"], "pad": pad, "pad_key": key,
-            "review_round": review_round, "lessons": lessons_given}
+            "review_round": review_round, "lessons": lessons_given, "lessons_turn": lessons_turn}
 
 
 # Enabling, caps, launching and running
@@ -2574,7 +2574,7 @@ def run(conn, desk: str, owl_id: str, mcp_job: Optional[str] = None, now: Option
             # Counted from here, before the process starts: a run killed or interrupted below still uses a run.
             # The launch lock ends here, so the next run of the desk reads the caps with this launch in them.
             capacity.record_launch(conn, desk, plan["run_id"], plan["model"], task_id=plan.get("task_id"), now=now)
-            if plan.get("lessons") is not None:
+            if plan.get("lessons_turn"):
                 from fleet import lessons
 
                 lessons.record(conn, desk, plan["task_id"], plan["lessons"], now)  # the task's first launch only

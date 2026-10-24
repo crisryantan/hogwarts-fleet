@@ -149,6 +149,20 @@ class ResumeTests(ResumeCase):
         self.enable("harry")
         self.assertEqual(self.sweep(), [])  # told once, never started later by itself
 
+    def test_a_restart_that_ended_before_it_launched_waits_for_the_owner_once(self):
+        dead = self.launch(ended=False)
+        with mock.patch.object(worktree, "start_desk", return_value=STARTED):  # its run gave up before its launch
+            self.assertEqual(self.sweep()[0]["outcome"], "started")
+        with run_desk.task_lock(self.task["id"]):  # while the restart waits for a slot it holds the task's lock
+            self.assertEqual(self.sweep(), [])
+        with mock.patch.object(run_desk, "stop_requested", return_value=True):  # a stop holds it to start it later
+            self.assertEqual(self.sweep(), [])
+        self.assertEqual(self.sweep(), [{"task_id": self.task["id"], "outcome": "restart never launched"}])
+        [line] = self.events_of(resume.DEAD_KIND)
+        self.assertEqual(line["dedupe_key"], f"build:dead:{dead}")
+        self.assertIn("ended before it launched", line["summary"])
+        self.assertEqual((self.sweep(), self.starts), ([], []))  # told once, never started a third time
+
     def test_the_owl_post_pass_runs_the_resume(self):
         self.launch(ended=False)
         summary = owl_post.run_pass(self.conn, now=self.tick())

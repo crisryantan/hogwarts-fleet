@@ -35,6 +35,7 @@ class LessonsCase(RunDeskCase):
         self.owl_id, self.task_id = self.request("harry", worktree="build")
         pensieve.start_task(self.conn, self.task_id, now=NOW)
         self.record = {"repo": REPO, "base": "0" * 40, "git_dir": "/nowhere/.git/worktrees/build", "path": "/nowhere"}
+        self.record_kept = dict(self.record)
         self.diff = ""
         self.task_md = "# Task\n\n## Intent\nFix the retry in src/api/client.py.\n"
         for target, name, value in ((lessons, "worktree_record", lambda task: self.record),
@@ -136,9 +137,9 @@ class GatherTests(LessonsCase):
         text, _ = self.turn()
         [long] = [line for line in self.lesson_lines(text) if "src/long.py" in line]
         self.assertLessEqual(len(long.split(": ", 1)[1]), 160 + 3 + config.LESSONS_TEXT_MAX)
-        with mock.patch.object(config, "LESSONS_BLOCK_MAX", 300):
+        with mock.patch.object(config, "LESSONS_BLOCK_MAX", 300 + lessons.wrapper_chars()):
             text, count = self.turn()
-        self.assertLessEqual(sum(len(line) + 1 for line in self.lesson_lines(text)), 300)
+        self.assertLessEqual(len(text), 300 + lessons.wrapper_chars())  # the whole block, heading and markers too
         self.assertNotIn("src/long.py", text)
         self.assertEqual(count, len(self.lesson_lines(text)))
         self.assertGreater(count, 1)  # the long one did not fit, the next ones did
@@ -217,6 +218,17 @@ class RecordTests(LessonsCase):
         [event] = self.events_of(lessons.EVENT_KIND)
         self.assertEqual(event["task_id"], self.task_id)
         self.assertTrue(event["summary"].startswith("2 lessons from past reviews went into harry's first build turn"))
+
+    def test_a_first_turn_that_could_not_read_its_repo_is_kept_as_that(self):
+        self.enable("harry")
+        self.record = None
+        with fake_children():
+            run_desk.run(self.conn, "harry", self.owl_id, now=NOW)
+        self.record = {**self.record_kept}
+        with fake_children():
+            run_desk.run(self.conn, "harry", self.owl_id, now=NOW)
+        [event] = self.events_of(lessons.EVENT_KIND)
+        self.assertTrue(event["summary"].startswith("no lessons went into harry's first build turn"))
 
     def test_the_count_is_kept_on_the_task_once(self):
         lessons.record(self.conn, "harry", self.task_id, 3, now=NOW)

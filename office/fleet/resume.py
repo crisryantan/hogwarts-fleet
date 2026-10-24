@@ -19,9 +19,12 @@ owner hears it in one line. A second death in a row waits for him.
   config.ORCHESTRATOR_DEAD_RUNS_IN_A_ROW or more, the bound McGonagall's fix-round retry keeps too, nothing starts and
   he gets one build.dead line saying it waits for him, as a second death always has. A start that did not start (the
   desk is not enabled, or at its daily cap) is a build.dead line saying why.
-- Once: each line's dedupe key names the dead run, and a run that has either line is never acted on again. The line
-  is written before the start, so a kill between them leaves a run told as started that never started, and never two
-  starts. McGonagall's fix-round retry refuses a run this has already started again (orchestrator._why_not_route).
+- Once: each line's dedupe key names the dead run, and a run that has either line is never started again. The line
+  is written before the start, so a kill between them never gives two starts. A restart that ended before its launch
+  counted (its run gave up waiting for a slot, hit a cap or was refused) leaves the dead run the newest launch with its
+  task's review lock free, since the restart's process holds that lock from its start: the owner then hears once that
+  the task waits for him (build.dead), unless a stop of the desk's family holds the restart to start it later.
+  McGonagall's fix-round retry refuses a run this has already started again (orchestrator._why_not_route).
 - Read and act only through those paths: nothing here writes a worktree, a branch or a review.
 """
 from __future__ import annotations
@@ -56,7 +59,11 @@ def acted_on(conn, run_id: str) -> bool:
 
 def resumed(conn, run_id: str) -> bool:
     """Whether the fleet started a build turn again after this run died."""
-    return db.fetch_one(conn, "SELECT id FROM events WHERE dedupe_key = ?", (resumed_key(run_id),)) is not None
+    return _told(conn, resumed_key(run_id))
+
+
+def _told(conn, key: str) -> bool:
+    return db.fetch_one(conn, "SELECT id FROM events WHERE dedupe_key = ?", (key,)) is not None
 
 
 def _since(now: int) -> int:
@@ -110,8 +117,10 @@ def resume_task(conn, task: dict, now: Optional[int] = None, floor: int = 0) -> 
     """Start one task's dead build turn again, or tell the owner it waits for him. Returns what it did, or None when
     nothing was due. A run launched at or before floor is left alone."""
     launch = _newest(conn, task["id"])
-    if launch is None or launch["launched_at"] <= floor or acted_on(conn, launch["run_id"]):
+    if launch is None or launch["launched_at"] <= floor or _told(conn, dead_key(launch["run_id"])):
         return None
+    if _told(conn, resumed_key(launch["run_id"])):
+        return _restart_ended(conn, task, launch, now)
     if not _maybe_dead(launch) or _handed_off(conn, task, launch) or _loop_busy(task["id"]):
         return None
     try:
@@ -129,6 +138,28 @@ def resume_task(conn, task: dict, now: Optional[int] = None, floor: int = 0) -> 
             return _act(conn, task, launch, streak, lock_fd, now)
     except safefs.Busy:
         return None  # a run of the task, or a review, is still going
+
+
+def _restart_ended(conn, task: dict, launch: dict, now: Optional[int]) -> Optional[str]:
+    """The restart of a dead run that never launched: still the task's newest launch, with its task's review lock free.
+    The restart's process inherits that lock from its start (start_desk hands it on) and holds it while it waits for a
+    run slot, so a free lock means it ended before its launch counted (a slot wait given up, a cap, a refusal). The
+    owner hears once that the task waits for him; it is not started a third time. A stop of the desk's family holds
+    the restart to start it again once cleared, so nothing is said while one holds."""
+    if run_desk.stop_requested(config.desk_family(task["desk"])):
+        return None
+    try:
+        with run_desk.task_lock(task["id"]):
+            newest = _newest(conn, task["id"])
+            if newest is None or newest["run_id"] != launch["run_id"] or _told(conn, dead_key(launch["run_id"])):
+                return None
+            _tell(conn, task, DEAD_KIND, dead_key(launch["run_id"]),
+                  f"{task['desk']}'s build turn on task {task['id']} died and the fleet's restart of it ended before it"
+                  " launched (a run slot wait, a cap or a refusal), so it waits for you: fleet build"
+                  f" {task['id']}", now)
+            return "restart never launched"
+    except safefs.Busy:
+        return None  # the restart is still waiting for a run slot, or a review runs
 
 
 def _act(conn, task: dict, launch: dict, streak: int, lock_fd: int, now: Optional[int]) -> str:

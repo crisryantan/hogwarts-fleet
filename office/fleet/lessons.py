@@ -160,10 +160,12 @@ def worktree_record(task: dict) -> Optional[dict]:
 
 
 def touched(record: dict) -> list:
-    """The paths the worktree changed against its base, committed or not, or none when git cannot say."""
+    """The paths the worktree changed against its base, committed or not, and its new files git does not ignore yet
+    (an interrupted turn's), or none when git cannot say."""
     try:
-        changed = gitops.git(["diff", "--name-only", "--end-of-options", record["base"]],
-                             record["git_dir"], record["path"])
+        changed = gitops.git(["diff", "--name-only", "--end-of-options", record["base"]], record["git_dir"],
+                             record["path"])
+        changed += "\n" + gitops.git(["ls-files", "--others", "--exclude-standard"], record["git_dir"], record["path"])
     except (FleetError, OSError):
         return []
     return [line for line in changed.splitlines() if line.strip()]
@@ -204,7 +206,8 @@ def gather(conn, task: dict, now: Optional[int] = None) -> tuple:
     folders = task_folders(conn, task, record)
     ranked = sorted(enumerate(found), key=lambda pair: (not near(_place_folder(pair[1]["place"]), folders),
                                                         -pair[1]["at"], pair[0]))
-    picked, seen, used = [], set(), 0
+    # The heading, the lead and the two marker lines count toward the cap too, so the whole block stays within it.
+    picked, seen, used = [], set(), wrapper_chars()
     for _, item in ranked:
         if len(picked) >= config.LESSONS_MAX:
             break
@@ -227,11 +230,17 @@ def _line(number: int, item: dict, place: str, text: str) -> str:
     return f"L{number} {day} {item['source']}, {item['kind']}: {where}{text}"
 
 
+def wrapper_chars() -> int:
+    """What the block's heading, lead, marker lines and line ends take of LESSONS_BLOCK_MAX, before any lesson."""
+    opening, closing = fences("0" * 16)
+    return sum(len(part) + 1 for part in (HEADER, LEAD, opening, closing))
+
+
 def block(lessons: list, nonce: Optional[str] = None) -> str:
     """The LESSONS FROM PAST REVIEWS block for the lessons gather picked, or "" for none."""
     if not lessons:
         return ""
-    opening, closing = fences(nonce or secrets.token_hex(8))
+    opening, closing = fences(nonce or secrets.token_hex(8))  # 16 hex characters, as wrapper_chars counts
     lines = [_line(number, item, item["place"], item["text"]) for number, item in enumerate(lessons, 1)]
     return "\n".join([HEADER, LEAD, opening, *lines, closing]) + "\n"
 
@@ -243,11 +252,14 @@ def for_turn(conn, task: dict, now: Optional[int] = None) -> tuple:
     return block(lessons), None if repo is None else len(lessons)
 
 
-def record(conn, desk: str, task_id: str, count: int, now: Optional[int] = None) -> None:
-    """Keep on the task how many lessons its first launched turn was given, once: one routine event. Never raises."""
+def record(conn, desk: str, task_id: str, count: Optional[int], now: Optional[int] = None) -> None:
+    """Keep on the task how many lessons its first launched turn was given, once: one routine event, saying so when
+    that turn could not read its repo (count None), so no later turn is taken for the first. Never raises."""
+    turn = f"{desk}'s first build turn on this task"
+    summary = (f"{count} lessons from past reviews went into {turn}" if count is not None
+               else f"no lessons went into {turn}: its worktree record could not be read")
     try:
-        pensieve.add_event(conn, desk, EVENT_KIND, "routine",
-                           f"{count} lessons from past reviews went into {desk}'s first build turn on this task",
-                           task_id=task_id, dedupe_key=f"build:lessons:{task_id}", now=now)
+        pensieve.add_event(conn, desk, EVENT_KIND, "routine", summary, task_id=task_id,
+                           dedupe_key=f"build:lessons:{task_id}", now=now)
     except (StoreError, FleetError, sqlite3.Error):
         pass

@@ -344,6 +344,18 @@ class TableTests(GoWatchCase):
                            task_id=build["id"], dedupe_key=f"build:dead:{run_id}", now=self.tick())
         self.expect("fix-dead", build)  # the resume told Ryan it could not, so it waits on him
 
+    def test_table_a_fix_round_gone_with_no_end_record_follows_the_resumes_line(self):
+        build = self.build()
+        self.expect("confirmed", build)
+        self.round(build, SHAS[0], "CHANGES")
+        self.expect("changes", build)
+        run_id = self.launch(build)  # the Mac restarted: no end record, so it reads as going
+        self.quiet()
+        for kind, key, state in (("build.resumed", "resumed", "fix-retry"), ("build.dead", "dead", "fix-dead")):
+            pensieve.add_event(self.conn, "harry", kind, "headmaster", "the fleet's line", task_id=build["id"],
+                               dedupe_key=f"build:{key}:{run_id}", now=self.tick())
+            self.expect(state, build)
+
     def told_fix_round(self, build: dict, round_no: int = 1) -> int:
         """The one event a CHANGES that started no fix round tells, with its key, its summary free text."""
         return pensieve.add_event(self.conn, "harry", "review.fix-round", "headmaster",
