@@ -837,7 +837,7 @@ class AutoProveTests(OllivanderCase):
         updates = self.keeper(runner=runner, prober=prober)["updates"]
         self.assertIsNone(updates["prove"])
         self.assertEqual(prober.calls, [])
-        self.assertTrue(self.codex_stop().exists())
+        self.assertEqual(self.codex_stop().read_text(), f"{OCT4 - 5} written by hand during the update\n")
         self.assertIn("codex-boundary-test.sh", self.events_of("ollivander.stopped")[-1]["summary"])
         self.assertEqual(self.events_of(ollivander.PROVE_KIND), [])
 
@@ -853,8 +853,8 @@ class AutoProveTests(OllivanderCase):
         self.assertTrue(self.codex_stop().read_text().startswith(f"{OCT4 + 7} a newer reason"))
         self.assertIn("not the one this proof is for", self.events_of("ollivander.proven")[-1]["summary"])
         self.assertEqual(len(self.events_of(ollivander.PROVE_RESULT_KIND)), 1)
-        # The removal itself moves the stop aside and checks it there: one of another stamp goes back untouched.
-        self.assertEqual(ollivander._remove_codex_stop(OCT4), "the Codex stop changed while Ollivander cleared it")
+        # The removal reads the stop where it is: one of another stamp never leaves its name.
+        self.assertEqual(ollivander._remove_codex_stop(OCT4), "the Codex stop in place is not the one this proof is for")
         self.assertTrue(self.codex_stop().read_text().startswith(f"{OCT4 + 7} a newer reason"))
         self.assertEqual(sorted(path.name for path in self.state.iterdir() if path.name.startswith(".")), [])
         self.assertIsNone(ollivander._remove_codex_stop(OCT4 + 7))

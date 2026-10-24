@@ -92,6 +92,7 @@ import re
 import secrets
 import select
 import signal
+import stat
 import subprocess
 import sys
 import time
@@ -947,12 +948,14 @@ def _update_locked(conn, runner: Runner, now: int, result: dict) -> None:
         else:
             notes.append((family, what))
     # A proof clears only a Codex stop of its own, so that stop is made new, never written over one that landed
-    # during the update. Losing that race means no proof: the stop then reads as today's.
+    # during the update. Losing that race means no proof, and the stop that landed stays as it is.
     written = set()
     if proving:
         if write_stop(". ".join(reasons["codex"]), now, family="codex", exclusive=True):
             written.add("codex")
         else:
+            # Kept as it is, with its own reason and stamp; the event below still names the new version.
+            written.add("codex")
             proving = False
             what = f"codex --version went from {before['codex'] or 'unknown'} to {after['codex']}"
             reasons["codex"][-1] = _version_reason("codex", what)
@@ -1130,56 +1133,37 @@ def _exec_result(code: int, out: bytes) -> dict:
     return found
 
 
-def _ours(fd: int, name: str, stamp: int) -> bool:
-    """Whether the stop file name in the state folder fd is the one the pass at stamp wrote."""
-    raw = safefs.read_regular(fd, name, config.STOP_TEXT_MAX_BYTES, "the stop file")
-    return raw.split(b" ", 1)[0] == str(stamp).encode("ascii")
-
-
-def _clear_blocker(stamp: int) -> Optional[str]:
-    """Why the Codex stop the pass at stamp wrote must stay, read only, or None when it may go: another stop or the
-    update marker in place would keep the Codex desks stopped anyway, and a Codex stop of another stamp holds a
-    reason this proof never saw."""
+def _remove_codex_stop(stamp: int) -> Optional[str]:
+    """Remove the Codex stop the pass at stamp wrote, and nothing else. None once removed, else why it stays. The stop
+    is read through an fd and removed only while its name still holds that same file, so a stop that is not ours, or
+    that replaced ours meanwhile, never leaves its name. Another stop or the update marker in place keeps it too,
+    since the Codex desks would stay stopped anyway."""
+    name = config.STOP_FAMILY_FILES["codex"]
     try:
         with safefs.opened_dir(config.OFFICE_ROOT, config.STATE_DIR) as fd:
+            stop_fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=fd)
+            try:
+                held = os.fstat(stop_fd)
+                raw = os.read(stop_fd, config.STOP_TEXT_MAX_BYTES) if stat.S_ISREG(held.st_mode) else None
+            finally:
+                os.close(stop_fd)
+            if raw is None:
+                return "the Codex stop could not be read"
+            if raw.split(b" ", 1)[0] != str(stamp).encode("ascii"):
+                return "the Codex stop in place is not the one this proof is for"
             if safefs.lstat(fd, config.STOP_FILE) is not None:
                 return "the stop of every family is in place"
             if safefs.lstat(fd, config.UPDATING_FILE) is not None:
                 return "a CLI update marker is in place"
-            if safefs.lstat(fd, config.STOP_FAMILY_FILES["codex"]) is None:
-                return NOTHING_TO_CLEAR
-            if not _ours(fd, config.STOP_FAMILY_FILES["codex"], stamp):
-                return "the Codex stop in place is not the one this proof is for"
+            there = os.stat(name, dir_fd=fd, follow_symlinks=False)
+            if (there.st_dev, there.st_ino) != (held.st_dev, held.st_ino):
+                return "the Codex stop changed while Ollivander cleared it"
+            os.unlink(name, dir_fd=fd)
+    except FileNotFoundError:
+        return NOTHING_TO_CLEAR
     except (FleetError, OSError):
         return "the Codex stop could not be read"
     return None
-
-
-def _remove_codex_stop(stamp: int) -> Optional[str]:
-    """Remove the Codex stop the pass at stamp wrote, and nothing else: it is moved aside in one step and checked
-    there, so a stop that replaced it meanwhile is never removed unread. One that is not ours is linked back, unless
-    a newer stop took the name, which then holds the desks. None once removed, else why it stays."""
-    name = config.STOP_FAMILY_FILES["codex"]
-    try:
-        with safefs.opened_dir(config.OFFICE_ROOT, config.STATE_DIR) as fd:
-            aside = f".{name}.{secrets.token_hex(6)}.clearing"
-            try:
-                os.rename(name, aside, src_dir_fd=fd, dst_dir_fd=fd)
-            except FileNotFoundError:
-                return NOTHING_TO_CLEAR
-            try:
-                if _ours(fd, aside, stamp):
-                    return None
-                with contextlib.suppress(FileExistsError):
-                    os.link(aside, name, src_dir_fd=fd, dst_dir_fd=fd, follow_symlinks=False)
-            except (FleetError, OSError):
-                with contextlib.suppress(FileExistsError):
-                    os.link(aside, name, src_dir_fd=fd, dst_dir_fd=fd, follow_symlinks=False)
-            finally:
-                os.unlink(aside, dir_fd=fd)
-    except (FleetError, OSError):
-        return "the Codex stop could not be read"
-    return "the Codex stop changed while Ollivander cleared it"
 
 
 def prove_codex(conn, runner: Runner, prober: Runner, version: str, stamp: int, now: int) -> dict:
@@ -1202,30 +1186,28 @@ def prove_codex(conn, runner: Runner, prober: Runner, version: str, stamp: int, 
         if now_on != version:
             found["exec"] = {"ok": False, "summary": f"Codex moved to {now_on or 'an unknown version'} while it ran"}
     found["proven"] = bool(found["exec"] and found["exec"]["ok"])
-    stays = _clear_blocker(stamp) if found["proven"] else None
+    # The proof is stored before the stop goes, so desks never resume with no record of why; the note follows the
+    # removal, so it says what happened.
+    _record_proof(conn, found, now)
+    stays = _remove_codex_stop(stamp) if found["proven"] else None
     found["cleared"] = found["proven"] and stays is None
-    # The proof and its note are stored before the stop goes, so desks never resume with no record of why.
-    _tell_proof(conn, found, stays, now)
-    if found["cleared"]:
-        stays = _remove_codex_stop(stamp)
-        if stays is not None:
-            found["cleared"] = False
-            pensieve.add_event(conn, config.OLLIVANDER_DESK, "ollivander.proven", "headmaster",
-                               common.one_line(f"Codex {version} proven, but {stays}, so the Codex desks stay stopped"
-                                               " after all. Once you have looked, castle ollivander clear removes"
-                                               " it.", 480),
-                               dedupe_key=f"ollivander:proven:{_digest(version)}:{now}:kept", now=now)
+    _note_proof(conn, found, stays, now)
     return found
 
 
-def _tell_proof(conn, found: dict, stays: Optional[str], now: int) -> None:
-    version, key = found["version"], _digest(found["version"])
-    shell = found["shell"]["summary"]
+def _record_proof(conn, found: dict, now: int) -> None:
+    """The version and both probes' results, as a routine event."""
+    version = found["version"]
     run_exec = "not run" if found["exec"] is None else found["exec"]["summary"]
     pensieve.add_event(conn, config.OLLIVANDER_DESK, PROVE_RESULT_KIND, "routine",
                        common.one_line(f"Codex {version} {'proven' if found['proven'] else 'not proven'}. Shell probe:"
-                                       f" {shell}. Exec probe: {run_exec}.", 480),
-                       dedupe_key=f"ollivander:prove-result:{key}:{now}", now=now)
+                                       f" {found['shell']['summary']}. Exec probe: {run_exec}.", 480),
+                       dedupe_key=f"ollivander:prove-result:{_digest(version)}:{now}", now=now)
+
+
+def _note_proof(conn, found: dict, stays: Optional[str], now: int) -> None:
+    """Ryan's one note on the proof, once the stop is removed or kept."""
+    version, key = found["version"], _digest(found["version"])
     if found["cleared"]:
         note = f"Codex {version} proven; Codex desks resumed."
     elif found["proven"] and stays == NOTHING_TO_CLEAR:
