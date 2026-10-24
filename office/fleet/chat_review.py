@@ -1581,18 +1581,21 @@ def facts_text(checks: dict, linked: list) -> str:
 
 class Section(NamedTuple):
     """One file's part of a diff: its text as the review shows it (one line for a file it deletes whole), the file's
-    path as its header names it ("" when it names none), its added and removed lines, and whether it was cut."""
+    path as its header names it ("" when it names none), its added and removed lines, whether it was cut, and whether
+    its header says the file is deleted whole (a binary or empty one, never cut, included)."""
     text: str
     path: str
     added: int
     removed: int
     collapsed: bool
+    gone: bool = False
 
 
 class Shaped(NamedTuple):
     """What a review shows of a diff: the shown text (its files in the diff's order), the files it leaves out as
     (path, added, removed), how many files it has in all, and how many of the shown ones it deletes whole; and of the
-    whole diff, for the acknowledgement's plan, its added and removed lines and how many files it deletes whole."""
+    whole diff, for the acknowledgement's plan, its added and removed lines, how many files it deletes whole (binary
+    and empty ones too) and each file's path as its section's header names it (rename-only and binary ones too)."""
     text: str
     not_shown: list
     files: int
@@ -1600,6 +1603,7 @@ class Shaped(NamedTuple):
     added: int = 0
     removed: int = 0
     deleted_all: int = 0
+    paths: tuple = ()
 
     def notes(self) -> list:
         """What the input says about it before the PR data, in counts only."""
@@ -1671,9 +1675,9 @@ def section(text: str) -> Section:
                     names.append(name)
     path = new or old or _header_path(lines)
     if not (deleted and old is not None and new is None and removed):
-        return Section(text, path, added, removed, False)
+        return Section(text, path, added, removed, False, deleted and new is None)
     line = f"deleted: {_input_path(old)} ({removed} lines)"
-    return Section(line + (f" declared {', '.join(names)}" if names else ""), old, 0, removed, True)
+    return Section(line + (f" declared {', '.join(names)}" if names else ""), old, 0, removed, True, True)
 
 
 def _header_path(lines: list) -> str:
@@ -1719,7 +1723,8 @@ def shape_diff(diff: str) -> Optional[Shaped]:
     return Shaped("\n".join(parts[index].text for index in sorted(shown)),
                   [(part.path, part.added, part.removed) for index, part in enumerate(parts) if index not in shown],
                   len(parts), sum(1 for index in shown if parts[index].collapsed), sum(part.added for part in parts),
-                  sum(part.removed for part in parts), sum(1 for part in parts if part.collapsed))
+                  sum(part.removed for part in parts), sum(1 for part in parts if part.gone),
+                  tuple(part.path for part in parts if part.path))
 
 
 def review_input(repo: str, number: int, pr: dict, diff: str, nonce: str, material: list = (),
@@ -2573,8 +2578,8 @@ def review(conn, key: str, record: dict, pr_fd: int) -> dict:
     shaped = shape_diff(diff) if diff is not None else None
     if shaped is None:
         return finish(TOO_LARGE, "too-large", sha=sha)
+    record = _acknowledge(key, record, plan_text(desk, number, sha, shaped, shaped.paths))
     paths = diff_paths(diff)  # of the whole diff, the files it deletes included
-    record = _acknowledge(key, record, plan_text(desk, number, sha, shaped, paths))
     nonce = secrets.token_hex(16)
     # The facts the job reads and posts itself, never the model: the base, the CI checks on the head, linked PRs.
     checks = read_checks(repo, sha)
@@ -3561,10 +3566,10 @@ def requester_digest(salt: bytes, email: str) -> str:
     return hmac.new(salt, email.strip().lower().encode("utf-8"), hashlib.sha256).hexdigest()
 
 
-def _requester_allowed(follow: dict) -> bool:
-    """Whether the follow's requester is still in CHAT_REVIEW_SENDERS: its digest is one of theirs. A follow with no
-    digest cannot say, so it is not."""
-    digest = follow.get("requester_digest")
+def _requester_allowed(item: dict) -> bool:
+    """Whether the requester of a follow, or of a review a follow queued, is still in CHAT_REVIEW_SENDERS: its
+    requester_digest is one of theirs. One with no digest cannot say, so it is not."""
+    digest = item.get("requester_digest")
     if not isinstance(digest, str) or SALT_HEX.fullmatch(digest) is None:
         return False
     salt = _salt()
@@ -3669,10 +3674,11 @@ def _end_follow(fkey: str, why: str, before_us: Optional[int] = None) -> None:
 
 
 def _follow_gone(record: dict) -> bool:
-    """Whether a queued review of new commits outlived its follow: the follow it names is gone, was started again
-    since it was queued, or its requester is no longer an allowed sender. Such a review ends unanswered."""
+    """Whether a queued review of new commits outlived its follow: the follow it names is gone or was started again
+    since it was queued, or the requester it answers (its own digest, kept as it was queued, so a follow moved to
+    someone else since never vouches for it) is no longer an allowed sender. Such a review ends unanswered."""
     follow = read_follow(record.get("follow"))
-    return follow is None or follow.get("since") != record.get("follow_since") or not _requester_allowed(follow)
+    return follow is None or follow.get("since") != record.get("follow_since") or not _requester_allowed(record)
 
 
 def _follow_note(fkey: str, follow: dict, name: str, text: str) -> None:
@@ -3706,9 +3712,10 @@ def _finish_follow(fkey: str, follow: dict, why: str, now: int) -> str:
 
 def follow_check(fkey: str, follow: dict, now: int, served: list) -> Optional[str]:
     """Check one follow, once its last check is CHAT_REVIEW_FOLLOW_CHECK_SECONDS old, and say what happened, None when
-    it was not due. It waits while its review of new commits is still open, its app is not served, its desk is off or a
-    stop of its desk's family is in place. A follow whose PR, conversation or thread is no longer allowed, or whose
-    requester is no longer in CHAT_REVIEW_SENDERS (_requester_allowed), ends with no line. Otherwise it reads the PR
+    it was not due. A follow whose requester is no longer in CHAT_REVIEW_SENDERS (_requester_allowed) ends with no
+    line first, whatever else holds it. It waits while its review of new commits is still open, its app is not served,
+    its desk is off or a stop of its desk's family is in place. A follow whose PR, conversation or thread is no longer
+    allowed ends with no line. Otherwise it reads the PR
     as a review does (read_pr): merged or closed, the follow ends with its line; quiet for CHAT_REVIEW_FOLLOW_DAYS
     since its head last moved, it ends with its line; with a head that is not its last reviewed one, it queues a
     review of it, a request of source follow in the same thread for the same requester, at most once per head (its
@@ -3716,6 +3723,9 @@ def follow_check(fkey: str, follow: dict, now: int, served: list) -> Optional[st
     on record, past which it waits for the next day and says so once."""
     if now - _follow_due(follow) < config.CHAT_REVIEW_FOLLOW_CHECK_SECONDS:
         return None
+    if not _requester_allowed(follow):
+        _end_follow(fkey, "sender-removed")
+        return "sender-removed"
     app, pending = follow.get("app"), follow.get("pending")
     if pending is not None:
         record = read_record(pending) if isinstance(pending, str) and KEY.fullmatch(pending) else None
@@ -3728,9 +3738,6 @@ def follow_check(fkey: str, follow: dict, now: int, served: list) -> Optional[st
     if found is None:
         _end_follow(fkey, "not-allowed")
         return "not-allowed"
-    if not _requester_allowed(follow):
-        _end_follow(fkey, "sender-removed")
-        return "sender-removed"
     repo, number, _, _ = found
     if not run_desk.is_enabled(app) or run_desk.stop_reason(config.desk_family(app)) is not None:
         return "waiting"
@@ -3775,7 +3782,7 @@ def follow_check(fkey: str, follow: dict, now: int, served: list) -> Optional[st
               **({"requester_user": follow["requester_user"]} if isinstance(follow.get("requester_user"), str)
                  and CHAT_USER.fullmatch(follow["requester_user"]) is not None else {}),
               "repo": repo, "number": number, "at": now, "follow": fkey, "follow_since": follow.get("since"),
-              "follow_sha": head}
+              "follow_sha": head, "requester_digest": follow.get("requester_digest")}
     if _create(key, record):
         log("received", **_logged(key, record), kind="review")
     _save_follow(fkey, {**follow, "pending": key})
@@ -4461,6 +4468,10 @@ def settle(conn, now: Optional[int] = None, only_hand: bool = False) -> list:
                 _clear_workdir(key)
                 _clear_turn_files(record)
                 done.append(_resume(key, record))
+            elif state == "queued" and record.get("source") == "follow" and _follow_gone(record):
+                # Stopped, its requester no longer allowed, or a kill left it behind the stop: no reply, even past
+                # the queue limit.
+                done.append(_end(key, record, "unfollowed")["state"])
             elif state == "queued" and now - int(record.get("at", 0)) > config.CHAT_REVIEW_QUEUE_MAX_SECONDS:
                 record = _save(key, {**_unasked(record), "state": "reply", "reply": _could_not(record),
                                      "outcome": "expired"})
@@ -4469,8 +4480,6 @@ def settle(conn, now: Optional[int] = None, only_hand: bool = False) -> list:
                 # An earlier mention of the thread by the other app was recorded only after this was taken: Chat
                 # listed it late, or that app's read was stopped then.
                 done.append(_end(key, {**record, "kind": "dropped"}, "not-owned")["state"])
-            elif state == "queued" and record.get("source") == "follow" and _follow_gone(record):
-                done.append(_end(key, record, "unfollowed")["state"])  # stopped, or a kill left it behind the stop
             elif state == "queued":
                 if reviews < config.CHAT_REVIEW_PER_PASS:
                     outcome = _run_queued(conn, key, record)

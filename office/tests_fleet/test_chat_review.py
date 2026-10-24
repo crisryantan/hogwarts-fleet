@@ -2050,6 +2050,17 @@ class PlanAckTests(ChatCase):
             with self.subTest(number=number, sha=sha), self.assertRaises(FleetError):
                 chat_review.plan_text("hermione", number, sha, shaped, [])
 
+    def test_binary_and_rename_only_sections_count_and_classify_too(self):
+        binary = ("diff --git a/logo.png b/logo.png\ndeleted file mode 100644\nindex 1234567..0000000\n"
+                  "Binary files a/logo.png and /dev/null differ\n")
+        rename = ("diff --git a/a.py b/tests/test_b.py\nsimilarity index 100%\nrename from a.py\n"
+                  "rename to tests/test_b.py\n")
+        shaped = chat_review.shape_diff(binary + rename + deleted_file("old.py", ["x = 1"]))
+        self.assertEqual((shaped.files, shaped.deleted_all, shaped.paths),
+                         (3, 2, ("logo.png", "tests/test_b.py", "old.py")))
+        self.assertEqual(chat_review.review_areas(shaped.paths, chat_review.ORDER),
+                         ["the Python code", chat_review.AREAS["tests"]])
+
     def test_a_partial_review_says_how_many_files_will_not_be_shown(self):
         self.patch(config, "CHAT_REVIEW_DIFF_MAX_BYTES", 2000)
         self.diff = "".join(changed_file(path, ["x" * 70] * (size // 72), []) for path, size in

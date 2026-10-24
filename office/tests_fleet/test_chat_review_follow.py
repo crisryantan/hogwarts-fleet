@@ -276,6 +276,38 @@ class FollowSenderTests(FollowCase):
         [record] = self.follow_records()
         self.assertEqual((record["state"], record["outcome"]), ("done", "unfollowed"))
         self.assertEqual((len(self.turns), len(self.google.acks), self.notes()), (1, 1, []))
+        self.assertIsNone(self.follow())  # and the follow itself ended on that pass's check
+
+    def test_a_removed_senders_review_queued_past_the_queue_limit_still_ends_unanswered(self):
+        self.reviewed()
+        self.push(NEWER)
+        with chat_review.pr_lock("acme/web-app", 7, "hermione"):
+            self.assertEqual(self.run_pass()["followed"], ["queued"])
+        [(key, record)] = [(key, record) for key, record in chat_review._records() if record.get("source") == "follow"]
+        chat_review._save(key, {**record, "at": record["at"] - config.CHAT_REVIEW_QUEUE_MAX_SECONDS - 1})
+        self.patch(config, "CHAT_REVIEW_SENDERS", (LEAD,))
+        self.run_pass()
+        [record] = self.follow_records()
+        self.assertEqual((record["state"], record["outcome"]), ("done", "unfollowed"))
+        self.assertEqual(len(self.google.messages), 1)  # the first review's reply alone: no failure line
+
+    def test_a_queued_review_answers_for_its_own_requester_not_the_follows_new_one(self):
+        self.reviewed()
+        self.push(NEWER)
+        with chat_review.pr_lock("acme/web-app", 7, "hermione"):
+            self.assertEqual(self.run_pass()["followed"], ["queued"])
+        salt = bytes.fromhex(json.loads(self.salt_file().read_text())["salt"])
+        [record] = self.follow_records()
+        self.assertEqual(record["requester_digest"], chat_review.requester_digest(salt, SENDER))
+        self.assertNotIn(SENDER, json.dumps(record))
+        # The follow moved to another allowed requester since; the one this review answers was then removed.
+        self.edit_follow(requester_digest=chat_review.requester_digest(salt, LEAD), thread=f"{SPACE}/threads/t2")
+        self.patch(config, "CHAT_REVIEW_SENDERS", (LEAD,))
+        self.run_pass()
+        [record] = self.follow_records()
+        self.assertEqual((record["state"], record["outcome"]), ("done", "unfollowed"))
+        self.assertEqual((len(self.turns), len(self.google.acks)), (1, 1))
+        self.assertIsNotNone(self.follow())  # the follow's own requester is still allowed
 
     def test_a_follow_with_no_digest_ends_silently(self):
         self.reviewed()
