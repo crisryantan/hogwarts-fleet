@@ -377,10 +377,10 @@ class FollowCommandTests(FollowCase):
         self.reviewed()
         now = int(time.time())
         lines = chat_review.status_text("hermione", now).splitlines()
-        self.assertEqual(lines[-3:-1], ["Following (1):",
+        self.assertEqual(lines[-4:-2], ["Following (1):",
                                         f"- acme/web-app#7: last reviewed {HEAD[:12]}, not checked yet {LINK}"])
         self.run_pass()
-        self.assertEqual(chat_review.status_text("hermione", now).splitlines()[-2],
+        self.assertEqual(chat_review.status_text("hermione", now).splitlines()[-3],
                          f"- acme/web-app#7: last reviewed {HEAD[:12]}, checked just now {LINK}")
         self.assertNotIn("Following", chat_review.status_text("moody", now))
 

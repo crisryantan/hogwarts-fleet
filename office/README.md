@@ -812,7 +812,7 @@ the asker. A question counts toward the per-person, fleet and desk caps like a r
 and can never approve: only a review reaches GitHub, through its strict verdict and the switches.
 
 A mention answer is a question that is about no review. It runs the same kind of read-only turn as a question, of
-the same app's desk, at the same budget and under the same caps, with a brief of its own: answer software engineering
+the same app's desk and under the same caps, on the chat model below, with a brief of its own: answer software engineering
 questions, casual questions and light chit-chat alike, concisely, in the desk's voice, in at most 900 characters,
 from general knowledge, its app's past reviews and the attached material only. It has no access to your repos, files
 or systems, or to the
@@ -821,6 +821,18 @@ a mention with a PR link for a review. Its input holds the message between marke
 teammate's untrusted text, and its answer block is read, scrubbed, defanged, cut and withheld like a question's,
 checked against the attached material. It names no PR, so it never reads or posts on GitHub, and a message it cannot
 use (over a cap, say) gets the help text. Its text is kept only until its turn has run and is never logged.
+
+Each app runs on two models. A review and a question about one, a conversation turn in a thread the app reviewed
+included, run on the review model: the desk's own, as Ollivander picked it, as you pinned it, or its registry model. A
+mention answer, a conversation turn anywhere else included, runs on the chat model: the first workhorse entry of the
+desk's own family in Ollivander's ladder (`state/model-ladders.json`), skipping a blocked one, at
+`CHAT_REVIEW_CHAT_BUDGET_USD` (0.25) for a Claude desk. When the ladder has no workhorse entry left, only blocked ones,
+or the workhorse line would cost more than the desk's own model, the chat model is the review model; it is never a
+model of the other family. A mention answer still runs on the review model, at `CHAT_REVIEW_QUESTION_BUDGET_USD`,
+when its text names a PR in a way the job takes as no request (a link with no scheme, such as
+`github.com/acme/web-app/pull/7`) or its attached material holds more than `CHAT_REVIEW_ESCALATE_CHARS` (20,000)
+characters of text, since either needs the stronger model. The model a turn ran on is on its launch row, as for any
+run, and its tier (`review` or `chat`) on its request record.
 
 Every answer turn, a question, a mention answer or a conversation turn, also gets its thread's recent messages as
 context: at most 8 of the messages in the thread before its own, read when the turn runs with the app's read token
@@ -899,8 +911,9 @@ thread names alone). It holds no email and no text a teammate wrote, and is cut 
 takes. Each app reports only its own requests.
 
 A status reply also lists the PRs the app follows, each as `owner/repo#number` with its last reviewed head, when it
-was last checked and its thread's link, and ends with how many past reviews its memory holds for each repo
-("Review memory: 3 past reviews (acme/web-app 2, acme/api 1).").
+was last checked and its thread's link, then the two models it runs on now ("Models: reviews on opus, chat on
+sonnet."), and ends with how many past reviews its memory holds for each repo ("Review memory: 3 past reviews
+(acme/web-app 2, acme/api 1).").
 
 Following. After an app's review of a PR from Chat goes to its thread, whatever its verdict, the app follows that
 PR, so nobody has to ask again: one small record per app and PR in `chat-reviews/follows/`, holding the thread to

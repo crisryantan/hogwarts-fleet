@@ -4736,9 +4736,9 @@ class StatusTests(ChatCase):
         self.assertEqual(lines[5], "- review of acme/web-app#7 for Dev Person, done 30m ago: reviewed, CHANGES, on"
                                    " GitHub <https://github.com/acme/web-app/pull/7#pullrequestreview-901|review>"
                                    " <https://mail.google.com/chat/u/0/#chat/space/AAAA/dddddd|thread>")
-        self.assertEqual(len(lines), 11)  # the newest five finished only, then the review memory's line
+        self.assertEqual(len(lines), 12)  # the newest five finished only, then the models' and review memory's lines
         self.assertTrue(all(": not-open" in line for line in lines[6:10]))
-        self.assertEqual(lines[10], "Review memory: no past reviews yet.")
+        self.assertEqual(lines[10:], ["Models: reviews on opus, chat on opus.", "Review memory: no past reviews yet."])
         for absent in (SECRET_MARK, SENDER, "ZZZZ"):
             self.assertNotIn(absent, text)
 

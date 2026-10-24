@@ -499,6 +499,13 @@ CHAT_REVIEW_CONTEXT_SECONDS = 120
 # the same desk with a smaller budget (a Claude desk's --max-budget-usd, dollars and cents): it counts toward the same
 # caps as a review.
 CHAT_REVIEW_QUESTION_BUDGET_USD = "0.50"
+# A review and a question about one run on the reviewing desk's own model. A mention answer and a conversation turn run
+# on the workhorse line of the desk's family, from Ollivander's ladder (the desk's own model when that line has none
+# left, or only a blocked one), at this smaller budget for a Claude desk. One whose message names a PR in a way that is
+# no request, or whose attached material holds more than the second many characters of text, runs on the desk's own
+# model at the question budget instead.
+CHAT_REVIEW_CHAT_BUDGET_USD = "0.25"
+CHAT_REVIEW_ESCALATE_CHARS = 20_000
 # Images attached to a message an app takes are downloaded with that app's read authorization (Chat's media download,
 # which chat.messages.readonly covers) and handed to its turn; False downloads none, and the turn is told so.
 CHAT_REVIEW_IMAGES = True

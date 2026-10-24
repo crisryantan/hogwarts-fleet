@@ -62,14 +62,23 @@ Anyone in the company's Chat can send an app text, so everything here treats a m
   or approves: only a review's record carries a verdict, and only a review reaches GitHub.
 - A mention answer: any other message that mentions the app, from an allowed sender, in any allowed conversation,
   that is no request, follow-up or question about a review (those win), holds no review or approve word, names no PR
-  and is at most QUESTION_MAX characters. It is a read-only turn like a question's (the same desk, sandbox and budget,
-  counted toward the same caps) with its own brief: answer engineering and casual questions alike, briefly, in the
-  desk's voice, in at most ANSWER_MAX characters, from general knowledge, its app's past reviews and the attached
-  material only, with no access to the owner's repos, files or network and no pretending to any; never claim to have
-  done anything. Its text
+  and is at most QUESTION_MAX characters. It is a read-only turn like a question's (the same desk and sandbox, counted
+  toward the same caps) on the chat tier (below), with its own brief: answer engineering and casual questions alike,
+  briefly, in the desk's voice, in at most ANSWER_MAX characters, from general knowledge, its app's past reviews and
+  the attached material only, with no access to the owner's repos, files or network and no pretending to any; never
+  claim to have done anything. Its text
   is kept and logged as a question's is, its answer is read, scrubbed, defanged and echo-checked against the attached
   material as a question's is, and it has no PR, so it never reaches GitHub. A message it cannot use (empty after the
   mention, over a cap) gets the help reply.
+- Two tiers (run_desk.CHAT_TIERS): a review and a question about one, a conversation turn in a thread the app
+  reviewed included, run on the review tier, the desk's own model (Ollivander's pick, Ryan's pin or its registry
+  model); a mention answer, a conversation turn elsewhere included, runs on the chat tier, the workhorse line of the
+  desk's own family from Ollivander's ladder (run_desk.chat_pick), at CHAT_REVIEW_CHAT_BUDGET_USD for a Claude desk.
+  When that line has no entry left, only a blocked one, or would cost more than the desk's own model, the chat tier
+  runs on the desk's own model; it never takes the other family's. A mention answer whose text names a PR in a way the
+  job took as no request (PR_REFERENCE) or whose attached material holds more than CHAT_REVIEW_ESCALATE_CHARS
+  characters of text runs on the review tier at CHAT_REVIEW_QUESTION_BUDGET_USD instead (mention_tier). The model a
+  turn ran on is on its launch row, and its tier on its record.
 - The thread's recent messages, for a question, a mention answer and a conversation turn alike: at most HISTORY_MAX
   of the messages in its thread created before its own, read when its turn runs with the app's read token (a
   spaces.messages.list of that thread, at most HISTORY_PAGES pages within HISTORY_SECONDS), oldest first, each one
@@ -169,7 +178,8 @@ Anyone in the company's Chat can send an app text, so everything here treats a m
   words, no link) gets a fixed reply built by the script, never a model turn (status_text): that app's requests from
   allowed conversations that are queued, running or waiting (with what they wait on), and the last STATUS_DONE_MAX it
   finished this cap day with their outcome, verdict and GitHub link, each line the PR, the asker's display name, how
-  long ago and a link to its thread. Never an email, and never any text a teammate wrote. It wins over a question, but
+  long ago and a link to its thread, then the models its reviews and its chat run on now. Never an email, and never
+  any text a teammate wrote. It wins over a question, but
   a review request or follow-up wins over it.
 - Following (follow_pass): after an app's review of a PR from Chat goes to its thread, whatever its verdict, the app
   follows that PR: one record per app and PR in chat-reviews/follows/, holding the thread it reports in, the
@@ -229,12 +239,13 @@ import math
 import os
 import re
 import secrets
+import sqlite3
 import stat
 import sys
 import time
 from typing import Callable, Iterable, Iterator, NamedTuple, Optional
 
-from hogwarts import capacity, ids, pensieve
+from hogwarts import capacity, db, ids, pensieve
 from hogwarts.errors import StoreError
 
 from fleet import chat_context, chat_material, common, config, gitops, google_chat, markers, run_desk, safefs
@@ -288,6 +299,9 @@ MESSAGE_NAME = re.compile(r"(spaces/[A-Za-z0-9_-]{1,100})/messages/[A-Za-z0-9_.-
 CLOCK_SKEW_SECONDS = 300
 _PR_LINK = r"https://github\.com/([A-Za-z0-9._-]{1,100})/([A-Za-z0-9._-]{1,100})/pull/([1-9][0-9]{0,9})"
 PR_LINK = re.compile(_PR_LINK)
+# Anything in a message that names a GitHub PR, with or without a scheme or www, in any letter case: a mention answer
+# that holds one runs on the review tier (mention_tier).
+PR_REFERENCE = re.compile(r"github\.com/[^/\s]+/[^/\s]+/pull/[0-9]", re.IGNORECASE)
 # A PR link inside a message is a whole word of it: the link, then at most /files, /commits or /checks and a query or
 # fragment, with the brackets, quotes and sentence marks around it let go. One inside another address, or run into
 # other characters, is no link. Chat may hand a link over as <url> or <url|label>: the target is the link, and a label
@@ -902,19 +916,32 @@ def config_problems(intake: bool) -> list:
         value = getattr(config, name)
         if type(value) is not int or value < 0:
             bad(name, value, "must be a whole number of at least 0")
-    if question_budget() is None:
-        bad("CHAT_REVIEW_QUESTION_BUDGET_USD", config.CHAT_REVIEW_QUESTION_BUDGET_USD,
-            "must be dollars and cents above zero, such as \"0.50\"")
+    for name, found in (("CHAT_REVIEW_QUESTION_BUDGET_USD", question_budget()),
+                        ("CHAT_REVIEW_CHAT_BUDGET_USD", chat_budget())):
+        if found is None:
+            bad(name, getattr(config, name, None), "must be dollars and cents above zero, such as \"0.50\"")
+    value = getattr(config, "CHAT_REVIEW_ESCALATE_CHARS", None)
+    if type(value) is not int or value < 0:
+        bad("CHAT_REVIEW_ESCALATE_CHARS", value, "must be a whole number of at least 0")
     return problems
 
 
-def question_budget() -> Optional[str]:
-    """CHAT_REVIEW_QUESTION_BUDGET_USD when it is dollars and cents above zero, as --max-budget-usd takes it, else
-    None."""
-    value = getattr(config, "CHAT_REVIEW_QUESTION_BUDGET_USD", None)
+def _dollars(name: str) -> Optional[str]:
+    """The setting called name when it is dollars and cents above zero, as --max-budget-usd takes it, else None."""
+    value = getattr(config, name, None)
     if isinstance(value, str) and run_desk.BUDGET.fullmatch(value) is not None and float(value) > 0:
         return value
     return None
+
+
+def question_budget() -> Optional[str]:
+    """CHAT_REVIEW_QUESTION_BUDGET_USD, a question's and a mention answer on the review tier's budget, or None."""
+    return _dollars("CHAT_REVIEW_QUESTION_BUDGET_USD")
+
+
+def chat_budget() -> Optional[str]:
+    """CHAT_REVIEW_CHAT_BUDGET_USD, a mention answer's budget on the chat tier, or None."""
+    return _dollars("CHAT_REVIEW_CHAT_BUDGET_USD")
 
 
 def _app_problems(bad: Callable, problems: list) -> None:
@@ -2676,7 +2703,8 @@ REFUSED = ("desk-capped", "capped", "model-blocked")
 
 def _launch(conn, key: str, record: dict, pr_fd: int, brief: str, prompt: str, input_name: str, input_text: str,
             budget: Optional[str] = None, images: Optional[dict] = None, context: Optional[dict] = None,
-            admitted: Optional[tuple] = None, desk: Optional[str] = None, hand: tuple = ()) -> tuple:
+            admitted: Optional[tuple] = None, desk: Optional[str] = None, hand: tuple = (),
+            tier: str = "review") -> tuple:
     """Run one turn of the record's desk (or of desk, for one turn of a pair review, whose launch is then checked and
     counted as _cap_check says and whose run is the record's run_desk) on input_text, its only input file, with hand
     (the other PR lock a pair holds) handed to the turn too, under one of the desk's run slots, the
@@ -2684,9 +2712,9 @@ def _launch(conn, key: str, record: dict, pr_fd: int, brief: str, prompt: str, i
     checked and counted, once per request (_cap_check), with the thread's notice, if one is due, sent as it starts
     (_notice): (the turn's outcome, its text, the record as it is after, holding the turn's run id and cost), or, when a cap or the desk's blocked model stops it before it launches, (one of REFUSED, the fixed reply for
     a chat cap or None, the record as it was). Later when it cannot start now. budget is the Claude turn's, else the
-    desk's per-run one; images go in its working folder beside its input, and a review's repo context under
-    context/ there. admitted is the run slot and launch gate the caller already holds (_admission), else the turn
-    takes its own."""
+    desk's per-run one, and tier the model it runs on (run_desk.CHAT_TIERS), kept on the record; images go in its
+    working folder beside its input, and a review's repo context under context/ there. admitted is the run slot and
+    launch gate the caller already holds (_admission), else the turn takes its own."""
     paired = desk is not None and record.get("pair") is not None
     desk = desk or app_of(record)
     run_id = f"chat-{secrets.token_hex(8)}"
@@ -2699,7 +2727,8 @@ def _launch(conn, key: str, record: dict, pr_fd: int, brief: str, prompt: str, i
             else:
                 slot, gate_fd = admitted
             own = held.enter_context(run_desk.run_lock(desk, run_id))
-            turn = run_desk.chat_review_argv(conn, brief, prompt, run_id, desk, budget, tuple(sorted(images or {})))
+            turn = run_desk.chat_review_argv(conn, brief, prompt, run_id, desk, budget, tuple(sorted(images or {})),
+                                             tier=tier)
             model = turn.model
             with run_desk.launch_lock(desk):
                 now = int(time.time())  # the cap day of the launch itself
@@ -2720,7 +2749,7 @@ def _launch(conn, key: str, record: dict, pr_fd: int, brief: str, prompt: str, i
             # them; its caps are counted, so a resumed launch counts toward none again.
             pair_fields = {"run_desk": desk, "counted_by": [*_counted_by(record), desk]} if paired else {}
             record = _save(key, {**record, "state": "running", "run_id": run_id, "started": now,
-                                 "cost_usd": _budget(desk, budget), "counted": True, **pair_fields})
+                                 "cost_usd": _budget(desk, budget), "counted": True, "tier": tier, **pair_fields})
             log(_event(record, "started"), **_logged(key, record))
             record = _notice(key, record, now)
             begun = time.monotonic()
@@ -3364,9 +3393,11 @@ def mention_answer(conn, key: str, record: dict, lock_fd: int) -> dict:
     found = _gather(key, record, nonce)
     history = _history(key, record, nonce)
     past, past_titles = _recall(key, record, nonce, lambda: recall(desk, question, None, now))
+    tier = mention_tier(question, found)
     outcome, text, record = _launch(conn, key, record, lock_fd, VOICES[desk].mention_brief, mention_prompt(nonce),
                                     QUESTION_FILE, mention_input(question, nonce, found.lines, history, past),
-                                    question_budget(), found.images)
+                                    question_budget() if tier == "review" else chat_budget(), found.images,
+                                    tier=tier)
     if outcome in ("capped", "desk-capped"):
         return finish(help_text(desk), outcome)
     if outcome in REFUSED:
@@ -3378,6 +3409,18 @@ def mention_answer(conn, key: str, record: dict, lock_fd: int) -> dict:
     except Unusable:
         return finish(COULD_NOT_ANSWER, "unusable")
     return finish(said, "withheld" if said == MENTION_WITHHELD else "answered")
+
+
+def mention_tier(question: object, found: chat_material.Gathered) -> str:
+    """The tier a mention answer runs on (run_desk.CHAT_TIERS): chat, but review when its text names a PR in a way the
+    job took as no request (PR_REFERENCE, such as a link with no scheme) or its attached material holds more than
+    CHAT_REVIEW_ESCALATE_CHARS characters of text, since either needs the stronger model."""
+    limit = getattr(config, "CHAT_REVIEW_ESCALATE_CHARS", None)
+    if isinstance(question, str) and PR_REFERENCE.search(question) is not None:
+        return "review"
+    if type(limit) is not int or len(found.untrusted) > limit:
+        return "review"
+    return "chat"
 
 
 # Review memory
@@ -3973,7 +4016,8 @@ def status_text(app: str, now: int) -> str:
     """The fixed status reply of app: its requests from conversations in CHAT_REVIEW_SPACES that are still open
     (queued, waiting with what they wait on, running or finishing), oldest first, then the last STATUS_DONE_MAX it
     finished this cap day, newest first, one line each (_status_line), then the PRs it follows (_follow_status_line),
-    then how many past reviews its memory holds for each repo (_memory_status_line), cut whole lines at a time to what
+    then the models its reviews and its chat run on now (_models_status_line) and how many past reviews its memory
+    holds for each repo (_memory_status_line), cut whole lines at a time to what
     Chat takes with the mention in front. Only reviews, questions and mention answers are listed: never a status ask,
     help reply, refusal or drop, never an email and never any text a teammate wrote."""
     day, open_lines, finished = _day(now), [], []
@@ -3997,8 +4041,22 @@ def status_text(app: str, now: int) -> str:
                and isinstance(follow.get("space"), str) and _space_allowed(follow["space"])]
     if follows:
         lines += [f"Following ({len(follows)}):", *(_follow_status_line(follow, now) for follow in follows)]
-    lines.append(_memory_status_line(app, now))
+    lines += [_models_status_line(app), _memory_status_line(app, now)]
     return _whole_lines(lines, google_chat.MESSAGE_MAX_CHARS - MENTION_ROOM)
+
+
+def _models_status_line(app: str) -> str:
+    """The status reply's line of the models app's desk runs on now (run_desk.chat_models), read from the store
+    opened read only: one for reviews and questions about them, one for the rest of its chat."""
+    try:
+        conn = db.connect_readonly(config.DB_PATH)
+        try:
+            models = run_desk.chat_models(conn, app)
+        finally:
+            conn.close()
+    except (FleetError, StoreError, OSError, sqlite3.Error):
+        return "Models: could not be read."
+    return f"Models: reviews on {models['review']}, chat on {models['chat']}."
 
 
 def _memory_status_line(app: str, now: int) -> str:

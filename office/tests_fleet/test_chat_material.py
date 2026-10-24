@@ -76,7 +76,7 @@ class MentionAnswerTests(MaterialCase):
         argv = turn["argv"]
         self.assertEqual(argv[:3], [config.CLAUDE_BIN, "-p", "--restricted"])
         self.assertEqual(argv[argv.index("--tools") + 1], "Read,Grep,Glob")
-        self.assertEqual(argv[argv.index("--max-budget-usd") + 1], config.CHAT_REVIEW_QUESTION_BUDGET_USD)
+        self.assertEqual(argv[argv.index("--max-budget-usd") + 1], config.CHAT_REVIEW_CHAT_BUDGET_USD)
         self.assertIn("--no-session-persistence", argv)
         nonce = turn["prompt"].split("<<<UNTRUSTED QUESTION ")[1][:32]
         self.assertEqual(turn["prompt"], chat_review.mention_prompt(nonce))

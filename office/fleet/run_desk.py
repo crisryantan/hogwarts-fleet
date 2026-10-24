@@ -1248,14 +1248,72 @@ CHAT_REVIEW_CODEX_FORCED = ('approval_policy="never"', 'web_search="disabled"', 
 
 # An image the job put in a chat turn's working folder, as chat_material names it.
 CHAT_IMAGE = re.compile(r"image-[1-9]\.(?:png|jpg|gif|webp)")
+# The two models a chat app runs on: "review" for a review and a question about one, the desk's own model; "chat" for a
+# mention answer and a conversation turn, the workhorse line of the desk's own family (chat_pick).
+CHAT_TIERS = ("review", "chat")
+CHAT_LINE = "workhorse"
+
+
+def _check_tier(tier: object) -> str:
+    if tier not in CHAT_TIERS:
+        raise FleetError("a chat turn's tier is review or chat")
+    return tier
+
+
+def chat_pick(conn, desk: str, family: str, model: str) -> Optional[dict]:
+    """The chat tier's {model, effort} for desk, whose review tier runs model: the first CHAT_LINE entry of its own
+    family's ladder as Ollivander last wrote it (failover.ladder), skipping one blocked here (failover's blocked-model
+    rules) and every one when that line costs more than model (failover._cap). None when no entry is left, so the turn
+    runs on model: never on the other family's, never on a blocked one."""
+    if config.COST_ORDER.index(CHAT_LINE) > config.COST_ORDER.index(failover._cap(conn, desk, family, model)):
+        return None
+    for entry in failover.ladder(desk, family):
+        if entry["line"] == CHAT_LINE and not failover._blocked(conn, family, entry["model"]):
+            return {"model": entry["model"], "effort": entry["effort"]}
+    return None
+
+
+def chat_claude_model(conn, desk: str, tier: str = "review") -> tuple:
+    """(model, effort) of a Claude desk's chat turn of tier: Ollivander's pick or Ryan's pin, else its registry model,
+    for the review tier, and the chat tier's pick (chat_pick) when there is one."""
+    choice = desk_choice(conn, desk)
+    model = choice["model"] or pensieve.get_desk(conn, desk).get("model")
+    if not model:
+        raise FleetError("Hermione has no model in the registry")
+    pick = chat_pick(conn, desk, "claude", model) if _check_tier(tier) == "chat" else None
+    return (model, choice["effort"]) if pick is None else (pick["model"], pick["effort"])
+
+
+def chat_codex_model(conn, desk: str, overrides: list, tier: str = "review") -> tuple:
+    """(model, the -c values that set it) of a Codex desk's chat turn of tier, overrides being its codex.toml's: the
+    desk's model and effort, else its profile's or top-level model, else the CLI default, for the review tier, and the
+    chat tier's pick (chat_pick) when there is one, set in the selected profile too."""
+    selected, top = profile_models(overrides)
+    choice = desk_choice(conn, desk)
+    model = choice["model"] or selected or top or CODEX_DEFAULT
+    pick = chat_pick(conn, desk, "codex", model) if _check_tier(tier) == "chat" else None
+    chosen = choice if pick is None else pick
+    return chosen["model"] or model, model_overrides(chosen, selected_profile(overrides))
+
+
+def chat_models(conn, desk: str) -> dict:
+    """{tier: model} of desk's chat turns, one of CHAT_REVIEW_DESKS, as a turn launched now would run them."""
+    if desk not in CHAT_REVIEW_DESKS:
+        raise FleetError("that desk runs no chat review")
+    if desk in config.HEADLESS_CODEX:
+        overrides = parse_codex_profile(_text(_read_office(desk, config.CODEX_PROFILE_FILE, config.SETTINGS_MAX_BYTES,
+                                                           "codex profile"), "codex profile"))
+        return {tier: chat_codex_model(conn, desk, overrides, tier)[0] for tier in CHAT_TIERS}
+    return {tier: chat_claude_model(conn, desk, tier)[0] for tier in CHAT_TIERS}
 
 
 def chat_review_argv(conn, brief: str, prompt: str, run_id: str, desk: str = CHAT_REVIEW_DESK,
-                     budget: Optional[str] = None, images: tuple = ()) -> ReportTurn:
+                     budget: Optional[str] = None, images: tuple = (), tier: str = "review") -> ReportTurn:
     """The chat review turn of desk, one of CHAT_REVIEW_DESKS: Hermione's (chat_review_claude_argv, at budget when it
-    is given, a question's) or Moody's (chat_review_codex_argv, which takes no budget). A question's turn is the same
-    turn, read-only alike, with its own brief and prompt. images names the images in its working folder (CHAT_IMAGE):
-    Hermione reads them with Read, and Moody's turn attaches them to its prompt with --image."""
+    is given, a question's or a mention answer's) or Moody's (chat_review_codex_argv, which takes no budget), on the
+    model of tier (CHAT_TIERS). A question's turn is the same turn, read-only alike, with its own brief and prompt.
+    images names the images in its working folder (CHAT_IMAGE): Hermione reads them with Read, and Moody's turn
+    attaches them to its prompt with --image."""
     if desk not in CHAT_REVIEW_DESKS:
         raise FleetError("that desk runs no chat review")
     if not isinstance(run_id, str) or CHAT_RUN_ID.fullmatch(run_id) is None:
@@ -1263,18 +1321,20 @@ def chat_review_argv(conn, brief: str, prompt: str, run_id: str, desk: str = CHA
     if not isinstance(images, tuple) or len(images) > 3 \
             or not all(isinstance(name, str) and CHAT_IMAGE.fullmatch(name) for name in images):
         raise FleetError("a chat turn's images are the job's own names in its working folder")
+    _check_tier(tier)
     if desk in config.HEADLESS_CODEX:
-        return chat_review_codex_argv(conn, brief, prompt, run_id, desk, images)
-    return chat_review_claude_argv(conn, brief, prompt, run_id, desk, budget)
+        return chat_review_codex_argv(conn, brief, prompt, run_id, desk, images, tier)
+    return chat_review_claude_argv(conn, brief, prompt, run_id, desk, budget, tier)
 
 
 def chat_review_claude_argv(conn, brief: str, prompt: str, run_id: str, desk: str = CHAT_REVIEW_DESK,
-                            budget: Optional[str] = None) -> ReportTurn:
+                            budget: Optional[str] = None, tier: str = "review") -> ReportTurn:
     """Hermione's chat review turn (fleet/chat_review.py), run like her fleet reviews but with only the read-only file
     tools Read, Grep and Glob (CHAT_REVIEW_TOOLS, check_report_tools): claude -p --restricted (file tools confined to
     its working folder, which holds only the turn's input, its images and a review's repo context) under her
     chat review settings, held to the report-only shape (check_report_settings: no allow rule, no write, no network,
-    no hooks), no MCP, her model (Ollivander's pick or her registry model) and effort, her per-run budget or budget
+    no hooks), no MCP, the model and effort of tier (chat_claude_model: Ollivander's pick or her registry model for a
+    review, the workhorse of her family's ladder for chat when there is one), her per-run budget or budget
     (dollars and cents, BUDGET), the fixed brief in runs/hermione/<run_id>.brief, so the run's own id is in its
     command line, the fixed prompt on stdin, JSON output, and no session saved, so neither the PR's text nor a
     teammate's question outlives the turn in a transcript. The turn runs at most RUN_TIMEOUT_SECONDS. Gates first: no stop, no CLI update, and her model not
@@ -1288,16 +1348,13 @@ def chat_review_claude_argv(conn, brief: str, prompt: str, run_id: str, desk: st
         raise FleetError("a chat review run id is chat- and 16 hex digits")
     if budget is not None and (not isinstance(budget, str) or BUDGET.fullmatch(budget) is None):
         raise FleetError("a chat turn's budget is dollars and cents")
-    choice = desk_choice(conn, desk)
-    model = choice["model"] or pensieve.get_desk(conn, desk).get("model")
-    if not model:
-        raise FleetError("Hermione has no model in the registry")
+    model, effort = chat_claude_model(conn, desk, tier)
     check_report_launch(conn, model)
     name = brief_name(run_id)
     argv = [config.CLAUDE_BIN, "-p", "--restricted", "--settings",
             f"{config.office_desk_dir(desk)}/{CHAT_REVIEW_SETTINGS_FILE}", "--strict-mcp-config",
             "--tools", CHAT_REVIEW_TOOLS, "--permission-mode", "dontAsk", "--model", model,
-            *(("--effort", choice["effort"]) if choice["effort"] else ()),
+            *(("--effort", effort) if effort else ()),
             "--append-system-prompt-file", f"{config.runs_dir()}/{desk}/{name}", "--output-format", "json",
             "--no-session-persistence", "--max-budget-usd", budget or config.MAX_BUDGET_USD[desk]]
     guard(argv)
@@ -1326,9 +1383,10 @@ def chat_review_permissions(desk: str) -> list:
 
 
 def chat_review_codex_argv(conn, brief: str, prompt: str, run_id: str, desk: str = "moody",
-                           images: tuple = ()) -> ReportTurn:
+                           images: tuple = (), tier: str = "review") -> ReportTurn:
     """Moody's chat review turn (fleet/chat_review.py), run like his fleet reviews (codex exec, his codex.toml with
-    --ignore-user-config and --ignore-rules, his model and effort) but in a permission profile of its own
+    --ignore-user-config and --ignore-rules, his model and effort, or for the chat tier the workhorse of his family's
+    ladder when there is one: chat_codex_model) but in a permission profile of its own
     (chat_review_permissions: it may read only its working folder, which holds only the turn's input, its images and
     a review's repo context, and the platform paths its shell needs; it writes nothing and has no network), keeping
     only CHAT_REVIEW_CODEX_KEPT of his codex.toml, top level or in a profile, with CHAT_REVIEW_CODEX_FORCED over it, no MCP, the brief and fixed prompt on stdin, JSON events on stdout, and --output-last-message in his
@@ -1341,10 +1399,7 @@ def chat_review_codex_argv(conn, brief: str, prompt: str, run_id: str, desk: str
     profile = _text(_read_office(desk, config.CODEX_PROFILE_FILE, config.SETTINGS_MAX_BYTES, "codex profile"),
                     "codex profile")
     overrides = parse_codex_profile(profile)
-    selected, top = profile_models(overrides)
-    choice = desk_choice(conn, desk)
-    chosen = model_overrides(choice, selected_profile(overrides))
-    model = choice["model"] or selected or top or CODEX_DEFAULT
+    model, chosen = chat_codex_model(conn, desk, overrides, tier)
     _check_stop("codex")
     blocked = blocked_model({"model": model, "family": "codex"}, conn)
     if blocked is not None:
