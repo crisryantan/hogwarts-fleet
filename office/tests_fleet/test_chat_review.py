@@ -68,6 +68,11 @@ MOODY_PLACEHOLDERS = {"CHAT_REVIEW_MOODY_NAME": "<second-chat-app-name>",
                       "CHAT_REVIEW_MOODY_USER_KEYCHAIN_SERVICE": "<second-chat-review-user-keychain-service>",
                       "CHAT_REVIEW_MOODY_SERVICE_ACCOUNT": "<second-chat-app-service-account>",
                       "CHAT_REVIEW_MOODY_KEYCHAIN_SERVICE": "<second-chat-review-keychain-service>"}
+# The third app's, McGonagall's (tests_fleet/test_chat_chief.py), likewise: unfilled here, so only the reviewers run.
+CHIEF_PLACEHOLDERS = {"CHAT_REVIEW_CHIEF_NAME": "<third-chat-app-name>",
+                      "CHAT_REVIEW_CHIEF_USER_KEYCHAIN_SERVICE": "<third-chat-review-user-keychain-service>",
+                      "CHAT_REVIEW_CHIEF_SERVICE_ACCOUNT": "<third-chat-app-service-account>",
+                      "CHAT_REVIEW_CHIEF_KEYCHAIN_SERVICE": "<third-chat-review-keychain-service>"}
 MOODY_SETTINGS = {"CHAT_REVIEW_MOODY_NAME": MOODY_NAME,
                   "CHAT_REVIEW_MOODY_USER_KEYCHAIN_SERVICE": MOODY_USER_KEYCHAIN_SERVICE,
                   "CHAT_REVIEW_MOODY_SERVICE_ACCOUNT": MOODY_SERVICE_ACCOUNT,
@@ -304,7 +309,8 @@ class ChatCase(FleetCase):
                     "CHAT_REVIEW_REPOS": ("acme/web-app",), "CHAT_REVIEW_ROOT": str(self.tmp / "chat-root"),
                     # Fleet answers off, as the kit ships them: an installed office fills its owner in.
                     "CHAT_REVIEW_OWNER": "<chat-review-owner-email>"}
-        for name, value in {**settings, **MOODY_PLACEHOLDERS}.items():  # the second app is not served unless filled
+        # The second and third apps are not served unless filled.
+        for name, value in {**settings, **MOODY_PLACEHOLDERS, **CHIEF_PLACEHOLDERS}.items():
             self.patch(config, name, value)
         self.patch(config, "CHAT_REVIEW_BURST_SECONDS", 0)  # each message its own turn, but in BurstTests
         google_chat.forget_tokens()
@@ -544,7 +550,7 @@ class SwitchAndConfigTests(ChatCase):
         for name, value in MOODY_PLACEHOLDERS.items():  # the second app ships unfilled, so the kit serves one app
             self.assertEqual(kit_setting(name), value)
         self.assertEqual(kit_setting("CHAT_REVIEW_NAME"), "Hermione (Staff Engineer)")
-        self.assertEqual(list(kit_setting("CHAT_REVIEW_APPS")), ["hermione", "moody"])
+        self.assertEqual(list(kit_setting("CHAT_REVIEW_APPS")), ["hermione", "moody", "mcgonagall"])
         for name in self.SETTINGS[3:]:
             self.assertTrue(all(item.startswith("<") for item in kit_setting(name)), name)
         self.assertFalse(hasattr(config, "CHAT_REVIEW_SHEET_ID"))

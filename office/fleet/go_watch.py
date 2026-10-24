@@ -41,7 +41,9 @@ changes what any run may do.
   notification. Each line is also appended, with a local timestamp, to
   logs/GO_UPDATES_LOG in the office (_log), which no desk can write, before it is sent, so a tail -F shows it after
   the banner has gone. Its marker says logging, with the record and where it goes, until then: a record a kill cut
-  short is logged by the next pass (_relog) unless it is where its marker says it went.
+  short is logged by the next pass (_relog) unless it is where its marker says it went. While the office file
+  config.CHAT_GO_UPDATES_FILE holds "on" too, each line is also left for McGonagall's Chat app to post in Ryan's direct
+  message with it (_to_chat, fleet/chat_chief.py).
 - Never twice: before a line is sent, a marker named by a digest of (epoch, go id, key) is published create-exclusive
   in the folder, then records the outcome as phone.py's do, so a rerun, a second watcher or a kill never sends it
   again. The first pass with the switch on only records a baseline (with a new epoch), so there is no backlog; with
@@ -554,6 +556,7 @@ def _watch(conn, fd: int) -> list:
         # where the record goes before it is written, so a kill in between is repaired exactly (_relog).
         _log(record, lambda at, name=name, record=record: markers.replace(
             fd, name, {"state": "logging", "record": record, "log": at}))
+        _to_chat(name, text)
         markers.replace(fd, name, {"state": "sending"})
         if len(outcomes) >= config.GO_WATCH_MAX_PER_PASS:  # only counted: the event it is made of pings itself
             batched.append(name)
@@ -579,6 +582,20 @@ def _watch(conn, fd: int) -> list:
     _write_state(fd, epoch, keys)
     _prune(fd, epoch, set(keys))
     return outcomes
+
+
+def _to_chat(name: str, text: str) -> None:
+    """While chat-go-updates is on as well, leave the line for McGonagall's Chat app, which posts it in the owner's
+    direct message with it (fleet/chat_chief.py): one file in the office folder CHAT_GO_UPDATES_DIR named by the
+    line's marker, made create-exclusive, so a line is left at most once. Batched and covered lines are left too,
+    since neither reached that conversation. A folder that cannot be written never holds the line back."""
+    if not common.opt_in_on(config.CHAT_GO_UPDATES_FILE):
+        return
+    try:
+        with safefs.opened_dir(config.OFFICE_ROOT, config.CHAT_GO_UPDATES_DIR, create=True) as out_fd:
+            markers.publish(out_fd, f"{name}.json", {"state": "queued", "line": text, "at": int(time.time())})
+    except (FleetError, OSError):
+        pass
 
 
 def _claim_event(key: dict) -> bool:

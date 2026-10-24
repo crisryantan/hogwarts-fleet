@@ -239,6 +239,11 @@ Anyone in the company's Chat can send an app text, so everything here treats a m
   again, and the turn lock it runs under means one request never has two turns.
 - Every request, its outcome and its cost is one JSON line in logs/chat-review.log, and its record stays in the office
   folder chat-reviews/ for CHAT_REVIEW_KEEP_SECONDS.
+- McGonagall's app (CHIEF_APP, keyed config.HOOK_DESK in CHAT_REVIEW_APPS) is served by this job too, after every
+  reviewing app, but is never one of them: served_apps lists only the reviewing apps, chief_served says whether hers
+  is filled in, and fleet/chat_chief.py is all it does (the owner's direct message with it: drafts, gos with a
+  one-time code, status and go updates). The intake refuses to start while it is served and CHAT_REVIEW_OWNER is a
+  placeholder.
 
 Run it with the wrapper line, as the chat-review job does:
 /usr/bin/env -i /usr/bin/python3 -I -B -X pycache_prefix=/var/empty -c 'import sys; sys.path.insert(0, "/Users/crisryantan/.hogwarts"); from fleet.chat_review import main; sys.exit(main())'
@@ -297,6 +302,8 @@ CAPS_MAX_BYTES = 65536
 KEY = re.compile(r"[0-9a-f]{32}")
 # The app a request from before there was more than one belongs to, and the one a review by hand runs as.
 DEFAULT_APP = google_chat.DEFAULT_APP
+# McGonagall's app, served by this job but never a reviewer: fleet/chat_chief.py is all it does.
+CHIEF_APP = config.HOOK_DESK
 # The settings that make an app served: while all three are placeholders it is simply not served.
 CREDENTIALS = ("read_keychain", "service_account", "keychain")
 APP_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9 ().,'&-]{0,79}")
@@ -985,7 +992,7 @@ def _app_problems(bad: Callable, problems: list) -> None:
         problems.append("CHAT_REVIEW_APPS in fleet/config.py must name the settings of each chat review app, for desks"
                         " that serve chat reviews")
         return
-    served = served_apps()
+    served = served_apps() + ([CHIEF_APP] if chief_served() else [])
     if not served:  # named for the first app alone: every other one is optional
         first = DEFAULT_APP if DEFAULT_APP in config.CHAT_REVIEW_APPS else next(iter(config.CHAT_REVIEW_APPS))
         for field in CREDENTIALS:
@@ -1010,6 +1017,8 @@ def _app_problems(bad: Callable, problems: list) -> None:
                     problems.append(f"{name} in fleet/config.py must differ from {seen[key]}{why}")
                 else:
                     seen[key] = name
+    if CHIEF_APP in served and not _is_owner(config.CHAT_REVIEW_OWNER):  # her app answers the owner and no one else
+        bad("CHAT_REVIEW_OWNER", config.CHAT_REVIEW_OWNER, "must be filled for McGonagall's app")
 
 
 def _apps_listed() -> bool:
@@ -1017,7 +1026,8 @@ def _apps_listed() -> bool:
     if not isinstance(apps, dict) or not apps:
         return False
     for app, names in apps.items():
-        if app not in VOICES or app not in run_desk.CHAT_REVIEW_DESKS or not isinstance(names, dict) \
+        reviewer = app in VOICES and app in run_desk.CHAT_REVIEW_DESKS
+        if not (reviewer or app == CHIEF_APP) or not isinstance(names, dict) \
                 or set(names) != set(google_chat.APP_FIELDS):
             return False
         try:
@@ -1028,13 +1038,22 @@ def _apps_listed() -> bool:
     return True
 
 
+def _filled(app: str) -> bool:
+    return not all("<" in repr(google_chat.app_value(app, field)) for field in CREDENTIALS)
+
+
 def served_apps() -> list:
-    """The desks of the apps the intake serves, in CHAT_REVIEW_APPS order: each whose credential settings are not all
-    still placeholders."""
+    """The desks of the reviewing apps the intake serves, in CHAT_REVIEW_APPS order: each whose credential settings are
+    not all still placeholders. McGonagall's app is never one of them (chief_served)."""
     if not _apps_listed():
         return []
-    return [app for app in config.CHAT_REVIEW_APPS
-            if not all("<" in repr(google_chat.app_value(app, field)) for field in CREDENTIALS)]
+    return [app for app in config.CHAT_REVIEW_APPS if app != CHIEF_APP and _filled(app)]
+
+
+def chief_served() -> bool:
+    """Whether McGonagall's app (fleet/chat_chief.py) is served: listed, and its credential settings not all still
+    placeholders."""
+    return _apps_listed() and CHIEF_APP in config.CHAT_REVIEW_APPS and _filled(CHIEF_APP)
 
 
 def app_of(record: dict) -> str:
@@ -5639,7 +5658,8 @@ def run_pass(conn_factory: Callable = common.connect) -> dict:
     """One pass of the chat-review job. Off: no token, no Chat call, only the runs by hand a kill left are finished
     (sweep_hand). On with a setting unfilled: the same, then refused, naming each setting. Otherwise, under the job's
     own lock: every allowed conversation each served app is in read once for new messages that mention it (read_chat),
-    the PRs each follows checked for new commits (follow_pass), then every open request moved on."""
+    the PRs each follows checked for new commits (follow_pass), then every open request moved on, and last McGonagall's
+    app's pass when it is served (chat_chief.run)."""
     if not common.opt_in_on(config.CHAT_REVIEW_FILE):
         sweep_hand()
         return {"state": "off"}
@@ -5660,9 +5680,15 @@ def run_pass(conn_factory: Callable = common.connect) -> dict:
             taken, read_error = read_chat(conn)  # replies and queued reviews move on whatever the read did
             followed = follow_pass()
             settled = settle(conn)
+            chief = None
+            if chief_served():  # McGonagall's app, after every reviewer
+                from fleet import chat_chief  # here, since it reads this module's own helpers
+
+                chief = chat_chief.run(conn)
         finally:
             conn.close()
-    return {"state": "ran", "taken": taken, "followed": followed, "settled": settled, "read_error": read_error}
+    result = {"state": "ran", "taken": taken, "followed": followed, "settled": settled, "read_error": read_error}
+    return result if chief is None else {**result, "chief": chief}
 
 
 # By hand
@@ -5706,7 +5732,7 @@ def main() -> int:
         sys.stdout.write(json.dumps({"at": stamp, "ok": False, "error": message}, ensure_ascii=True) + "\n")
         return 1
     if result["state"] == "ran" and (result["taken"] or result["followed"] or result["settled"]
-                                     or result["read_error"]):
+                                     or result["read_error"] or result.get("chief")):
         sys.stdout.write(json.dumps({"at": stamp, "ok": True, "data": result}, ensure_ascii=True) + "\n")
     return 0
 

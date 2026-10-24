@@ -12,7 +12,8 @@ per app that never stand in for each other or for another app's:
   token and refuses one whose granted scopes are anything but those two. It is per app because Chat answers
   spaces/<id>/members/app with the membership of the app of the project the OAuth client belongs to. With it this
   module only reads Chat: spaces.members.get (that app's own membership, and an allowlisted sender's, by email),
-  spaces.members.list (who is in one conversation, for the owner's fleet questions), spaces.messages.list, and
+  spaces.members.list (who is in one conversation, for the owner's fleet questions and McGonagall's app),
+  spaces.messages.list (for McGonagall's app, in the owner's direct message with it, dm_messages), and
   media.download of an image attached to a message the app takes (download_media), which chat.messages.readonly
   covers.
 - Sending is the app's. Its worker service account's one JSON key is a generic password too (service the app's key
@@ -547,6 +548,48 @@ def list_messages(space: str, after_us: int, app_user: str, token: str, page: Op
                          "sender": _text(sender.get("name"), NAME_MAX), "sender_type": _text(sender.get("type"), 20),
                          "sender_name": _text(sender.get("displayName"), NAME_MAX),
                          "argument": argument})
+    return messages, following
+
+
+def dm_messages(space: str, after_us: int, app_user: str, owner_user: str, token: str,
+                page: Optional[str] = None) -> tuple:
+    """One page of a direct message's messages created after after_us, oldest first, with your read token: (messages,
+    the next page's token or None), for McGonagall's app (fleet/chat_chief.py), which calls it only for a conversation
+    whose members it found to be the owner and that app alone. Each is its time, and only one the owner (owner_user)
+    or the app (app_user) sent is also its name, thread, sender, sender type and whole text (argumentText when it
+    mentions the app, so the mention is out); nothing else of any other message ever leaves here."""
+    for user in (app_user, owner_user):
+        if not isinstance(user, str) or USER.fullmatch(user) is None:
+            raise GoogleError("a member's user name is not a Chat user name")
+    query = {"pageSize": PAGE_SIZE, "filter": f'createTime > "{rfc3339(after_us)}"', "orderBy": "createTime ASC"}
+    if page is not None:
+        if not isinstance(page, str) or PAGE_TOKEN.fullmatch(page) is None:
+            raise GoogleError("Chat's page token is not one")
+        query["pageToken"] = page
+    answer = _read(f"{CHAT_ROOT}/{_space(space)}/messages?{urllib.parse.urlencode(query)}", token)
+    found = answer.get("messages", [])
+    following = answer.get("nextPageToken") or None
+    if not isinstance(found, list) or (following is not None and (not isinstance(following, str)
+                                                                    or PAGE_TOKEN.fullmatch(following) is None)):
+        raise GoogleError("Chat's answer has no messages")
+    messages = []
+    for item in found[:PAGE_SIZE]:
+        item = item if isinstance(item, dict) else {}
+        at = time_us(item.get("createTime"))
+        if at is None:
+            continue
+        sender = item.get("sender") if isinstance(item.get("sender"), dict) else {}
+        kind = sender.get("type")
+        if (sender.get("name"), kind) not in ((owner_user, "HUMAN"), (app_user, "BOT")):
+            messages.append({"created_us": at})
+            continue
+        thread = item.get("thread") if isinstance(item.get("thread"), dict) else {}
+        text = item.get("argumentText") if _mentions(item, app_user) else item.get("text")
+        if not isinstance(text, str) or len(text) > TEXT_MAX:
+            text = ""  # text longer than Chat sends is read as none, never as a cut prefix
+        messages.append({"created_us": at, "name": _text(item.get("name"), NAME_MAX * 2),
+                         "thread": _text(thread.get("name"), NAME_MAX * 2), "sender": sender["name"],
+                         "own": kind == "BOT", "text": text})
     return messages, following
 
 

@@ -172,11 +172,14 @@ CHAT_REVIEW_GITHUB_FILE = "chat-review-github"
 # APPROVE instead of COMMENT. It is your gh account's own approval, so it counts for branch protection. Off by default,
 # and it does nothing while chat-review-github is off. echo on > ~/.hogwarts/chat-review-approve
 CHAT_REVIEW_APPROVE_FILE = "chat-review-approve"
+# While this office file holds "on", and auto-go-updates too, each go update line also posts in your direct message with
+# McGonagall's Chat app (fleet/chat_chief.py), alongside the phone. Off by default: echo on > ~/.hogwarts/chat-go-updates
+CHAT_GO_UPDATES_FILE = "chat-go-updates"
 # Every office opt-in file. common.opt_in_on reads only these names, so a typo never reads another office file as a
 # switch, every switch is read through that one reader, and a name not listed here always reads off.
 OPT_IN_FILES = (AUTO_DRAFT_PR_FILE, AUTO_PORTRAIT_FILE, PR_FOLLOWUP_FILE, AUTO_CLOSE_FILE, WORKTREE_CLEANUP_FILE,
                 OWL_REPORTS_FILE, CROSS_FAMILY_FAILOVER_FILE, ORCHESTRATOR_FILE, GO_UPDATES_FILE, CHAT_REVIEW_FILE,
-                CHAT_REVIEW_GITHUB_FILE, CHAT_REVIEW_APPROVE_FILE)
+                CHAT_REVIEW_GITHUB_FILE, CHAT_REVIEW_APPROVE_FILE, CHAT_GO_UPDATES_FILE)
 # Review rounds of one follow-up, apart from the task's REVIEW_ROUND_CAP, and the follow-ups one task may take.
 FOLLOWUP_ROUND_CAP = 2
 FOLLOWUP_MAX_PER_TASK = 5
@@ -444,6 +447,12 @@ CHAT_REVIEW_MOODY_NAME = "<second-chat-app-name>"
 CHAT_REVIEW_MOODY_USER_KEYCHAIN_SERVICE = "<second-chat-review-user-keychain-service>"
 CHAT_REVIEW_MOODY_SERVICE_ACCOUNT = "<second-chat-app-service-account>"
 CHAT_REVIEW_MOODY_KEYCHAIN_SERVICE = "<second-chat-review-keychain-service>"
+# McGonagall's app (fleet/chat_chief.py): the same four settings for a third project. It never reviews: it answers
+# only CHAT_REVIEW_OWNER, only in a direct message with it, and drafts and starts tasks there.
+CHAT_REVIEW_CHIEF_NAME = "<third-chat-app-name>"
+CHAT_REVIEW_CHIEF_USER_KEYCHAIN_SERVICE = "<third-chat-review-user-keychain-service>"
+CHAT_REVIEW_CHIEF_SERVICE_ACCOUNT = "<third-chat-app-service-account>"
+CHAT_REVIEW_CHIEF_KEYCHAIN_SERVICE = "<third-chat-review-keychain-service>"
 # The apps the chat review serves, keyed by the desk that reviews for each, in the order a pass reads them: the names
 # of the settings above that hold each one's display name, read Keychain service, service account and key Keychain
 # service. The store-key and authorize helpers read this too, as text, so it holds only setting names.
@@ -452,6 +461,9 @@ CHAT_REVIEW_APPS: dict = {
                  "service_account": "CHAT_REVIEW_SERVICE_ACCOUNT", "keychain": "CHAT_REVIEW_KEYCHAIN_SERVICE"},
     "moody": {"name": "CHAT_REVIEW_MOODY_NAME", "read_keychain": "CHAT_REVIEW_MOODY_USER_KEYCHAIN_SERVICE",
               "service_account": "CHAT_REVIEW_MOODY_SERVICE_ACCOUNT", "keychain": "CHAT_REVIEW_MOODY_KEYCHAIN_SERVICE"},
+    "mcgonagall": {"name": "CHAT_REVIEW_CHIEF_NAME", "read_keychain": "CHAT_REVIEW_CHIEF_USER_KEYCHAIN_SERVICE",
+                   "service_account": "CHAT_REVIEW_CHIEF_SERVICE_ACCOUNT",
+                   "keychain": "CHAT_REVIEW_CHIEF_KEYCHAIN_SERVICE"},
 }
 # Only messages from these people (their Chat email) in these spaces (spaces/<id>), each one the mentioned app is a
 # member of, are taken; a person not on the list who mentions an app gets a fixed refusal. Only PRs of these repos
@@ -540,6 +552,21 @@ CHAT_REVIEW_KEEP_SECONDS = 30 * 86400
 # Each app keeps a short note of every review it finished (repo, PR, title, folders, verdict, risk, summary, a few
 # findings, date and thread) for this many days, and draws on its own notes when it answers in Chat.
 CHAT_REVIEW_MEMORY_DAYS = 90
+# McGonagall's app (fleet/chat_chief.py). A message that is no command runs one headless drafting turn of hers: this
+# model and budget, at most the third many turns a cap day, within the fourth many seconds, in its own folder under
+# CHAT_CHIEF_ROOT (outside the office and the castle, so the turn may read it). The turn reads at most CHAT_CHIEF_HISTORY
+# of the direct message's earlier messages from the last CHAT_CHIEF_HISTORY_SECONDS. A go typed there waits for its
+# one-time code at most CHAT_CHIEF_GO_CODE_SECONDS.
+CHAT_CHIEF_MODEL = "opus"
+CHAT_CHIEF_MAX_BUDGET_USD = "1.00"
+CHAT_CHIEF_TURNS_PER_DAY = 20
+CHAT_CHIEF_TIMEOUT_SECONDS = 300
+CHAT_CHIEF_ROOT = "/Users/crisryantan/Library/Caches/hogwarts-chat-chief"
+CHAT_CHIEF_HISTORY = 8
+CHAT_CHIEF_HISTORY_SECONDS = 6 * 3600
+CHAT_CHIEF_GO_CODE_SECONDS = 600
+# Go update lines wait for McGonagall's app in this office folder, one file each, while chat-go-updates is on.
+CHAT_GO_UPDATES_DIR = "chat-go-updates-outbox"
 # Phone delivery (fleet/phone.py): the loud headmaster events go to Ryan off the machine, one ping each. The primary
 # transport is a command set only in the private overlay: an absolute argv, never holding a secret, that reads one JSON
 # payload on stdin and exits 0 once delivered. None, or a failure, falls back to the macOS notification.

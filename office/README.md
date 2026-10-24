@@ -164,10 +164,17 @@ The store has none of these:
                                         blocking finding and a risk below high is posted as APPROVE, your gh
                                         account's own approval for branch protection (off when missing, and nothing
                                         while chat-review-github is off)
+  chat-go-updates                       while it holds exactly "on", and auto-go-updates too, each go update line
+                                        also posts in your direct message with McGonagall's Chat app (off when
+                                        missing, and the lines waiting for it are dropped)
+  chat-go-updates-outbox/               the go update lines waiting for McGonagall's app, one file each
   chat-reviews/                         one record per message and app it asked something (requests/), each app's
                                         read markers per conversation (read/), the once-per-head-commit GitHub markers
                                         of each app (github/), each cap day's counts (caps/) and the PRs each app
-                                        follows (follows/)
+                                        follows (follows/); for McGonagall's app, one record per message
+                                        (chief-requests/), the codes a go waits for, as salted digests (chief-codes/),
+                                        the drafts it wrote (chief-drafts/), its read markers (chief-reads/) and its
+                                        turns per cap day (chief-caps/)
   patrol/shadow                         while it is here, the patrol and Gringotts only write files (shadow mode)
   patrol/<job>/                         the Map's snapshot and rows, lineups, keeper's watches, scoreboards, bot passes,
                                         and in shadow mode what a follow-up would have routed (patrol/followup/)
@@ -987,6 +994,52 @@ mention answer's lines hold only its request id, app and outcome, a turn's mater
 never a link, a page or an image, and its history line only counts. Each record stays in `chat-reviews/requests/` for 30 days. `fleet review pr <link> --requested-by <email>` runs Hermione's review from your
 terminal, under the same caps, locks and GitHub switch, with no Chat reply.
 
+### McGonagall's app
+
+A third app, keyed `mcgonagall` in `CHAT_REVIEW_APPS`, lets the owner work with McGonagall from their phone as they do
+in her terminal session: describe a task, see her draft, start it with a go, and hear each go update. It never
+reviews a PR, and it answers only `CHAT_REVIEW_OWNER`, only in a direct message with it (a conversation whose
+membership list holds the owner and the app and no one else, read as for fleet answers, and read again just before
+each reply that carries anything but a fixed line). The owner mentioning it anywhere else gets one line, "I only work
+with my owner, in our direct message."; anyone else gets nothing, with no record and no log line. The same job serves
+it, after every reviewing app, under the same `chat-review` switch, and the intake refuses to start while it is
+filled and `CHAT_REVIEW_OWNER` is a placeholder. Every message from the owner in that direct message is read, with
+or without a mention:
+
+- `status` gets the fleet answer above.
+- `go <task-id>`, one per line, at most five, starts nothing. For each task the go's read-only checks run (the store
+  does not know it yet, its TASK.md is there, and its Spec block reads as a go reads it), and the reply names the task,
+  its title and repo and a one-time code of six letters and digits. The office keeps only a salted sha256 of the code,
+  the sha256 of the TASK.md it was made for and when. `go <task-id> <code>` within `CHAT_CHIEF_GO_CODE_SECONDS` (600)
+  uses the code up before anything else runs; three wrong codes void it. TASK.md must still be the bytes the code was
+  made for. Then the go runs through the hook's own code (`user_prompt_submit.run_go`), with every check a typed go
+  gets: the task's state, its spec, write-once, the branch lock, the worktree and its take-back. Each outcome is a
+  `go.confirmed` or `go.refused` headmaster event on McGonagall's desk whose summary starts "Go from Chat:", so her
+  terminal session sees it, then one go updates pass.
+- `close`, `drop`, `Mischief managed` and `watch` stay in her terminal session, whose checks rest on your typed
+  transcript entry; in Chat they get one line saying so and change nothing.
+- Anything else is a drafting turn: one headless McGonagall turn, the owl report's shape (`claude -p --restricted` with
+  Read, Grep and Glob confined to a fresh folder under `CHAT_CHIEF_ROOT`, the checked report-only settings, no MCP, no
+  network, no write and no shell), with her own brief, `CHAT_CHIEF_MODEL` and `CHAT_CHIEF_MAX_BUDGET_USD`, at most
+  `CHAT_CHIEF_TURNS_PER_DAY` (20) a cap day, under the launch gate and the stop and blocked-model checks. Its input
+  holds the owner's message between marker lines with a nonce, as the owner's request but never an instruction to use
+  a tool or change anything beyond the draft, at most `CHAT_CHIEF_HISTORY` (8) earlier messages of the direct message
+  from the last `CHAT_CHIEF_HISTORY_SECONDS` as context, the open drafts this app wrote and the repos earlier gos built
+  in. Her answer is one JSON object, held to a schema: a draft, a revision of one of those drafts, or a reply. Her
+  terminal session writes TASK.md with Claude's Write tool under an ask rule, which a headless turn cannot be asked;
+  so the job writes it instead, in her own format: Intent is the owner's words verbatim (less criteria lines and
+  their heading), never her text; every criterion must read back clean; the Spec block must pass the go's own read.
+  A draft gets a new task id and its own new folder under `~/hogwarts/tasks/`; a revision rewrites only a TASK.md this
+  app wrote, still the bytes it wrote, of a task the store does not know. Nothing else is written. The reply names
+  the task id, title, repo, branch, base and each criterion, and says to send `go <task-id>`.
+
+Go updates reach that direct message too while `~/.hogwarts/chat-go-updates` holds `on` along with
+`auto-go-updates`: each line the go watch sends to your phone is also left in the office folder
+`chat-go-updates-outbox/`, and each pass posts it in the thread of your newest message there, once (its request id is
+made from the line's own marker), then removes it. Off, the folder is emptied; a line older than a day is dropped.
+Nothing of a message's text, a draft or a code is logged: each line in `logs/chat-review.log` says which record, what
+kind and how it ended.
+
 ### Setting it up
 
 Each app is set up the same way, in its own Google Cloud project. For each, with an account that may administer the
@@ -1003,7 +1056,7 @@ project:
    in the editor's settings first). Every app uses the same `Code.gs`. In the manifest only `addOns.common.name` and
    `addOns.common.logoUrl` change from app to app: the kit's manifest is Hermione's, and for Moody's app set the name
    to his app's name and the logo to `moody-128.png` in `office/assets/avatars/png/` (the same URL with `hermione`
-   replaced by `moody`). It needs no Script Properties. Deploy it (Deploy, New deployment, type Add-on) and note the
+   replaced by `moody`), and for McGonagall's to her app's name and `mcgonagall-128.png`. It needs no Script Properties. Deploy it (Deploy, New deployment, type Add-on) and note the
    deployment id. The manifest's `addOns` section is what lets Chat call the script: the console builds Chat apps as
    Workspace add-ons, and without it every message ends in "not responding" with a broken-manifest error in the
    project's logs. After pasting a new `Code.gs` or manifest, use Deploy, Manage deployments, edit, New version, so
@@ -1011,6 +1064,7 @@ project:
 5. In the Chat API's configuration, name the app (`Hermione (Staff Engineer)` for the first; for the second, the name
    you give it, the same one its settings hold), let it join spaces, set its connection to the Apps Script project
    with that deployment id, and make it visible to named people only. Add it to a test space you are in first.
+   McGonagall's app is visible to you alone, and you open a direct message with it.
 
 Then fill these in your private overlay of `fleet/config.py`; while an app is filled only in part, or no app is
 filled, the job refuses to start and says which:
@@ -1023,6 +1077,9 @@ filled, the job refuses to start and says which:
   and `CHAT_REVIEW_MOODY_KEYCHAIN_SERVICE`, and `CHAT_REVIEW_MOODY_NAME`, his app's name as the Chat API
   configuration spells it, which his replies and GitHub reviews use. Every Keychain service must differ from every
   other. Leave all of them placeholders to serve Hermione's app alone.
+- For McGonagall's app, the same four as `CHAT_REVIEW_CHIEF_NAME`, `CHAT_REVIEW_CHIEF_USER_KEYCHAIN_SERVICE`,
+  `CHAT_REVIEW_CHIEF_SERVICE_ACCOUNT` and `CHAT_REVIEW_CHIEF_KEYCHAIN_SERVICE`. Leave them placeholders to serve no
+  such app. Serving it needs `CHAT_REVIEW_OWNER`, and your direct message with it in `CHAT_REVIEW_SPACES`.
 - `CHAT_REVIEW_SENDERS`: the emails of the people who may ask.
 - `CHAT_REVIEW_SPACES`: the conversations it answers in, as `spaces/<id>` (the id is the last part of the space's
   link). You must be a member of each, since your tokens read them.
@@ -1031,7 +1088,8 @@ filled, the job refuses to start and says which:
   an app about the fleet's work, in a direct message with it. Leave the placeholder to switch fleet answers off.
 
 Once the office is installed with those filled in, run both helpers yourself in Terminal, from your clone, once for
-each app. Without `--app` they are for Hermione's app; `--app moody` is for Moody's:
+each app. Without `--app` they are for Hermione's app; `--app moody` is for Moody's and `--app mcgonagall` for
+McGonagall's:
 
 - `/usr/bin/python3 -I -B scripts/chat-review-store-key.py [--app moody] <worker key.json>` stores the app's worker
   key. It refuses any other account's key, and a Keychain service another setting names too. Then delete the
@@ -1047,7 +1105,9 @@ reviews to run. `CHAT_REVIEW_PER_PERSON_DAILY` and `CHAT_REVIEW_DAILY` have work
 `sh scripts/loops-setup.sh`, which adds the chat-review job to `loops/jobs`, restart `fleet loops`, and switch it on
 with `echo on > ~/.hogwarts/chat-review`. Once a few Chat replies read right, switch on the GitHub post with
 `echo on > ~/.hogwarts/chat-review-github`. Once you trust its passes enough to let them count as your approval,
-switch that on with `echo on > ~/.hogwarts/chat-review-approve`. `rm` any of these files switches it off again.
+switch that on with `echo on > ~/.hogwarts/chat-review-approve`. For go updates in your direct message with
+McGonagall's app, `echo on > ~/.hogwarts/chat-go-updates` (with `auto-go-updates` on). `rm` any of these files
+switches it off again.
 
 Rotate each worker key every 90 days: create a new key, store it with the same helper and `--app` (it replaces the
 Keychain item), check a review goes through, then delete the old key in Google Cloud. Re-run the authorize helper for

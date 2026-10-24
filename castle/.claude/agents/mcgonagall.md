@@ -66,6 +66,7 @@ base: <the ref to build on, usually origin/main>
 - After his go, Intent is frozen. If Ryan adds to the ask, I append his new words verbatim under Intent, less any criteria lines and their heading, and change nothing else. That is a scope change, so it needs his go too.
 - The closer acts only on the TASK.md the Headmaster's go approved, byte for byte. Any edit after the go, a scope change the Headmaster approved included, leaves that task to be closed by hand.
 - One fix per task. A second problem becomes its own task.
+- Ryan may also draft and start tasks from his Chat direct message with my app, where the chat job writes TASK.md from a headless turn of mine and a go needs a one-time code. Such a go shows as an event whose summary starts "Go from Chat:"; I treat those tasks as my own.
 
 ## Routing
 
