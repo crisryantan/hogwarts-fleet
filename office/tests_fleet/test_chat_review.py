@@ -2356,6 +2356,28 @@ class ReviewFactsTests(ChatCase):
                                       "- Partial review: 1 changed file did not fit and was not reviewed:",
                                       "  - big.py"])
 
+    def test_the_longest_findings_never_cut_a_partial_reviews_files_from_reply_or_body(self):
+        named = [f"big/{'d' * 180}{index}.py" for index in range(chat_review.NOT_REVIEWED_NAMED)]
+        left = {"not_reviewed": named, "not_reviewed_count": 13}
+        long = "x.py:1 | " + "#." * 295
+        blocking = [f"B{index} {long} | fix" for index in range(1, chat_review.FINDINGS_MAX + 1)]
+        notes = [f"N{index} {long}" for index in range(1, chat_review.FINDINGS_MAX + 1)]
+        caveats = ["c" * chat_review.NOT_VERIFIED_ITEM_MAX] * chat_review.NOT_VERIFIED_MAX
+        reply = chat_review.reply_text("acme/web-app", 7, HEAD, "CHANGES", blocking, notes, SUMMARY, **left,
+                                       risk="low", checks={"state": "none"}, not_verified=caveats)
+        body = chat_review.github_body("Dev", HEAD, "CHANGES", blocking, notes, summary=SUMMARY, **left, risk="low",
+                                       not_verified=caveats)
+        self.assertLessEqual(len(said(reply, "users/" + "9" * 40)), google_chat.MESSAGE_MAX_CHARS)
+        self.assertLessEqual(len(body), chat_review.GITHUB_BODY_MAX)
+        for text, shown in ((reply, str), (body, chat_review.github_prose)):
+            with self.subTest(text=text[:40]):
+                self.assertIn("more lines not shown)", text)
+                self.assertTrue(text.endswith(
+                    "- Partial review: 13 changed files did not fit and were not reviewed:\n"
+                    + "\n".join(f"  - {shown(path)}" for path in named) + "\n  - and 3 more"))
+                self.assertIn("Not verified:\n", text)
+                self.assertTrue(text.startswith(chat_review.OPENING.split(" by", 1)[0]) or text.startswith(SUMMARY))
+
     def test_the_second_app_posts_the_same_facts_in_its_own_voice(self):
         self.second_app()
         self.switch(config.CHAT_REVIEW_GITHUB_FILE, True)

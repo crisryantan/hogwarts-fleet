@@ -2249,7 +2249,7 @@ def reply_text(repo: str, number: int, sha: str, verdict: str, blocking: list, n
     """The reply for the Chat thread: the summary, the risk, the verdict line (and, for a high-risk pass, that it
     needs a person to approve), the CI line, the findings as bullets, then what was not verified: the reviewer's own
     caveats and, for a partial review, the files it left out. Cut whole lines at a time to what Chat takes with the
-    mention in front."""
+    mention in front, a partial review's files always kept (_fitted)."""
     lines = [summary] if summary else []
     if risk:
         lines.append(f"Risk: {risk}")
@@ -2265,20 +2265,33 @@ def reply_text(repo: str, number: int, sha: str, verdict: str, blocking: list, n
         lines += ["Notes:", *map(_bullet, non_blocking)]
     if not blocking and not non_blocking:
         lines.append("No findings.")
-    unverified = _not_verified_lines(not_verified, not_reviewed, not_reviewed_count, str)
-    if unverified:
-        lines += ["Not verified:", *unverified]
-    return _whole_lines(lines, google_chat.MESSAGE_MAX_CHARS - MENTION_ROOM)
+    caveats, partial = _not_verified_lines(not_verified, not_reviewed, not_reviewed_count, str)
+    return _fitted(lines, caveats, partial, google_chat.MESSAGE_MAX_CHARS - MENTION_ROOM)
 
 
-def _not_verified_lines(not_verified: list, not_reviewed: list, not_reviewed_count: int, shown: Callable) -> list:
-    """What a review says it did not verify, as bullets: each of the reviewer's caveats, then, for a partial review,
-    the line saying how many files it left out with those it names under it. Each text goes through shown."""
-    lines = [f"- {shown(item)}" for item in not_verified if isinstance(item, str)]
+def _not_verified_lines(not_verified: list, not_reviewed: list, not_reviewed_count: int, shown: Callable) -> tuple:
+    """What a review says it did not verify, as bullets: (each of the reviewer's caveats, and for a partial review
+    the line saying how many files it left out with those it names under it). Each text goes through shown."""
+    caveats = [f"- {shown(item)}" for item in not_verified if isinstance(item, str)]
     heading, named, more = _not_reviewed_lines(not_reviewed, not_reviewed_count)
-    if heading:
-        lines += [f"- {heading}", *(f"  - {shown(path)}" for path in named), *([f"  - {more}"] if more else [])]
-    return lines
+    if not heading:
+        return caveats, []
+    return caveats, [f"- {heading}", *(f"  - {shown(path)}" for path in named), *([f"  - {more}"] if more else [])]
+
+
+def _fitted(lines: list, caveats: list, partial: list, limit: int, gap: bool = False) -> str:
+    """lines, then "Not verified:" with the caveats and a partial review's lines under it, cut whole lines at a time
+    to limit, the partial review's lines always kept: the head is cut first to leave them room, then the caveats to
+    what is left, so a long list of findings never hides which files were not reviewed. gap puts a blank line before
+    the heading."""
+    if not caveats and not partial:
+        return _whole_lines(lines, limit)
+    heading = ["", "Not verified:"] if gap else ["Not verified:"]
+    reserved = sum(len(line) + 1 for line in heading + partial) + 2 * 40  # room for two cut lines too
+    head = _whole_lines(lines, limit - reserved)
+    room = limit - len(head) - sum(len(line) + 1 for line in heading + partial) - 1
+    told = [_whole_lines(caveats, room)] if caveats else []
+    return "\n".join([head, *heading, *told, *partial])
 
 
 def _not_reviewed_lines(paths: list, count: int) -> tuple:
@@ -2310,7 +2323,7 @@ def github_body(requester: str, sha: str, verdict: str, blocking: list, non_bloc
     (a title only for one of the same repo, so no other repo's title is posted here); the verdict; the findings
     given, those not posted as inline comments, without their tags; then what was not verified (the reviewer's
     caveats, and a partial review's files left out). All of it plain prose (github_prose), cut whole lines at a time
-    to GITHUB_BODY_MAX. A line whose fact the record does not hold (one from before the job read it) is left out."""
+    to GITHUB_BODY_MAX, a partial review's files always kept (_fitted). A line whose fact the record does not hold (one from before the job read it) is left out."""
     lines = [OPENING.format(name=app_name(app), requester=requester)]
     if risk:
         lines += ["", f"Risk: {risk}"]
@@ -2329,10 +2342,8 @@ def github_body(requester: str, sha: str, verdict: str, blocking: list, non_bloc
         lines += ["", "Blocking", *(f"- {github_prose(_bullet(item)[2:])}" for item in blocking)]
     if non_blocking:
         lines += ["", "Non-blocking", *(f"- {github_prose(_bullet(item)[2:])}" for item in non_blocking)]
-    unverified = _not_verified_lines(not_verified, not_reviewed, not_reviewed_count, github_prose)
-    if unverified:
-        lines += ["", "Not verified:", *unverified]
-    return _whole_lines(lines, GITHUB_BODY_MAX)
+    caveats, partial = _not_verified_lines(not_verified, not_reviewed, not_reviewed_count, github_prose)
+    return _fitted(lines, caveats, partial, GITHUB_BODY_MAX, gap=True)
 
 
 def _related(item: dict, repo: str) -> str:
