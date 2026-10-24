@@ -12,8 +12,9 @@ per app that never stand in for each other or for another app's:
   token and refuses one whose granted scopes are anything but those two. It is per app because Chat answers
   spaces/<id>/members/app with the membership of the app of the project the OAuth client belongs to. With it this
   module only reads Chat: spaces.members.get (that app's own membership, and an allowlisted sender's, by email),
-  spaces.messages.list, and media.download of an image attached to a message the app takes (download_media), which
-  chat.messages.readonly covers.
+  spaces.members.list (who is in one conversation, for the owner's fleet questions), spaces.messages.list, and
+  media.download of an image attached to a message the app takes (download_media), which chat.messages.readonly
+  covers.
 - Sending is the app's. Its worker service account's one JSON key is a generic password too (service the app's key
   Keychain service, account the service account's email), stored there by scripts/chat-review-store-key.py as the
   base64 of its PKCS#8 body. access_token signs a JWT bearer grant (RS256) for the chat.bot scope alone with it, and
@@ -100,6 +101,8 @@ PAGE_SIZE = 100
 PAGE_TOKEN = re.compile(r"[A-Za-z0-9._~+/=-]{1,2048}")
 # Messages one read of a thread's recent messages asks for, at most.
 HISTORY_PAGE_SIZE = 25
+# People one membership read asks for: a conversation with more is no private one, and is read as not known.
+MEMBERS_PAGE_SIZE = 10
 NAME_MAX = 200
 TEXT_MAX = 4096
 
@@ -411,6 +414,32 @@ def member_user(space: str, email: str, token: str, timeout: Optional[float] = N
             return None
         raise
     return _joined(answer, space, "HUMAN")
+
+
+def members(space: str, token: str, timeout: Optional[float] = None) -> Optional[list]:
+    """Everyone in space as [(user name, HUMAN or BOT, state)], invited people too, from one spaces.members.list read
+    with your read token (chat.memberships.readonly), or None when that cannot be known whole: Chat refuses it, the
+    answer is malformed or the list runs past MEMBERS_PAGE_SIZE people."""
+    query = {"pageSize": MEMBERS_PAGE_SIZE, "showInvited": "true"}
+    try:
+        answer = _read(f"{CHAT_ROOT}/{_space(space)}/members?{urllib.parse.urlencode(query)}", token, timeout)
+    except GoogleError as exc:
+        if exc.status in (403, 404):
+            return None
+        raise
+    found = answer.get("memberships", [])
+    if not isinstance(found, list) or len(found) > MEMBERS_PAGE_SIZE or answer.get("nextPageToken"):
+        return None
+    people = []
+    for item in found:
+        item = item if isinstance(item, dict) else {}
+        member = item.get("member") if isinstance(item.get("member"), dict) else {}
+        name, kind, state = member.get("name"), member.get("type"), item.get("state")
+        if not isinstance(name, str) or USER.fullmatch(name) is None or kind not in ("HUMAN", "BOT") \
+                or not isinstance(state, str):
+            return None
+        people.append((name, kind, state))
+    return people
 
 
 def time_us(text: object) -> Optional[int]:

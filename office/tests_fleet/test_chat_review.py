@@ -160,6 +160,8 @@ class FakeGoogle:
         self.posted = {}  # space: the messages in it, as spaces.messages.list gives them
         self.members = {SPACE: {SENDER: SENDER_USER, LEAD: LEAD_USER, "stranger@example.com": STRANGER_USER}}
         self.app_in = {SPACE}
+        self.invited = {}  # space: the users invited to it, not joined yet
+        self.members_fail = {}  # space: the HTTP status its membership list is refused with
         self.moody_in = {SPACE}  # where the second app is a member, when it is served
         self.joined = time.time() - 86400  # when the app's membership began
         self.list_fail = {}  # space: (the page it fails at, the HTTP status)
@@ -197,6 +199,19 @@ class FakeGoogle:
         query = urllib.parse.parse_qs(parts.query)
         if payload is None:
             assert token in APP_USERS, "a Chat read with the wrong token"
+            listed_members = re.fullmatch(r"(spaces/[^/]+)/members", path)
+            if listed_members is not None:  # spaces.members.list: the humans, the app where it is in, and the invited
+                space = listed_members.group(1)
+                if space in self.members_fail:
+                    raise google_chat.GoogleError(f"Google answered HTTP {self.members_fail[space]}",
+                                                  status=self.members_fail[space])
+                assert query["showInvited"] == ["true"]
+                found = [(user, "HUMAN", "JOINED") for user in self.members.get(space, {}).values()]
+                found += [(user, "HUMAN", "INVITED") for user in self.invited.get(space, ())]
+                if space in (self.app_in if token == USER_TOKEN else self.moody_in):
+                    found.append((APP_USERS[token], "BOT", "JOINED"))
+                return {"memberships": [{"name": f"{space}/members/{user[6:]}", "state": state,
+                                         "member": {"name": user, "type": kind}} for user, kind, state in found]}
             member = re.fullmatch(r"(spaces/[^/]+)/members/([^/]+)", path)
             if member is not None:
                 space, who = member.group(1), urllib.parse.unquote(member.group(2))

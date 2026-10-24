@@ -181,6 +181,18 @@ Anyone in the company's Chat can send an app text, so everything here treats a m
   long ago and a link to its thread, then the models its reviews and its chat run on now. Never an email, and never
   any text a teammate wrote. It wins over a question, but
   a review request or follow-up wins over it.
+- A fleet ask: the owner (CHAT_REVIEW_OWNER, an email also in CHAT_REVIEW_SENDERS, which your private overlay fills)
+  can ask an app about the fleet's own work, with a mention, in at most FLEET_WORDS_MAX words (parse_fleet): "fleet
+  status" or "what's the fleet doing" lists the open tasks (id, title cut to 60 and scrubbed, and a stage: queued,
+  building, in review round N, passed, draft PR open, awaiting merge, or blocked with its reason class) and the last
+  5 closed this cap day; "fleet <PR link>" or "fleet status <PR link>" shows, for a PR the fleet opened, its task and
+  stage, each review round with its verdict, reviewer desk and the head it read, CI as the Map last saw it and the
+  follow-ups still open, and for any other PR says the fleet did not open it. Fixed lines read from the store opened
+  read only (fleet/chat_fleet.py), never a model turn, and never TASK.md beyond a title, a diff, a path, a teammate's
+  comment or an email. It wins over a review request, since "fleet <link>" holds a PR link. Only in a direct message
+  with the app, a conversation whose membership list (google_chat.members) holds the owner and the app and no one
+  else: asked anywhere else, the owner gets only FLEET_DM_ONLY and no fleet data. Anyone else's fleet ask gets the help
+  reply, and while CHAT_REVIEW_OWNER is a placeholder everyone's does.
 - Following (follow_pass): after an app's review of a PR from Chat goes to its thread, whatever its verdict, the app
   follows that PR: one record per app and PR in chat-reviews/follows/, holding the thread it reports in, the
   requester's Chat user id and display name and a one-way digest of their email under the office's own salt
@@ -248,7 +260,7 @@ from typing import Callable, Iterable, Iterator, NamedTuple, Optional
 from hogwarts import capacity, db, ids, pensieve
 from hogwarts.errors import StoreError
 
-from fleet import chat_context, chat_material, common, config, gitops, google_chat, markers, run_desk, safefs
+from fleet import chat_context, chat_fleet, chat_material, common, config, gitops, google_chat, markers, run_desk, safefs
 from fleet.safefs import FleetError
 
 DIR = "chat-reviews"
@@ -269,7 +281,7 @@ READ_STOPPED = "read-stopped.json"
 SPACE_MARK = "space"
 QUIET = "quiet"
 # What taking a message that mentions the app can make: a record, each counted toward CHAT_REVIEW_PULL_MAX.
-TAKEN = ("review", "question", "mention", "help", "refusal", "status", "follow", "unfollow")
+TAKEN = ("review", "question", "mention", "help", "refusal", "status", "fleet", "follow", "unfollow")
 # What a mention from an allowed sender can make that takes its thread for the app (_first_mentions).
 TAKES_THREAD = ("review", "help", "mention", "follow", "unfollow")
 LOG = "chat-review.log"
@@ -426,6 +438,18 @@ STATUS_ASK = re.compile(r"(?:(?:hey|hi|hello|ok|okay|so|please|pls)[,!]?\s+)*"
 STATUS_WORDS_MAX = 8
 # A status reply lists at most this many requests finished this cap day, newest first.
 STATUS_DONE_MAX = 5
+# A mention of the app from the owner that asks about the fleet's own work (parse_fleet), by two fixed asks, in at most
+# FLEET_WORDS_MAX words: "fleet status" and its kin (FLEET_STATUS_ASK), or "fleet" or "fleet status" around exactly one
+# PR link and no other address (FLEET_PR_ASK). Only the owner, in a direct message with the app, is ever answered
+# (fleet_reply); anyone else's is the help reply.
+_FLEET_GREETING = r"(?:(?:hey|hi|hello|ok|okay|so|please|pls)[,!]?\s+)*"
+FLEET_STATUS_ASK = re.compile(_FLEET_GREETING + r"(?:fleet\s+status(?:\s+(?:update|check))?"
+                              r"|what(?:'s|s| is)\s+the\s+fleet\s+(?:doing|up\s+to|working\s+on))"
+                              r"(?:\s+(?:right\s+)?now)?\s*[.!?]*", re.IGNORECASE)
+FLEET_PR_ASK = re.compile(_FLEET_GREETING + r"fleet(?:\s+status)?\s*[.!?]*", re.IGNORECASE)
+FLEET_WORDS_MAX = 8
+# The only fleet line anyone gets outside a direct message with the app, the owner included.
+FLEET_DM_ONLY = "Ask me in our DM for fleet status."
 # A mention that only asks the app to follow one PR without reviewing it now (parse_follow_command): these words, after
 # an optional greeting, around exactly one PR link and no other address.
 FOLLOW_WORDS = re.compile(r"(?:(?:hey|hi|ok|okay|please|pls|plz|can you|could you)[,!]?\s+)*(?:follow|watch)"
@@ -906,6 +930,10 @@ def config_problems(intake: bool) -> list:
         if not isinstance(value, tuple) or not value or not all(isinstance(item, str) and pattern.fullmatch(item)
                                                                  for item in value):
             bad(name, value, "must list at least one valid entry")
+    owner = config.CHAT_REVIEW_OWNER  # still a placeholder: fleet answers are simply off
+    if "<" not in repr(owner) and not (isinstance(owner, str) and EMAIL.fullmatch(owner) is not None
+                                       and _sender_allowed(owner)):
+        bad("CHAT_REVIEW_OWNER", owner, "must be one email that is also in CHAT_REVIEW_SENDERS")
     for name in ("CHAT_REVIEW_PULL_MAX", "CHAT_REVIEW_LIST_PAGES", "CHAT_REVIEW_READ_OVERLAP_SECONDS",
                  "CHAT_REVIEW_FOLLOW_DAYS", "CHAT_REVIEW_FOLLOW_REVIEWS_PER_DAY", "CHAT_REVIEW_MEMORY_DAYS"):
         value = getattr(config, name)
@@ -1221,6 +1249,29 @@ def parse_status(text: object) -> bool:
         return False
     plain = " ".join(typographic(text).split())
     return len(plain.split()) <= STATUS_WORDS_MAX and STATUS_ASK.fullmatch(plain) is not None
+
+
+def parse_fleet(text: object) -> Optional[tuple]:
+    """("status", None) when text, with the app mention already out, only asks what the fleet is doing
+    (FLEET_STATUS_ASK, any letter case, no address or link of any kind), or ("pr", (repo, number)) when it is "fleet"
+    or "fleet status" around exactly one GitHub PR link and no other address (FLEET_PR_ASK), the PR of any repo; in
+    either case in at most FLEET_WORDS_MAX words. Nothing else in the text is read or kept."""
+    if not isinstance(text, str) or len(typographic(text).split()) > FLEET_WORDS_MAX:
+        return None
+    found = _links(text)
+    if found is None or any(PR_WORD.fullmatch(markup.group(1)) is None for markup in LINK_MARKUP.finditer(text)):
+        return None
+    rest = " ".join(word for word in found[1].split()
+                    if PR_WORD.fullmatch(word.lstrip("<([\"'").rstrip(")]>\"'.,;:!?")) is None)
+    plain = " ".join(typographic(rest).split())
+    if ANY_ADDRESS.search(plain) is not None or LINKISH.search(plain) is not None:
+        return None
+    if not found[0]:
+        return ("status", None) if FLEET_STATUS_ASK.fullmatch(plain) is not None else None
+    owner, name, number = found[0][0]
+    if len(found[0]) != 1 or FLEET_PR_ASK.fullmatch(plain) is None or not _repo_ok(f"{owner}/{name}"):
+        return None
+    return "pr", (f"{owner}/{name}", int(number))
 
 
 def parse_follow_command(text: object) -> Optional[tuple]:
@@ -4073,6 +4124,52 @@ def _memory_status_line(app: str, now: int) -> str:
             + ", ".join(f"{repo} {counts[repo]}" for repo in ranked) + ").")
 
 
+def _is_owner(email: object) -> bool:
+    """Whether email is CHAT_REVIEW_OWNER's, matched without letter case. A setting that is still a placeholder, or no
+    email, is nobody's."""
+    owner = config.CHAT_REVIEW_OWNER
+    return isinstance(email, str) and isinstance(owner, str) and EMAIL.fullmatch(owner) is not None \
+        and owner.lower() == email.lower()
+
+
+def _private_with(space: str, user: object, app_user: Optional[str], token: str) -> bool:
+    """Whether space holds no human but user (the owner's Chat user name) and no app but app_user: a direct message
+    with the app. Read from Chat's own membership list (google_chat.members), invited people included; one that cannot
+    be read whole is no direct message. A refused read authorization stops reading, as any read does."""
+    if not isinstance(user, str) or app_user is None:
+        return False
+    try:
+        people = google_chat.members(space, token)
+    except google_chat.ReadAuthError:
+        raise
+    except FleetError:
+        return False
+    if people is None:
+        return False
+    humans = [name for name, kind, _ in people if kind == "HUMAN"]
+    return humans == [user] and {name for name, kind, _ in people if kind == "BOT"} <= {app_user} \
+        and all(state == "JOINED" for _, _, state in people)
+
+
+def fleet_reply(fleet: tuple, app: str, email: str, user: object, space: str, token: str, app_user: Optional[str],
+                now: int) -> dict:
+    """The record fields of a reply to a fleet ask (parse_fleet) from an allowed sender: from anyone but the owner
+    (_is_owner) the help reply, as for a message that asks nothing it knows; from the owner anywhere but a direct
+    message with the app (_private_with) FLEET_DM_ONLY and no fleet data at all; else the fixed fleet answer
+    (fleet/chat_fleet.py) read from the store, with no turn, cut whole lines at a time to what Chat takes with the
+    mention in front."""
+    if not _is_owner(email):
+        return {"state": "reply", "kind": "help", "reply": help_text(app), "outcome": "help"}
+    if not _private_with(space, user, app_user, token):
+        return {"state": "reply", "kind": "fleet", "reply": FLEET_DM_ONLY, "outcome": "fleet-dm-only"}
+    if fleet[0] == "status":
+        text = chat_fleet.fleet_text(now, _memory_text)
+    else:
+        text = chat_fleet.pr_text(fleet[1][0], fleet[1][1], now, _memory_text, _ago)
+    return {"state": "reply", "kind": "fleet", "outcome": "fleet",
+            "reply": _whole_lines(text.split("\n"), google_chat.MESSAGE_MAX_CHARS - MENTION_ROOM)}
+
+
 def ack_text(key: str, app: str, number: int, other_work: bool = False) -> str:
     """The fixed acknowledgement for the request with this key, in its app's desk's voice: one of its lines chosen by
     the key, naming the PR by its number, then its review-only line when the request asked for other work too."""
@@ -4760,9 +4857,12 @@ def _ignored(name: str, why: str) -> str:
     return "ignored"
 
 
-def take_message(message: dict, space: str, token: str, known: dict, now: int, app: str) -> str:
+def take_message(message: dict, space: str, token: str, known: dict, now: int, app: str,
+                 app_user: Optional[str] = None) -> str:
     """Take one message that mentions app, once for that app: a review request from an allowed sender becomes a queued
-    review by its desk, a status ask (parse_status) the app's status reply (status_text), a question about the app's review there or any other message a queued answer (parse_question,
+    review by its desk, a status ask (parse_status) the app's status reply (status_text), a fleet ask (parse_fleet) the
+    owner's fleet answer or its refusals (fleet_reply, which needs app_user, the app's own Chat user name, to tell a
+    direct message), a question about the app's review there or any other message a queued answer (parse_question,
     parse_mention), with what it attaches (_material), anything else from them the app's fixed help reply, and
     anything from a person not allowed
     the fixed refusal, each as a record made create-exclusive, so a message read again (the overlap of each read, or
@@ -4825,20 +4925,25 @@ def take_message(message: dict, space: str, token: str, known: dict, now: int, a
         record = {**record, "state": "reply", "kind": "refusal", "reply": SENDER_REFUSED, "outcome": "not-allowed"}
     else:
         record = {**record, "requester": email, "requester_name": display_name(message["sender_name"]), **user}
+        # A fleet ask is the owner's, or help: it wins over everything else a message with a PR link could be.
+        fleet = parse_fleet(message["argument"])
         # "follow <link>" or "stop following" is a follow command, a fixed reply with no turn: it wins over a request.
-        command = _follow_reply(message["argument"], space, thread, app)
-        asked = parse_request(message["argument"]) if command is None else None
-        if asked is None and command is None and parse_follow_up(message["argument"]):
+        command = _follow_reply(message["argument"], space, thread, app) if fleet is None else None
+        asked = parse_request(message["argument"]) if command is None and fleet is None else None
+        if asked is None and command is None and fleet is None and parse_follow_up(message["argument"]):
             # A follow-up in a thread where this app already took a review request: the same PR again, never another.
             asked = earlier_request(space, thread, app, message["created_us"])
             if asked is not None:
                 record = {**record, "follow_up": True}
         # A status ask gets the app's status, a fixed reply with no turn, even in a thread it reviewed.
-        status = asked is None and command is None and parse_status(message["argument"])
+        status = asked is None and command is None and fleet is None and parse_status(message["argument"])
         # Anything else that mentions the app, in a thread where it reviewed a PR, is a question about that review.
         reviewed = reviewed_request(space, thread, app, message["created_us"]) \
-            if asked is None and command is None and not status and parse_question(message["argument"]) else None
-        if command is not None:
+            if asked is None and command is None and fleet is None and not status \
+            and parse_question(message["argument"]) else None
+        if fleet is not None:
+            record = {**record, **fleet_reply(fleet, app, email, message["sender"], space, token, app_user, now)}
+        elif command is not None:
             record = {**record, **command}
         elif status:
             record = {**record, "state": "reply", "kind": "status", "reply": status_text(app, now), "outcome": "status"}
@@ -5090,7 +5195,7 @@ def read_space(space: str, token: str, known: dict, done: list, room: int, now: 
                     if sum(outcome in TAKEN for outcome in done) >= room:
                         waiting = min(message["created_us"], now_us)  # no room: the next read starts here
                         return
-                    done.append(take_message(message, space, token, known, now, app))
+                    done.append(take_message(message, space, token, known, now, app, app_user))
                 if message["created_us"] <= now_us:  # a time ahead of this Mac's clock never moves the marker
                     newest = max(newest, message["created_us"])
                 if message["created_us"] <= now_us + CLOCK_SKEW_SECONDS * 1_000_000:
@@ -5167,7 +5272,7 @@ def read_quiet(space: str, token: str, known: dict, done: list, room: int, now: 
                     waiting = min(message["created_us"], now_us)
                     return
                 outcome = take_turn(pending, space, token, known, now, app, app_user) if pending \
-                    else take_message(message, space, token, known, now, app)
+                    else take_message(message, space, token, known, now, app, app_user)
                 if left or outcome != "ignored":  # an unmentioned one ignored leaves no trace
                     done.append(outcome)
             if message["created_us"] <= now_us:

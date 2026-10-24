@@ -636,6 +636,10 @@ messages an answer turn reads as its context. Of those that mention it:
   pending", "anything running" and a few of their kin, any letter case, at most 8 words, no link or address) gets the
   app's status reply (Status, below) and no turn, even in a thread the app reviewed; a link or a review command in it
   still makes it a request or follow-up;
+- one from them that asks about the fleet's own work, "fleet status" or "what's the fleet doing", or "fleet <PR link>"
+  or "fleet status <PR link>" (at most 8 words, one PR link of any repo and no other address), is a fleet ask (Fleet
+  answers, below): from the owner (`CHAT_REVIEW_OWNER`) it gets the fleet's answer, with no turn, and wins over a
+  review request for the same link; from anyone else it gets the help reply;
 - one from them that is none of those, holds no review or approve word anywhere and has at most 2000 characters, in
   a thread where the same app has a review request on record whose outcome is reviewed, is a question about that
   review (Questions, below). A message that does not mention the app is one only as a conversation turn (above), and
@@ -915,6 +919,24 @@ was last checked and its thread's link, then the two models it runs on now ("Mod
 sonnet."), and ends with how many past reviews its memory holds for each repo ("Review memory: 3 past reviews
 (acme/web-app 2, acme/api 1).").
 
+Fleet answers. The owner can ask either app about the fleet's own work, the way they would ask McGonagall, with a
+mention, in a direct message with the app. `CHAT_REVIEW_OWNER` names the owner by Chat email; it must also be in
+`CHAT_REVIEW_SENDERS`, and your private overlay fills it (while it is a placeholder, nobody gets fleet answers).
+"fleet status" or "what's the fleet doing" lists the open tasks, newest first, one line each with the task id, its title
+(scrubbed and cut to 60 characters) and its stage: queued, building, in review round N, passed, draft PR open,
+awaiting merge, or blocked with its reason class (needs the owner, round cap, review died, tooling, review loop
+stopped); a go task whose build is open is folded into the build. Then the last 5 tasks closed this cap day, each as
+merged or closed with its reason. "fleet <PR link>" or "fleet status <PR link>" shows a PR the fleet opened: its task
+and stage, each review round with its verdict, reviewer desk and the first 12 characters of the head it read, the head
+reviewed, CI as the Map last saw it (one word, the head it read and how long ago, or that the Map has not seen the PR)
+and the follow-ups still open with their state. A PR the fleet did not open gets one line saying so. Every answer is
+built by the job from the store, opened read only, with no model turn, so it holds nothing but those fields: no text
+from a TASK.md beyond the title, no diff, file path, branch name, teammate comment or email. Anyone else's fleet ask
+gets the help reply. The owner asking anywhere but a direct message gets only "Ask me in our DM for fleet status.",
+and no fleet data: a direct message is a conversation whose membership list, read with the same read-only
+authorization, holds the owner and the app and no one else, invited people included; a list that cannot be read whole is
+no direct message.
+
 Following. After an app's review of a PR from Chat goes to its thread, whatever its verdict, the app follows that
 PR, so nobody has to ask again: one small record per app and PR in `chat-reviews/follows/`, holding the thread to
 report in, the requester's Chat user id and display name, a one-way digest of their email (HMAC-SHA256 under a
@@ -1005,6 +1027,8 @@ filled, the job refuses to start and says which:
 - `CHAT_REVIEW_SPACES`: the conversations it answers in, as `spaces/<id>` (the id is the last part of the space's
   link). You must be a member of each, since your tokens read them.
 - `CHAT_REVIEW_REPOS`: the repos it reviews, as `owner/name`.
+- `CHAT_REVIEW_OWNER`: your own Chat email, which must also be in `CHAT_REVIEW_SENDERS`: the one person who may ask
+  an app about the fleet's work, in a direct message with it. Leave the placeholder to switch fleet answers off.
 
 Once the office is installed with those filled in, run both helpers yourself in Terminal, from your clone, once for
 each app. Without `--app` they are for Hermione's app; `--app moody` is for Moody's:

@@ -459,6 +459,10 @@ CHAT_REVIEW_APPS: dict = {
 CHAT_REVIEW_SENDERS: tuple = ("<allowed-sender-email>",)
 CHAT_REVIEW_SPACES: tuple = ("<allowed-chat-space>",)
 CHAT_REVIEW_REPOS: tuple = ("<allowed-repo>",)
+# The one person (their Chat email, also listed in CHAT_REVIEW_SENDERS) who may ask an app about the fleet's own work,
+# in a direct message with the app: fleet status, or fleet <PR link>. Your private overlay fills it with your own
+# email; while it is still a placeholder, nobody gets fleet answers.
+CHAT_REVIEW_OWNER = "<chat-review-owner-email>"
 # Reviews per person and for the whole fleet in one cap day (CAP_RESET_UTC_SECONDS), whichever app was asked, counted
 # before the desk starts, so a killed review counts. Each is also one run of the reviewing desk under its own daily
 # caps: a Hermione turn at her MAX_BUDGET_USD at most, or a Moody turn, charged as his runs are. A question about a
