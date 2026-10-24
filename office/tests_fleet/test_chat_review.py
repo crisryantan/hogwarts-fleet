@@ -301,7 +301,9 @@ class ChatCase(FleetCase):
         settings = {"CHAT_REVIEW_USER_KEYCHAIN_SERVICE": USER_KEYCHAIN_SERVICE,
                     "CHAT_REVIEW_SERVICE_ACCOUNT": SERVICE_ACCOUNT, "CHAT_REVIEW_KEYCHAIN_SERVICE": KEYCHAIN_SERVICE,
                     "CHAT_REVIEW_SENDERS": (SENDER, LEAD), "CHAT_REVIEW_SPACES": (SPACE,),
-                    "CHAT_REVIEW_REPOS": ("acme/web-app",), "CHAT_REVIEW_ROOT": str(self.tmp / "chat-root")}
+                    "CHAT_REVIEW_REPOS": ("acme/web-app",), "CHAT_REVIEW_ROOT": str(self.tmp / "chat-root"),
+                    # Fleet answers off, as the kit ships them: an installed office fills its owner in.
+                    "CHAT_REVIEW_OWNER": "<chat-review-owner-email>"}
         for name, value in {**settings, **MOODY_PLACEHOLDERS}.items():  # the second app is not served unless filled
             self.patch(config, name, value)
         self.patch(config, "CHAT_REVIEW_BURST_SECONDS", 0)  # each message its own turn, but in BurstTests
